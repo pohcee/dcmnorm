@@ -4,23 +4,25 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use dicom_core::{Tag, VR};
 use dicom_dictionary_std::tags;
+use dicom_dictionary_std::uids;
 use serde_json::Value as JsonValue;
 
 use super::{
-    read_dicom_bytes, read_dicom_file, read_dicom_json, read_dicom_json_full,
-    read_dicom_json_full_with_source, read_dicom_json_with_source, write_dicom_bytes,
-    write_dicom_file, write_dicom_json, write_dicom_json_full, write_dicom_json_full_with_source,
-    write_dicom_json_with_options, write_dicom_json_with_source, DicomJsonKeyStyle,
-    DicomJsonWriteOptions,
+    detect_jpeg2000_backend_from_search_path, list_transfer_syntax_support, read_dicom_bytes,
+    read_dicom_file, read_dicom_json, read_dicom_json_full, read_dicom_json_full_with_source,
+    read_dicom_json_with_source, transcode_dicom_object, write_dicom_bytes, write_dicom_file,
+    write_dicom_json, jpeg2000_backend, kakadu_ffi_enabled,
+    write_dicom_json_full, write_dicom_json_full_with_source, write_dicom_json_with_options,
+    write_dicom_json_with_source, DicomJsonKeyStyle, DicomJsonWriteOptions, Jpeg2000Backend,
 };
 
-const DX_FIXTURE: &str = "/home/jklotzer/code/dcmnorm/test/files/dx.dcm";
-const CT_FIXTURE: &str = "/home/jklotzer/code/dcmnorm/test/files/ct.dcm";
 const PRIVATE_TAG: Tag = Tag(0x0013, 0x1010);
+const EXPLICIT_VR_BIG_ENDIAN_UID: &str = "1.2.840.10008.1.2.2";
+const JPEG_2000_IMAGE_COMPRESSION_UID: &str = "1.2.840.10008.1.2.4.91";
 
 #[test]
 fn reads_dicom_file_fixture() {
-    let object = read_dicom_file(DX_FIXTURE).unwrap();
+    let object = read_dicom_file(fixture_path("dx.dcm")).unwrap();
 
     assert_eq!(object.element(tags::MODALITY).unwrap().to_str().unwrap(), "DX");
     assert!(object.element(tags::PIXEL_DATA).is_ok());
@@ -28,7 +30,7 @@ fn reads_dicom_file_fixture() {
 
 #[test]
 fn writes_dicom_file_fixture_round_trip() {
-    let original = read_dicom_file(DX_FIXTURE).unwrap();
+    let original = read_dicom_file(fixture_path("dx.dcm")).unwrap();
     let output_path = temp_file_path("dicom-file-roundtrip");
 
     write_dicom_file(&original, &output_path).unwrap();
@@ -41,7 +43,7 @@ fn writes_dicom_file_fixture_round_trip() {
 
 #[test]
 fn reads_dicom_bytes_fixture() {
-    let bytes = fixture_bytes(DX_FIXTURE);
+    let bytes = fixture_bytes(fixture_path("dx.dcm"));
     let object = read_dicom_bytes(&bytes).unwrap();
 
     assert_eq!(object.element(tags::MODALITY).unwrap().to_str().unwrap(), "DX");
@@ -50,7 +52,7 @@ fn reads_dicom_bytes_fixture() {
 
 #[test]
 fn writes_dicom_bytes_fixture_round_trip() {
-    let original = read_dicom_file(DX_FIXTURE).unwrap();
+    let original = read_dicom_file(fixture_path("dx.dcm")).unwrap();
     let bytes = write_dicom_bytes(&original).unwrap();
     let roundtrip = read_dicom_bytes(&bytes).unwrap();
 
@@ -59,7 +61,7 @@ fn writes_dicom_bytes_fixture_round_trip() {
 
 #[test]
 fn writes_flat_json_with_inline_binary_by_default() {
-    let object = read_dicom_file(DX_FIXTURE).unwrap();
+    let object = read_dicom_file(fixture_path("dx.dcm")).unwrap();
     let json_text = write_dicom_json(&object).unwrap();
     let json: JsonValue = serde_json::from_str(&json_text).unwrap();
 
@@ -75,7 +77,7 @@ fn writes_flat_json_with_inline_binary_by_default() {
 
 #[test]
 fn writes_flat_json_keys_as_hex_when_requested() {
-    let object = read_dicom_file(DX_FIXTURE).unwrap();
+    let object = read_dicom_file(fixture_path("dx.dcm")).unwrap();
     let json_text = write_dicom_json_with_options(
         &object,
         DicomJsonWriteOptions {
@@ -97,7 +99,7 @@ fn writes_flat_json_keys_as_hex_when_requested() {
 
 #[test]
 fn writes_and_reads_flat_json_with_bulk_data_uri() {
-    let source = fixture_bytes(DX_FIXTURE);
+    let source = fixture_bytes(fixture_path("dx.dcm"));
     let original = read_dicom_bytes(&source).unwrap();
     let json = write_dicom_json_with_source(&original, &source).unwrap();
     let value: JsonValue = serde_json::from_str(&json).unwrap();
@@ -118,7 +120,7 @@ fn writes_and_reads_flat_json_with_bulk_data_uri() {
 
 #[test]
 fn writes_and_reads_flat_json_with_bulk_data_uri_for_ct() {
-    let source = fixture_bytes(CT_FIXTURE);
+    let source = fixture_bytes(fixture_path("ct.dcm"));
     let original = read_dicom_bytes(&source).unwrap();
     let json = write_dicom_json_with_source(&original, &source).unwrap();
 
@@ -149,7 +151,7 @@ fn writes_and_reads_flat_json_with_bulk_data_uri_for_ct() {
 
 #[test]
 fn writes_and_reads_full_json_with_inline_binary() {
-    let original = read_dicom_file(DX_FIXTURE).unwrap();
+    let original = read_dicom_file(fixture_path("dx.dcm")).unwrap();
     let json = write_dicom_json_full(&original).unwrap();
     let value: JsonValue = serde_json::from_str(&json).unwrap();
 
@@ -164,7 +166,7 @@ fn writes_and_reads_full_json_with_inline_binary() {
 
 #[test]
 fn writes_and_reads_full_json_with_bulk_data_uri() {
-    let source = fixture_bytes(CT_FIXTURE);
+    let source = fixture_bytes(fixture_path("ct.dcm"));
     let original = read_dicom_bytes(&source).unwrap();
     let json = write_dicom_json_full_with_source(&original, &source).unwrap();
     let value: JsonValue = serde_json::from_str(&json).unwrap();
@@ -188,8 +190,151 @@ fn writes_and_reads_full_json_with_bulk_data_uri() {
     assert_eq!(original.meta().transfer_syntax(), roundtrip.meta().transfer_syntax());
 }
 
+#[test]
+fn transcodes_native_dataset_to_big_endian() {
+    let original = read_dicom_file(fixture_path("dx.dcm")).unwrap();
+    let transcoded = transcode_dicom_object(&original, EXPLICIT_VR_BIG_ENDIAN_UID).unwrap();
+    let bytes = write_dicom_bytes(&transcoded).unwrap();
+    let roundtrip = read_dicom_bytes(&bytes).unwrap();
+
+    assert_eq!(roundtrip.meta().transfer_syntax(), EXPLICIT_VR_BIG_ENDIAN_UID);
+    assert_dataset_fields_match(&original, &roundtrip);
+    assert_eq!(
+        original.element(tags::PIXEL_DATA).unwrap().to_bytes().unwrap().len(),
+        roundtrip.element(tags::PIXEL_DATA).unwrap().to_bytes().unwrap().len(),
+    );
+}
+
+#[test]
+fn transcodes_native_dataset_to_encapsulated_uncompressed_and_back() {
+    let original = read_dicom_file(fixture_path("dx.dcm")).unwrap();
+    let encapsulated = transcode_dicom_object(&original, uids::ENCAPSULATED_UNCOMPRESSED_EXPLICIT_VR_LITTLE_ENDIAN)
+        .unwrap();
+    let rehydrated = transcode_dicom_object(&encapsulated, uids::EXPLICIT_VR_LITTLE_ENDIAN)
+        .unwrap();
+
+    assert_eq!(
+        encapsulated.meta().transfer_syntax(),
+        uids::ENCAPSULATED_UNCOMPRESSED_EXPLICIT_VR_LITTLE_ENDIAN,
+    );
+    assert!(encapsulated.element(tags::PIXEL_DATA).unwrap().fragments().is_some());
+    assert_core_fields_match(&original, &rehydrated);
+    assert_eq!(
+        original.element(tags::PIXEL_DATA).unwrap().to_bytes().unwrap(),
+        rehydrated.element(tags::PIXEL_DATA).unwrap().to_bytes().unwrap(),
+    );
+}
+
+#[test]
+fn reports_jpeg_2000_transfer_syntax_capabilities() {
+    let support = list_transfer_syntax_support();
+    let jpeg_2000 = support
+        .iter()
+        .find(|entry| entry.uid == JPEG_2000_IMAGE_COMPRESSION_UID)
+        .unwrap();
+
+    let kakadu_available = kakadu_ffi_enabled()
+        && matches!(jpeg2000_backend(), Jpeg2000Backend::Kakadu { .. });
+
+    assert!(jpeg_2000.can_decode_pixel_data);
+
+    let original = read_dicom_file(fixture_path("dx.dcm")).unwrap();
+    if kakadu_available {
+        assert!(jpeg_2000.can_encode_pixel_data);
+        assert!(jpeg_2000.can_transcode_to());
+
+        let transcoded = transcode_dicom_object(&original, JPEG_2000_IMAGE_COMPRESSION_UID)
+            .unwrap();
+        assert_eq!(transcoded.meta().transfer_syntax(), JPEG_2000_IMAGE_COMPRESSION_UID);
+        assert!(transcoded.element(tags::PIXEL_DATA).unwrap().fragments().is_some());
+    } else {
+        assert!(!jpeg_2000.can_encode_pixel_data);
+        assert!(!jpeg_2000.can_transcode_to());
+
+        let error = transcode_dicom_object(&original, JPEG_2000_IMAGE_COMPRESSION_UID)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(JPEG_2000_IMAGE_COMPRESSION_UID));
+        assert!(
+            error.contains("unsupported target transfer syntax")
+                || error.contains("failed to encode encapsulated pixel data")
+        );
+    }
+}
+
+#[test]
+fn detects_kakadu_backend_from_search_path() {
+    let base = std::env::temp_dir().join(format!(
+        "dcmnorm-kakadu-detect-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&base).unwrap();
+    let kakadu_lib = base.join("libkdu_v84R.so");
+    fs::write(&kakadu_lib, []).unwrap();
+
+    let backend = detect_jpeg2000_backend_from_search_path(base.to_string_lossy().as_ref());
+    assert!(matches!(backend, Jpeg2000Backend::Kakadu { .. }));
+
+    fs::remove_file(kakadu_lib).unwrap();
+    fs::remove_dir(base).unwrap();
+}
+
+#[test]
+fn falls_back_to_openjpeg_when_kakadu_not_in_search_path() {
+    let base = std::env::temp_dir().join(format!(
+        "dcmnorm-openjpeg-fallback-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&base).unwrap();
+
+    let backend = detect_jpeg2000_backend_from_search_path(base.to_string_lossy().as_ref());
+    assert_eq!(backend, Jpeg2000Backend::OpenJpeg);
+
+    fs::remove_dir(base).unwrap();
+}
+
+#[test]
+fn transcodes_jpeg2000_with_kakadu_when_available() {
+    if !kakadu_ffi_enabled() {
+        return;
+    }
+
+    let Jpeg2000Backend::Kakadu { .. } = jpeg2000_backend() else {
+        return;
+    };
+
+    let original = read_dicom_file(fixture_path("dx.dcm")).unwrap();
+    let j2k = transcode_dicom_object(&original, "1.2.840.10008.1.2.4.90").unwrap();
+    assert_eq!(j2k.meta().transfer_syntax(), "1.2.840.10008.1.2.4.90");
+    assert!(j2k.element(tags::PIXEL_DATA).unwrap().fragments().is_some());
+
+    let roundtrip = transcode_dicom_object(&j2k, uids::EXPLICIT_VR_LITTLE_ENDIAN).unwrap();
+    assert_eq!(
+        original.element(tags::ROWS).unwrap().uint16().unwrap(),
+        roundtrip.element(tags::ROWS).unwrap().uint16().unwrap(),
+    );
+    assert_eq!(
+        original.element(tags::COLUMNS).unwrap().uint16().unwrap(),
+        roundtrip.element(tags::COLUMNS).unwrap().uint16().unwrap(),
+    );
+    assert_eq!(
+        original.element(tags::PIXEL_DATA).unwrap().to_bytes().unwrap().len(),
+        roundtrip.element(tags::PIXEL_DATA).unwrap().to_bytes().unwrap().len(),
+    );
+}
+
 fn fixture_bytes(path: impl AsRef<Path>) -> Vec<u8> {
     fs::read(path).unwrap()
+}
+
+fn fixture_path(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test/files").join(name)
 }
 
 fn assert_core_fields_match(
@@ -197,6 +342,13 @@ fn assert_core_fields_match(
     actual: &dicom_object::DefaultDicomObject,
 ) {
     assert_eq!(expected.meta().transfer_syntax(), actual.meta().transfer_syntax());
+    assert_dataset_fields_match(expected, actual);
+}
+
+fn assert_dataset_fields_match(
+    expected: &dicom_object::DefaultDicomObject,
+    actual: &dicom_object::DefaultDicomObject,
+) {
     assert_eq!(
         expected.element(tags::SOP_CLASS_UID).unwrap().to_str().unwrap(),
         actual.element(tags::SOP_CLASS_UID).unwrap().to_str().unwrap(),
