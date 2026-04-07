@@ -47,6 +47,148 @@ impl From<WriteError> for DicomIoError {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TransferSyntaxSupport {
+    pub uid: String,
+    pub name: String,
+    pub encapsulated_pixel_data: bool,
+    pub can_read_dataset: bool,
+    pub can_write_dataset: bool,
+    pub can_decode_pixel_data: bool,
+    pub can_encode_pixel_data: bool,
+}
+
+impl TransferSyntaxSupport {
+    pub fn can_transcode_to(&self) -> bool {
+        self.can_write_dataset
+            && (!self.encapsulated_pixel_data || self.can_encode_pixel_data)
+    }
+}
+
+#[derive(Debug)]
+pub enum TranscodeError {
+    Read(ReadError),
+    Write(WriteError),
+    UnknownTransferSyntax(String),
+    UnsupportedSourceTransferSyntax {
+        uid: String,
+        name: String,
+        reason: String,
+    },
+    UnsupportedTargetTransferSyntax {
+        uid: String,
+        name: String,
+        reason: String,
+    },
+    UnsupportedConversion {
+        from_uid: String,
+        to_uid: String,
+        message: String,
+    },
+    MissingImageAttribute(&'static str),
+    UnsupportedBitsAllocated(u16),
+    InvalidDecodedPixelDataLength {
+        bits_allocated: u16,
+        length: usize,
+    },
+    DecodePixelData {
+        uid: String,
+        name: String,
+        message: String,
+    },
+    EncodePixelData {
+        uid: String,
+        name: String,
+        message: String,
+    },
+    ApplyAttribute(String),
+}
+
+impl fmt::Display for TranscodeError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Read(error) => write!(formatter, "failed to read DICOM data: {error}"),
+            Self::Write(error) => write!(formatter, "failed to write DICOM data: {error}"),
+            Self::UnknownTransferSyntax(uid) => {
+                write!(formatter, "unknown transfer syntax: {uid}")
+            }
+            Self::UnsupportedSourceTransferSyntax { uid, name, reason } => write!(
+                formatter,
+                "unsupported source transfer syntax {uid} ({name}): {reason}"
+            ),
+            Self::UnsupportedTargetTransferSyntax { uid, name, reason } => write!(
+                formatter,
+                "unsupported target transfer syntax {uid} ({name}): {reason}"
+            ),
+            Self::UnsupportedConversion {
+                from_uid,
+                to_uid,
+                message,
+            } => write!(
+                formatter,
+                "unsupported DICOM transcoding path {from_uid} -> {to_uid}: {message}"
+            ),
+            Self::MissingImageAttribute(name) => {
+                write!(formatter, "missing required image attribute: {name}")
+            }
+            Self::UnsupportedBitsAllocated(bits) => write!(
+                formatter,
+                "unsupported BitsAllocated value for pixel transcoding: {bits}"
+            ),
+            Self::InvalidDecodedPixelDataLength {
+                bits_allocated,
+                length,
+            } => write!(
+                formatter,
+                "decoded pixel data length {length} is not valid for BitsAllocated={bits_allocated}"
+            ),
+            Self::DecodePixelData { uid, name, message } => write!(
+                formatter,
+                "failed to decode encapsulated pixel data from {uid} ({name}): {message}"
+            ),
+            Self::EncodePixelData { uid, name, message } => write!(
+                formatter,
+                "failed to encode encapsulated pixel data for {uid} ({name}): {message}"
+            ),
+            Self::ApplyAttribute(error) => write!(
+                formatter,
+                "failed to apply transcoding attribute update: {error}"
+            ),
+        }
+    }
+}
+
+impl Error for TranscodeError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Read(error) => Some(error),
+            Self::Write(error) => Some(error),
+            Self::UnknownTransferSyntax(_)
+            | Self::UnsupportedSourceTransferSyntax { .. }
+            | Self::UnsupportedTargetTransferSyntax { .. }
+            | Self::UnsupportedConversion { .. }
+            | Self::MissingImageAttribute(_)
+            | Self::UnsupportedBitsAllocated(_)
+            | Self::InvalidDecodedPixelDataLength { .. }
+            | Self::DecodePixelData { .. }
+            | Self::EncodePixelData { .. }
+            | Self::ApplyAttribute(_) => None,
+        }
+    }
+}
+
+impl From<ReadError> for TranscodeError {
+    fn from(value: ReadError) -> Self {
+        Self::Read(value)
+    }
+}
+
+impl From<WriteError> for TranscodeError {
+    fn from(value: WriteError) -> Self {
+        Self::Write(value)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum DicomJsonFormat {
     #[default]

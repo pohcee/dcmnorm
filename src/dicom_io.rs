@@ -3,14 +3,18 @@ mod common;
 mod flat_json;
 mod io;
 mod json;
+mod kakadu;
 mod standard_json;
 #[cfg(test)]
 mod tests;
 mod types;
 
 pub use io::{
-    read_dicom_bytes, read_dicom_file, write_dataset_as_dicom_bytes, write_dataset_as_dicom_file,
-    write_dicom_bytes, write_dicom_file,
+    detect_jpeg2000_backend_from_search_path, jpeg2000_backend, jpeg2000_backend_name,
+    kakadu_ffi_enabled,
+    list_transfer_syntax_support, read_dicom_bytes, read_dicom_file, transcode_dicom_bytes,
+    transcode_dicom_file, transcode_dicom_object, write_dataset_as_dicom_bytes,
+    write_dataset_as_dicom_file, write_dicom_bytes, write_dicom_file, Jpeg2000Backend,
 };
 pub use json::{
     read_dicom_json, read_dicom_json_full, read_dicom_json_full_with_source,
@@ -21,5 +25,6 @@ pub use json::{
 };
 pub use types::{
     DicomIoError, DicomJsonBulkDataMode, DicomJsonError, DicomJsonFormat, DicomJsonKeyStyle,
-    DicomJsonReadOptions, DicomJsonWriteOptions, ReadError, WithMetaError, WriteError,
+    DicomJsonReadOptions, DicomJsonWriteOptions, ReadError, TransferSyntaxSupport,
+    TranscodeError, WithMetaError, WriteError,
 };
