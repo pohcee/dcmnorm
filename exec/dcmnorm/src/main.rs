@@ -14,6 +14,7 @@ use dcmnorm::dicom_io::{
 #[command(name = "dcmnorm")]
 #[command(about = "Convert between DICOM and JSON")]
 #[command(long_about = "Convert between DICOM and flattened or standard DICOM JSON. The CLI infers whether to run DICOM-to-JSON or JSON-to-DICOM from the input and output file types.")]
+#[command(arg_required_else_help = true)]
 struct Cli {
     #[arg(value_name = "INPUT")]
     input: Option<PathBuf>,
