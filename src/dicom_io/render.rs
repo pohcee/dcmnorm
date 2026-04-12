@@ -3,7 +3,7 @@ use dicom_dictionary_std::{tags, uids};
 use dicom_object::DefaultDicomObject;
 use image::codecs::jpeg::JpegEncoder;
 use image::codecs::png::PngEncoder;
-use image::{ColorType, ImageEncoder};
+use image::{ColorType, GrayImage, ImageEncoder, RgbImage};
 
 use super::io::transcode_dicom_object;
 use super::types::RenderError;
@@ -23,6 +23,16 @@ pub struct RenderPipelineOptions {
     pub window_center: Option<f64>,
     pub window_width: Option<f64>,
     pub jpeg_quality: u8,
+    /// Explicit output width in pixels. When combined with `output_height`, the image is scaled
+    /// to the exact dimensions. When used alone, the height is computed from the aspect ratio.
+    pub output_width: Option<u32>,
+    /// Explicit output height in pixels. When combined with `output_width`, the image is scaled
+    /// to the exact dimensions. When used alone, the width is computed from the aspect ratio.
+    pub output_height: Option<u32>,
+    /// Scale the output so that its width equals this value, preserving the aspect ratio.
+    pub scale_x_size: Option<u32>,
+    /// Scale the output so that its height equals this value, preserving the aspect ratio.
+    pub scale_y_size: Option<u32>,
 }
 
 impl Default for RenderPipelineOptions {
@@ -34,6 +44,10 @@ impl Default for RenderPipelineOptions {
             window_center: None,
             window_width: None,
             jpeg_quality: 90,
+            output_width: None,
+            output_height: None,
+            scale_x_size: None,
+            scale_y_size: None,
         }
     }
 }
@@ -94,6 +108,7 @@ pub fn render_dicom_frames(
     let metadata = read_render_metadata(&working)?;
 
     let frame = render_single_frame(&working, &metadata, options)?;
+    let frame = maybe_resize_frame(frame, options);
     let encoded = encode_rendered_frame(&frame, output_format, options.jpeg_quality)?;
     Ok(vec![encoded])
 }
@@ -108,7 +123,10 @@ pub fn render_all_dicom_frames(
     let rendered = render_all_frames(&working, &metadata, options)?;
     rendered
         .iter()
-        .map(|frame| encode_rendered_frame(frame, output_format, options.jpeg_quality))
+        .map(|frame| {
+            let resized = maybe_resize_frame(frame.clone(), options);
+            encode_rendered_frame(&resized, output_format, options.jpeg_quality)
+        })
         .collect()
 }
 
@@ -753,6 +771,60 @@ fn color_type(samples_per_pixel: u16) -> ColorType {
     } else {
         ColorType::Rgb8
     }
+}
+
+fn maybe_resize_frame(frame: RenderedFramePixels, options: &RenderPipelineOptions) -> RenderedFramePixels {
+    let Some((new_width, new_height)) = compute_output_dimensions(frame.width, frame.height, options) else {
+        return frame;
+    };
+
+    if new_width == u32::from(frame.width) && new_height == u32::from(frame.height) {
+        return frame;
+    }
+
+    use image::imageops::{self, FilterType};
+    let resized_bytes = if frame.samples_per_pixel == 1 {
+        let img = GrayImage::from_raw(u32::from(frame.width), u32::from(frame.height), frame.bytes)
+            .expect("grayscale frame buffer size mismatch");
+        imageops::resize(&img, new_width, new_height, FilterType::Lanczos3).into_raw()
+    } else {
+        let img = RgbImage::from_raw(u32::from(frame.width), u32::from(frame.height), frame.bytes)
+            .expect("RGB frame buffer size mismatch");
+        imageops::resize(&img, new_width, new_height, FilterType::Lanczos3).into_raw()
+    };
+
+    RenderedFramePixels {
+        width: new_width as u16,
+        height: new_height as u16,
+        samples_per_pixel: frame.samples_per_pixel,
+        bytes: resized_bytes,
+    }
+}
+
+fn compute_output_dimensions(
+    original_width: u16,
+    original_height: u16,
+    options: &RenderPipelineOptions,
+) -> Option<(u32, u32)> {
+    let ow = u32::from(original_width);
+    let oh = u32::from(original_height);
+    match (options.output_width, options.output_height, options.scale_x_size, options.scale_y_size) {
+        (Some(w), Some(h), None, None) => Some((w, h)),
+        (Some(w), None, None, None) => Some((w, scale_by_ratio(oh, ow, w))),
+        (None, Some(h), None, None) => Some((scale_by_ratio(ow, oh, h), h)),
+        (None, None, Some(w), None) => Some((w, scale_by_ratio(oh, ow, w))),
+        (None, None, None, Some(h)) => Some((scale_by_ratio(ow, oh, h), h)),
+        (None, None, None, None) => None,
+        _ => None,
+    }
+}
+
+fn scale_by_ratio(to_scale: u32, reference: u32, new_reference: u32) -> u32 {
+    if reference == 0 {
+        return to_scale;
+    }
+    let scaled = f64::from(new_reference) / f64::from(reference) * f64::from(to_scale);
+    (scaled.round() as u32).max(1)
 }
 
 fn encode_rendered_frame(
