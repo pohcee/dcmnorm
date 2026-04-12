@@ -189,6 +189,88 @@ impl From<WriteError> for TranscodeError {
     }
 }
 
+#[derive(Debug)]
+pub enum RenderError {
+    MissingImageAttribute(&'static str),
+    UnsupportedBitsAllocated(u16),
+    UnsupportedSamplesPerPixel(u16),
+    UnsupportedPlanarConfiguration(u16),
+    UnsupportedPhotometricInterpretation(String),
+    InvalidFrameIndex { requested: usize, number_of_frames: usize },
+    InvalidPixelDataLength { expected: usize, actual: usize },
+    InvalidWindow(String),
+    Transcode(TranscodeError),
+    ImageEncoding(image::ImageError),
+}
+
+impl fmt::Display for RenderError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MissingImageAttribute(name) => {
+                write!(formatter, "missing required image attribute: {name}")
+            }
+            Self::UnsupportedBitsAllocated(bits) => {
+                write!(formatter, "unsupported BitsAllocated value for rendering: {bits}")
+            }
+            Self::UnsupportedSamplesPerPixel(samples) => write!(
+                formatter,
+                "unsupported SamplesPerPixel value for rendering: {samples}"
+            ),
+            Self::UnsupportedPlanarConfiguration(value) => write!(
+                formatter,
+                "unsupported PlanarConfiguration value for rendering: {value}"
+            ),
+            Self::UnsupportedPhotometricInterpretation(value) => write!(
+                formatter,
+                "unsupported PhotometricInterpretation for rendering: {value}"
+            ),
+            Self::InvalidFrameIndex {
+                requested,
+                number_of_frames,
+            } => write!(
+                formatter,
+                "frame index {requested} is out of range for NumberOfFrames={number_of_frames}"
+            ),
+            Self::InvalidPixelDataLength { expected, actual } => write!(
+                formatter,
+                "invalid PixelData length for rendered frame extraction: expected at least {expected} bytes, got {actual}"
+            ),
+            Self::InvalidWindow(message) => write!(formatter, "invalid VOI window configuration: {message}"),
+            Self::Transcode(error) => write!(formatter, "failed to transcode DICOM data for rendering: {error}"),
+            Self::ImageEncoding(error) => write!(formatter, "failed to encode rendered image: {error}"),
+        }
+    }
+}
+
+impl Error for RenderError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Transcode(error) => Some(error),
+            Self::ImageEncoding(error) => Some(error),
+            Self::MissingImageAttribute(_)
+            | Self::UnsupportedBitsAllocated(_)
+            | Self::UnsupportedSamplesPerPixel(_)
+            | Self::UnsupportedPlanarConfiguration(_)
+            | Self::UnsupportedPhotometricInterpretation(_)
+            | Self::InvalidFrameIndex { .. }
+            | Self::InvalidPixelDataLength { .. }
+            | Self::InvalidWindow(_) => None,
+        }
+    }
+}
+
+impl From<TranscodeError> for RenderError {
+    fn from(value: TranscodeError) -> Self {
+        Self::Transcode(value)
+    }
+}
+
+impl From<image::ImageError> for RenderError {
+    fn from(value: image::ImageError) -> Self {
+        Self::ImageEncoding(value)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum DicomJsonFormat {
     #[default]

@@ -5,7 +5,7 @@ Rust workspace for reading, writing, transcoding, and converting DICOM data.
 This repository contains:
 
 - `dcmnorm`: a library crate with DICOM file, memory, and JSON conversion helpers
-- `exec/dcmnorm`: a CLI for converting between DICOM, transcoded DICOM, and JSON
+- `exec/dcmnorm`: a CLI for converting between DICOM, transcoded DICOM, JSON, and rendered images/raw frames
 
 ## Workspace Layout
 
@@ -21,6 +21,43 @@ This repository contains:
 ```
 
 ## Build
+
+Default builds enable the MPEG and JPEG-LS codec features.
+
+Native prerequisites for the default build on Debian or Ubuntu are:
+
+- `build-essential`
+- `clang`
+- `cmake`
+- `libc6-dev`
+- `libclang-dev`
+- `pkg-config`
+- `libavutil-dev`
+- `libavcodec-dev`
+- `libavformat-dev`
+- `libswscale-dev`
+- `libswresample-dev`
+
+The FFmpeg integration is built with a reduced `ffmpeg-next` feature set, so
+`libavfilter-dev` and `libavdevice-dev` are not required for the current build.
+
+Example install command:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y \
+    build-essential \
+    clang \
+    cmake \
+    libc6-dev \
+    libclang-dev \
+    pkg-config \
+    libavutil-dev \
+    libavcodec-dev \
+    libavformat-dev \
+    libswscale-dev \
+    libswresample-dev
+```
 
 Build the entire workspace from the repository root:
 
@@ -48,6 +85,12 @@ KAKADU_LIB_DIR=$HOME/.local/lib \
 cargo build --workspace --features kakadu-ffi
 ```
 
+Build without the default MPEG and JPEG-LS codec features:
+
+```bash
+cargo build --workspace --no-default-features
+```
+
 Release binaries are written to `target/release/`.
 
 ## Install Binaries
@@ -66,6 +109,10 @@ To install every CLI under `exec/` with one command, use the helper script:
 
 The install script automatically detects Kakadu headers and libraries and enables
 `kakadu-ffi` when available.
+
+The install script also verifies the default codec toolchain before invoking Cargo.
+For the default build this means `pkg-config`, `clang`, standard C headers, and the
+FFmpeg development packages listed above must already be installed.
 
 This installs the binaries into Cargo's bin directory, usually `~/.cargo/bin`.
 
@@ -114,6 +161,45 @@ Build the CLI in release mode:
 cargo build -p dcmnorm-cli --release
 ```
 
+## Docker
+
+This repository includes a multi-stage Dockerfile that builds `dcmnorm` in a
+toolchain stage and copies only the release binary into a slim runtime stage.
+
+Build the image:
+
+```bash
+docker build -t dcmnorm .
+```
+
+Run the CLI:
+
+```bash
+docker run --rm dcmnorm
+```
+
+Convert a file from a bind-mounted working directory:
+
+```bash
+docker run --rm \
+    -v "$PWD":/work \
+    -w /work \
+    dcmnorm \
+    test/files/dx.dcm
+```
+
+The final runtime image installs these native packages:
+
+- `ca-certificates`
+- `ffmpeg`
+- `libstdc++6`
+
+Build-only dependencies such as `clang`, `cmake`, `pkg-config`, and FFmpeg `-dev`
+packages are kept in the builder stage and are not present in the final image.
+
+Kakadu is not included in the Docker image. If you need JPEG 2000 Kakadu support,
+provide the Kakadu headers and shared libraries yourself and build with `kakadu-ffi`.
+
 ## Test
 
 Run all tests in the workspace:
@@ -154,8 +240,62 @@ cargo run -p dcmnorm-cli -- out.json out.dcm --bulk-data-source test/files/dx.dc
 
 - DICOM input + JSON output, or no output, runs DICOM to JSON
 - DICOM input + DICOM output with `--transfer-syntax <UID>` runs DICOM to DICOM transcoding
+- DICOM input + `.png` / `.jpg` / `.jpeg` / `.raw` output runs DICOM frame rendering
 - JSON input + DICOM output runs JSON to DICOM
 - JSON to DICOM requires an output path
+
+Render the first frame of a DICOM file to PNG:
+
+```bash
+cargo run -p dcmnorm-cli -- test/files/dx.dcm out.png
+```
+
+Render frame 2 to JPEG with explicit quality:
+
+```bash
+cargo run -p dcmnorm-cli -- test/files/ct.dcm out.jpg --render-frame 1 --jpeg-quality 95
+```
+
+Render to raw 8-bit frame bytes:
+
+```bash
+cargo run -p dcmnorm-cli -- test/files/dx.dcm out.raw
+```
+
+Render all frames from a multiframe dataset to numbered PNG files (`out_000001.png`, `out_000002.png`, ...):
+
+```bash
+cargo run -p dcmnorm-cli -- test/files/ct.dcm out.png --render-all-frames
+```
+
+Render all frames from a multiframe dataset to a single `.mp4` video:
+
+```bash
+cargo run -p dcmnorm-cli -- test/files/ct.dcm out.mp4 --render-fps 24
+```
+
+If `--render-fps` is omitted for `.mp4` output, `dcmnorm` uses frame-rate metadata
+from the DICOM instance when available (`RecommendedDisplayFrameRate`, `CineRate`,
+`FrameTime`, or `FrameTimeVector`) and falls back to 24 FPS otherwise.
+
+Use `--verbose` to print render/conversion diagnostics. Without `--verbose`, external
+tool output such as `ffmpeg` is suppressed unless an error occurs.
+
+Rendering supports 1-bit, 8-bit, and 16-bit monochrome pixel data, as well as RGB data.
+The render pipeline includes decompression when needed and applies modality LUT and VOI LUT/windowing by default.
+Use `--no-modality-lut` and/or `--no-voi-lut` to disable those steps, and use
+`--window-center` / `--window-width` to override VOI windowing.
+
+Photometric interpretations supported by rendering include:
+
+- `MONOCHROME1`
+- `MONOCHROME2`
+- `PALETTE COLOR`
+- `RGB`
+
+Both planar configurations are supported for RGB rendering (`PlanarConfiguration` 0 and 1).
+
+`.mp4` output requires `ffmpeg` installed and available on `PATH`.
 
 Transcode a DICOM file to Explicit VR Big Endian:
 
@@ -169,13 +309,17 @@ List the transfer syntaxes known to the current build and whether dataset read/w
 cargo run -p dcmnorm-cli -- --list-transfer-syntaxes
 ```
 
-Transfer-syntax support is build-specific. This workspace enables the DICOM library support that is available without extra native imaging libraries first:
+Transfer-syntax support is build-specific. The default build in this repository enables
+the MPEG and JPEG-LS codec features in addition to the DICOM library support that is
+available without extra native imaging libraries:
 
 - native uncompressed syntaxes
 - deflated dataset syntaxes
 - encapsulated uncompressed pixel data
+- MPEG transfer syntax support via FFmpeg-backed build integration
 - JPEG baseline decode/encode
 - JPEG extended and JPEG lossless decode-only
+- JPEG-LS transfer syntax support via CharLS-backed build integration
 - JPEG 2000 decode-only
 - RLE lossless decode-only
 

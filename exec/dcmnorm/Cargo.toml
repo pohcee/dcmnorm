@@ -10,3 +10,6 @@ path = "src/main.rs"
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
 dcmnorm = { path = "../.." }
+dicom-core = "0.9.1"
+dicom-dictionary-std = "0.9.0"
+dicom-object = "0.9.1"

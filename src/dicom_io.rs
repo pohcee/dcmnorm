@@ -2,8 +2,11 @@ mod bulk_data;
 mod common;
 mod flat_json;
 mod io;
+mod jpeg_ls;
 mod json;
 mod kakadu;
+mod mpeg;
+mod render;
 mod standard_json;
 #[cfg(test)]
 mod tests;
@@ -23,8 +26,13 @@ pub use json::{
     write_dicom_json, write_dicom_json_full, write_dicom_json_full_with_source,
     write_dicom_json_with_options, write_dicom_json_with_source,
 };
+pub use render::{
+    render_all_dicom_frames, render_dicom_frame, render_dicom_frames,
+    render_dicom_to_recompressed_object, RenderFrameOutput, RenderOutputFormat,
+    RenderPipelineOptions,
+};
 pub use types::{
     DicomIoError, DicomJsonBulkDataMode, DicomJsonError, DicomJsonFormat, DicomJsonKeyStyle,
-    DicomJsonReadOptions, DicomJsonWriteOptions, ReadError, TransferSyntaxSupport,
-    TranscodeError, WithMetaError, WriteError,
+    DicomJsonReadOptions, DicomJsonWriteOptions, ReadError, RenderError,
+    TransferSyntaxSupport, TranscodeError, WithMetaError, WriteError,
 };

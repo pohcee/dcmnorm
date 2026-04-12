@@ -10,10 +10,11 @@ use serde_json::Value as JsonValue;
 use super::{
     detect_jpeg2000_backend_from_search_path, list_transfer_syntax_support, read_dicom_bytes,
     read_dicom_file, read_dicom_json, read_dicom_json_full, read_dicom_json_full_with_source,
-    read_dicom_json_with_source, transcode_dicom_object, write_dicom_bytes, write_dicom_file,
-    write_dicom_json, jpeg2000_backend, kakadu_ffi_enabled,
-    write_dicom_json_full, write_dicom_json_full_with_source, write_dicom_json_with_options,
-    write_dicom_json_with_source, DicomJsonKeyStyle, DicomJsonWriteOptions, Jpeg2000Backend,
+    read_dicom_json_with_source, render_dicom_frame, transcode_dicom_object,
+    write_dicom_bytes, write_dicom_file, write_dicom_json, jpeg2000_backend,
+    kakadu_ffi_enabled, write_dicom_json_full, write_dicom_json_full_with_source,
+    write_dicom_json_with_options, write_dicom_json_with_source, DicomJsonKeyStyle,
+    DicomJsonWriteOptions, Jpeg2000Backend, RenderOutputFormat, RenderPipelineOptions,
 };
 
 const PRIVATE_TAG: Tag = Tag(0x0013, 0x1010);
@@ -327,6 +328,101 @@ fn transcodes_jpeg2000_with_kakadu_when_available() {
         original.element(tags::PIXEL_DATA).unwrap().to_bytes().unwrap().len(),
         roundtrip.element(tags::PIXEL_DATA).unwrap().to_bytes().unwrap().len(),
     );
+}
+
+#[test]
+fn renders_dx_frame_to_png() {
+    let object = read_dicom_file(fixture_path("dx.dcm")).unwrap();
+    let rendered = render_dicom_frame(
+        &object,
+        RenderOutputFormat::Png,
+        &RenderPipelineOptions::default(),
+    )
+    .unwrap();
+
+    assert_eq!(&rendered.bytes[..8], b"\x89PNG\r\n\x1a\n");
+    assert_eq!(rendered.width, object.element(tags::COLUMNS).unwrap().uint16().unwrap());
+    assert_eq!(rendered.height, object.element(tags::ROWS).unwrap().uint16().unwrap());
+}
+
+#[test]
+fn renders_dx_frame_to_jpeg() {
+    let object = read_dicom_file(fixture_path("dx.dcm")).unwrap();
+    let rendered = render_dicom_frame(
+        &object,
+        RenderOutputFormat::Jpeg,
+        &RenderPipelineOptions::default(),
+    )
+    .unwrap();
+
+    assert_eq!(&rendered.bytes[..2], b"\xFF\xD8");
+    assert!(rendered.bytes.len() > 100);
+}
+
+#[test]
+fn renders_dx_frame_to_raw_u8() {
+    let object = read_dicom_file(fixture_path("dx.dcm")).unwrap();
+    let rendered = render_dicom_frame(
+        &object,
+        RenderOutputFormat::Raw,
+        &RenderPipelineOptions::default(),
+    )
+    .unwrap();
+
+    let rows = object.element(tags::ROWS).unwrap().uint16().unwrap() as usize;
+    let cols = object.element(tags::COLUMNS).unwrap().uint16().unwrap() as usize;
+    let samples = object
+        .get(tags::SAMPLES_PER_PIXEL)
+        .and_then(|element| element.uint16().ok())
+        .unwrap_or(1) as usize;
+
+    assert_eq!(rendered.bytes.len(), rows * cols * samples);
+    assert_eq!(rendered.bits_allocated, 8);
+}
+
+#[test]
+fn falls_back_when_window_is_outside_pixel_domain() {
+    let object = read_dicom_file(fixture_path("dx.dcm")).unwrap();
+    let default_rendered = render_dicom_frame(
+        &object,
+        RenderOutputFormat::Raw,
+        &RenderPipelineOptions::default(),
+    )
+    .unwrap();
+    let no_voi_rendered = render_dicom_frame(
+        &object,
+        RenderOutputFormat::Raw,
+        &RenderPipelineOptions {
+            apply_voi_lut: false,
+            ..RenderPipelineOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(default_rendered.bytes, no_voi_rendered.bytes);
+}
+
+#[test]
+fn renders_rgb_fixture_when_present() {
+    let object = read_dicom_file(fixture_path("sc.dcm")).unwrap();
+    let samples = object
+        .get(tags::SAMPLES_PER_PIXEL)
+        .and_then(|element| element.uint16().ok())
+        .unwrap_or(1);
+
+    if samples != 3 {
+        return;
+    }
+
+    let rendered = render_dicom_frame(
+        &object,
+        RenderOutputFormat::Png,
+        &RenderPipelineOptions::default(),
+    )
+    .unwrap();
+
+    assert_eq!(rendered.samples_per_pixel, 3);
+    assert_eq!(&rendered.bytes[..8], b"\x89PNG\r\n\x1a\n");
 }
 
 fn fixture_bytes(path: impl AsRef<Path>) -> Vec<u8> {
