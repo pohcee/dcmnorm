@@ -1,6 +1,7 @@
 use std::io::Cursor;
 use std::ffi::OsStr;
 use std::path::Path;
+use std::process::Command;
 
 use dicom_core::ops::ApplyOp;
 use dicom_core::value::PixelFragmentSequence;
@@ -15,6 +16,8 @@ use dicom_object::{
 use dicom_transfer_syntax_registry::TransferSyntaxRegistry;
 
 use super::kakadu;
+use super::jpeg_ls;
+use super::mpeg;
 use super::types::{
     DicomIoError, ReadError, TransferSyntaxSupport, TranscodeError, WriteError,
 };
@@ -88,6 +91,40 @@ fn is_jpeg2000_transfer_syntax(uid: &str) -> bool {
     )
 }
 
+fn is_mpeg_transfer_syntax(uid: &str) -> bool {
+    let normalized = normalize_transfer_syntax_uid(uid);
+    matches!(
+        normalized,
+        "1.2.840.10008.1.2.4.100"
+            | "1.2.840.10008.1.2.4.101"
+            | "1.2.840.10008.1.2.4.102"
+            | "1.2.840.10008.1.2.4.103"
+            | "1.2.840.10008.1.2.4.104"
+            | "1.2.840.10008.1.2.4.105"
+            | "1.2.840.10008.1.2.4.106"
+            | "1.2.840.10008.1.2.4.107"
+            | "1.2.840.10008.1.2.4.108"
+    )
+}
+
+fn is_jpeg_ls_transfer_syntax(uid: &str) -> bool {
+    matches!(
+        normalize_transfer_syntax_uid(uid),
+        "1.2.840.10008.1.2.4.80" | "1.2.840.10008.1.2.4.81"
+    )
+}
+
+fn ffmpeg_available() -> bool {
+    if let Ok(output) = Command::new("ffmpeg")
+        .arg("-version")
+        .output()
+    {
+        output.status.success()
+    } else {
+        false
+    }
+}
+
 pub fn read_dicom_file<P>(path: P) -> Result<DefaultDicomObject, ReadError>
 where
     P: AsRef<Path>,
@@ -143,6 +180,7 @@ pub fn write_dataset_as_dicom_bytes(
 
 pub fn list_transfer_syntax_support() -> Vec<TransferSyntaxSupport> {
     let kakadu_enabled = kakadu_ffi_available_from_backend(&jpeg2000_backend());
+    let ffmpeg_enabled = ffmpeg_available();
     let mut syntaxes = TransferSyntaxRegistry
         .iter()
         .map(|ts| TransferSyntaxSupport {
@@ -151,8 +189,8 @@ pub fn list_transfer_syntax_support() -> Vec<TransferSyntaxSupport> {
             encapsulated_pixel_data: is_encapsulated_transfer_syntax(ts),
             can_read_dataset: can_read_dataset(ts),
             can_write_dataset: can_write_dataset(ts),
-            can_decode_pixel_data: can_decode_pixel_data(ts, kakadu_enabled),
-            can_encode_pixel_data: can_encode_pixel_data(ts, kakadu_enabled),
+            can_decode_pixel_data: can_decode_pixel_data(ts, kakadu_enabled, ffmpeg_enabled),
+            can_encode_pixel_data: can_encode_pixel_data(ts, kakadu_enabled, ffmpeg_enabled),
         })
         .collect::<Vec<_>>();
 
@@ -240,17 +278,25 @@ fn can_write_dataset<D, R, W>(ts: &dicom_encoding::TransferSyntax<D, R, W>) -> b
 fn can_decode_pixel_data<D, R, W>(
     ts: &dicom_encoding::TransferSyntax<D, R, W>,
     kakadu_enabled: bool,
+    _ffmpeg_enabled: bool,
 ) -> bool {
+    let uid = ts.uid();
     matches!(ts.codec(), Codec::EncapsulatedPixelData(Some(_), _))
-        || (kakadu_enabled && is_jpeg2000_transfer_syntax(ts.uid()))
+        || (kakadu_enabled && is_jpeg2000_transfer_syntax(uid))
+        || (cfg!(feature = "ffmpeg-codec") && is_mpeg_transfer_syntax(uid))
+        || (cfg!(feature = "jpeg-ls-codec") && is_jpeg_ls_transfer_syntax(uid))
 }
 
 fn can_encode_pixel_data<D, R, W>(
     ts: &dicom_encoding::TransferSyntax<D, R, W>,
     kakadu_enabled: bool,
+    _ffmpeg_enabled: bool,
 ) -> bool {
+    let uid = ts.uid();
     matches!(ts.codec(), Codec::EncapsulatedPixelData(_, Some(_)))
-        || (kakadu_enabled && is_jpeg2000_transfer_syntax(ts.uid()))
+        || (kakadu_enabled && is_jpeg2000_transfer_syntax(uid))
+        || (cfg!(feature = "ffmpeg-codec") && is_mpeg_transfer_syntax(uid))
+        || (cfg!(feature = "jpeg-ls-codec") && is_jpeg_ls_transfer_syntax(uid))
 }
 
 fn kakadu_ffi_available_from_backend(backend: &Jpeg2000Backend) -> bool {
@@ -410,6 +456,52 @@ fn decode_pixel_data(
         }
     }
 
+    // Try MPEG decoding
+    if is_mpeg_transfer_syntax(source_ts.uid()) {
+        match mpeg::decode_mpeg_pixel_data(object) {
+            Ok(decoded) => {
+                replace_with_native_pixel_data(object, decoded)?;
+                normalize_decoded_pixel_data_attributes(object);
+                object.meta_mut().set_transfer_syntax(
+                    TransferSyntaxRegistry
+                        .get(uids::EXPLICIT_VR_LITTLE_ENDIAN)
+                        .expect("explicit VR little endian transfer syntax must exist"),
+                );
+                return Ok(());
+            }
+            Err(error) => {
+                return Err(TranscodeError::DecodePixelData {
+                    uid: source_ts.uid().to_owned(),
+                    name: source_ts.name().to_owned(),
+                    message: error,
+                });
+            }
+        }
+    }
+
+    // Try JPEG-LS decoding
+    if is_jpeg_ls_transfer_syntax(source_ts.uid()) {
+        match jpeg_ls::decode_jpeg_ls_pixel_data(object) {
+            Ok(decoded) => {
+                replace_with_native_pixel_data(object, decoded)?;
+                normalize_decoded_pixel_data_attributes(object);
+                object.meta_mut().set_transfer_syntax(
+                    TransferSyntaxRegistry
+                        .get(uids::EXPLICIT_VR_LITTLE_ENDIAN)
+                        .expect("explicit VR little endian transfer syntax must exist"),
+                );
+                return Ok(());
+            }
+            Err(error) => {
+                return Err(TranscodeError::DecodePixelData {
+                    uid: source_ts.uid().to_owned(),
+                    name: source_ts.name().to_owned(),
+                    message: error,
+                });
+            }
+        }
+    }
+
     let reader = match source_ts.codec() {
         Codec::EncapsulatedPixelData(Some(reader), _) => reader,
         _ => {
@@ -461,6 +553,41 @@ fn encode_pixel_data(
                 })?;
             replace_with_encapsulated_pixel_data(object, vec![0], fragments);
             return Ok(());
+        }
+    }
+
+    // Try MPEG encoding
+    if is_mpeg_transfer_syntax(target_ts.uid()) {
+        match mpeg::encode_mpeg_pixel_data(object, target_ts.uid()) {
+            Ok(fragments) => {
+                replace_with_encapsulated_pixel_data(object, vec![0], fragments);
+                return Ok(());
+            }
+            Err(error) => {
+                return Err(TranscodeError::EncodePixelData {
+                    uid: target_ts.uid().to_owned(),
+                    name: target_ts.name().to_owned(),
+                    message: error,
+                });
+            }
+        }
+    }
+
+    // Try JPEG-LS encoding
+    if is_jpeg_ls_transfer_syntax(target_ts.uid()) {
+        let lossless = target_ts.uid() == "1.2.840.10008.1.2.4.80";
+        match jpeg_ls::encode_jpeg_ls_pixel_data(object, lossless) {
+            Ok(fragments) => {
+                replace_with_encapsulated_pixel_data(object, vec![0], fragments);
+                return Ok(());
+            }
+            Err(error) => {
+                return Err(TranscodeError::EncodePixelData {
+                    uid: target_ts.uid().to_owned(),
+                    name: target_ts.name().to_owned(),
+                    message: error,
+                });
+            }
         }
     }
 

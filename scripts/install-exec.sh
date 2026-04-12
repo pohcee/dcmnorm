@@ -30,6 +30,42 @@ split_paths_var() {
     tr ':' '\n' <<< "$value"
 }
 
+require_command() {
+    local cmd="$1"
+    local hint="$2"
+
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+        echo "Missing required command: $cmd" >&2
+        echo "$hint" >&2
+        exit 1
+    fi
+}
+
+check_clang_can_find_std_headers() {
+    local tmp_source
+    tmp_source="$(mktemp)"
+    printf '#include <limits.h>\n' > "$tmp_source"
+
+    if ! clang -fsyntax-only -x c "$tmp_source" >/dev/null 2>&1; then
+        rm -f "$tmp_source"
+        echo "Clang is installed but cannot find standard C headers (for example limits.h)." >&2
+        echo "Install the system C toolchain headers, such as build-essential/libc6-dev on Debian or Ubuntu, so bindgen can compile FFmpeg bindings." >&2
+        exit 1
+    fi
+
+    rm -f "$tmp_source"
+}
+
+check_ffmpeg_dev_pkg() {
+    local pkg="$1"
+
+    if ! pkg-config --exists "$pkg"; then
+        echo "Missing FFmpeg development package: $pkg" >&2
+        echo "Default builds now enable dcmnorm/ffmpeg-codec. Install FFmpeg development headers and pkg-config, or build with --no-default-features if you need a reduced build." >&2
+        exit 1
+    fi
+}
+
 find_kakadu_include_dir() {
     if [[ -n "${KAKADU_INCLUDE_DIR:-}" ]] && has_flat_headers "$KAKADU_INCLUDE_DIR"; then
         echo "$KAKADU_INCLUDE_DIR"
@@ -91,6 +127,16 @@ find_kakadu_lib_dir() {
 use_kakadu_ffi=0
 install_args=()
 
+require_command cargo "Install Rust and Cargo before running this script."
+require_command pkg-config "Install pkg-config so the default FFmpeg codec support can find system FFmpeg libraries."
+require_command clang "Install clang so bindgen can generate FFmpeg bindings during the default build."
+check_clang_can_find_std_headers
+check_ffmpeg_dev_pkg libavutil
+check_ffmpeg_dev_pkg libavcodec
+check_ffmpeg_dev_pkg libavformat
+check_ffmpeg_dev_pkg libswscale
+check_ffmpeg_dev_pkg libswresample
+
 if kakadu_include_dir="$(find_kakadu_include_dir)" && kakadu_lib_dir="$(find_kakadu_lib_dir)"; then
     use_kakadu_ffi=1
     export KAKADU_INCLUDE_DIR="$kakadu_include_dir"
@@ -98,9 +144,9 @@ if kakadu_include_dir="$(find_kakadu_include_dir)" && kakadu_lib_dir="$(find_kak
     install_args+=(--features dcmnorm/kakadu-ffi)
     echo "Detected Kakadu headers at $KAKADU_INCLUDE_DIR"
     echo "Detected Kakadu libraries at $KAKADU_LIB_DIR"
-    echo "Installing exec crates with feature: dcmnorm/kakadu-ffi"
+    echo "Installing exec crates with default codec features plus: dcmnorm/kakadu-ffi"
 else
-    echo "Kakadu headers/libs not detected; installing exec crates without kakadu-ffi"
+    echo "Kakadu headers/libs not detected; installing exec crates with default codec features only"
 fi
 
 found_any=0
