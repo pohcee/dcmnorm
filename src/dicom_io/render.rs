@@ -638,28 +638,43 @@ fn resolve_window(
     object: &DefaultDicomObject,
     options: &RenderPipelineOptions,
 ) -> Result<(Option<f64>, Option<f64>), RenderError> {
-    let center = options.window_center.or_else(|| {
-        object
-            .get(tags::WINDOW_CENTER)
-            .and_then(|element| first_numeric_value(element.to_str().ok().as_deref()))
-    });
-    let width = options.window_width.or_else(|| {
-        object
-            .get(tags::WINDOW_WIDTH)
-            .and_then(|element| first_numeric_value(element.to_str().ok().as_deref()))
-    });
+    if let Some(window_width) = options.window_width {
+        if options.window_center.is_none() {
+            return Err(RenderError::InvalidWindow(
+                "window width is set but window center is missing".to_owned(),
+            ));
+        }
 
-    if width.is_some() && center.is_none() {
-        return Err(RenderError::InvalidWindow(
-            "window width is set but window center is missing".to_owned(),
-        ));
-    }
-
-    if let Some(window_width) = width {
         if window_width <= 0.0 {
             return Err(RenderError::InvalidWindow(
                 "window width must be greater than zero".to_owned(),
             ));
+        }
+
+        return Ok((options.window_center, Some(window_width)));
+    }
+
+    if options.window_center.is_some() {
+        return Ok((options.window_center, None));
+    }
+
+    let center = object
+        .get(tags::WINDOW_CENTER)
+        .and_then(|element| first_numeric_value(element.to_str().ok().as_deref()));
+    let width = object
+        .get(tags::WINDOW_WIDTH)
+        .and_then(|element| first_numeric_value(element.to_str().ok().as_deref()));
+
+    // Real-world datasets sometimes carry malformed VOI values (for example,
+    // width=0 or width without center). Ignore those tags and fall back to
+    // robust min/max normalization instead of failing the whole render.
+    if width.is_some() && center.is_none() {
+        return Ok((None, None));
+    }
+
+    if let Some(window_width) = width {
+        if window_width <= 0.0 {
+            return Ok((None, None));
         }
     }
 
