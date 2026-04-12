@@ -2,7 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use dicom_core::{Tag, VR};
+use dicom_core::{DataElement, PrimitiveValue, Tag, VR};
 use dicom_dictionary_std::tags;
 use dicom_dictionary_std::uids;
 use serde_json::Value as JsonValue;
@@ -400,6 +400,56 @@ fn falls_back_when_window_is_outside_pixel_domain() {
     .unwrap();
 
     assert_eq!(default_rendered.bytes, no_voi_rendered.bytes);
+}
+
+#[test]
+fn ignores_invalid_window_width_from_dataset() {
+    let mut object = read_dicom_file(fixture_path("dx.dcm")).unwrap();
+    object.put(DataElement::new(
+        tags::WINDOW_CENTER,
+        VR::DS,
+        PrimitiveValue::from("40"),
+    ));
+    object.put(DataElement::new(
+        tags::WINDOW_WIDTH,
+        VR::DS,
+        PrimitiveValue::from("0"),
+    ));
+    let default_rendered = render_dicom_frame(
+        &object,
+        RenderOutputFormat::Raw,
+        &RenderPipelineOptions::default(),
+    )
+    .unwrap();
+    let no_voi_rendered = render_dicom_frame(
+        &object,
+        RenderOutputFormat::Raw,
+        &RenderPipelineOptions {
+            apply_voi_lut: false,
+            ..RenderPipelineOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(default_rendered.bytes, no_voi_rendered.bytes);
+}
+
+#[test]
+fn rejects_invalid_user_provided_window_width() {
+    let object = read_dicom_file(fixture_path("dx.dcm")).unwrap();
+    let error = render_dicom_frame(
+        &object,
+        RenderOutputFormat::Raw,
+        &RenderPipelineOptions {
+            window_center: Some(40.0),
+            window_width: Some(0.0),
+            ..RenderPipelineOptions::default()
+        },
+    )
+    .unwrap_err()
+    .to_string();
+
+    assert!(error.contains("window width must be greater than zero"));
 }
 
 #[test]
