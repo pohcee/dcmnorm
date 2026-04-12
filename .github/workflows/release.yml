@@ -55,6 +55,8 @@ jobs:
           TAG="${GITHUB_REF_NAME}"
           ARCHIVE="${BINARY_NAME}-${TAG}-linux-x86_64.tar.gz"
           CHECKSUM="${ARCHIVE}.sha256"
+          LATEST_ARCHIVE="${BINARY_NAME}-linux-x86_64.tar.gz"
+          LATEST_CHECKSUM="${LATEST_ARCHIVE}.sha256"
 
           mkdir -p dist
           cp "target/release/${BINARY_NAME}" dist/
@@ -64,8 +66,13 @@ jobs:
           tar -C dist -czf "$ARCHIVE" "${BINARY_NAME}" README.md LICENSE
           sha256sum "$ARCHIVE" > "$CHECKSUM"
 
+          cp "$ARCHIVE" "$LATEST_ARCHIVE"
+          sha256sum "$LATEST_ARCHIVE" > "$LATEST_CHECKSUM"
+
           echo "archive=${ARCHIVE}" >> "$GITHUB_OUTPUT"
           echo "checksum=${CHECKSUM}" >> "$GITHUB_OUTPUT"
+          echo "latest_archive=${LATEST_ARCHIVE}" >> "$GITHUB_OUTPUT"
+          echo "latest_checksum=${LATEST_CHECKSUM}" >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
@@ -74,3 +81,5 @@ jobs:
           files: |
             ${{ steps.package.outputs.archive }}
             ${{ steps.package.outputs.checksum }}
+            ${{ steps.package.outputs.latest_archive }}
+            ${{ steps.package.outputs.latest_checksum }}
