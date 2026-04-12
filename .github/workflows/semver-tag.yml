@@ -1,0 +1,94 @@
+name: SemVer Tag
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_type:
+        description: Version bump type
+        type: choice
+        required: true
+        default: patch
+        options:
+          - patch
+          - minor
+          - major
+      prerelease:
+        description: Create a prerelease tag
+        type: boolean
+        required: true
+        default: false
+      prerelease_identifier:
+        description: Prerelease identifier (used when prerelease is true)
+        type: string
+        required: true
+        default: rc
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    name: Create SemVer tag
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute next version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          latest_tag=$(git tag --list 'v*' --sort=-v:refname | head -n1 || true)
+          if [[ -z "$latest_tag" ]]; then
+            latest_tag="v0.0.0"
+          fi
+
+          base_version=${latest_tag#v}
+          base_version=${base_version%%-*}
+
+          IFS='.' read -r major minor patch <<< "$base_version"
+
+          case "${{ github.event.inputs.release_type }}" in
+            major)
+              major=$((major + 1))
+              minor=0
+              patch=0
+              ;;
+            minor)
+              minor=$((minor + 1))
+              patch=0
+              ;;
+            patch)
+              patch=$((patch + 1))
+              ;;
+            *)
+              echo "Unsupported release_type"
+              exit 1
+              ;;
+          esac
+
+          next_version="${major}.${minor}.${patch}"
+
+          if [[ "${{ github.event.inputs.prerelease }}" == "true" ]]; then
+            preid="${{ github.event.inputs.prerelease_identifier }}"
+            next_version="${next_version}-${preid}.${{ github.run_number }}"
+          fi
+
+          next_tag="v${next_version}"
+          echo "next_tag=${next_tag}" >> "$GITHUB_OUTPUT"
+          echo "Computed ${next_tag} from ${latest_tag}"
+
+      - name: Create and push tag
+        env:
+          TAG: ${{ steps.version.outputs.next_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name github-actions
+          git config user.email github-actions@users.noreply.github.com
+          git tag -a "$TAG" -m "Release $TAG"
+          git push origin "$TAG"
