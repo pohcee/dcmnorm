@@ -99,6 +99,34 @@ struct Cli {
 
     #[arg(
         long,
+        value_name = "PIXELS",
+        help = "Set the output width in pixels. If --output-height is also set, the image is scaled exactly; otherwise the height is computed from the aspect ratio"
+    )]
+    output_width: Option<u32>,
+
+    #[arg(
+        long,
+        value_name = "PIXELS",
+        help = "Set the output height in pixels. If --output-width is also set, the image is scaled exactly; otherwise the width is computed from the aspect ratio"
+    )]
+    output_height: Option<u32>,
+
+    #[arg(
+        long,
+        value_name = "PIXELS",
+        help = "Scale the output so its width equals this value, preserving the aspect ratio"
+    )]
+    scale_x_size: Option<u32>,
+
+    #[arg(
+        long,
+        value_name = "PIXELS",
+        help = "Scale the output so its height equals this value, preserving the aspect ratio"
+    )]
+    scale_y_size: Option<u32>,
+
+    #[arg(
+        long,
         action = ArgAction::SetTrue,
         help = "List transfer syntaxes known to this build and exit"
     )]
@@ -471,6 +499,10 @@ fn run_dicom_to_render(cli: &Cli, input_bytes: &[u8]) -> Result<(), Box<dyn std:
         window_center: cli.window_center,
         window_width: cli.window_width,
         jpeg_quality: cli.jpeg_quality,
+        output_width: cli.output_width,
+        output_height: cli.output_height,
+        scale_x_size: cli.scale_x_size,
+        scale_y_size: cli.scale_y_size,
     };
 
     if format == RenderFormat::Mpeg4 {
@@ -496,6 +528,23 @@ fn run_dicom_to_render(cli: &Cli, input_bytes: &[u8]) -> Result<(), Box<dyn std:
         return Err(io::Error::new(
             ErrorKind::InvalidInput,
             "--render-fps is only valid for MPEG4 output",
+        )
+        .into());
+    }
+
+    let has_scale = cli.scale_x_size.is_some() || cli.scale_y_size.is_some();
+    let has_output = cli.output_width.is_some() || cli.output_height.is_some();
+    if has_scale && has_output {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "--scale-x-size/--scale-y-size cannot be combined with --output-width/--output-height",
+        )
+        .into());
+    }
+    if cli.scale_x_size.is_some() && cli.scale_y_size.is_some() {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "--scale-x-size and --scale-y-size cannot both be specified",
         )
         .into());
     }
@@ -695,6 +744,10 @@ fn validate_no_render_flags(cli: &Cli) -> Result<(), Box<dyn std::error::Error>>
         || cli.jpeg_quality != 90
         || cli.render_all_frames
         || cli.render_fps.is_some()
+        || cli.output_width.is_some()
+        || cli.output_height.is_some()
+        || cli.scale_x_size.is_some()
+        || cli.scale_y_size.is_some()
     {
         return Err(io::Error::new(
             ErrorKind::InvalidInput,
