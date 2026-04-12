@@ -182,7 +182,13 @@ You can create a prerelease tag locally:
 
 Use `--dry-run` to preview the computed next tag without creating or pushing it.
 
-The script pushes a version tag to `origin`, which triggers `.github/workflows/release.yml` automatically.
+The script updates versions in:
+
+- `Cargo.toml`
+- `exec/dcmnorm/Cargo.toml`
+
+Then it creates a release commit, pushes that commit to `origin`, and pushes the version tag.
+The pushed tag triggers `.github/workflows/release.yml` automatically.
 
 ## Build The CLI
 

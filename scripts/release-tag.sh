@@ -5,7 +5,7 @@ set -euo pipefail
 usage() {
     cat <<'EOF'
 Usage:
-  ./scripts/release-tag.sh <patch|minor|major> [--prerelease <id>] [--dry-run]
+    ./scripts/release-tag.sh <patch|minor|major> [--prerelease <id>] [--dry-run]
 
 Examples:
   ./scripts/release-tag.sh patch
@@ -14,8 +14,10 @@ Examples:
 
 This script:
   1) Computes the next SemVer tag from existing v* tags
-  2) Creates an annotated tag on HEAD
-  3) Pushes the tag to origin
+    2) Updates crate versions in Cargo.toml files
+    3) Commits the version bump
+    4) Creates an annotated tag on that commit
+    5) Pushes the commit and tag to origin
 
 Pushing the tag triggers .github/workflows/release.yml.
 EOF
@@ -68,6 +70,43 @@ compute_next_version() {
     fi
 
     echo "$next"
+}
+
+update_manifest_version() {
+    local manifest="$1"
+    local version="$2"
+    local tmp
+
+    tmp="$(mktemp)"
+    awk -v version="$version" '
+        BEGIN {
+            in_package = 0
+            updated = 0
+        }
+        /^\[package\]$/ {
+            in_package = 1
+            print
+            next
+        }
+        /^\[/ {
+            in_package = 0
+        }
+        in_package && /^version[[:space:]]*=/ && updated == 0 {
+            print "version = \"" version "\""
+            updated = 1
+            next
+        }
+        {
+            print
+        }
+        END {
+            if (updated == 0) {
+                exit 2
+            }
+        }
+    ' "$manifest" > "$tmp"
+
+    mv "$tmp" "$manifest"
 }
 
 bump_type=""
@@ -151,6 +190,14 @@ if [[ "$dry_run" -eq 1 ]]; then
     echo "Dry run enabled. No tag created or pushed."
     exit 0
 fi
+
+update_manifest_version "Cargo.toml" "$next_version"
+update_manifest_version "exec/dcmnorm/Cargo.toml" "$next_version"
+
+git add Cargo.toml exec/dcmnorm/Cargo.toml
+git commit -m "chore(release): ${next_tag}"
+
+git push origin HEAD
 
 git tag -a "$next_tag" -m "Release $next_tag"
 git push origin "$next_tag"
