@@ -29,10 +29,8 @@ pub struct RenderPipelineOptions {
     /// Explicit output height in pixels. When combined with `output_width`, the image is scaled
     /// to the exact dimensions. When used alone, the width is computed from the aspect ratio.
     pub output_height: Option<u32>,
-    /// Scale the output so that its width equals this value, preserving the aspect ratio.
-    pub scale_x_size: Option<u32>,
-    /// Scale the output so that its height equals this value, preserving the aspect ratio.
-    pub scale_y_size: Option<u32>,
+    /// Scale output while preserving aspect ratio so the longer side equals this value.
+    pub scale_max_size: Option<u32>,
 }
 
 impl Default for RenderPipelineOptions {
@@ -46,8 +44,7 @@ impl Default for RenderPipelineOptions {
             jpeg_quality: 90,
             output_width: None,
             output_height: None,
-            scale_x_size: None,
-            scale_y_size: None,
+            scale_max_size: None,
         }
     }
 }
@@ -808,15 +805,29 @@ fn compute_output_dimensions(
 ) -> Option<(u32, u32)> {
     let ow = u32::from(original_width);
     let oh = u32::from(original_height);
-    match (options.output_width, options.output_height, options.scale_x_size, options.scale_y_size) {
-        (Some(w), Some(h), None, None) => Some((w, h)),
-        (Some(w), None, None, None) => Some((w, scale_by_ratio(oh, ow, w))),
-        (None, Some(h), None, None) => Some((scale_by_ratio(ow, oh, h), h)),
-        (None, None, Some(w), None) => Some((w, scale_by_ratio(oh, ow, w))),
-        (None, None, None, Some(h)) => Some((scale_by_ratio(ow, oh, h), h)),
-        (None, None, None, None) => None,
+    match (options.output_width, options.output_height, options.scale_max_size) {
+        (Some(w), Some(h), None) => Some((w, h)),
+        (Some(w), None, None) => Some((w, scale_by_ratio(oh, ow, w))),
+        (None, Some(h), None) => Some((scale_by_ratio(ow, oh, h), h)),
+        (None, None, Some(max_dim)) => Some(scale_to_max_dimension(ow, oh, max_dim)),
+        (None, None, None) => None,
         _ => None,
     }
+}
+
+fn scale_to_max_dimension(width: u32, height: u32, max_dimension: u32) -> (u32, u32) {
+    if width == 0 || height == 0 {
+        return (width.max(1), height.max(1));
+    }
+
+    let current_max = width.max(height);
+    if current_max == 0 {
+        return (width, height);
+    }
+
+    let scaled_width = scale_by_ratio(width, current_max, max_dimension);
+    let scaled_height = scale_by_ratio(height, current_max, max_dimension);
+    (scaled_width.max(1), scaled_height.max(1))
 }
 
 fn scale_by_ratio(to_scale: u32, reference: u32, new_reference: u32) -> u32 {
