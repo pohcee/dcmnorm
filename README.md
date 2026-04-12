@@ -190,6 +190,8 @@ The script updates versions in:
 Then it creates a release commit, pushes that commit to `origin`, and pushes the version tag.
 The pushed tag triggers `.github/workflows/release.yml` automatically.
 
+If no `v*` tags exist yet, the script uses the root `Cargo.toml` `package.version` as the baseline for computing the next version.
+
 ## Build The CLI
 
 Build only `dcmnorm`:

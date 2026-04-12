@@ -34,6 +34,28 @@ latest_semver_tag() {
     git tag --list 'v*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$' | head -n1 || true
 }
 
+current_manifest_version() {
+    local manifest="$1"
+    awk '
+        BEGIN {
+            in_package = 0
+        }
+        /^\[package\]$/ {
+            in_package = 1
+            next
+        }
+        /^\[/ {
+            in_package = 0
+        }
+        in_package && /^version[[:space:]]*=/ {
+            gsub(/^[^\"]*\"/, "", $0)
+            gsub(/\".*/, "", $0)
+            print $0
+            exit
+        }
+    ' "$manifest"
+}
+
 compute_next_version() {
     local latest="$1"
     local bump="$2"
@@ -171,8 +193,15 @@ require_clean_tree
 git fetch --tags --quiet
 
 latest_tag="$(latest_semver_tag)"
+version_source="git tag"
 if [[ -z "$latest_tag" ]]; then
-    latest_tag="v0.0.0"
+    manifest_version="$(current_manifest_version "Cargo.toml")"
+    if [[ -z "$manifest_version" ]]; then
+        echo "Could not read version from Cargo.toml" >&2
+        exit 1
+    fi
+    latest_tag="v${manifest_version}"
+    version_source="Cargo.toml"
 fi
 
 next_version="$(compute_next_version "$latest_tag" "$bump_type" "$prerelease_id")"
@@ -183,7 +212,7 @@ if git rev-parse -q --verify "refs/tags/${next_tag}" >/dev/null; then
     exit 1
 fi
 
-echo "Current tag: ${latest_tag}"
+echo "Current version (${version_source}): ${latest_tag}"
 echo "Next tag:    ${next_tag}"
 
 if [[ "$dry_run" -eq 1 ]]; then
