@@ -147,6 +147,43 @@ If `~/.local/bin` is not already on your `PATH`, add this to your shell profile:
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
+## GitHub Releases
+
+This repository includes two GitHub Actions workflows for SemVer-based CLI releases:
+
+- `.github/workflows/semver-tag.yml`: manually creates and pushes the next `vX.Y.Z` tag from the latest existing `v*` tag
+- `.github/workflows/release.yml`: runs on pushed version tags, builds the CLI, and creates a GitHub Release with artifacts
+
+Release flow:
+
+1. Run the **SemVer Tag** workflow from the Actions tab and choose `patch`, `minor`, or `major`.
+2. The workflow pushes a new version tag (for example `v0.1.1`).
+3. The **Build and Release CLI** workflow is triggered by that tag and publishes:
+    - `dcmnorm-<tag>-linux-x86_64.tar.gz`
+    - `dcmnorm-<tag>-linux-x86_64.tar.gz.sha256`
+
+Prereleases are supported in the SemVer tag workflow via the `prerelease` input.
+
+### Local Tag + Release Trigger
+
+If you prefer not to manually run the tag workflow in GitHub, use the local helper script:
+
+```bash
+./scripts/release-tag.sh patch
+```
+
+Supported bump types are `patch`, `minor`, and `major`.
+
+You can create a prerelease tag locally:
+
+```bash
+./scripts/release-tag.sh minor --prerelease rc
+```
+
+Use `--dry-run` to preview the computed next tag without creating or pushing it.
+
+The script pushes a version tag to `origin`, which triggers `.github/workflows/release.yml` automatically.
+
 ## Build The CLI
 
 Build only `dcmnorm`:
