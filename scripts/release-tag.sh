@@ -223,7 +223,9 @@ fi
 update_manifest_version "Cargo.toml" "$next_version"
 update_manifest_version "exec/dcmnorm/Cargo.toml" "$next_version"
 
-git add Cargo.toml exec/dcmnorm/Cargo.toml
+cargo generate-lockfile --quiet
+
+git add -u
 git commit -m "chore(release): ${next_tag}"
 
 git push origin HEAD
