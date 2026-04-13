@@ -104,6 +104,18 @@ pub fn render_dicom_frames(
     let working = transcode_dicom_object(object, uids::EXPLICIT_VR_LITTLE_ENDIAN)?;
     let metadata = read_render_metadata(&working)?;
 
+    if output_format == RenderOutputFormat::Raw {
+        let bytes = get_frame_bytes(&working, &metadata, options.frame_index)?;
+        return Ok(vec![RenderFrameOutput {
+            width: metadata.cols,
+            height: metadata.rows,
+            samples_per_pixel: metadata.samples_per_pixel,
+            bits_allocated: metadata.bits_allocated,
+            format: RenderOutputFormat::Raw,
+            bytes,
+        }]);
+    }
+
     let frame = render_single_frame(&working, &metadata, options)?;
     let frame = maybe_resize_frame(frame, options);
     let encoded = encode_rendered_frame(&frame, output_format, options.jpeg_quality)?;
@@ -117,6 +129,23 @@ pub fn render_all_dicom_frames(
 ) -> Result<Vec<RenderFrameOutput>, RenderError> {
     let working = transcode_dicom_object(object, uids::EXPLICIT_VR_LITTLE_ENDIAN)?;
     let metadata = read_render_metadata(&working)?;
+
+    if output_format == RenderOutputFormat::Raw {
+        let mut frames = Vec::with_capacity(metadata.number_of_frames);
+        for frame_index in 0..metadata.number_of_frames {
+            let bytes = get_frame_bytes(&working, &metadata, frame_index)?;
+            frames.push(RenderFrameOutput {
+                width: metadata.cols,
+                height: metadata.rows,
+                samples_per_pixel: metadata.samples_per_pixel,
+                bits_allocated: metadata.bits_allocated,
+                format: RenderOutputFormat::Raw,
+                bytes,
+            });
+        }
+        return Ok(frames);
+    }
+
     let rendered = render_all_frames(&working, &metadata, options)?;
     rendered
         .iter()
