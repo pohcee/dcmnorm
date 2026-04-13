@@ -54,6 +54,10 @@ pub fn detect_jpeg2000_backend_from_search_path(search_path: &str) -> Jpeg2000Ba
 }
 
 fn detect_jpeg2000_backend_from_ld_library_path(ld_library_path: Option<&OsStr>) -> Jpeg2000Backend {
+    if !kakadu_ffi_enabled() {
+        return Jpeg2000Backend::OpenJpeg;
+    }
+
     let Some(search_path) = ld_library_path else {
         return Jpeg2000Backend::OpenJpeg;
     };
@@ -289,12 +293,15 @@ fn can_decode_pixel_data<D, R, W>(
 
 fn can_encode_pixel_data<D, R, W>(
     ts: &dicom_encoding::TransferSyntax<D, R, W>,
-    kakadu_enabled: bool,
+    _kakadu_enabled: bool,
     _ffmpeg_enabled: bool,
 ) -> bool {
     let uid = ts.uid();
+    if is_jpeg2000_transfer_syntax(uid) {
+        return false;
+    }
+
     matches!(ts.codec(), Codec::EncapsulatedPixelData(_, Some(_)))
-        || (kakadu_enabled && is_jpeg2000_transfer_syntax(uid))
         || (cfg!(feature = "ffmpeg-codec") && is_mpeg_transfer_syntax(uid))
         || (cfg!(feature = "jpeg-ls-codec") && is_jpeg_ls_transfer_syntax(uid))
 }
@@ -347,69 +354,6 @@ fn decode_jpeg2000_with_kakadu(object: &DefaultDicomObject, _library_path: &str)
     }
 
     kakadu::decode_jpeg2000(&codestream, rows, cols, samples_per_pixel, bits_stored, is_signed)
-}
-
-fn encode_jpeg2000_with_kakadu(
-    object: &DefaultDicomObject,
-    target_uid: &str,
-    _library_path: &str,
-) -> Result<Vec<Vec<u8>>, String> {
-    let rows = object
-        .get(tags::ROWS)
-        .and_then(|element| element.uint16().ok())
-        .ok_or_else(|| "missing Rows attribute".to_owned())? as usize;
-    let cols = object
-        .get(tags::COLUMNS)
-        .and_then(|element| element.uint16().ok())
-        .ok_or_else(|| "missing Columns attribute".to_owned())? as usize;
-    let samples_per_pixel = object
-        .get(tags::SAMPLES_PER_PIXEL)
-        .and_then(|element| element.uint16().ok())
-        .unwrap_or(1) as usize;
-    let bits_stored = object
-        .get(tags::BITS_STORED)
-        .and_then(|element| element.uint16().ok())
-        .or_else(|| object.get(tags::BITS_ALLOCATED).and_then(|element| element.uint16().ok()))
-        .ok_or_else(|| "missing BitsStored/BitsAllocated attribute".to_owned())?;
-    let is_signed = object
-        .get(tags::PIXEL_REPRESENTATION)
-        .and_then(|element| element.uint16().ok())
-        .unwrap_or(0)
-        != 0;
-    let number_of_frames = object
-        .get(tags::NUMBER_OF_FRAMES)
-        .and_then(|element| element.to_str().ok())
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .unwrap_or(1);
-    let planar_configuration = object
-        .get(tags::PLANAR_CONFIGURATION)
-        .and_then(|element| element.uint16().ok())
-        .unwrap_or(0);
-
-    if number_of_frames != 1 {
-        return Err("Kakadu FFI encode currently supports single-frame datasets only".to_owned());
-    }
-    if samples_per_pixel > 1 && planar_configuration != 0 {
-        return Err("Kakadu FFI encode currently supports only planar configuration 0".to_owned());
-    }
-
-    let pixels = object
-        .element(tags::PIXEL_DATA)
-        .map_err(|error| format!("missing PixelData element: {error}"))?
-        .to_bytes()
-        .map_err(|error| format!("failed to access native PixelData bytes: {error}"))?
-        .to_vec();
-    let reversible = normalize_transfer_syntax_uid(target_uid) == "1.2.840.10008.1.2.4.90";
-    let codestream = kakadu::encode_jpeg2000(
-        &pixels,
-        rows,
-        cols,
-        samples_per_pixel,
-        bits_stored,
-        is_signed,
-        reversible,
-    )?;
-    Ok(vec![codestream])
 }
 
 fn is_encapsulated_transfer_syntax<D, R, W>(
@@ -544,16 +488,11 @@ fn encode_pixel_data(
     target_ts: &dicom_encoding::TransferSyntax,
 ) -> Result<(), TranscodeError> {
     if is_jpeg2000_transfer_syntax(target_ts.uid()) {
-        if let Jpeg2000Backend::Kakadu { library_path } = jpeg2000_backend() {
-            let fragments = encode_jpeg2000_with_kakadu(object, target_ts.uid(), &library_path)
-                .map_err(|error| TranscodeError::EncodePixelData {
-                    uid: target_ts.uid().to_owned(),
-                    name: target_ts.name().to_owned(),
-                    message: format!("Kakadu FFI encode failed: {error}"),
-                })?;
-            replace_with_encapsulated_pixel_data(object, vec![0], fragments);
-            return Ok(());
-        }
+        return Err(TranscodeError::UnsupportedTargetTransferSyntax {
+            uid: target_ts.uid().to_owned(),
+            name: target_ts.name().to_owned(),
+            reason: "JPEG2000 encoding is disabled in this build".to_owned(),
+        });
     }
 
     // Try MPEG encoding

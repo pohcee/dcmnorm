@@ -1005,6 +1005,9 @@ mod tests {
             jpeg_quality: 90,
             render_all_frames: false,
             render_fps: None,
+            output_width: None,
+            output_height: None,
+            scale_max_size: None,
             list_transfer_syntaxes: false,
             verbose: false,
         }

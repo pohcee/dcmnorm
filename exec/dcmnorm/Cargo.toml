@@ -3,6 +3,10 @@ name = "dcmnorm-cli"
 version = "0.1.6"
 edition = "2021"
 
+[features]
+default = []
+kakadu-ffi = ["dcmnorm/kakadu-ffi"]
+
 [[bin]]
 name = "dcmnorm"
 path = "src/main.rs"

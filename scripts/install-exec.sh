@@ -141,10 +141,10 @@ if kakadu_include_dir="$(find_kakadu_include_dir)" && kakadu_lib_dir="$(find_kak
     use_kakadu_ffi=1
     export KAKADU_INCLUDE_DIR="$kakadu_include_dir"
     export KAKADU_LIB_DIR="$kakadu_lib_dir"
-    install_args+=(--features dcmnorm/kakadu-ffi)
+    install_args+=(--features kakadu-ffi)
     echo "Detected Kakadu headers at $KAKADU_INCLUDE_DIR"
     echo "Detected Kakadu libraries at $KAKADU_LIB_DIR"
-    echo "Installing exec crates with default codec features plus: dcmnorm/kakadu-ffi"
+    echo "Installing exec crates with default codec features plus: kakadu-ffi"
 else
     echo "Kakadu headers/libs not detected; installing exec crates with default codec features only"
 fi
