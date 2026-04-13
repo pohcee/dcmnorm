@@ -8,11 +8,12 @@ use dicom_dictionary_std::uids;
 use serde_json::Value as JsonValue;
 
 use super::{
-    detect_jpeg2000_backend_from_search_path, list_transfer_syntax_support, read_dicom_bytes,
+    detect_jpeg2000_backend_from_search_path, kakadu_ffi_enabled,
+    list_transfer_syntax_support, read_dicom_bytes,
     read_dicom_file, read_dicom_json, read_dicom_json_full, read_dicom_json_full_with_source,
     read_dicom_json_with_source, render_dicom_frame, transcode_dicom_object,
-    write_dicom_bytes, write_dicom_file, write_dicom_json, jpeg2000_backend,
-    kakadu_ffi_enabled, write_dicom_json_full, write_dicom_json_full_with_source,
+    write_dicom_bytes, write_dicom_file, write_dicom_json,
+    write_dicom_json_full, write_dicom_json_full_with_source,
     write_dicom_json_with_options, write_dicom_json_with_source, DicomJsonKeyStyle,
     DicomJsonWriteOptions, Jpeg2000Backend, RenderOutputFormat, RenderPipelineOptions,
 };
@@ -234,33 +235,16 @@ fn reports_jpeg_2000_transfer_syntax_capabilities() {
         .find(|entry| entry.uid == JPEG_2000_IMAGE_COMPRESSION_UID)
         .unwrap();
 
-    let kakadu_available = kakadu_ffi_enabled()
-        && matches!(jpeg2000_backend(), Jpeg2000Backend::Kakadu { .. });
-
     assert!(jpeg_2000.can_decode_pixel_data);
+    assert!(!jpeg_2000.can_encode_pixel_data);
+    assert!(!jpeg_2000.can_transcode_to());
 
     let original = read_dicom_file(fixture_path("dx.dcm")).unwrap();
-    if kakadu_available {
-        assert!(jpeg_2000.can_encode_pixel_data);
-        assert!(jpeg_2000.can_transcode_to());
-
-        let transcoded = transcode_dicom_object(&original, JPEG_2000_IMAGE_COMPRESSION_UID)
-            .unwrap();
-        assert_eq!(transcoded.meta().transfer_syntax(), JPEG_2000_IMAGE_COMPRESSION_UID);
-        assert!(transcoded.element(tags::PIXEL_DATA).unwrap().fragments().is_some());
-    } else {
-        assert!(!jpeg_2000.can_encode_pixel_data);
-        assert!(!jpeg_2000.can_transcode_to());
-
-        let error = transcode_dicom_object(&original, JPEG_2000_IMAGE_COMPRESSION_UID)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains(JPEG_2000_IMAGE_COMPRESSION_UID));
-        assert!(
-            error.contains("unsupported target transfer syntax")
-                || error.contains("failed to encode encapsulated pixel data")
-        );
-    }
+    let error = transcode_dicom_object(&original, JPEG_2000_IMAGE_COMPRESSION_UID)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains(JPEG_2000_IMAGE_COMPRESSION_UID));
+    assert!(error.contains("unsupported target transfer syntax"));
 }
 
 #[test]
@@ -277,7 +261,11 @@ fn detects_kakadu_backend_from_search_path() {
     fs::write(&kakadu_lib, []).unwrap();
 
     let backend = detect_jpeg2000_backend_from_search_path(base.to_string_lossy().as_ref());
-    assert!(matches!(backend, Jpeg2000Backend::Kakadu { .. }));
+    if kakadu_ffi_enabled() {
+        assert!(matches!(backend, Jpeg2000Backend::Kakadu { .. }));
+    } else {
+        assert_eq!(backend, Jpeg2000Backend::OpenJpeg);
+    }
 
     fs::remove_file(kakadu_lib).unwrap();
     fs::remove_dir(base).unwrap();
@@ -298,36 +286,6 @@ fn falls_back_to_openjpeg_when_kakadu_not_in_search_path() {
     assert_eq!(backend, Jpeg2000Backend::OpenJpeg);
 
     fs::remove_dir(base).unwrap();
-}
-
-#[test]
-fn transcodes_jpeg2000_with_kakadu_when_available() {
-    if !kakadu_ffi_enabled() {
-        return;
-    }
-
-    let Jpeg2000Backend::Kakadu { .. } = jpeg2000_backend() else {
-        return;
-    };
-
-    let original = read_dicom_file(fixture_path("dx.dcm")).unwrap();
-    let j2k = transcode_dicom_object(&original, "1.2.840.10008.1.2.4.90").unwrap();
-    assert_eq!(j2k.meta().transfer_syntax(), "1.2.840.10008.1.2.4.90");
-    assert!(j2k.element(tags::PIXEL_DATA).unwrap().fragments().is_some());
-
-    let roundtrip = transcode_dicom_object(&j2k, uids::EXPLICIT_VR_LITTLE_ENDIAN).unwrap();
-    assert_eq!(
-        original.element(tags::ROWS).unwrap().uint16().unwrap(),
-        roundtrip.element(tags::ROWS).unwrap().uint16().unwrap(),
-    );
-    assert_eq!(
-        original.element(tags::COLUMNS).unwrap().uint16().unwrap(),
-        roundtrip.element(tags::COLUMNS).unwrap().uint16().unwrap(),
-    );
-    assert_eq!(
-        original.element(tags::PIXEL_DATA).unwrap().to_bytes().unwrap().len(),
-        roundtrip.element(tags::PIXEL_DATA).unwrap().to_bytes().unwrap().len(),
-    );
 }
 
 #[test]

@@ -3,6 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 fn main() {
+    println!("cargo:rerun-if-changed=src/dicom_io/kakadu_bridge.cpp");
     println!("cargo:rerun-if-env-changed=KAKADU_INCLUDE_DIR");
     println!("cargo:rerun-if-env-changed=KAKADU_LIB_DIR");
     println!("cargo:rerun-if-env-changed=KAKADU_LIB_NAME");
