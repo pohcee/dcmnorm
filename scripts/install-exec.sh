@@ -41,6 +41,43 @@ require_command() {
     fi
 }
 
+check_apt_build_deps_for_all_features() {
+    # Apt package checks are only relevant on Debian/Ubuntu style systems.
+    if ! command -v dpkg-query >/dev/null 2>&1; then
+        return 0
+    fi
+
+    local -a required_packages=(
+        build-essential
+        ca-certificates
+        clang
+        cmake
+        libc6-dev
+        libavcodec-dev
+        libavformat-dev
+        libavutil-dev
+        libclang-dev
+        libswresample-dev
+        libswscale-dev
+        pkg-config
+    )
+    local -a missing_packages=()
+    local pkg
+
+    for pkg in "${required_packages[@]}"; do
+        if ! dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q '^install ok installed$'; then
+            missing_packages+=("$pkg")
+        fi
+    done
+
+    if [[ "${#missing_packages[@]}" -gt 0 ]]; then
+        echo "Missing apt packages required for full-feature exec builds:" >&2
+        printf '  - %s\n' "${missing_packages[@]}" >&2
+        echo "Install them with: sudo apt-get update && sudo apt-get install -y ${missing_packages[*]}" >&2
+        exit 1
+    fi
+}
+
 check_clang_can_find_std_headers() {
     local tmp_source
     tmp_source="$(mktemp)"
@@ -127,6 +164,7 @@ find_kakadu_lib_dir() {
 use_kakadu_ffi=0
 install_args=()
 
+check_apt_build_deps_for_all_features
 require_command cargo "Install Rust and Cargo before running this script."
 require_command pkg-config "Install pkg-config so the default FFmpeg codec support can find system FFmpeg libraries."
 require_command clang "Install clang so bindgen can generate FFmpeg bindings during the default build."
