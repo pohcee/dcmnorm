@@ -17,8 +17,8 @@ use dcmnorm::dicom_io::{
 #[derive(Parser, Debug)]
 #[command(name = "dcmnorm")]
 #[command(version)]
-#[command(about = "Convert between DICOM and JSON")]
-#[command(long_about = "Convert between DICOM and flattened or standard DICOM JSON. The CLI infers whether to run DICOM-to-JSON or JSON-to-DICOM from the input and output file types.")]
+#[command(about = "Convert, transcode, and render DICOM data")]
+#[command(long_about = "Convert between DICOM and flattened or standard DICOM JSON, transcode DICOM transfer syntaxes, render DICOM frames to raw/PNG/JPEG/MPEG4 outputs, and list transfer-syntax support for the current build. The CLI infers the operation from the input and output file types unless an explicit mode flag is provided.")]
 #[command(arg_required_else_help = true)]
 struct Cli {
     #[arg(value_name = "INPUT")]
