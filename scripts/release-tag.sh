@@ -226,7 +226,11 @@ update_manifest_version "exec/dcmnorm/Cargo.toml" "$next_version"
 cargo generate-lockfile --quiet
 
 git add -u
-git commit -m "chore(release): ${next_tag}"
+if git diff --cached --quiet; then
+    echo "Version files already at ${next_version}; creating tag on current HEAD without a new commit."
+else
+    git commit -m "chore(release): ${next_tag}"
+fi
 
 git push origin HEAD
 
