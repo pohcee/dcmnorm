@@ -21,117 +21,182 @@ use dcmnorm::dicom_io::{
 #[command(long_about = "Convert between DICOM and flattened or standard DICOM JSON, transcode DICOM transfer syntaxes, render DICOM frames to raw/PNG/JPEG/MPEG4 outputs, and list transfer-syntax support for the current build. The CLI infers the operation from the input and output file types unless an explicit mode flag is provided.")]
 #[command(arg_required_else_help = true)]
 struct Cli {
-    #[arg(value_name = "INPUT")]
+    #[arg(value_name = "INPUT", help_heading = "General", display_order = 1)]
     input: Option<PathBuf>,
 
-    #[arg(value_name = "OUTPUT")]
+    #[arg(value_name = "OUTPUT", help_heading = "General", display_order = 2)]
     output: Option<PathBuf>,
 
-    #[arg(long, value_enum, default_value_t = JsonFormat::Flat)]
-    format: JsonFormat,
-
-    #[arg(long, value_enum, default_value_t = KeyFormat::Name)]
-    keys: KeyFormat,
-
-    #[arg(
-        long,
-        value_enum,
-        default_value_t = BulkDataMode::Uri,
-        help = "Bulk data encoding mode for DICOM to JSON. In uri mode, values of 32 bytes or less still use InlineBinary automatically"
-    )]
-    bulk_data: BulkDataMode,
-
-    #[arg(long, value_name = "SOURCE")]
-    bulk_data_source: Option<PathBuf>,
-
-    #[arg(
-        long,
-        value_name = "UID",
-        help = "Target transfer syntax UID for DICOM-to-DICOM transcoding"
-    )]
-    transfer_syntax: Option<String>,
-
-    #[arg(
-        long,
-        value_enum,
-        help = "Render DICOM input to this format (raw/png/jpeg/mpeg4). For MPEG4 files, use the .mp4 output extension; if omitted, the format is inferred from the output extension"
-    )]
-    render_format: Option<RenderFormat>,
-
-    #[arg(long, default_value_t = 0, help = "Zero-based frame index to render")]
-    render_frame: usize,
-
     #[arg(
         long,
         action = ArgAction::SetTrue,
-        help = "Disable modality LUT during rendering"
-    )]
-    no_modality_lut: bool,
-
-    #[arg(
-        long,
-        action = ArgAction::SetTrue,
-        help = "Disable VOI LUT / windowing during rendering"
-    )]
-    no_voi_lut: bool,
-
-    #[arg(long, value_name = "FLOAT", help = "Override VOI window center for rendering")]
-    window_center: Option<f64>,
-
-    #[arg(long, value_name = "FLOAT", help = "Override VOI window width for rendering")]
-    window_width: Option<f64>,
-
-    #[arg(long, default_value_t = 90, help = "JPEG quality for rendered JPEG output (1-100)")]
-    jpeg_quality: u8,
-
-    #[arg(
-        long,
-        action = ArgAction::SetTrue,
-        help = "Render and export all frames for multiframe images. For image outputs, OUTPUT is expanded to STEM_000001.EXT, STEM_000002.EXT, and so on"
-    )]
-    render_all_frames: bool,
-
-    #[arg(
-        long,
-        value_name = "FPS",
-        help = "Frames per second when writing MPEG4/.mp4 output (defaults to DICOM frame rate metadata when available, else 24)"
-    )]
-    render_fps: Option<f64>,
-
-    #[arg(
-        long,
-        value_name = "PIXELS",
-        help = "Set the output width in pixels. If --output-height is also set, the image is scaled exactly; otherwise the height is computed from the aspect ratio"
-    )]
-    output_width: Option<u32>,
-
-    #[arg(
-        long,
-        value_name = "PIXELS",
-        help = "Set the output height in pixels. If --output-width is also set, the image is scaled exactly; otherwise the width is computed from the aspect ratio"
-    )]
-    output_height: Option<u32>,
-
-    #[arg(
-        long,
-        value_name = "PIXELS",
-        help = "Scale output while preserving aspect ratio so the longer side equals this value"
-    )]
-    scale_max_size: Option<u32>,
-
-    #[arg(
-        long,
-        action = ArgAction::SetTrue,
-        help = "List transfer syntaxes known to this build and exit"
+        help = "List transfer syntaxes known to this build and exit",
+        help_heading = "General",
+        display_order = 3
     )]
     list_transfer_syntaxes: bool,
 
     #[arg(
         long,
         action = ArgAction::SetTrue,
-        help = "Emit verbose conversion and rendering diagnostics"
+        help = "Emit verbose conversion and rendering diagnostics",
+        help_heading = "General",
+        display_order = 4
     )]
     verbose: bool,
+
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = JsonFormat::Flat,
+        help_heading = "JSON Conversion",
+        display_order = 10
+    )]
+    format: JsonFormat,
+
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = KeyFormat::Name,
+        help_heading = "JSON Conversion",
+        display_order = 11
+    )]
+    keys: KeyFormat,
+
+    #[arg(
+        long,
+        value_enum,
+        default_value_t = BulkDataMode::Uri,
+        help = "Bulk data encoding mode for DICOM to JSON. In uri mode, values of 32 bytes or less still use InlineBinary automatically",
+        help_heading = "JSON Conversion",
+        display_order = 12
+    )]
+    bulk_data: BulkDataMode,
+
+    #[arg(
+        long,
+        value_name = "SOURCE",
+        help_heading = "JSON Conversion",
+        display_order = 13
+    )]
+    bulk_data_source: Option<PathBuf>,
+
+    #[arg(
+        long,
+        value_name = "UID",
+        help = "Target transfer syntax UID for DICOM-to-DICOM transcoding",
+        help_heading = "DICOM Transcoding",
+        display_order = 20
+    )]
+    transfer_syntax: Option<String>,
+
+    #[arg(
+        long,
+        value_enum,
+        help = "Render DICOM input to this format (raw/png/jpeg/mpeg4). For MPEG4 files, use the .mp4 output extension; if omitted, the format is inferred from the output extension",
+        help_heading = "Rendering",
+        display_order = 30
+    )]
+    render_format: Option<RenderFormat>,
+
+    #[arg(
+        long,
+        default_value_t = 0,
+        help = "Zero-based frame index to render",
+        help_heading = "Rendering",
+        display_order = 31
+    )]
+    render_frame: usize,
+
+    #[arg(
+        long,
+        action = ArgAction::SetTrue,
+        help = "Render and export all frames for multiframe images. For image outputs, OUTPUT is expanded to STEM_000001.EXT, STEM_000002.EXT, and so on",
+        help_heading = "Rendering",
+        display_order = 32
+    )]
+    render_all_frames: bool,
+
+    #[arg(
+        long,
+        value_name = "FPS",
+        help = "Frames per second when writing MPEG4/.mp4 output (defaults to DICOM frame rate metadata when available, else 24)",
+        help_heading = "Rendering",
+        display_order = 33
+    )]
+    render_fps: Option<f64>,
+
+    #[arg(
+        long,
+        action = ArgAction::SetTrue,
+        help = "Disable modality LUT during rendering",
+        help_heading = "Rendering",
+        display_order = 34
+    )]
+    no_modality_lut: bool,
+
+    #[arg(
+        long,
+        action = ArgAction::SetTrue,
+        help = "Disable VOI LUT / windowing during rendering",
+        help_heading = "Rendering",
+        display_order = 35
+    )]
+    no_voi_lut: bool,
+
+    #[arg(
+        long,
+        value_name = "FLOAT",
+        help = "Override VOI window center for rendering",
+        help_heading = "Rendering",
+        display_order = 36
+    )]
+    window_center: Option<f64>,
+
+    #[arg(
+        long,
+        value_name = "FLOAT",
+        help = "Override VOI window width for rendering",
+        help_heading = "Rendering",
+        display_order = 37
+    )]
+    window_width: Option<f64>,
+
+    #[arg(
+        long,
+        default_value_t = 90,
+        help = "JPEG quality for rendered JPEG output (1-100)",
+        help_heading = "Rendering",
+        display_order = 38
+    )]
+    jpeg_quality: u8,
+
+    #[arg(
+        long,
+        value_name = "PIXELS",
+        help = "Set the output width in pixels. If --output-height is also set, the image is scaled exactly; otherwise the height is computed from the aspect ratio",
+        help_heading = "Rendering",
+        display_order = 39
+    )]
+    output_width: Option<u32>,
+
+    #[arg(
+        long,
+        value_name = "PIXELS",
+        help = "Set the output height in pixels. If --output-width is also set, the image is scaled exactly; otherwise the width is computed from the aspect ratio",
+        help_heading = "Rendering",
+        display_order = 40
+    )]
+    output_height: Option<u32>,
+
+    #[arg(
+        long,
+        value_name = "PIXELS",
+        help = "Scale output while preserving aspect ratio so the longer side equals this value",
+        help_heading = "Rendering",
+        display_order = 41
+    )]
+    scale_max_size: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
