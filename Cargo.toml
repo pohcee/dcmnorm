@@ -23,7 +23,7 @@ dicom-dictionary-std = "0.9.0"
 dicom-encoding = "0.9.1"
 dicom-json = "0.9.0"
 dicom-object = "0.9.1"
-dicom-transfer-syntax-registry = { version = "0.9.1", default-features = false, features = ["native", "deflate", "openjp2"] }
+dicom-transfer-syntax-registry = { version = "0.9.1", default-features = false, features = ["native", "deflate", "openjpeg-sys"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 serde_json = "1.0"
 ffmpeg-next = { version = "8.1", optional = true, default-features = false, features = ["codec", "format", "software-resampling", "software-scaling"] }
