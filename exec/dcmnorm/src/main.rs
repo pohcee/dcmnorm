@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use clap::{ArgAction, Parser, ValueEnum};
+use clap::{ArgAction, CommandFactory, FromArgMatches, Parser, ValueEnum};
 use dicom_dictionary_std::tags;
 use dcmnorm::dicom_io::{
     jpeg2000_backend_name, list_transfer_syntax_support, read_dicom_bytes,
@@ -13,6 +13,7 @@ use dcmnorm::dicom_io::{
     DicomJsonBulkDataMode, DicomJsonFormat, DicomJsonKeyStyle, DicomJsonReadOptions,
     DicomJsonWriteOptions, RenderOutputFormat, RenderPipelineOptions,
 };
+use sha2::{Digest, Sha256};
 
 #[derive(Parser, Debug)]
 #[command(name = "dcmnorm")]
@@ -248,7 +249,10 @@ fn main() {
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let cli = Cli::parse();
+    let version_with_hash = cli_version_with_binary_hash();
+    let version_static: &'static str = Box::leak(version_with_hash.into_boxed_str());
+    let matches = Cli::command().version(version_static).get_matches();
+    let cli = Cli::from_arg_matches(&matches).expect("clap generated invalid matches");
 
     if cli.list_transfer_syntaxes {
         print_transfer_syntax_support()?;
@@ -271,6 +275,31 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         Direction::DicomToRender => run_dicom_to_render(&cli, &input_bytes),
         Direction::JsonToDicom => run_json_to_dicom(&cli, &input_bytes),
     }
+}
+
+fn cli_version_with_binary_hash() -> String {
+    let base_version = env!("CARGO_PKG_VERSION");
+    match running_binary_sha256_prefix(12) {
+        Some(hash_prefix) => format!("{base_version}-{hash_prefix}"),
+        None => base_version.to_string(),
+    }
+}
+
+fn running_binary_sha256_prefix(prefix_len: usize) -> Option<String> {
+    let exe_path = std::env::current_exe().ok()?;
+    let exe_bytes = fs::read(exe_path).ok()?;
+
+    let mut hasher = Sha256::new();
+    hasher.update(&exe_bytes);
+    let digest = hasher.finalize();
+
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write as _;
+        write!(&mut hex, "{byte:02x}").ok()?;
+    }
+
+    Some(hex.chars().take(prefix_len).collect())
 }
 
 fn print_transfer_syntax_support() -> Result<(), Box<dyn std::error::Error>> {
