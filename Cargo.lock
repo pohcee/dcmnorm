@@ -341,7 +341,7 @@ dependencies = [
 
 [[package]]
 name = "dcmnorm"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "base64",
  "cc",
@@ -359,7 +359,7 @@ dependencies = [
 
 [[package]]
 name = "dcmnorm-cli"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "clap",
  "dcmnorm",
