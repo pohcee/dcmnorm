@@ -267,7 +267,13 @@ Convert a DICOM file to standard JSON with hex keys and write to a file:
 cargo run -p dcmnorm-cli -- test/files/dx.dcm out.json --format standard --keys hex
 ```
 
-By default, `dcmnorm` emits bulk data as `BulkDataURI`, but values of 32 bytes or less are automatically emitted as `InlineBinary` when converting DICOM to JSON.
+By default, `dcmnorm` emits bulk data as relative `BulkDataURI` values (`?offset=...&length=...`) when converting DICOM to JSON, and values of 32 bytes or less are automatically emitted as `InlineBinary`.
+
+To embed absolute `file://` URIs in `BulkDataURI`, pass `--bulk-data-source` without a value:
+
+```bash
+cargo run -p dcmnorm-cli -- test/files/dx.dcm --bulk-data uri --bulk-data-source
+```
 
 Convert JSON back to a DICOM file:
 
@@ -342,6 +348,20 @@ Both planar configurations are supported for RGB rendering (`PlanarConfiguration
 
 `.mp4` output requires `ffmpeg` installed and available on `PATH`.
 
+Pipe input paths from stdin using `-I` / `--stdin-paths`, one path per line:
+
+```bash
+find . -name "*.dcm" | dcmnorm -I
+```
+
+This applies the same options as single-file mode to every path. Errors for individual files are printed to stderr with the filename, and `dcmnorm` exits non-zero if any file fails.
+
+To emit `file://` `BulkDataURI` values in piped mode, also pass `--bulk-data-source` without a value:
+
+```bash
+find . -name "*.dcm" | dcmnorm -I --bulk-data uri --bulk-data-source
+```
+
 Transcode a DICOM file to Explicit VR Big Endian:
 
 ```bash
@@ -388,7 +408,8 @@ For DICOM to JSON, `dcmnorm` defaults to:
 
 - flattened JSON output
 - named lookup keys where possible
-- `BulkDataURI` bulk data output
+- relative `BulkDataURI` bulk data output (`?offset=...&length=...`)
+- `file://` `BulkDataURI` output when `--bulk-data-source` is passed without a value
 - automatic `InlineBinary` fallback for bulk values of 32 bytes or less
 
 For JSON to DICOM, `dcmnorm` defaults to:

@@ -1,5 +1,5 @@
 use std::fs;
-use std::io::{self, ErrorKind, Write};
+use std::io::{self, BufRead, ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -47,6 +47,16 @@ struct Cli {
     verbose: bool,
 
     #[arg(
+        short = 'I',
+        long = "stdin-paths",
+        action = ArgAction::SetTrue,
+        help = "Read input paths from stdin, one per line (e.g. find . -name '*.dcm' | dcmnorm -I)",
+        help_heading = "General",
+        display_order = 5
+    )]
+    stdin_paths: bool,
+
+    #[arg(
         long,
         value_enum,
         default_value_t = JsonFormat::Flat,
@@ -68,7 +78,7 @@ struct Cli {
         long,
         value_enum,
         default_value_t = BulkDataMode::Uri,
-        help = "Bulk data encoding mode for DICOM to JSON. In uri mode, values of 32 bytes or less still use InlineBinary automatically",
+        help = "Bulk data encoding mode for DICOM to JSON. In uri mode, values over 32 bytes use BulkDataURI (relative by default; use --bulk-data-source with no value to embed file:// URIs)",
         help_heading = "JSON Conversion",
         display_order = 12
     )]
@@ -77,10 +87,13 @@ struct Cli {
     #[arg(
         long,
         value_name = "SOURCE",
+        num_args = 0..=1,
+        default_missing_value = "",
+        help = "For JSON-to-DICOM: path to the original DICOM file used to resolve BulkDataURIs. For DICOM-to-JSON with --bulk-data uri: pass this flag with no value to embed the input file path as file:// in each BulkDataURI",
         help_heading = "JSON Conversion",
         display_order = 13
     )]
-    bulk_data_source: Option<PathBuf>,
+    bulk_data_source: Option<String>,
 
     #[arg(
         long,
@@ -259,6 +272,27 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
+    if cli.stdin_paths {
+        let stdin = io::stdin();
+        let mut any_error = false;
+        for line in stdin.lock().lines() {
+            let line = line?;
+            let line = line.trim().to_string();
+            if line.is_empty() {
+                continue;
+            }
+            let input_path = PathBuf::from(&line);
+            if let Err(e) = process_one(&cli, &input_path) {
+                eprintln!("{}: {e}", input_path.display());
+                any_error = true;
+            }
+        }
+        if any_error {
+            return Err(io::Error::new(ErrorKind::Other, "one or more inputs failed").into());
+        }
+        return Ok(());
+    }
+
     let input_path = cli.input.as_ref().ok_or_else(|| {
         io::Error::new(
             ErrorKind::InvalidInput,
@@ -266,14 +300,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         )
     })?;
 
+    process_one(&cli, input_path)
+}
+
+fn process_one(cli: &Cli, input_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let input_bytes = fs::read(input_path)?;
-    let direction = infer_direction(&cli, &input_bytes)?;
+    let direction = infer_direction(cli, input_path, &input_bytes)?;
 
     match direction {
-        Direction::DicomToJson => run_dicom_to_json(&cli, &input_bytes),
-        Direction::DicomToDicom => run_dicom_to_dicom(&cli, &input_bytes),
-        Direction::DicomToRender => run_dicom_to_render(&cli, &input_bytes),
-        Direction::JsonToDicom => run_json_to_dicom(&cli, &input_bytes),
+        Direction::DicomToJson => run_dicom_to_json(cli, input_path, &input_bytes),
+        Direction::DicomToDicom => run_dicom_to_dicom(cli, &input_bytes),
+        Direction::DicomToRender => run_dicom_to_render(cli, &input_bytes),
+        Direction::JsonToDicom => run_json_to_dicom(cli, &input_bytes),
     }
 }
 
@@ -392,13 +430,32 @@ fn yes_no(value: bool) -> &'static str {
     }
 }
 
-fn run_dicom_to_json(cli: &Cli, input_bytes: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+fn path_to_file_uri(path: &Path) -> Option<String> {
+    let abs = path.canonicalize().ok()?;
+    let s = abs.to_str()?;
+    // Encode spaces and percent signs; other characters used in typical paths are safe.
+    let encoded: String = s
+        .chars()
+        .flat_map(|c| match c {
+            ' ' => vec!['%', '2', '0'],
+            '%' => vec!['%', '2', '5'],
+            c => vec![c],
+        })
+        .collect();
+    Some(format!("file://{encoded}"))
+}
+
+fn run_dicom_to_json(
+    cli: &Cli,
+    input_path: &Path,
+    input_bytes: &[u8],
+) -> Result<(), Box<dyn std::error::Error>> {
     validate_no_render_flags(cli)?;
 
-    if cli.bulk_data_source.is_some() {
+    if matches!(&cli.bulk_data_source, Some(s) if !s.is_empty()) {
         return Err(io::Error::new(
             ErrorKind::InvalidInput,
-            "--bulk-data-source is only valid when converting JSON to DICOM",
+            "--bulk-data-source with a path is only valid when converting JSON to DICOM; use --bulk-data-source without a value to embed the input file:// URI in BulkDataURIs",
         )
         .into());
     }
@@ -424,6 +481,17 @@ fn run_dicom_to_json(cli: &Cli, input_bytes: &[u8]) -> Result<(), Box<dyn std::e
         BulkDataMode::Uri => DicomJsonBulkDataMode::Uri,
     };
 
+    // Embed the input file:// URI in BulkDataURIs only when the user explicitly
+    // passes --bulk-data-source without a value.
+    let uri_base_owned: Option<String> =
+        if bulk_data_mode == DicomJsonBulkDataMode::Uri
+            && cli.bulk_data_source.as_deref() == Some("")
+        {
+            path_to_file_uri(input_path)
+        } else {
+            None
+        };
+
     let output = write_dicom_json_with_options(
         &object,
         DicomJsonWriteOptions {
@@ -441,6 +509,7 @@ fn run_dicom_to_json(cli: &Cli, input_bytes: &[u8]) -> Result<(), Box<dyn std::e
             } else {
                 None
             },
+            bulk_data_uri_base: uri_base_owned.as_deref(),
         },
     )?;
 
@@ -683,9 +752,17 @@ fn run_json_to_dicom(cli: &Cli, input_bytes: &[u8]) -> Result<(), Box<dyn std::e
     }
 
     let json = std::str::from_utf8(input_bytes)?;
+    if cli.bulk_data_source.as_deref() == Some("") {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "--bulk-data-source requires a path when converting JSON to DICOM",
+        )
+        .into());
+    }
+
     let bulk_data_source = cli
         .bulk_data_source
-        .as_ref()
+        .as_deref()
         .map(fs::read)
         .transpose()?;
 
@@ -712,13 +789,7 @@ fn run_json_to_dicom(cli: &Cli, input_bytes: &[u8]) -> Result<(), Box<dyn std::e
     Ok(())
 }
 
-fn infer_direction(cli: &Cli, input_bytes: &[u8]) -> Result<Direction, Box<dyn std::error::Error>> {
-    let input = cli.input.as_ref().ok_or_else(|| {
-        io::Error::new(
-            ErrorKind::InvalidInput,
-            "an input path is required unless --list-transfer-syntaxes is set",
-        )
-    })?;
+fn infer_direction(cli: &Cli, input: &Path, input_bytes: &[u8]) -> Result<Direction, Box<dyn std::error::Error>> {
     let input_kind = detect_input_kind(input, input_bytes)?;
 
     match (&cli.output, input_kind) {

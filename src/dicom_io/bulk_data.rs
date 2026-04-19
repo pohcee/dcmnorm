@@ -54,10 +54,14 @@ where
                     BASE64_STANDARD.encode(raw_bytes),
                 ));
             }
-            return Ok(BulkRepresentation::Uri(format!(
-                "?offset={}&length={}",
-                location.offset, location.length
-            )));
+            let uri = match options.bulk_data_uri_base {
+                Some(base) => format!(
+                    "{}?offset={}&length={}",
+                    base, location.offset, location.length
+                ),
+                None => format!("?offset={}&length={}", location.offset, location.length),
+            };
+            return Ok(BulkRepresentation::Uri(uri));
         }
     }
 
