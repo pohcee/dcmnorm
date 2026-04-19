@@ -313,6 +313,11 @@ pub struct DicomJsonWriteOptions<'a> {
     pub bulk_data_mode: DicomJsonBulkDataMode,
     pub key_style: DicomJsonKeyStyle,
     pub bulk_data_source: Option<&'a [u8]>,
+    /// When set, BulkDataURIs are generated as `{base}?offset=…&length=…` instead
+    /// of the bare relative form `?offset=…&length=…`. Typical values are a
+    /// `file:///absolute/path/to/input.dcm` URI or an `https://` URL, letting
+    /// consumers resolve bulk data without a separate source argument.
+    pub bulk_data_uri_base: Option<&'a str>,
 }
 
 impl Default for DicomJsonWriteOptions<'_> {
@@ -322,6 +327,7 @@ impl Default for DicomJsonWriteOptions<'_> {
             bulk_data_mode: DicomJsonBulkDataMode::InlineBinary,
             key_style: DicomJsonKeyStyle::Name,
             bulk_data_source: None,
+            bulk_data_uri_base: None,
         }
     }
 }
