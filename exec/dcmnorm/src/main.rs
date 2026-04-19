@@ -1156,6 +1156,7 @@ mod tests {
         Cli {
             input: None,
             output: None,
+            stdin_paths: false,
             format: super::JsonFormat::Flat,
             keys: super::KeyFormat::Name,
             bulk_data: super::BulkDataMode::Uri,
