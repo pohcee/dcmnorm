@@ -295,6 +295,20 @@ cargo run -p dcmnorm-cli -- out.json out.dcm --bulk-data-source test/files/dx.dc
 - JSON input + DICOM output runs JSON to DICOM
 - JSON to DICOM requires an output path
 
+Set one or more DICOM element values while converting by repeating `--set KEY=VALUE`:
+
+```bash
+cargo run -p dcmnorm-cli -- test/files/dx.dcm out.dcm --transfer-syntax 1.2.840.10008.1.2.1 --set SOPClassUID=1.2.840.10008.5.1.4.1.1.2 --set StudyDescription=Normalized
+```
+
+`KEY` can be a DICOM keyword (for example, `SOPClassUID`) or a tag expression (for example, `(0008,0016)`).
+
+Use `--overwrite` to write DICOM output back to the input path. This is useful for in-place edits with `--set`:
+
+```bash
+cargo run -p dcmnorm-cli -- test/files/dx.dcm --set SOPClassUID=1.2.840.10008.5.1.4.1.1.2 --overwrite
+```
+
 Render the first frame of a DICOM file to PNG:
 
 ```bash
@@ -355,6 +369,18 @@ find . -name "*.dcm" | dcmnorm -I
 ```
 
 This applies the same options as single-file mode to every path. Errors for individual files are printed to stderr with the filename, and `dcmnorm` exits non-zero if any file fails.
+
+`--set` also applies in piped mode. The same element updates are applied to each input path:
+
+```bash
+find . -name "*.dcm" | dcmnorm -I --set SOPClassUID=1.2.840.10008.5.1.4.1.1.2
+```
+
+To update each input file in place in piped mode, combine `--set` with `--overwrite`:
+
+```bash
+find . -name "*.dcm" | dcmnorm -I --set SOPClassUID=1.2.840.10008.5.1.4.1.1.2 --overwrite
+```
 
 To emit `file://` `BulkDataURI` values in piped mode, also pass `--bulk-data-source` without a value:
 

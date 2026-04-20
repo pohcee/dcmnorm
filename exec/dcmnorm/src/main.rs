@@ -5,7 +5,10 @@ use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{ArgAction, CommandFactory, FromArgMatches, Parser, ValueEnum};
+use dicom_core::dictionary::{DataDictionary, DataDictionaryEntry};
+use dicom_core::{Tag, VR};
 use dicom_dictionary_std::tags;
+use dicom_dictionary_std::StandardDataDictionary;
 use dcmnorm::dicom_io::{
     jpeg2000_backend_name, list_transfer_syntax_support, read_dicom_bytes,
     read_dicom_json_with_options, render_all_dicom_frames, render_dicom_frame,
@@ -58,6 +61,15 @@ struct Cli {
 
     #[arg(
         long,
+        action = ArgAction::SetTrue,
+        help = "Overwrite each input file in place. With DICOM input this writes updated DICOM back to the same path",
+        help_heading = "General",
+        display_order = 6
+    )]
+    overwrite: bool,
+
+    #[arg(
+        long,
         value_enum,
         default_value_t = JsonFormat::Flat,
         help_heading = "JSON Conversion",
@@ -103,6 +115,16 @@ struct Cli {
         display_order = 20
     )]
     transfer_syntax: Option<String>,
+
+    #[arg(
+        long,
+        value_name = "KEY=VALUE",
+        action = ArgAction::Append,
+        help = "Set or replace a DICOM element value. KEY can be a keyword (e.g. SOPClassUID) or tag expression (e.g. (0008,0016)). Repeat this option to set multiple elements",
+        help_heading = "DICOM Editing",
+        display_order = 21
+    )]
+    set: Vec<String>,
 
     #[arg(
         long,
@@ -309,7 +331,7 @@ fn process_one(cli: &Cli, input_path: &Path) -> Result<(), Box<dyn std::error::E
 
     match direction {
         Direction::DicomToJson => run_dicom_to_json(cli, input_path, &input_bytes),
-        Direction::DicomToDicom => run_dicom_to_dicom(cli, &input_bytes),
+        Direction::DicomToDicom => run_dicom_to_dicom(cli, input_path, &input_bytes),
         Direction::DicomToRender => run_dicom_to_render(cli, &input_bytes),
         Direction::JsonToDicom => run_json_to_dicom(cli, &input_bytes),
     }
@@ -468,7 +490,8 @@ fn run_dicom_to_json(
         .into());
     }
 
-    let object = read_dicom_bytes(input_bytes)?;
+    let mut object = read_dicom_bytes(input_bytes)?;
+    apply_attribute_overrides(cli, &mut object)?;
     verbose_log(
         cli,
         format!(
@@ -524,21 +547,41 @@ fn run_dicom_to_json(
     Ok(())
 }
 
-fn run_dicom_to_dicom(cli: &Cli, input_bytes: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+fn run_dicom_to_dicom(
+    cli: &Cli,
+    input_path: &Path,
+    input_bytes: &[u8],
+) -> Result<(), Box<dyn std::error::Error>> {
     validate_no_render_flags(cli)?;
 
-    let output_path = cli.output.as_ref().ok_or_else(|| {
-        io::Error::new(
+    if cli.overwrite && cli.output.is_some() {
+        return Err(io::Error::new(
             ErrorKind::InvalidInput,
-            "DICOM to DICOM transcoding requires an output path",
+            "--overwrite cannot be combined with an explicit output path",
         )
-    })?;
-    let target_transfer_syntax = cli.transfer_syntax.as_deref().ok_or_else(|| {
-        io::Error::new(
+        .into());
+    }
+
+    let output_path = if cli.overwrite {
+        input_path
+    } else {
+        cli.output.as_deref().ok_or_else(|| {
+            io::Error::new(
+                ErrorKind::InvalidInput,
+                "DICOM to DICOM output requires either an output path or --overwrite",
+            )
+        })?
+    };
+
+    if cli.transfer_syntax.is_none() && cli.set.is_empty() {
+        return Err(io::Error::new(
             ErrorKind::InvalidInput,
-            "DICOM to DICOM transcoding requires --transfer-syntax <UID>",
+            "DICOM to DICOM output requires --transfer-syntax <UID> and/or at least one --set KEY=VALUE",
         )
-    })?;
+        .into());
+    }
+
+    let target_transfer_syntax = cli.transfer_syntax.as_deref();
 
     if cli.keys != KeyFormat::Name {
         return Err(io::Error::new(
@@ -572,17 +615,27 @@ fn run_dicom_to_dicom(cli: &Cli, input_bytes: &[u8]) -> Result<(), Box<dyn std::
         .into());
     }
 
-    let object = read_dicom_bytes(input_bytes)?;
-    verbose_log(
-        cli,
-        format!(
-            "Transcoding DICOM to transfer syntax {} -> {}",
-            object.meta().transfer_syntax(),
-            target_transfer_syntax
-        ),
-    );
-    let transcoded = transcode_dicom_object(&object, target_transfer_syntax)?;
-    write_dicom_file(&transcoded, output_path)?;
+    let mut object = read_dicom_bytes(input_bytes)?;
+    apply_attribute_overrides(cli, &mut object)?;
+    if let Some(target_transfer_syntax) = target_transfer_syntax {
+        verbose_log(
+            cli,
+            format!(
+                "Transcoding DICOM to transfer syntax {} -> {}",
+                object.meta().transfer_syntax(),
+                target_transfer_syntax
+            ),
+        );
+        let transcoded = transcode_dicom_object(&object, target_transfer_syntax)?;
+        write_dicom_file(&transcoded, output_path)?;
+    } else {
+        verbose_log(
+            cli,
+            format!("Writing updated DICOM to {}", output_path.display()),
+        );
+        write_dicom_file(&object, output_path)?;
+    }
+
     Ok(())
 }
 
@@ -634,7 +687,8 @@ fn run_dicom_to_render(cli: &Cli, input_bytes: &[u8]) -> Result<(), Box<dyn std:
         )
     })?;
 
-    let object = read_dicom_bytes(input_bytes)?;
+    let mut object = read_dicom_bytes(input_bytes)?;
+    apply_attribute_overrides(cli, &mut object)?;
     let format = resolve_render_format(cli, output_path)?;
     verbose_log(
         cli,
@@ -766,7 +820,7 @@ fn run_json_to_dicom(cli: &Cli, input_bytes: &[u8]) -> Result<(), Box<dyn std::e
         .map(fs::read)
         .transpose()?;
 
-    let object = read_dicom_json_with_options(
+    let mut object = read_dicom_json_with_options(
         json,
         DicomJsonReadOptions {
             format: match cli.format {
@@ -776,6 +830,7 @@ fn run_json_to_dicom(cli: &Cli, input_bytes: &[u8]) -> Result<(), Box<dyn std::e
             bulk_data_source: bulk_data_source.as_deref(),
         },
     )?;
+    apply_attribute_overrides(cli, &mut object)?;
 
     verbose_log(
         cli,
@@ -789,19 +844,110 @@ fn run_json_to_dicom(cli: &Cli, input_bytes: &[u8]) -> Result<(), Box<dyn std::e
     Ok(())
 }
 
+fn apply_attribute_overrides(
+    cli: &Cli,
+    object: &mut dicom_object::DefaultDicomObject,
+) -> Result<(), Box<dyn std::error::Error>> {
+    for assignment in &cli.set {
+        let (tag, vr, value) = parse_attribute_override(assignment)?;
+        object.put_str(tag, vr, value);
+        verbose_log(
+            cli,
+            format!(
+                "Set {} ({:04X},{:04X}) to {}",
+                keyword_for_tag(tag),
+                tag.group(),
+                tag.element(),
+                assignment
+                    .split_once('=')
+                    .map(|(_, rhs)| rhs)
+                    .unwrap_or_default()
+            ),
+        );
+    }
+
+    Ok(())
+}
+
+fn parse_attribute_override(assignment: &str) -> Result<(Tag, VR, String), io::Error> {
+    let (raw_key, raw_value) = assignment.split_once('=').ok_or_else(|| {
+        io::Error::new(
+            ErrorKind::InvalidInput,
+            format!(
+                "invalid --set value '{assignment}'; expected KEY=VALUE, for example SOPClassUID=1.2.840.10008.5.1.4.1.1.2"
+            ),
+        )
+    })?;
+
+    let key = raw_key.trim();
+    if key.is_empty() {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            format!("invalid --set value '{assignment}'; KEY cannot be empty"),
+        ));
+    }
+
+    let tag = StandardDataDictionary.parse_tag(key).ok_or_else(|| {
+        io::Error::new(
+            ErrorKind::InvalidInput,
+            format!(
+                "invalid --set key '{key}'; use a DICOM keyword like SOPClassUID or a tag expression like (0008,0016)"
+            ),
+        )
+    })?;
+
+    let vr = StandardDataDictionary
+        .by_tag(tag)
+        .map(|entry| entry.vr().relaxed())
+        .ok_or_else(|| {
+            io::Error::new(
+                ErrorKind::InvalidInput,
+                format!(
+                    "could not determine VR for --set key '{key}'; use a standard DICOM attribute"
+                ),
+            )
+        })?;
+
+    if vr == VR::SQ {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            format!(
+                "--set does not currently support sequence attributes ({key}); set non-sequence elements instead"
+            ),
+        ));
+    }
+
+    Ok((tag, vr, raw_value.to_owned()))
+}
+
+fn keyword_for_tag(tag: Tag) -> String {
+    StandardDataDictionary
+        .by_tag(tag)
+        .map(|entry| entry.alias().to_owned())
+        .unwrap_or_else(|| format!("({:04X},{:04X})", tag.group(), tag.element()))
+}
+
 fn infer_direction(cli: &Cli, input: &Path, input_bytes: &[u8]) -> Result<Direction, Box<dyn std::error::Error>> {
     let input_kind = detect_input_kind(input, input_bytes)?;
+
+    if cli.overwrite && cli.output.is_some() {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "--overwrite cannot be combined with an explicit output path",
+        )
+        .into());
+    }
 
     match (&cli.output, input_kind) {
         (Some(output), FileKind::Dicom) => match detect_output_kind(output) {
             Some(FileKind::Json) => Ok(Direction::DicomToJson),
             Some(FileKind::Dicom) => {
-                if cli.transfer_syntax.is_some() {
+                if cli.transfer_syntax.is_some() || !cli.set.is_empty() {
                     Ok(Direction::DicomToDicom)
                 } else {
                     Err(io::Error::new(
                         ErrorKind::InvalidInput,
-                        "DICOM input with DICOM output requires --transfer-syntax <UID>",
+                        "DICOM input with DICOM output requires --transfer-syntax <UID> and/or at least one --set KEY=VALUE",
                     )
                     .into())
                 }
@@ -831,12 +977,36 @@ fn infer_direction(cli: &Cli, input: &Path, input_bytes: &[u8]) -> Result<Direct
             )
             .into()),
         },
-        (None, FileKind::Dicom) => Ok(Direction::DicomToJson),
-        (None, FileKind::Json) => Err(io::Error::new(
-            ErrorKind::InvalidInput,
-            "JSON to DICOM conversion requires an output path",
-        )
-        .into()),
+        (None, FileKind::Dicom) => {
+            if cli.overwrite {
+                if cli.transfer_syntax.is_some() || !cli.set.is_empty() {
+                    Ok(Direction::DicomToDicom)
+                } else {
+                    Err(io::Error::new(
+                        ErrorKind::InvalidInput,
+                        "--overwrite requires --transfer-syntax <UID> and/or at least one --set KEY=VALUE",
+                    )
+                    .into())
+                }
+            } else {
+                Ok(Direction::DicomToJson)
+            }
+        }
+        (None, FileKind::Json) => {
+            if cli.overwrite {
+                Err(io::Error::new(
+                    ErrorKind::InvalidInput,
+                    "--overwrite is only valid for DICOM input",
+                )
+                .into())
+            } else {
+                Err(io::Error::new(
+                    ErrorKind::InvalidInput,
+                    "JSON to DICOM conversion requires an output path",
+                )
+                .into())
+            }
+        }
         (_, FileKind::Render) => Err(io::Error::new(
             ErrorKind::InvalidInput,
             "rendered image input is not supported; input must be DICOM or JSON",
@@ -1149,7 +1319,12 @@ fn looks_like_dicom(input_bytes: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{detect_output_kind, resolve_render_format, Cli, FileKind, RenderFormat};
+    use super::{
+        detect_output_kind, infer_direction, parse_attribute_override, resolve_render_format, Cli,
+        Direction, FileKind, RenderFormat,
+    };
+    use clap::{CommandFactory, FromArgMatches};
+    use dicom_core::Tag;
     use std::path::PathBuf;
 
     fn base_cli() -> Cli {
@@ -1157,11 +1332,13 @@ mod tests {
             input: None,
             output: None,
             stdin_paths: false,
+            overwrite: false,
             format: super::JsonFormat::Flat,
             keys: super::KeyFormat::Name,
             bulk_data: super::BulkDataMode::Uri,
             bulk_data_source: None,
             transfer_syntax: None,
+            set: Vec::new(),
             render_format: None,
             render_frame: 0,
             no_modality_lut: false,
@@ -1192,5 +1369,71 @@ mod tests {
         let cli = base_cli();
         let format = resolve_render_format(&cli, &PathBuf::from("out.mp4")).unwrap();
         assert_eq!(format, RenderFormat::Mpeg4);
+    }
+
+    #[test]
+    fn parses_set_with_keyword() {
+        let (tag, vr, value) =
+            parse_attribute_override("SOPClassUID=1.2.840.10008.5.1.4.1.1.2").unwrap();
+        assert_eq!(tag, Tag(0x0008, 0x0016));
+        assert_eq!(vr, dicom_core::VR::UI);
+        assert_eq!(value, "1.2.840.10008.5.1.4.1.1.2");
+    }
+
+    #[test]
+    fn rejects_set_without_separator() {
+        let error = parse_attribute_override("SOPClassUID").unwrap_err().to_string();
+        assert!(error.contains("expected KEY=VALUE"));
+    }
+
+    #[test]
+    fn parses_multiple_set_values_with_stdin_paths_flag() {
+        let matches = Cli::command()
+            .try_get_matches_from([
+                "dcmnorm",
+                "-I",
+                "--overwrite",
+                "--set",
+                "SOPClassUID=1.2.840.10008.5.1.4.1.1.2",
+                "--set",
+                "StudyDescription=Normalized",
+            ])
+            .unwrap();
+        let cli = Cli::from_arg_matches(&matches).unwrap();
+
+        assert!(cli.stdin_paths);
+        assert!(cli.overwrite);
+        assert_eq!(cli.set.len(), 2);
+        assert_eq!(cli.set[0], "SOPClassUID=1.2.840.10008.5.1.4.1.1.2");
+        assert_eq!(cli.set[1], "StudyDescription=Normalized");
+    }
+
+    #[test]
+    fn infers_overwrite_without_output_as_dicom_to_dicom() {
+        let mut cli = base_cli();
+        cli.overwrite = true;
+        cli.set.push("SOPClassUID=1.2.840.10008.5.1.4.1.1.2".to_string());
+
+        let mut input_bytes = vec![0u8; 132];
+        input_bytes[128..132].copy_from_slice(b"DICM");
+
+        let direction = infer_direction(&cli, &PathBuf::from("in.dcm"), &input_bytes).unwrap();
+        assert_eq!(direction, Direction::DicomToDicom);
+    }
+
+    #[test]
+    fn rejects_overwrite_with_explicit_output() {
+        let mut cli = base_cli();
+        cli.overwrite = true;
+        cli.output = Some(PathBuf::from("out.dcm"));
+        cli.set.push("SOPClassUID=1.2.840.10008.5.1.4.1.1.2".to_string());
+
+        let mut input_bytes = vec![0u8; 132];
+        input_bytes[128..132].copy_from_slice(b"DICM");
+
+        let error = infer_direction(&cli, &PathBuf::from("in.dcm"), &input_bytes)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("cannot be combined with an explicit output path"));
     }
 }
