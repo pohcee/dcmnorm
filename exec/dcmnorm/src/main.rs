@@ -1626,6 +1626,7 @@ mod tests {
             bulk_data_source: None,
             transfer_syntax: None,
             set: Vec::new(),
+            remove: Vec::new(),
             render_format: None,
             render_frame: 0,
             no_modality_lut: false,
