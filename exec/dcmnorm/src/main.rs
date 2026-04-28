@@ -11,9 +11,10 @@ use dicom_dictionary_std::tags;
 use dicom_dictionary_std::StandardDataDictionary;
 use dcmnorm::dicom_io::{
     jpeg2000_backend_name, list_transfer_syntax_support, read_dicom_bytes,
+    redact_dicom_pixels_to_transfer_syntax,
     read_dicom_json_with_options, render_all_dicom_frames, render_dicom_frame,
     transcode_dicom_object, write_dicom_file, write_dicom_json_with_options,
-    DicomJsonBulkDataMode, DicomJsonFormat, DicomJsonKeyStyle, DicomJsonReadOptions,
+    BoundingBox, BoxLength, DicomJsonBulkDataMode, DicomJsonFormat, DicomJsonKeyStyle, DicomJsonReadOptions,
     DicomJsonWriteOptions, RenderOutputFormat, RenderPipelineOptions,
 };
 use sha2::{Digest, Sha256};
@@ -233,6 +234,26 @@ struct Cli {
         display_order = 41
     )]
     scale_max_size: Option<u32>,
+
+    #[arg(
+        long,
+        value_name = "X,Y,W,H",
+        action = ArgAction::Append,
+        allow_hyphen_values = true,
+        help = "Draw a filled bounding box for redaction at position X,Y with size W×H (output-image pixels, after any scaling). X/Y may be negative to anchor from right/bottom (for example -20 is 20 px from the right/bottom edge). W/H accept pixels (40) or percentages (25%). Repeat to add multiple boxes",
+        help_heading = "Rendering",
+        display_order = 42
+    )]
+    redact_box: Vec<String>,
+
+    #[arg(
+        long,
+        value_name = "COLOR",
+        help = "Fill color for redaction boxes as R,G,B (0-255 each) or #RRGGBB hex. Defaults to 0,0,0 (black)",
+        help_heading = "Rendering",
+        display_order = 43
+    )]
+    redact_color: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -275,6 +296,8 @@ enum Direction {
     DicomToRender,
     JsonToDicom,
 }
+
+const NEGATIVE_ZERO_ANCHOR: i32 = i32::MIN;
 
 fn main() {
     if let Err(error) = run() {
@@ -472,7 +495,7 @@ fn run_dicom_to_json(
     input_path: &Path,
     input_bytes: &[u8],
 ) -> Result<(), Box<dyn std::error::Error>> {
-    validate_no_render_flags(cli)?;
+    validate_no_render_or_redaction_flags(cli)?;
 
     if matches!(&cli.bulk_data_source, Some(s) if !s.is_empty()) {
         return Err(io::Error::new(
@@ -552,7 +575,7 @@ fn run_dicom_to_dicom(
     input_path: &Path,
     input_bytes: &[u8],
 ) -> Result<(), Box<dyn std::error::Error>> {
-    validate_no_render_flags(cli)?;
+    validate_non_dicom_to_dicom_render_flags(cli)?;
 
     if cli.overwrite && cli.output.is_some() {
         return Err(io::Error::new(
@@ -573,10 +596,18 @@ fn run_dicom_to_dicom(
         })?
     };
 
-    if cli.transfer_syntax.is_none() && cli.set.is_empty() {
+    if cli.transfer_syntax.is_none() && cli.set.is_empty() && cli.redact_box.is_empty() {
         return Err(io::Error::new(
             ErrorKind::InvalidInput,
-            "DICOM to DICOM output requires --transfer-syntax <UID> and/or at least one --set KEY=VALUE",
+            "DICOM to DICOM output requires --transfer-syntax <UID>, at least one --set KEY=VALUE, and/or at least one --redact-box X,Y,W,H",
+        )
+        .into());
+    }
+
+    if cli.redact_color.is_some() && cli.redact_box.is_empty() {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "--redact-color requires at least one --redact-box",
         )
         .into());
     }
@@ -617,6 +648,44 @@ fn run_dicom_to_dicom(
 
     let mut object = read_dicom_bytes(input_bytes)?;
     apply_attribute_overrides(cli, &mut object)?;
+
+    if !cli.redact_box.is_empty() {
+        let target_transfer_syntax = cli
+            .transfer_syntax
+            .as_deref()
+            .unwrap_or(object.meta().transfer_syntax());
+        ensure_supported_redaction_target_transfer_syntax(target_transfer_syntax)?;
+
+        let bounding_boxes = cli
+            .redact_box
+            .iter()
+            .map(|s| parse_redact_box(s))
+            .collect::<Result<Vec<_>, _>>()?;
+        let bounding_box_color = cli
+            .redact_color
+            .as_deref()
+            .map(parse_redact_color)
+            .transpose()?
+            .unwrap_or([0, 0, 0]);
+
+        verbose_log(
+            cli,
+            format!(
+                "Applying {} redaction box(es) and transcoding to transfer syntax {}",
+                bounding_boxes.len(),
+                target_transfer_syntax
+            ),
+        );
+        let redacted = redact_dicom_pixels_to_transfer_syntax(
+            &object,
+            target_transfer_syntax,
+            &bounding_boxes,
+            bounding_box_color,
+        )?;
+        write_dicom_file(&redacted, output_path)?;
+        return Ok(());
+    }
+
     if let Some(target_transfer_syntax) = target_transfer_syntax {
         verbose_log(
             cli,
@@ -703,6 +772,18 @@ fn run_dicom_to_render(cli: &Cli, input_bytes: &[u8]) -> Result<(), Box<dyn std:
             cli.jpeg_quality
         ),
     );
+    let bounding_boxes = cli
+        .redact_box
+        .iter()
+        .map(|s| parse_redact_box(s))
+        .collect::<Result<Vec<_>, _>>()?;
+    let bounding_box_color = cli
+        .redact_color
+        .as_deref()
+        .map(parse_redact_color)
+        .transpose()?
+        .unwrap_or([0, 0, 0]);
+
     let options = RenderPipelineOptions {
         frame_index: cli.render_frame,
         apply_modality_lut: !cli.no_modality_lut,
@@ -713,6 +794,8 @@ fn run_dicom_to_render(cli: &Cli, input_bytes: &[u8]) -> Result<(), Box<dyn std:
         output_width: cli.output_width,
         output_height: cli.output_height,
         scale_max_size: cli.scale_max_size,
+        bounding_boxes,
+        bounding_box_color,
     };
 
     if format == RenderFormat::Mpeg4 {
@@ -772,7 +855,7 @@ fn run_dicom_to_render(cli: &Cli, input_bytes: &[u8]) -> Result<(), Box<dyn std:
 }
 
 fn run_json_to_dicom(cli: &Cli, input_bytes: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
-    validate_no_render_flags(cli)?;
+    validate_no_render_or_redaction_flags(cli)?;
 
     let output_path = cli.output.as_ref().ok_or_else(|| {
         io::Error::new(
@@ -869,6 +952,133 @@ fn apply_attribute_overrides(
     Ok(())
 }
 
+fn parse_redact_box(s: &str) -> Result<BoundingBox, io::Error> {
+    let parts: Vec<&str> = s.split(',').collect();
+    if parts.len() != 4 {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            format!(
+                "invalid --redact-box value '{s}'; expected X,Y,W,H where X/Y are integers (negative allowed for right/bottom anchoring) and W/H are non-negative integers or percentages like 25%"
+            ),
+        ));
+    }
+    let x = parse_redact_coordinate(parts[0].trim(), s, "X")?;
+    let y = parse_redact_coordinate(parts[1].trim(), s, "Y")?;
+    let width = parse_redact_extent(parts[2].trim(), s, "W")?;
+    let height = parse_redact_extent(parts[3].trim(), s, "H")?;
+
+    Ok(BoundingBox {
+        x,
+        y,
+        width,
+        height,
+    })
+}
+
+fn parse_redact_extent(value: &str, original: &str, axis: &str) -> Result<BoxLength, io::Error> {
+    if let Some(percent) = value.strip_suffix('%') {
+        let parsed = percent.trim().parse::<f64>().map_err(|_| {
+            io::Error::new(
+                ErrorKind::InvalidInput,
+                format!(
+                    "invalid --redact-box value '{original}'; {axis} must be a non-negative integer or percentage like 25%"
+                ),
+            )
+        })?;
+
+        if !parsed.is_finite() || parsed < 0.0 {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                format!(
+                    "invalid --redact-box value '{original}'; {axis} percentage must be non-negative"
+                ),
+            ));
+        }
+
+        return Ok(BoxLength::Percent(parsed));
+    }
+
+    let parsed = value.parse::<u32>().map_err(|_| {
+        io::Error::new(
+            ErrorKind::InvalidInput,
+            format!(
+                "invalid --redact-box value '{original}'; {axis} must be a non-negative integer or percentage like 25%"
+            ),
+        )
+    })?;
+    Ok(BoxLength::Pixels(parsed))
+}
+
+fn parse_redact_coordinate(value: &str, original: &str, axis: &str) -> Result<i32, io::Error> {
+    let parsed = value.parse::<i32>().map_err(|_| {
+        io::Error::new(
+            ErrorKind::InvalidInput,
+            format!(
+                "invalid --redact-box value '{original}'; {axis} must be an integer (negative allowed)"
+            ),
+        )
+    })?;
+
+    if parsed == 0 && value.starts_with('-') {
+        return Ok(NEGATIVE_ZERO_ANCHOR);
+    }
+
+    Ok(parsed)
+}
+
+fn parse_redact_color(s: &str) -> Result<[u8; 3], io::Error> {
+    let s = s.trim();
+    if let Some(hex) = s.strip_prefix('#') {
+        if hex.len() != 6 {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                format!("invalid --redact-color value '{s}'; hex color must be #RRGGBB"),
+            ));
+        }
+        let r = u8::from_str_radix(&hex[0..2], 16).map_err(|_| {
+            io::Error::new(
+                ErrorKind::InvalidInput,
+                format!("invalid --redact-color value '{s}'; not a valid hex color"),
+            )
+        })?;
+        let g = u8::from_str_radix(&hex[2..4], 16).map_err(|_| {
+            io::Error::new(
+                ErrorKind::InvalidInput,
+                format!("invalid --redact-color value '{s}'; not a valid hex color"),
+            )
+        })?;
+        let b = u8::from_str_radix(&hex[4..6], 16).map_err(|_| {
+            io::Error::new(
+                ErrorKind::InvalidInput,
+                format!("invalid --redact-color value '{s}'; not a valid hex color"),
+            )
+        })?;
+        return Ok([r, g, b]);
+    }
+
+    let parts: Vec<&str> = s.split(',').collect();
+    if parts.len() != 3 {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            format!(
+                "invalid --redact-color value '{s}'; expected R,G,B (three comma-separated 0-255 integers) or #RRGGBB"
+            ),
+        ));
+    }
+    let mut values = [0u8; 3];
+    for (i, part) in parts.iter().enumerate() {
+        values[i] = part.trim().parse::<u8>().map_err(|_| {
+            io::Error::new(
+                ErrorKind::InvalidInput,
+                format!(
+                    "invalid --redact-color value '{s}'; each component must be 0-255"
+                ),
+            )
+        })?;
+    }
+    Ok(values)
+}
+
 fn parse_attribute_override(assignment: &str) -> Result<(Tag, VR, String), io::Error> {
     let (raw_key, raw_value) = assignment.split_once('=').ok_or_else(|| {
         io::Error::new(
@@ -942,12 +1152,16 @@ fn infer_direction(cli: &Cli, input: &Path, input_bytes: &[u8]) -> Result<Direct
         (Some(output), FileKind::Dicom) => match detect_output_kind(output) {
             Some(FileKind::Json) => Ok(Direction::DicomToJson),
             Some(FileKind::Dicom) => {
-                if cli.transfer_syntax.is_some() || !cli.set.is_empty() {
+                if cli.transfer_syntax.is_some()
+                    || !cli.set.is_empty()
+                    || !cli.redact_box.is_empty()
+                    || cli.redact_color.is_some()
+                {
                     Ok(Direction::DicomToDicom)
                 } else {
                     Err(io::Error::new(
                         ErrorKind::InvalidInput,
-                        "DICOM input with DICOM output requires --transfer-syntax <UID> and/or at least one --set KEY=VALUE",
+                        "DICOM input with DICOM output requires --transfer-syntax <UID>, at least one --set KEY=VALUE, and/or at least one --redact-box X,Y,W,H",
                     )
                     .into())
                 }
@@ -979,12 +1193,16 @@ fn infer_direction(cli: &Cli, input: &Path, input_bytes: &[u8]) -> Result<Direct
         },
         (None, FileKind::Dicom) => {
             if cli.overwrite {
-                if cli.transfer_syntax.is_some() || !cli.set.is_empty() {
+                if cli.transfer_syntax.is_some()
+                    || !cli.set.is_empty()
+                    || !cli.redact_box.is_empty()
+                    || cli.redact_color.is_some()
+                {
                     Ok(Direction::DicomToDicom)
                 } else {
                     Err(io::Error::new(
                         ErrorKind::InvalidInput,
-                        "--overwrite requires --transfer-syntax <UID> and/or at least one --set KEY=VALUE",
+                        "--overwrite requires --transfer-syntax <UID>, at least one --set KEY=VALUE, and/or at least one --redact-box X,Y,W,H",
                     )
                     .into())
                 }
@@ -1055,7 +1273,33 @@ fn detect_kind_from_extension(path: &Path) -> Option<FileKind> {
     }
 }
 
-fn validate_no_render_flags(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+fn validate_no_render_or_redaction_flags(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+    if cli.render_format.is_some()
+        || cli.render_frame != 0
+        || cli.no_modality_lut
+        || cli.no_voi_lut
+        || cli.window_center.is_some()
+        || cli.window_width.is_some()
+        || cli.jpeg_quality != 90
+        || cli.render_all_frames
+        || cli.render_fps.is_some()
+        || cli.output_width.is_some()
+        || cli.output_height.is_some()
+        || cli.scale_max_size.is_some()
+        || !cli.redact_box.is_empty()
+        || cli.redact_color.is_some()
+    {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "render options are only valid when converting DICOM to .jpg/.jpeg/.png/.raw/.mp4",
+        )
+        .into());
+    }
+
+    Ok(())
+}
+
+fn validate_non_dicom_to_dicom_render_flags(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     if cli.render_format.is_some()
         || cli.render_frame != 0
         || cli.no_modality_lut
@@ -1074,6 +1318,38 @@ fn validate_no_render_flags(cli: &Cli) -> Result<(), Box<dyn std::error::Error>>
             "render options are only valid when converting DICOM to .jpg/.jpeg/.png/.raw/.mp4",
         )
         .into());
+    }
+
+    Ok(())
+}
+
+fn ensure_supported_redaction_target_transfer_syntax(uid: &str) -> Result<(), io::Error> {
+    let support = list_transfer_syntax_support();
+    let Some(entry) = support.iter().find(|entry| entry.uid == uid) else {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            format!(
+                "we do not support transcoding to {uid} transfer syntax. Run --list-transfer-syntaxes to see supported transfer syntaxes"
+            ),
+        ));
+    };
+
+    if !entry.can_write_dataset {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            format!(
+                "we do not support transcoding to {uid} transfer syntax. Run --list-transfer-syntaxes to see supported transfer syntaxes"
+            ),
+        ));
+    }
+
+    if entry.encapsulated_pixel_data && !entry.can_encode_pixel_data {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            format!(
+                "we do not support transcoding to {uid} transfer syntax because PIXEL_ENCODE is not supported. Run --list-transfer-syntaxes to see supported transfer syntaxes"
+            ),
+        ));
     }
 
     Ok(())
@@ -1320,7 +1596,8 @@ fn looks_like_dicom(input_bytes: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        detect_output_kind, infer_direction, parse_attribute_override, resolve_render_format, Cli,
+        detect_output_kind, infer_direction, parse_attribute_override, parse_redact_box,
+        resolve_render_format, Cli,
         Direction, FileKind, RenderFormat,
     };
     use clap::{CommandFactory, FromArgMatches};
@@ -1351,6 +1628,8 @@ mod tests {
             output_width: None,
             output_height: None,
             scale_max_size: None,
+            redact_box: Vec::new(),
+            redact_color: None,
             list_transfer_syntaxes: false,
             verbose: false,
         }
@@ -1387,6 +1666,63 @@ mod tests {
     }
 
     #[test]
+    fn parses_redact_box_with_negative_offsets() {
+        let bbox = parse_redact_box("-20,-10,15,8").unwrap();
+        assert_eq!(bbox.x, -20);
+        assert_eq!(bbox.y, -10);
+        match bbox.width {
+            super::BoxLength::Pixels(value) => assert_eq!(value, 15),
+            _ => panic!("expected pixel width"),
+        }
+        match bbox.height {
+            super::BoxLength::Pixels(value) => assert_eq!(value, 8),
+            _ => panic!("expected pixel height"),
+        }
+    }
+
+    #[test]
+    fn rejects_negative_redact_box_width_or_height() {
+        let error = parse_redact_box("0,0,-5,10").unwrap_err().to_string();
+        assert!(error.contains("W must be a non-negative integer or percentage like 25%"));
+    }
+
+    #[test]
+    fn parses_redact_box_with_percentage_extents() {
+        let bbox = parse_redact_box("-20,-10,25%,50%").unwrap();
+        match bbox.width {
+            super::BoxLength::Percent(value) => assert!((value - 25.0).abs() < f64::EPSILON),
+            _ => panic!("expected percent width"),
+        }
+        match bbox.height {
+            super::BoxLength::Percent(value) => assert!((value - 50.0).abs() < f64::EPSILON),
+            _ => panic!("expected percent height"),
+        }
+    }
+
+    #[test]
+    fn cli_accepts_hyphen_prefixed_redact_box_value() {
+        let matches = Cli::command()
+            .try_get_matches_from([
+                "dcmnorm",
+                "--redact-box",
+                "-0,-0,20%,20%",
+                "in.dcm",
+                "out.jpg",
+            ])
+            .unwrap();
+        let cli = Cli::from_arg_matches(&matches).unwrap();
+
+        assert_eq!(cli.redact_box, vec!["-0,-0,20%,20%".to_string()]);
+    }
+
+    #[test]
+    fn preserves_negative_zero_anchor_coordinates() {
+        let bbox = parse_redact_box("-0,0,10,10").unwrap();
+        assert_eq!(bbox.x, super::NEGATIVE_ZERO_ANCHOR);
+        assert_eq!(bbox.y, 0);
+    }
+
+    #[test]
     fn parses_multiple_set_values_with_stdin_paths_flag() {
         let matches = Cli::command()
             .try_get_matches_from([
@@ -1413,6 +1749,19 @@ mod tests {
         let mut cli = base_cli();
         cli.overwrite = true;
         cli.set.push("SOPClassUID=1.2.840.10008.5.1.4.1.1.2".to_string());
+
+        let mut input_bytes = vec![0u8; 132];
+        input_bytes[128..132].copy_from_slice(b"DICM");
+
+        let direction = infer_direction(&cli, &PathBuf::from("in.dcm"), &input_bytes).unwrap();
+        assert_eq!(direction, Direction::DicomToDicom);
+    }
+
+    #[test]
+    fn infers_dicom_to_dicom_for_redaction_without_transfer_syntax() {
+        let mut cli = base_cli();
+        cli.output = Some(PathBuf::from("out.dcm"));
+        cli.redact_box.push("0,0,10,10".to_string());
 
         let mut input_bytes = vec![0u8; 132];
         input_bytes[128..132].copy_from_slice(b"DICM");

@@ -16,6 +16,33 @@ pub enum RenderOutputFormat {
 }
 
 #[derive(Clone, Debug)]
+pub enum BoxLength {
+    Pixels(u32),
+    Percent(f64),
+}
+
+impl Default for BoxLength {
+    fn default() -> Self {
+        Self::Pixels(0)
+    }
+}
+
+/// A filled rectangle drawn on a rendered image for redaction purposes.
+///
+/// Coordinates are in output-image pixels (after any resizing).
+#[derive(Clone, Debug, Default)]
+pub struct BoundingBox {
+    /// X offset for the left edge. Negative values are measured from the right edge.
+    pub x: i32,
+    /// Y offset for the top edge. Negative values are measured from the bottom edge.
+    pub y: i32,
+    /// Width of the box in pixels or as a percentage of image width.
+    pub width: BoxLength,
+    /// Height of the box in pixels or as a percentage of image height.
+    pub height: BoxLength,
+}
+
+#[derive(Clone, Debug)]
 pub struct RenderPipelineOptions {
     pub frame_index: usize,
     pub apply_modality_lut: bool,
@@ -31,6 +58,12 @@ pub struct RenderPipelineOptions {
     pub output_height: Option<u32>,
     /// Scale output while preserving aspect ratio so the longer side equals this value.
     pub scale_max_size: Option<u32>,
+    /// Filled rectangles to draw over the output image for redaction.
+    ///
+    /// Coordinates are applied after any resizing, so they reference output-image pixels.
+    pub bounding_boxes: Vec<BoundingBox>,
+    /// Fill color for bounding boxes as `[R, G, B]`, values 0-255. Defaults to `[0, 0, 0]` (black).
+    pub bounding_box_color: [u8; 3],
 }
 
 impl Default for RenderPipelineOptions {
@@ -45,6 +78,8 @@ impl Default for RenderPipelineOptions {
             output_width: None,
             output_height: None,
             scale_max_size: None,
+            bounding_boxes: Vec::new(),
+            bounding_box_color: [0, 0, 0],
         }
     }
 }
@@ -101,6 +136,7 @@ pub fn render_dicom_frames(
     output_format: RenderOutputFormat,
     options: &RenderPipelineOptions,
 ) -> Result<Vec<RenderFrameOutput>, RenderError> {
+    validate_user_window_overrides(options)?;
     let working = transcode_dicom_object(object, uids::EXPLICIT_VR_LITTLE_ENDIAN)?;
     let metadata = read_render_metadata(&working)?;
 
@@ -117,7 +153,8 @@ pub fn render_dicom_frames(
     }
 
     let frame = render_single_frame(&working, &metadata, options)?;
-    let frame = maybe_resize_frame(frame, options);
+    let mut frame = maybe_resize_frame(frame, options);
+    draw_bounding_boxes(&mut frame, options);
     let encoded = encode_rendered_frame(&frame, output_format, options.jpeg_quality)?;
     Ok(vec![encoded])
 }
@@ -127,6 +164,7 @@ pub fn render_all_dicom_frames(
     output_format: RenderOutputFormat,
     options: &RenderPipelineOptions,
 ) -> Result<Vec<RenderFrameOutput>, RenderError> {
+    validate_user_window_overrides(options)?;
     let working = transcode_dicom_object(object, uids::EXPLICIT_VR_LITTLE_ENDIAN)?;
     let metadata = read_render_metadata(&working)?;
 
@@ -150,7 +188,8 @@ pub fn render_all_dicom_frames(
     rendered
         .iter()
         .map(|frame| {
-            let resized = maybe_resize_frame(frame.clone(), options);
+            let mut resized = maybe_resize_frame(frame.clone(), options);
+            draw_bounding_boxes(&mut resized, options);
             encode_rendered_frame(&resized, output_format, options.jpeg_quality)
         })
         .collect()
@@ -227,6 +266,48 @@ pub fn render_dicom_to_recompressed_object(
     Ok(recompressed)
 }
 
+pub fn redact_dicom_pixels_to_transfer_syntax(
+    object: &DefaultDicomObject,
+    target_transfer_syntax_uid: &str,
+    boxes: &[BoundingBox],
+    color: [u8; 3],
+) -> Result<DefaultDicomObject, RenderError> {
+    let mut working = transcode_dicom_object(object, uids::EXPLICIT_VR_LITTLE_ENDIAN)?;
+    let metadata = read_render_metadata(&working)?;
+
+    if metadata.bits_allocated != 1 && metadata.bits_allocated != 8 && metadata.bits_allocated != 16 {
+        return Err(RenderError::UnsupportedBitsAllocated(metadata.bits_allocated));
+    }
+
+    if metadata.samples_per_pixel != 1 && metadata.samples_per_pixel != 3 {
+        return Err(RenderError::UnsupportedSamplesPerPixel(metadata.samples_per_pixel));
+    }
+
+    if metadata.samples_per_pixel == 3 && metadata.planar_configuration > 1 {
+        return Err(RenderError::UnsupportedPlanarConfiguration(
+            metadata.planar_configuration,
+        ));
+    }
+
+    let frame_len = frame_length_bytes(&metadata)?;
+    let mut redacted_pixel_data = Vec::with_capacity(frame_len * metadata.number_of_frames);
+    for frame_index in 0..metadata.number_of_frames {
+        let mut frame_bytes = get_frame_bytes(&working, &metadata, frame_index)?;
+        apply_bounding_boxes_to_raw_frame(&mut frame_bytes, &metadata, boxes, color)?;
+        redacted_pixel_data.extend_from_slice(&frame_bytes);
+    }
+
+    let pixel_vr = if metadata.bits_allocated > 8 { VR::OW } else { VR::OB };
+    working.put(DataElement::new(
+        tags::PIXEL_DATA,
+        pixel_vr,
+        PrimitiveValue::from(redacted_pixel_data),
+    ));
+
+    let recompressed = transcode_dicom_object(&working, target_transfer_syntax_uid)?;
+    Ok(recompressed)
+}
+
 fn render_all_frames(
     object: &DefaultDicomObject,
     metadata: &RenderMetadata,
@@ -239,6 +320,187 @@ fn render_all_frames(
         rendered.push(render_single_frame(object, metadata, &frame_options)?);
     }
     Ok(rendered)
+}
+
+fn frame_length_bytes(metadata: &RenderMetadata) -> Result<usize, RenderError> {
+    let samples_per_frame = usize::from(metadata.rows)
+        * usize::from(metadata.cols)
+        * usize::from(metadata.samples_per_pixel);
+    match metadata.bits_allocated {
+        1 => Ok(samples_per_frame.div_ceil(8)),
+        8 => Ok(samples_per_frame),
+        16 => Ok(samples_per_frame * 2),
+        other => Err(RenderError::UnsupportedBitsAllocated(other)),
+    }
+}
+
+fn apply_bounding_boxes_to_raw_frame(
+    frame_bytes: &mut [u8],
+    metadata: &RenderMetadata,
+    boxes: &[BoundingBox],
+    color: [u8; 3],
+) -> Result<(), RenderError> {
+    if boxes.is_empty() {
+        return Ok(());
+    }
+
+    let width = u32::from(metadata.cols);
+    let height = u32::from(metadata.rows);
+    let pixel_count = usize::from(metadata.rows) * usize::from(metadata.cols);
+
+    match (metadata.samples_per_pixel, metadata.bits_allocated) {
+        (1, 1) => {
+            let threshold = rgb_to_luma(color) >= 128;
+            for bbox in boxes {
+                let (x_start, x_end, y_start, y_end) = clamped_box(bbox, width, height);
+                for y in y_start..y_end {
+                    for x in x_start..x_end {
+                        let pixel_index = (y * width + x) as usize;
+                        set_bit_sample(frame_bytes, pixel_index, threshold);
+                    }
+                }
+            }
+        }
+        (1, 8) => {
+            let value = scale_u8_to_bits_stored(rgb_to_luma(color), metadata.bits_stored) as u8;
+            for bbox in boxes {
+                let (x_start, x_end, y_start, y_end) = clamped_box(bbox, width, height);
+                for y in y_start..y_end {
+                    for x in x_start..x_end {
+                        let pixel_index = (y * width + x) as usize;
+                        frame_bytes[pixel_index] = value;
+                    }
+                }
+            }
+        }
+        (1, 16) => {
+            let value = scale_u8_to_bits_stored(rgb_to_luma(color), metadata.bits_stored);
+            for bbox in boxes {
+                let (x_start, x_end, y_start, y_end) = clamped_box(bbox, width, height);
+                for y in y_start..y_end {
+                    for x in x_start..x_end {
+                        let pixel_index = (y * width + x) as usize;
+                        let byte_index = pixel_index * 2;
+                        let bytes = value.to_le_bytes();
+                        frame_bytes[byte_index] = bytes[0];
+                        frame_bytes[byte_index + 1] = bytes[1];
+                    }
+                }
+            }
+        }
+        (3, 8) => {
+            let r = scale_u8_to_bits_stored(color[0], metadata.bits_stored) as u8;
+            let g = scale_u8_to_bits_stored(color[1], metadata.bits_stored) as u8;
+            let b = scale_u8_to_bits_stored(color[2], metadata.bits_stored) as u8;
+            for bbox in boxes {
+                let (x_start, x_end, y_start, y_end) = clamped_box(bbox, width, height);
+                for y in y_start..y_end {
+                    for x in x_start..x_end {
+                        let pixel_index = (y * width + x) as usize;
+                        if metadata.planar_configuration == 0 {
+                            let base = pixel_index * 3;
+                            frame_bytes[base] = r;
+                            frame_bytes[base + 1] = g;
+                            frame_bytes[base + 2] = b;
+                        } else {
+                            frame_bytes[pixel_index] = r;
+                            frame_bytes[pixel_index + pixel_count] = g;
+                            frame_bytes[pixel_index + 2 * pixel_count] = b;
+                        }
+                    }
+                }
+            }
+        }
+        (3, 16) => {
+            let r = scale_u8_to_bits_stored(color[0], metadata.bits_stored).to_le_bytes();
+            let g = scale_u8_to_bits_stored(color[1], metadata.bits_stored).to_le_bytes();
+            let b = scale_u8_to_bits_stored(color[2], metadata.bits_stored).to_le_bytes();
+            for bbox in boxes {
+                let (x_start, x_end, y_start, y_end) = clamped_box(bbox, width, height);
+                for y in y_start..y_end {
+                    for x in x_start..x_end {
+                        let pixel_index = (y * width + x) as usize;
+                        if metadata.planar_configuration == 0 {
+                            let base = pixel_index * 6;
+                            frame_bytes[base] = r[0];
+                            frame_bytes[base + 1] = r[1];
+                            frame_bytes[base + 2] = g[0];
+                            frame_bytes[base + 3] = g[1];
+                            frame_bytes[base + 4] = b[0];
+                            frame_bytes[base + 5] = b[1];
+                        } else {
+                            let r_base = pixel_index * 2;
+                            let g_base = (pixel_index + pixel_count) * 2;
+                            let b_base = (pixel_index + 2 * pixel_count) * 2;
+                            frame_bytes[r_base] = r[0];
+                            frame_bytes[r_base + 1] = r[1];
+                            frame_bytes[g_base] = g[0];
+                            frame_bytes[g_base + 1] = g[1];
+                            frame_bytes[b_base] = b[0];
+                            frame_bytes[b_base + 1] = b[1];
+                        }
+                    }
+                }
+            }
+        }
+        (samples, _) => return Err(RenderError::UnsupportedSamplesPerPixel(samples)),
+    }
+
+    Ok(())
+}
+
+fn clamped_box(bbox: &BoundingBox, width: u32, height: u32) -> (u32, u32, u32, u32) {
+    let x_start = resolve_axis_start(bbox.x, width);
+    let box_width = resolve_axis_length(&bbox.width, width);
+    let x_end = x_start.saturating_add(box_width).min(width);
+    let y_start = resolve_axis_start(bbox.y, height);
+    let box_height = resolve_axis_length(&bbox.height, height);
+    let y_end = y_start.saturating_add(box_height).min(height);
+    (x_start, x_end, y_start, y_end)
+}
+
+fn resolve_axis_start(offset: i32, extent: u32) -> u32 {
+    if offset == i32::MIN {
+        return extent;
+    }
+
+    if offset >= 0 {
+        (offset as u32).min(extent)
+    } else {
+        extent.saturating_sub(offset.unsigned_abs().min(extent))
+    }
+}
+
+fn resolve_axis_length(length: &BoxLength, extent: u32) -> u32 {
+    match length {
+        BoxLength::Pixels(value) => *value,
+        BoxLength::Percent(percent) => {
+            let clamped_percent = percent.clamp(0.0, 100.0);
+            ((f64::from(extent) * clamped_percent) / 100.0).round() as u32
+        }
+    }
+}
+
+fn rgb_to_luma(color: [u8; 3]) -> u8 {
+    (0.2126 * f64::from(color[0]) + 0.7152 * f64::from(color[1]) + 0.0722 * f64::from(color[2]))
+        .round()
+        .clamp(0.0, 255.0) as u8
+}
+
+fn scale_u8_to_bits_stored(value: u8, bits_stored: u16) -> u16 {
+    let bits = bits_stored.clamp(1, 16);
+    let max_value = (1u32 << u32::from(bits)) - 1;
+    ((u32::from(value) * max_value + 127) / 255) as u16
+}
+
+fn set_bit_sample(bytes: &mut [u8], pixel_index: usize, value: bool) {
+    let byte_index = pixel_index / 8;
+    let bit = 7 - (pixel_index % 8);
+    if value {
+        bytes[byte_index] |= 1 << bit;
+    } else {
+        bytes[byte_index] &= !(1 << bit);
+    }
 }
 
 fn render_single_frame(
@@ -663,6 +925,24 @@ fn apply_modality_lut(object: &DefaultDicomObject, values: &mut [f64]) {
     }
 }
 
+fn validate_user_window_overrides(options: &RenderPipelineOptions) -> Result<(), RenderError> {
+    if let Some(window_width) = options.window_width {
+        if options.window_center.is_none() {
+            return Err(RenderError::InvalidWindow(
+                "window width is set but window center is missing".to_owned(),
+            ));
+        }
+
+        if window_width <= 0.0 {
+            return Err(RenderError::InvalidWindow(
+                "window width must be greater than zero".to_owned(),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 fn resolve_window(
     object: &DefaultDicomObject,
     options: &RenderPipelineOptions,
@@ -811,6 +1091,100 @@ fn color_type(samples_per_pixel: u16) -> ColorType {
         ColorType::L8
     } else {
         ColorType::Rgb8
+    }
+}
+
+fn draw_bounding_boxes(frame: &mut RenderedFramePixels, options: &RenderPipelineOptions) {
+    if options.bounding_boxes.is_empty() {
+        return;
+    }
+
+    let width = u32::from(frame.width);
+    let height = u32::from(frame.height);
+    let [cr, cg, cb] = options.bounding_box_color;
+
+    for bbox in &options.bounding_boxes {
+        let x_start = resolve_axis_start(bbox.x, width);
+        let box_width = resolve_axis_length(&bbox.width, width);
+        let x_end = x_start.saturating_add(box_width).min(width);
+        let y_start = resolve_axis_start(bbox.y, height);
+        let box_height = resolve_axis_length(&bbox.height, height);
+        let y_end = y_start.saturating_add(box_height).min(height);
+
+        for y in y_start..y_end {
+            for x in x_start..x_end {
+                let pixel_index = (y * width + x) as usize;
+                match frame.samples_per_pixel {
+                    1 => {
+                        let gray = (0.2126 * f64::from(cr)
+                            + 0.7152 * f64::from(cg)
+                            + 0.0722 * f64::from(cb))
+                        .round()
+                        .clamp(0.0, 255.0) as u8;
+                        frame.bytes[pixel_index] = gray;
+                    }
+                    3 => {
+                        frame.bytes[pixel_index * 3] = cr;
+                        frame.bytes[pixel_index * 3 + 1] = cg;
+                        frame.bytes[pixel_index * 3 + 2] = cb;
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{clamped_box, BoundingBox, BoxLength};
+
+    #[test]
+    fn resolves_negative_offsets_from_right_and_bottom() {
+        let bbox = BoundingBox {
+            x: -20,
+            y: -10,
+            width: BoxLength::Pixels(5),
+            height: BoxLength::Pixels(4),
+        };
+
+        assert_eq!(clamped_box(&bbox, 100, 50), (80, 85, 40, 44));
+    }
+
+    #[test]
+    fn clamps_negative_offsets_beyond_image_edge() {
+        let bbox = BoundingBox {
+            x: -500,
+            y: -500,
+            width: BoxLength::Pixels(10),
+            height: BoxLength::Pixels(10),
+        };
+
+        assert_eq!(clamped_box(&bbox, 64, 32), (0, 10, 0, 10));
+    }
+
+    #[test]
+    fn resolves_percentage_width_and_height() {
+        let bbox = BoundingBox {
+            x: -20,
+            y: -10,
+            width: BoxLength::Percent(25.0),
+            height: BoxLength::Percent(50.0),
+        };
+
+        assert_eq!(clamped_box(&bbox, 200, 100), (180, 200, 90, 100));
+    }
+
+    #[test]
+    fn treats_negative_zero_as_edge_anchor() {
+        let bbox = BoundingBox {
+            x: i32::MIN,
+            y: 0,
+            width: BoxLength::Percent(50.0),
+            height: BoxLength::Percent(50.0),
+        };
+
+        assert_eq!(clamped_box(&bbox, 100, 80), (100, 100, 0, 40));
     }
 }
 

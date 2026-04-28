@@ -11,10 +11,11 @@ use super::{
     detect_jpeg2000_backend_from_search_path, kakadu_ffi_enabled,
     list_transfer_syntax_support, read_dicom_bytes,
     read_dicom_file, read_dicom_json, read_dicom_json_full, read_dicom_json_full_with_source,
-    read_dicom_json_with_source, render_dicom_frame, transcode_dicom_object,
+    read_dicom_json_with_source, redact_dicom_pixels_to_transfer_syntax, render_dicom_frame,
+    transcode_dicom_object,
     write_dicom_bytes, write_dicom_file, write_dicom_json,
     write_dicom_json_full, write_dicom_json_full_with_source,
-    write_dicom_json_with_options, write_dicom_json_with_source, DicomJsonKeyStyle,
+    write_dicom_json_with_options, write_dicom_json_with_source, BoundingBox, BoxLength, DicomJsonKeyStyle,
     DicomJsonWriteOptions, Jpeg2000Backend, RenderOutputFormat, RenderPipelineOptions,
 };
 
@@ -248,6 +249,101 @@ fn reports_jpeg_2000_transfer_syntax_capabilities() {
 }
 
 #[test]
+fn redacts_monochrome_pixels_in_dicom_to_dicom_path() {
+    let original = read_dicom_file(fixture_path("dx.dcm")).unwrap();
+    let original_native = transcode_dicom_object(&original, uids::EXPLICIT_VR_LITTLE_ENDIAN).unwrap();
+    let redacted = redact_dicom_pixels_to_transfer_syntax(
+        &original,
+        uids::EXPLICIT_VR_LITTLE_ENDIAN,
+        &[BoundingBox {
+            x: 0,
+            y: 0,
+            width: BoxLength::Pixels(8),
+            height: BoxLength::Pixels(8),
+        }],
+        [255, 0, 0],
+    )
+    .unwrap();
+
+    assert_eq!(redacted.meta().transfer_syntax(), uids::EXPLICIT_VR_LITTLE_ENDIAN);
+
+    let baseline_inside = mono_sample_value(&original_native, 0, 0).unwrap();
+    let baseline_outside = mono_sample_value(&original_native, 16, 16).unwrap();
+    let redacted_inside = mono_sample_value(&redacted, 0, 0).unwrap();
+    let redacted_outside = mono_sample_value(&redacted, 16, 16).unwrap();
+    let bits_stored = redacted.element(tags::BITS_STORED).unwrap().uint16().unwrap();
+
+    assert_ne!(baseline_inside, redacted_inside);
+    assert_eq!(baseline_outside, redacted_outside);
+    assert_eq!(redacted_inside, scaled_u8_to_bits_stored(54, bits_stored));
+}
+
+#[test]
+fn redacts_rgb_pixels_when_planar_configuration_is_one() {
+    let source = read_dicom_file(fixture_path("sc.dcm")).unwrap();
+    let mut object = transcode_dicom_object(&source, uids::EXPLICIT_VR_LITTLE_ENDIAN).unwrap();
+
+    let samples = object
+        .get(tags::SAMPLES_PER_PIXEL)
+        .and_then(|element| element.uint16().ok())
+        .unwrap_or(1);
+    let bits_allocated = object
+        .get(tags::BITS_ALLOCATED)
+        .and_then(|element| element.uint16().ok())
+        .unwrap_or(0);
+    if samples != 3 || bits_allocated != 8 {
+        return;
+    }
+
+    let rows = object.element(tags::ROWS).unwrap().uint16().unwrap() as usize;
+    let cols = object.element(tags::COLUMNS).unwrap().uint16().unwrap() as usize;
+    let pixel_count = rows * cols;
+
+    let interleaved = object.element(tags::PIXEL_DATA).unwrap().to_bytes().unwrap().into_owned();
+    if interleaved.len() < pixel_count * 3 {
+        return;
+    }
+
+    let mut planar = vec![0u8; pixel_count * 3];
+    for index in 0..pixel_count {
+        planar[index] = interleaved[index * 3];
+        planar[index + pixel_count] = interleaved[index * 3 + 1];
+        planar[index + 2 * pixel_count] = interleaved[index * 3 + 2];
+    }
+
+    object.put(DataElement::new(
+        tags::PLANAR_CONFIGURATION,
+        VR::US,
+        PrimitiveValue::from(1u16),
+    ));
+    object.put(DataElement::new(tags::PIXEL_DATA, VR::OB, PrimitiveValue::from(planar)));
+
+    let redacted = redact_dicom_pixels_to_transfer_syntax(
+        &object,
+        uids::EXPLICIT_VR_LITTLE_ENDIAN,
+        &[BoundingBox {
+            x: 0,
+            y: 0,
+            width: BoxLength::Pixels(1),
+            height: BoxLength::Pixels(1),
+        }],
+        [12, 34, 56],
+    )
+    .unwrap();
+
+    let redacted_planar = redacted
+        .element(tags::PIXEL_DATA)
+        .unwrap()
+        .to_bytes()
+        .unwrap()
+        .into_owned();
+    assert_eq!(redacted.element(tags::PLANAR_CONFIGURATION).unwrap().uint16().unwrap(), 1);
+    assert_eq!(redacted_planar[0], 12);
+    assert_eq!(redacted_planar[pixel_count], 34);
+    assert_eq!(redacted_planar[2 * pixel_count], 56);
+}
+
+#[test]
 fn detects_kakadu_backend_from_search_path() {
     let base = std::env::temp_dir().join(format!(
         "dcmnorm-kakadu-detect-{}",
@@ -333,9 +429,20 @@ fn renders_dx_frame_to_raw_u8() {
         .get(tags::SAMPLES_PER_PIXEL)
         .and_then(|element| element.uint16().ok())
         .unwrap_or(1) as usize;
+    let bits_allocated = object
+        .get(tags::BITS_ALLOCATED)
+        .and_then(|element| element.uint16().ok())
+        .unwrap_or(8) as usize;
+    let samples_per_frame = rows * cols * samples;
+    let expected_len = match bits_allocated {
+        1 => samples_per_frame.div_ceil(8),
+        8 => samples_per_frame,
+        16 => samples_per_frame * 2,
+        other => panic!("unexpected BitsAllocated value in fixture: {other}"),
+    };
 
-    assert_eq!(rendered.bytes.len(), rows * cols * samples);
-    assert_eq!(rendered.bits_allocated, 8);
+    assert_eq!(rendered.bytes.len(), expected_len);
+    assert_eq!(rendered.bits_allocated as usize, bits_allocated);
 }
 
 #[test]
@@ -482,4 +589,53 @@ fn temp_file_path(prefix: &str) -> PathBuf {
         .as_nanos();
 
     std::env::temp_dir().join(format!("{prefix}-{nanos}.dcm"))
+}
+
+fn mono_sample_value(object: &dicom_object::DefaultDicomObject, x: usize, y: usize) -> Option<u16> {
+    let cols = object.element(tags::COLUMNS).ok()?.uint16().ok()? as usize;
+    let rows = object.element(tags::ROWS).ok()?.uint16().ok()? as usize;
+    if x >= cols || y >= rows {
+        return None;
+    }
+
+    let bits_allocated = object.element(tags::BITS_ALLOCATED).ok()?.uint16().ok()?;
+    let bits_stored = object.element(tags::BITS_STORED).ok()?.uint16().ok()?;
+    let bytes = object.element(tags::PIXEL_DATA).ok()?.to_bytes().ok()?.into_owned();
+    let index = y * cols + x;
+
+    match bits_allocated {
+        1 => {
+            let byte = *bytes.get(index / 8)?;
+            let bit = 7 - (index % 8);
+            Some(u16::from((byte >> bit) & 1))
+        }
+        8 => {
+            let raw = u16::from(*bytes.get(index)?);
+            let mask = if bits_stored >= 8 {
+                0xFF
+            } else {
+                (1u16 << bits_stored).saturating_sub(1)
+            };
+            Some(raw & mask.max(1))
+        }
+        16 => {
+            let base = index * 2;
+            let low = *bytes.get(base)?;
+            let high = *bytes.get(base + 1)?;
+            let raw = u16::from_le_bytes([low, high]);
+            let mask = if bits_stored >= 16 {
+                0xFFFF
+            } else {
+                (1u16 << bits_stored).saturating_sub(1)
+            };
+            Some(raw & mask.max(1))
+        }
+        _ => None,
+    }
+}
+
+fn scaled_u8_to_bits_stored(value: u8, bits_stored: u16) -> u16 {
+    let bits = bits_stored.clamp(1, 16);
+    let max_value = (1u32 << u32::from(bits)) - 1;
+    ((u32::from(value) * max_value + 127) / 255) as u16
 }
