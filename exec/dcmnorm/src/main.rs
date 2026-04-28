@@ -129,6 +129,16 @@ struct Cli {
 
     #[arg(
         long,
+        value_name = "KEY",
+        action = ArgAction::Append,
+        help = "Remove a DICOM element. KEY can be a keyword (e.g. PatientName) or tag expression (e.g. (0010,0010)). Repeat this option to remove multiple elements",
+        help_heading = "DICOM Editing",
+        display_order = 22
+    )]
+    remove: Vec<String>,
+
+    #[arg(
+        long,
         value_enum,
         help = "Render DICOM input to this format (raw/png/jpeg/mpeg4). For MPEG4 files, use the .mp4 output extension; if omitted, the format is inferred from the output extension",
         help_heading = "Rendering",
@@ -596,14 +606,6 @@ fn run_dicom_to_dicom(
         })?
     };
 
-    if cli.transfer_syntax.is_none() && cli.set.is_empty() && cli.redact_box.is_empty() {
-        return Err(io::Error::new(
-            ErrorKind::InvalidInput,
-            "DICOM to DICOM output requires --transfer-syntax <UID>, at least one --set KEY=VALUE, and/or at least one --redact-box X,Y,W,H",
-        )
-        .into());
-    }
-
     if cli.redact_color.is_some() && cli.redact_box.is_empty() {
         return Err(io::Error::new(
             ErrorKind::InvalidInput,
@@ -949,6 +951,21 @@ fn apply_attribute_overrides(
         );
     }
 
+    for key in &cli.remove {
+        let tag = parse_tag_key(key)?;
+        let was_present = object.remove_element(tag);
+        verbose_log(
+            cli,
+            format!(
+                "Remove {} ({:04X},{:04X}){}",
+                keyword_for_tag(tag),
+                tag.group(),
+                tag.element(),
+                if was_present { "" } else { " (not present)" },
+            ),
+        );
+    }
+
     Ok(())
 }
 
@@ -1079,6 +1096,25 @@ fn parse_redact_color(s: &str) -> Result<[u8; 3], io::Error> {
     Ok(values)
 }
 
+fn parse_tag_key(key: &str) -> Result<Tag, io::Error> {
+    let key = key.trim();
+    if key.is_empty() {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "--remove KEY cannot be empty",
+        ));
+    }
+
+    StandardDataDictionary.parse_tag(key).ok_or_else(|| {
+        io::Error::new(
+            ErrorKind::InvalidInput,
+            format!(
+                "invalid --remove key '{key}'; use a DICOM keyword like PatientName or a tag expression like (0010,0010)"
+            ),
+        )
+    })
+}
+
 fn parse_attribute_override(assignment: &str) -> Result<(Tag, VR, String), io::Error> {
     let (raw_key, raw_value) = assignment.split_once('=').ok_or_else(|| {
         io::Error::new(
@@ -1151,21 +1187,7 @@ fn infer_direction(cli: &Cli, input: &Path, input_bytes: &[u8]) -> Result<Direct
     match (&cli.output, input_kind) {
         (Some(output), FileKind::Dicom) => match detect_output_kind(output) {
             Some(FileKind::Json) => Ok(Direction::DicomToJson),
-            Some(FileKind::Dicom) => {
-                if cli.transfer_syntax.is_some()
-                    || !cli.set.is_empty()
-                    || !cli.redact_box.is_empty()
-                    || cli.redact_color.is_some()
-                {
-                    Ok(Direction::DicomToDicom)
-                } else {
-                    Err(io::Error::new(
-                        ErrorKind::InvalidInput,
-                        "DICOM input with DICOM output requires --transfer-syntax <UID>, at least one --set KEY=VALUE, and/or at least one --redact-box X,Y,W,H",
-                    )
-                    .into())
-                }
-            }
+            Some(FileKind::Dicom) => Ok(Direction::DicomToDicom),
             Some(FileKind::Render) => Ok(Direction::DicomToRender),
             None => Err(io::Error::new(
                 ErrorKind::InvalidInput,
@@ -1193,19 +1215,7 @@ fn infer_direction(cli: &Cli, input: &Path, input_bytes: &[u8]) -> Result<Direct
         },
         (None, FileKind::Dicom) => {
             if cli.overwrite {
-                if cli.transfer_syntax.is_some()
-                    || !cli.set.is_empty()
-                    || !cli.redact_box.is_empty()
-                    || cli.redact_color.is_some()
-                {
-                    Ok(Direction::DicomToDicom)
-                } else {
-                    Err(io::Error::new(
-                        ErrorKind::InvalidInput,
-                        "--overwrite requires --transfer-syntax <UID>, at least one --set KEY=VALUE, and/or at least one --redact-box X,Y,W,H",
-                    )
-                    .into())
-                }
+                Ok(Direction::DicomToDicom)
             } else {
                 Ok(Direction::DicomToJson)
             }
