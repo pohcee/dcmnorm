@@ -60,8 +60,7 @@ pub struct TransferSyntaxSupport {
 
 impl TransferSyntaxSupport {
     pub fn can_transcode_to(&self) -> bool {
-        self.can_write_dataset
-            && (!self.encapsulated_pixel_data || self.can_encode_pixel_data)
+        self.can_write_dataset && (!self.encapsulated_pixel_data || self.can_encode_pixel_data)
     }
 }
 
@@ -196,8 +195,14 @@ pub enum RenderError {
     UnsupportedSamplesPerPixel(u16),
     UnsupportedPlanarConfiguration(u16),
     UnsupportedPhotometricInterpretation(String),
-    InvalidFrameIndex { requested: usize, number_of_frames: usize },
-    InvalidPixelDataLength { expected: usize, actual: usize },
+    InvalidFrameIndex {
+        requested: usize,
+        number_of_frames: usize,
+    },
+    InvalidPixelDataLength {
+        expected: usize,
+        actual: usize,
+    },
     InvalidWindow(String),
     Transcode(TranscodeError),
     ImageEncoding(image::ImageError),
@@ -364,7 +369,10 @@ impl fmt::Display for DicomJsonError {
                 write!(formatter, "invalid JSON value for {keyword}: {message}")
             }
             Self::InvalidStandardElement { tag, message } => {
-                write!(formatter, "invalid standard JSON element for {tag}: {message}")
+                write!(
+                    formatter,
+                    "invalid standard JSON element for {tag}: {message}"
+                )
             }
             Self::InvalidBulkDataUri(uri) => write!(formatter, "invalid BulkDataURI: {uri}"),
             Self::MissingBulkDataSource(uri) => {
@@ -385,7 +393,10 @@ impl fmt::Display for DicomJsonError {
                 "invalid bulk data length {length} for tag {tag} with VR {vr:?}"
             ),
             Self::UnsupportedTransferSyntax(uid) => {
-                write!(formatter, "unsupported transfer syntax for bulk data conversion: {uid}")
+                write!(
+                    formatter,
+                    "unsupported transfer syntax for bulk data conversion: {uid}"
+                )
             }
         }
     }

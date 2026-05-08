@@ -144,8 +144,8 @@ pub fn write_dataset_as_dicom_json_with_options(
     transfer_syntax_uid: &str,
     mut options: DicomJsonWriteOptions<'_>,
 ) -> Result<String, DicomJsonError> {
-    let file_object = dataset
-        .with_meta(FileMetaTableBuilder::new().transfer_syntax(transfer_syntax_uid))?;
+    let file_object =
+        dataset.with_meta(FileMetaTableBuilder::new().transfer_syntax(transfer_syntax_uid))?;
 
     if options.bulk_data_mode == DicomJsonBulkDataMode::Uri && options.bulk_data_source.is_none() {
         options.bulk_data_mode = DicomJsonBulkDataMode::InlineBinary;

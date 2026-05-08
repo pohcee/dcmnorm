@@ -1,12 +1,10 @@
 #[cfg(feature = "jpeg-ls-codec")]
 pub mod jpeg_ls_impl {
-    use dicom_object::DefaultDicomObject;
     use dicom_dictionary_std::tags;
+    use dicom_object::DefaultDicomObject;
 
     /// Decode JPEG-LS encoded pixel data
-    pub fn decode_jpeg_ls_pixel_data(
-        object: &DefaultDicomObject,
-    ) -> Result<Vec<u8>, String> {
+    pub fn decode_jpeg_ls_pixel_data(object: &DefaultDicomObject) -> Result<Vec<u8>, String> {
         // Extract JPEG-LS encoded data from pixel data fragments
         let fragments = object
             .element(tags::PIXEL_DATA)
@@ -36,7 +34,10 @@ pub mod jpeg_ls_impl {
 
         // JPEG-LS decoding using charls crate
         // The charls crate provides FFI bindings for CharLS library
-        Err("JPEG-LS decoding infrastructure initialized - charls FFI bindings available".to_owned())
+        Err(
+            "JPEG-LS decoding infrastructure initialized - charls FFI bindings available"
+                .to_owned(),
+        )
     }
 
     /// Encode raw pixel data to JPEG-LS format
@@ -45,7 +46,7 @@ pub mod jpeg_ls_impl {
         _lossless: bool,
     ) -> Result<Vec<Vec<u8>>, String> {
         // Get pixel data
-            let _pixel_data = object
+        let _pixel_data = object
             .element(tags::PIXEL_DATA)
             .map_err(|e| format!("missing PixelData: {e}"))?
             .to_bytes()
@@ -64,7 +65,10 @@ pub mod jpeg_ls_impl {
 
         // JPEG-LS encoding using charls crate
         // The charls crate provides FFI bindings for CharLS library
-        Err("JPEG-LS encoding infrastructure initialized - charls FFI bindings available".to_owned())
+        Err(
+            "JPEG-LS encoding infrastructure initialized - charls FFI bindings available"
+                .to_owned(),
+        )
     }
 }
 
@@ -72,9 +76,7 @@ pub mod jpeg_ls_impl {
 pub mod jpeg_ls_impl {
     use dicom_object::DefaultDicomObject;
 
-    pub fn decode_jpeg_ls_pixel_data(
-        _object: &DefaultDicomObject,
-    ) -> Result<Vec<u8>, String> {
+    pub fn decode_jpeg_ls_pixel_data(_object: &DefaultDicomObject) -> Result<Vec<u8>, String> {
         Err("JPEG-LS codec support requires 'jpeg-ls-codec' feature to be enabled".to_owned())
     }
 

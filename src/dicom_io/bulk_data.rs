@@ -110,8 +110,8 @@ pub(super) fn resolve_flat_bulk_bytes(
     }
 
     if let Some(JsonValue::String(uri)) = object.get("BulkDataURI") {
-        let source = bulk_data_source
-            .ok_or_else(|| DicomJsonError::MissingBulkDataSource(uri.clone()))?;
+        let source =
+            bulk_data_source.ok_or_else(|| DicomJsonError::MissingBulkDataSource(uri.clone()))?;
         return Ok(Some(resolve_bulk_data_uri(uri, source)?));
     }
 
@@ -135,8 +135,8 @@ pub(super) fn resolve_standard_bulk_bytes(
     }
 
     if let Some(JsonValue::String(uri)) = object.get("BulkDataURI") {
-        let source = bulk_data_source
-            .ok_or_else(|| DicomJsonError::MissingBulkDataSource(uri.clone()))?;
+        let source =
+            bulk_data_source.ok_or_else(|| DicomJsonError::MissingBulkDataSource(uri.clone()))?;
         return Ok(Some(resolve_bulk_data_uri(uri, source)?));
     }
 
@@ -177,26 +177,23 @@ pub(super) fn is_bulk_value<I, P>(tag: Tag, vr: VR, value: &DicomValue<I, P>) ->
         || (primitive_is_bulk(vr) && tag != tags::WAVEFORM_DATA)
 }
 
-pub(super) fn needs_custom_standard_bulk<I, P>(
-    tag: Tag,
-    vr: VR,
-    value: &DicomValue<I, P>,
-) -> bool {
-    matches!(value, DicomValue::PixelSequence(_)) || (primitive_is_bulk(vr) && tag == tags::PIXEL_DATA)
+pub(super) fn needs_custom_standard_bulk<I, P>(tag: Tag, vr: VR, value: &DicomValue<I, P>) -> bool {
+    matches!(value, DicomValue::PixelSequence(_))
+        || (primitive_is_bulk(vr) && tag == tags::PIXEL_DATA)
 }
 
 pub(super) fn primitive_is_bulk(vr: VR) -> bool {
-    matches!(vr, VR::OB | VR::OD | VR::OF | VR::OL | VR::OV | VR::OW | VR::UN)
+    matches!(
+        vr,
+        VR::OB | VR::OD | VR::OF | VR::OL | VR::OV | VR::OW | VR::UN
+    )
 }
 
 pub(super) fn is_bulk_vr(vr: VR) -> bool {
     primitive_is_bulk(vr)
 }
 
-pub(super) fn resolve_bulk_data_uri(
-    uri: &str,
-    source: &[u8],
-) -> Result<Vec<u8>, DicomJsonError> {
+pub(super) fn resolve_bulk_data_uri(uri: &str, source: &[u8]) -> Result<Vec<u8>, DicomJsonError> {
     let (offset, length) = parse_bulk_data_uri(uri)?;
     let end = offset.saturating_add(length);
     if end > source.len() {
@@ -270,14 +267,21 @@ fn locate_root_element_value(
         }
 
         if header.tag == tags::TRANSFER_SYNTAX_UID {
-            transfer_syntax_uid = decode_dicom_text(&source[value_offset..value_offset + value_length]);
+            transfer_syntax_uid =
+                decode_dicom_text(&source[value_offset..value_offset + value_length]);
         }
 
         position = value_offset + value_length;
     }
 
     let syntax = transfer_syntax_from_uid(transfer_syntax_uid.as_str())?;
-    locate_tag_in_dataset(source, position, target, syntax.explicit_vr, syntax.little_endian)
+    locate_tag_in_dataset(
+        source,
+        position,
+        target,
+        syntax.explicit_vr,
+        syntax.little_endian,
+    )
 }
 
 fn locate_tag_in_dataset(

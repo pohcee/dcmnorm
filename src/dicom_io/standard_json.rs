@@ -9,8 +9,12 @@ use super::bulk_data::{
     bulk_representation, is_bulk_value, needs_custom_standard_bulk, raw_bytes_to_dicom_value,
     resolve_standard_bulk_bytes,
 };
-use super::common::{apply_meta_element, extract_transfer_syntax_from_standard, keyword_for_tag, tag_key};
-use super::types::{BulkRepresentation, DicomJsonBulkDataMode, DicomJsonError, DicomJsonWriteOptions};
+use super::common::{
+    apply_meta_element, extract_transfer_syntax_from_standard, keyword_for_tag, tag_key,
+};
+use super::types::{
+    BulkRepresentation, DicomJsonBulkDataMode, DicomJsonError, DicomJsonWriteOptions,
+};
 
 pub(super) fn write_standard_json_value(
     object: &DefaultDicomObject,
@@ -23,21 +27,22 @@ pub(super) fn write_standard_json_value(
             continue;
         }
 
-        let value = if needs_custom_standard_bulk(element.header().tag, element.vr(), element.value()) {
-            custom_standard_element_json(
-                element.header().tag,
-                element.vr(),
-                element.value(),
-                options,
-            )?
-        } else {
-            let DicomValue::Primitive(primitive) = element.value() else {
-                unreachable!();
+        let value =
+            if needs_custom_standard_bulk(element.header().tag, element.vr(), element.value()) {
+                custom_standard_element_json(
+                    element.header().tag,
+                    element.vr(),
+                    element.value(),
+                    options,
+                )?
+            } else {
+                let DicomValue::Primitive(primitive) = element.value() else {
+                    unreachable!();
+                };
+                let meta_element: InMemElement =
+                    InMemElement::new(element.header().tag, element.vr(), primitive.clone());
+                dicom_json::to_value(meta_element)?
             };
-            let meta_element: InMemElement =
-                InMemElement::new(element.header().tag, element.vr(), primitive.clone());
-            dicom_json::to_value(meta_element)?
-        };
 
         json.insert(
             tag_key(element.header().tag),
@@ -50,20 +55,21 @@ pub(super) fn write_standard_json_value(
     }
 
     for element in object.iter() {
-        let value = if needs_custom_standard_bulk(element.header().tag, element.vr(), element.value())
-            || (options.bulk_data_mode == DicomJsonBulkDataMode::Uri
-                && options.bulk_data_source.is_some()
-                && is_bulk_value(element.header().tag, element.vr(), element.value()))
-        {
-            custom_standard_element_json(
-                element.header().tag,
-                element.vr(),
-                element.value(),
-                options,
-            )?
-        } else {
-            dicom_json::to_value(element.clone())?
-        };
+        let value =
+            if needs_custom_standard_bulk(element.header().tag, element.vr(), element.value())
+                || (options.bulk_data_mode == DicomJsonBulkDataMode::Uri
+                    && options.bulk_data_source.is_some()
+                    && is_bulk_value(element.header().tag, element.vr(), element.value()))
+            {
+                custom_standard_element_json(
+                    element.header().tag,
+                    element.vr(),
+                    element.value(),
+                    options,
+                )?
+            } else {
+                dicom_json::to_value(element.clone())?
+            };
 
         json.insert(
             tag_key(element.header().tag),
@@ -138,8 +144,14 @@ fn decorate_standard_element_json(
         });
     };
 
-    object.insert("Keyword".to_owned(), JsonValue::String(keyword_for_tag(tag)));
-    object.insert("VM".to_owned(), JsonValue::Number(JsonNumber::from(multiplicity)));
+    object.insert(
+        "Keyword".to_owned(),
+        JsonValue::String(keyword_for_tag(tag)),
+    );
+    object.insert(
+        "VM".to_owned(),
+        JsonValue::Number(JsonNumber::from(multiplicity)),
+    );
     Ok(JsonValue::Object(object))
 }
 
@@ -153,7 +165,10 @@ where
     P: AsRef<[u8]>,
 {
     let mut object = JsonMap::new();
-    object.insert("vr".to_owned(), JsonValue::String(vr.to_string().to_owned()));
+    object.insert(
+        "vr".to_owned(),
+        JsonValue::String(vr.to_string().to_owned()),
+    );
 
     match bulk_representation(tag, vr, value, options)? {
         BulkRepresentation::Uri(uri) => {
@@ -201,10 +216,11 @@ fn standard_element_vr(tag_text: &str, element_json: &JsonValue) -> Result<VR, D
         });
     };
 
-    vr.parse().map_err(|_| DicomJsonError::InvalidStandardElement {
-        tag: tag_text.to_owned(),
-        message: format!("invalid VR {vr}"),
-    })
+    vr.parse()
+        .map_err(|_| DicomJsonError::InvalidStandardElement {
+            tag: tag_text.to_owned(),
+            message: format!("invalid VR {vr}"),
+        })
 }
 
 fn standard_json_to_dicom_value(

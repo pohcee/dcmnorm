@@ -149,7 +149,12 @@ fn find_lib_dir() -> PathBuf {
     }
 
     for root in candidate_roots() {
-        for dir in [root.clone(), root.join("lib"), root.join("lib64"), root.join("bin")] {
+        for dir in [
+            root.clone(),
+            root.join("lib"),
+            root.join("lib64"),
+            root.join("bin"),
+        ] {
             if find_matching_lib(&dir).is_some() {
                 return dir;
             }
@@ -183,7 +188,10 @@ fn find_lib_name(lib_dir: &Path) -> String {
     }
 
     let path = find_matching_lib(lib_dir).expect("library should exist in located Kakadu lib dir");
-    let file_name = path.file_name().and_then(|name| name.to_str()).expect("valid library file name");
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .expect("valid library file name");
     file_name
         .trim_start_matches("lib")
         .trim_end_matches(".so")

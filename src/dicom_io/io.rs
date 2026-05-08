@@ -1,5 +1,5 @@
-use std::io::Cursor;
 use std::ffi::OsStr;
+use std::io::Cursor;
 use std::path::Path;
 use std::process::Command;
 
@@ -15,12 +15,10 @@ use dicom_object::{
 };
 use dicom_transfer_syntax_registry::TransferSyntaxRegistry;
 
-use super::kakadu;
 use super::jpeg_ls;
+use super::kakadu;
 use super::mpeg;
-use super::types::{
-    DicomIoError, ReadError, TransferSyntaxSupport, TranscodeError, WriteError,
-};
+use super::types::{DicomIoError, ReadError, TranscodeError, TransferSyntaxSupport, WriteError};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Jpeg2000Backend {
@@ -53,7 +51,9 @@ pub fn detect_jpeg2000_backend_from_search_path(search_path: &str) -> Jpeg2000Ba
     detect_jpeg2000_backend_from_ld_library_path(Some(OsStr::new(search_path)))
 }
 
-fn detect_jpeg2000_backend_from_ld_library_path(ld_library_path: Option<&OsStr>) -> Jpeg2000Backend {
+fn detect_jpeg2000_backend_from_ld_library_path(
+    ld_library_path: Option<&OsStr>,
+) -> Jpeg2000Backend {
     if !kakadu_ffi_enabled() {
         return Jpeg2000Backend::OpenJpeg;
     }
@@ -119,10 +119,7 @@ fn is_jpeg_ls_transfer_syntax(uid: &str) -> bool {
 }
 
 fn ffmpeg_available() -> bool {
-    if let Ok(output) = Command::new("ffmpeg")
-        .arg("-version")
-        .output()
-    {
+    if let Ok(output) = Command::new("ffmpeg").arg("-version").output() {
         output.status.success()
     } else {
         false
@@ -163,8 +160,8 @@ pub fn write_dataset_as_dicom_file<P>(
 where
     P: AsRef<Path>,
 {
-    let file_object = dataset
-        .with_meta(FileMetaTableBuilder::new().transfer_syntax(transfer_syntax_uid))?;
+    let file_object =
+        dataset.with_meta(FileMetaTableBuilder::new().transfer_syntax(transfer_syntax_uid))?;
 
     file_object.write_to_file(path)?;
     Ok(())
@@ -174,8 +171,8 @@ pub fn write_dataset_as_dicom_bytes(
     dataset: InMemDicomObject,
     transfer_syntax_uid: &str,
 ) -> Result<Vec<u8>, DicomIoError> {
-    let file_object = dataset
-        .with_meta(FileMetaTableBuilder::new().transfer_syntax(transfer_syntax_uid))?;
+    let file_object =
+        dataset.with_meta(FileMetaTableBuilder::new().transfer_syntax(transfer_syntax_uid))?;
 
     let mut bytes = Vec::new();
     file_object.write_all(&mut bytes)?;
@@ -310,7 +307,10 @@ fn kakadu_ffi_available_from_backend(backend: &Jpeg2000Backend) -> bool {
     matches!(backend, Jpeg2000Backend::Kakadu { .. }) && kakadu_ffi_enabled()
 }
 
-fn decode_jpeg2000_with_kakadu(object: &DefaultDicomObject, _library_path: &str) -> Result<Vec<u8>, String> {
+fn decode_jpeg2000_with_kakadu(
+    object: &DefaultDicomObject,
+    _library_path: &str,
+) -> Result<Vec<u8>, String> {
     let rows = object
         .get(tags::ROWS)
         .and_then(|element| element.uint16().ok())
@@ -326,7 +326,11 @@ fn decode_jpeg2000_with_kakadu(object: &DefaultDicomObject, _library_path: &str)
     let bits_stored = object
         .get(tags::BITS_STORED)
         .and_then(|element| element.uint16().ok())
-        .or_else(|| object.get(tags::BITS_ALLOCATED).and_then(|element| element.uint16().ok()))
+        .or_else(|| {
+            object
+                .get(tags::BITS_ALLOCATED)
+                .and_then(|element| element.uint16().ok())
+        })
         .ok_or_else(|| "missing BitsStored/BitsAllocated attribute".to_owned())?;
     let is_signed = object
         .get(tags::PIXEL_REPRESENTATION)
@@ -353,12 +357,17 @@ fn decode_jpeg2000_with_kakadu(object: &DefaultDicomObject, _library_path: &str)
         codestream.extend_from_slice(fragment);
     }
 
-    kakadu::decode_jpeg2000(&codestream, rows, cols, samples_per_pixel, bits_stored, is_signed)
+    kakadu::decode_jpeg2000(
+        &codestream,
+        rows,
+        cols,
+        samples_per_pixel,
+        bits_stored,
+        is_signed,
+    )
 }
 
-fn is_encapsulated_transfer_syntax<D, R, W>(
-    ts: &dicom_encoding::TransferSyntax<D, R, W>,
-) -> bool {
+fn is_encapsulated_transfer_syntax<D, R, W>(ts: &dicom_encoding::TransferSyntax<D, R, W>) -> bool {
     matches!(ts.codec(), Codec::EncapsulatedPixelData(_, _))
 }
 
@@ -547,7 +556,12 @@ fn encode_pixel_data(
     let mut fragments = Vec::new();
     let mut offset_table = Vec::new();
     let operations = writer
-        .encode(object, EncodeOptions::default(), &mut fragments, &mut offset_table)
+        .encode(
+            object,
+            EncodeOptions::default(),
+            &mut fragments,
+            &mut offset_table,
+        )
         .map_err(|error| TranscodeError::EncodePixelData {
             uid: target_ts.uid().to_owned(),
             name: target_ts.name().to_owned(),
@@ -676,7 +690,12 @@ fn normalize_decoded_pixel_data_attributes(object: &mut DefaultDicomObject) {
         .get(tags::PHOTOMETRIC_INTERPRETATION)
         .and_then(|element| element.to_str().ok())
         .map(|value| value.trim().to_owned())
-        .filter(|value| matches!(value.as_str(), "MONOCHROME1" | "MONOCHROME2" | "PALETTE COLOR"))
+        .filter(|value| {
+            matches!(
+                value.as_str(),
+                "MONOCHROME1" | "MONOCHROME2" | "PALETTE COLOR"
+            )
+        })
         .unwrap_or_else(|| "MONOCHROME2".to_owned());
 
     object.put(DataElement::new(

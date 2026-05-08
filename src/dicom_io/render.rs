@@ -60,10 +60,14 @@ pub struct RenderPipelineOptions {
     pub scale_max_size: Option<u32>,
     /// Filled rectangles to draw over the output image for redaction.
     ///
-    /// Coordinates are applied after any resizing, so they reference output-image pixels.
+    /// Coordinates are applied after any resizing, but before padding, referencing source image pixels.
     pub bounding_boxes: Vec<BoundingBox>,
     /// Fill color for bounding boxes as `[R, G, B]`, values 0-255. Defaults to `[0, 0, 0]` (black).
     pub bounding_box_color: [u8; 3],
+    /// Pad the image to a square canvas when `scale_max_size` is set.
+    pub pad: bool,
+    /// Pad color for the square canvas as `[R, G, B]`. Defaults to `[0, 0, 0]` (black).
+    pub pad_color: [u8; 3],
 }
 
 impl Default for RenderPipelineOptions {
@@ -80,6 +84,8 @@ impl Default for RenderPipelineOptions {
             scale_max_size: None,
             bounding_boxes: Vec::new(),
             bounding_box_color: [0, 0, 0],
+            pad: false,
+            pad_color: [0, 0, 0],
         }
     }
 }
@@ -155,6 +161,7 @@ pub fn render_dicom_frames(
     let frame = render_single_frame(&working, &metadata, options)?;
     let mut frame = maybe_resize_frame(frame, options);
     draw_bounding_boxes(&mut frame, options);
+    let frame = maybe_pad_frame(frame, options);
     let encoded = encode_rendered_frame(&frame, output_format, options.jpeg_quality)?;
     Ok(vec![encoded])
 }
@@ -190,7 +197,8 @@ pub fn render_all_dicom_frames(
         .map(|frame| {
             let mut resized = maybe_resize_frame(frame.clone(), options);
             draw_bounding_boxes(&mut resized, options);
-            encode_rendered_frame(&resized, output_format, options.jpeg_quality)
+            let final_frame = maybe_pad_frame(resized, options);
+            encode_rendered_frame(&final_frame, output_format, options.jpeg_quality)
         })
         .collect()
 }
@@ -209,7 +217,11 @@ pub fn render_dicom_to_recompressed_object(
         rendered_pixel_data.extend_from_slice(&frame.bytes);
     }
 
-    let output_samples_per_pixel = if metadata.samples_per_pixel == 1 { 1u16 } else { 3u16 };
+    let output_samples_per_pixel = if metadata.samples_per_pixel == 1 {
+        1u16
+    } else {
+        3u16
+    };
     let output_photometric = if output_samples_per_pixel == 1 {
         "MONOCHROME2"
     } else {
@@ -275,12 +287,17 @@ pub fn redact_dicom_pixels_to_transfer_syntax(
     let mut working = transcode_dicom_object(object, uids::EXPLICIT_VR_LITTLE_ENDIAN)?;
     let metadata = read_render_metadata(&working)?;
 
-    if metadata.bits_allocated != 1 && metadata.bits_allocated != 8 && metadata.bits_allocated != 16 {
-        return Err(RenderError::UnsupportedBitsAllocated(metadata.bits_allocated));
+    if metadata.bits_allocated != 1 && metadata.bits_allocated != 8 && metadata.bits_allocated != 16
+    {
+        return Err(RenderError::UnsupportedBitsAllocated(
+            metadata.bits_allocated,
+        ));
     }
 
     if metadata.samples_per_pixel != 1 && metadata.samples_per_pixel != 3 {
-        return Err(RenderError::UnsupportedSamplesPerPixel(metadata.samples_per_pixel));
+        return Err(RenderError::UnsupportedSamplesPerPixel(
+            metadata.samples_per_pixel,
+        ));
     }
 
     if metadata.samples_per_pixel == 3 && metadata.planar_configuration > 1 {
@@ -297,7 +314,11 @@ pub fn redact_dicom_pixels_to_transfer_syntax(
         redacted_pixel_data.extend_from_slice(&frame_bytes);
     }
 
-    let pixel_vr = if metadata.bits_allocated > 8 { VR::OW } else { VR::OB };
+    let pixel_vr = if metadata.bits_allocated > 8 {
+        VR::OW
+    } else {
+        VR::OB
+    };
     working.put(DataElement::new(
         tags::PIXEL_DATA,
         pixel_vr,
@@ -698,13 +719,19 @@ fn render_rgb_frame(
                 .collect()
         } else {
             let plane_len = pixel_count;
-            let mut planes = [vec![0u8; plane_len], vec![0u8; plane_len], vec![0u8; plane_len]];
+            let mut planes = [
+                vec![0u8; plane_len],
+                vec![0u8; plane_len],
+                vec![0u8; plane_len],
+            ];
             for (channel, plane) in planes.iter_mut().enumerate() {
                 for index in 0..plane_len {
                     let sample_index = channel * plane_len + index;
                     let byte_index = sample_index * 2;
-                    let sample = u16::from_le_bytes([frame_bytes[byte_index], frame_bytes[byte_index + 1]]);
-                    plane[index] = ((f64::from(sample) / max_value) * 255.0).clamp(0.0, 255.0) as u8;
+                    let sample =
+                        u16::from_le_bytes([frame_bytes[byte_index], frame_bytes[byte_index + 1]]);
+                    plane[index] =
+                        ((f64::from(sample) / max_value) * 255.0).clamp(0.0, 255.0) as u8;
                 }
             }
 
@@ -717,7 +744,9 @@ fn render_rgb_frame(
             interleaved
         }
     } else {
-        return Err(RenderError::UnsupportedBitsAllocated(metadata.bits_allocated));
+        return Err(RenderError::UnsupportedBitsAllocated(
+            metadata.bits_allocated,
+        ));
     };
 
     Ok(RenderedFramePixels {
@@ -858,7 +887,11 @@ fn decode_grayscale_values(
             let mut values = Vec::with_capacity(pixel_count);
             for byte in &frame_bytes[..pixel_count] {
                 let raw = u16::from(*byte) & mask;
-                values.push(sign_or_unsigned(raw, metadata.bits_stored, metadata.pixel_representation));
+                values.push(sign_or_unsigned(
+                    raw,
+                    metadata.bits_stored,
+                    metadata.pixel_representation,
+                ));
             }
             Ok(values)
         }
@@ -880,7 +913,11 @@ fn decode_grayscale_values(
             let mut values = Vec::with_capacity(pixel_count);
             for chunk in frame_bytes[..expected].chunks_exact(2) {
                 let raw = u16::from_le_bytes([chunk[0], chunk[1]]) & mask;
-                values.push(sign_or_unsigned(raw, metadata.bits_stored, metadata.pixel_representation));
+                values.push(sign_or_unsigned(
+                    raw,
+                    metadata.bits_stored,
+                    metadata.pixel_representation,
+                ));
             }
             Ok(values)
         }
@@ -1116,11 +1153,7 @@ fn draw_bounding_boxes(frame: &mut RenderedFramePixels, options: &RenderPipeline
                 let pixel_index = (y * width + x) as usize;
                 match frame.samples_per_pixel {
                     1 => {
-                        let gray = (0.2126 * f64::from(cr)
-                            + 0.7152 * f64::from(cg)
-                            + 0.0722 * f64::from(cb))
-                        .round()
-                        .clamp(0.0, 255.0) as u8;
+                        let gray = rgb_to_luma([cr, cg, cb]);
                         frame.bytes[pixel_index] = gray;
                     }
                     3 => {
@@ -1186,10 +1219,54 @@ mod tests {
 
         assert_eq!(clamped_box(&bbox, 100, 80), (100, 100, 0, 40));
     }
+
+    #[test]
+    fn maybe_pad_frame_pads_to_square() {
+        use super::{maybe_pad_frame, RenderPipelineOptions, RenderedFramePixels};
+
+        let input = RenderedFramePixels {
+            width: 2,
+            height: 1,
+            samples_per_pixel: 1,
+            bytes: vec![255, 255], // white
+        };
+        let options = RenderPipelineOptions {
+            scale_max_size: Some(4),
+            pad: true,
+            pad_color: [100, 100, 100],
+            ..RenderPipelineOptions::default()
+        };
+
+        let result = maybe_pad_frame(input, &options);
+        assert_eq!(result.width, 4);
+        assert_eq!(result.height, 4);
+        assert_eq!(result.samples_per_pixel, 1);
+
+        // Dimensions 4x4=16 bytes.
+        assert_eq!(result.bytes.len(), 16);
+
+        // X offset = (4 - 2) / 2 = 1. Y offset = (4 - 1) / 2 = 1.
+        // Source image goes into Row 1 (0-indexed), Columns 1 and 2.
+        // The rest should be the padding color (gray).
+        // Note: Luma math (0.2126*100 + 0.7152*100 + 0.0722*100) = 100.
+
+        // Row 0 (padded)
+        assert_eq!(result.bytes[0], 100);
+        // Row 1, pixel 0 (padded), pixel 1 & 2 (original data), pixel 3 (padded)
+        assert_eq!(result.bytes[4], 100);
+        assert_eq!(result.bytes[5], 255);
+        assert_eq!(result.bytes[6], 255);
+        assert_eq!(result.bytes[7], 100);
+    }
 }
 
-fn maybe_resize_frame(frame: RenderedFramePixels, options: &RenderPipelineOptions) -> RenderedFramePixels {
-    let Some((new_width, new_height)) = compute_output_dimensions(frame.width, frame.height, options) else {
+fn maybe_resize_frame(
+    frame: RenderedFramePixels,
+    options: &RenderPipelineOptions,
+) -> RenderedFramePixels {
+    let Some((new_width, new_height)) =
+        compute_output_dimensions(frame.width, frame.height, options)
+    else {
         return frame;
     };
 
@@ -1216,6 +1293,64 @@ fn maybe_resize_frame(frame: RenderedFramePixels, options: &RenderPipelineOption
     }
 }
 
+fn maybe_pad_frame(
+    frame: RenderedFramePixels,
+    options: &RenderPipelineOptions,
+) -> RenderedFramePixels {
+    let Some(max_dim) = options.scale_max_size else {
+        return frame;
+    };
+
+    if !options.pad {
+        return frame;
+    }
+
+    let current_w = u32::from(frame.width);
+    let current_h = u32::from(frame.height);
+
+    // If we're somehow larger than the square max_dim target, clamping/skipping logic
+    // but normally the max_dim IS current_w.max(current_h).
+    let target_size = max_dim.max(current_w).max(current_h);
+
+    if target_size == current_w && target_size == current_h {
+        return frame; // already square and correctly sized
+    }
+
+    let x_offset = (target_size - current_w) / 2;
+    let y_offset = (target_size - current_h) / 2;
+
+    use image::{GenericImage, GrayImage, Luma, Rgb, RgbImage};
+
+    let padded_bytes = if frame.samples_per_pixel == 1 {
+        let luma = rgb_to_luma(options.pad_color);
+        let mut base = GrayImage::from_pixel(target_size, target_size, Luma([luma]));
+        let img = GrayImage::from_raw(current_w, current_h, frame.bytes)
+            .expect("grayscale frame buffer size mismatch");
+        base.copy_from(&img, x_offset, y_offset)
+            .expect("failed to overlay grayscale image during padding");
+        base.into_raw()
+    } else if frame.samples_per_pixel == 3 {
+        let [r, g, b] = options.pad_color;
+        let mut base = RgbImage::from_pixel(target_size, target_size, Rgb([r, g, b]));
+        let img = RgbImage::from_raw(current_w, current_h, frame.bytes)
+            .expect("RGB frame buffer size mismatch");
+        base.copy_from(&img, x_offset, y_offset)
+            .expect("failed to overlay RGB image during padding");
+        base.into_raw()
+    } else {
+        // Handle other formats (e.g. unknown channels) by bypassing padding
+        // or panicking explicitly to protect memory consistency.
+        return frame;
+    };
+
+    RenderedFramePixels {
+        width: target_size as u16,
+        height: target_size as u16,
+        samples_per_pixel: frame.samples_per_pixel,
+        bytes: padded_bytes,
+    }
+}
+
 fn compute_output_dimensions(
     original_width: u16,
     original_height: u16,
@@ -1223,7 +1358,11 @@ fn compute_output_dimensions(
 ) -> Option<(u32, u32)> {
     let ow = u32::from(original_width);
     let oh = u32::from(original_height);
-    match (options.output_width, options.output_height, options.scale_max_size) {
+    match (
+        options.output_width,
+        options.output_height,
+        options.scale_max_size,
+    ) {
         (Some(w), Some(h), None) => Some((w, h)),
         (Some(w), None, None) => Some((w, scale_by_ratio(oh, ow, w))),
         (None, Some(h), None) => Some((scale_by_ratio(ow, oh, h), h)),

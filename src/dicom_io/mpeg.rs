@@ -1,12 +1,10 @@
 #[cfg(feature = "ffmpeg-codec")]
 pub mod mpeg_impl {
-    use dicom_object::DefaultDicomObject;
     use dicom_dictionary_std::tags;
+    use dicom_object::DefaultDicomObject;
 
     /// Decode MPEG-encoded pixel data using FFmpeg
-    pub fn decode_mpeg_pixel_data(
-        object: &DefaultDicomObject,
-    ) -> Result<Vec<u8>, String> {
+    pub fn decode_mpeg_pixel_data(object: &DefaultDicomObject) -> Result<Vec<u8>, String> {
         // Extract MPEG-encoded data from pixel data fragments
         let fragments = object
             .element(tags::PIXEL_DATA)
@@ -86,9 +84,7 @@ pub mod mpeg_impl {
 pub mod mpeg_impl {
     use dicom_object::DefaultDicomObject;
 
-    pub fn decode_mpeg_pixel_data(
-        _object: &DefaultDicomObject,
-    ) -> Result<Vec<u8>, String> {
+    pub fn decode_mpeg_pixel_data(_object: &DefaultDicomObject) -> Result<Vec<u8>, String> {
         Err("MPEG codec support requires 'ffmpeg-codec' feature to be enabled".to_owned())
     }
 

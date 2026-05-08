@@ -6,7 +6,9 @@ use dicom_dictionary_std::{tags, StandardDataDictionary};
 use dicom_object::{DefaultDicomObject, InMemDicomObject};
 use serde_json::{Map as JsonMap, Number as JsonNumber, Value as JsonValue};
 
-use super::bulk_data::{bulk_json_value, primitive_is_bulk, resolve_flat_bulk_bytes, raw_bytes_to_dicom_value};
+use super::bulk_data::{
+    bulk_json_value, primitive_is_bulk, raw_bytes_to_dicom_value, resolve_flat_bulk_bytes,
+};
 use super::common::{
     apply_meta_element, extract_transfer_syntax_from_flat, flat_key_for_tag, invalid_json_value,
     json_number_from_f32, json_number_from_f64, json_value_to_numbers, json_value_to_text,
@@ -146,14 +148,19 @@ where
                 .collect(),
         )),
         DicomValue::PixelSequence(_) => bulk_json_value(tag, vr, value, options),
-        DicomValue::Primitive(_) if primitive_is_bulk(vr) => bulk_json_value(tag, vr, value, options),
+        DicomValue::Primitive(_) if primitive_is_bulk(vr) => {
+            bulk_json_value(tag, vr, value, options)
+        }
         DicomValue::Primitive(primitive) => Ok(flat_primitive_to_json(vr, primitive)),
     }
 }
 
 fn wrap_flat_value(vr: VR, value: JsonValue) -> JsonValue {
     let mut object = JsonMap::new();
-    object.insert("vr".to_owned(), JsonValue::String(vr.to_string().to_owned()));
+    object.insert(
+        "vr".to_owned(),
+        JsonValue::String(vr.to_string().to_owned()),
+    );
 
     if let JsonValue::Object(map) = value {
         if map.contains_key("InlineBinary") || map.contains_key("BulkDataURI") {
@@ -203,7 +210,13 @@ fn flat_primitive_to_json(vr: VR, primitive: &PrimitiveValue) -> JsonValue {
         ),
         PrimitiveValue::I32(values) => {
             if vr == VR::IS {
-                JsonValue::String(values.iter().map(ToString::to_string).collect::<Vec<_>>().join("\\"))
+                JsonValue::String(
+                    values
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join("\\"),
+                )
             } else {
                 number_or_backslash_string(
                     values
@@ -233,7 +246,13 @@ fn flat_primitive_to_json(vr: VR, primitive: &PrimitiveValue) -> JsonValue {
         ),
         PrimitiveValue::F32(values) => {
             if vr == VR::DS {
-                JsonValue::String(values.iter().map(ToString::to_string).collect::<Vec<_>>().join("\\"))
+                JsonValue::String(
+                    values
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join("\\"),
+                )
             } else {
                 number_or_backslash_string(
                     values
@@ -245,7 +264,13 @@ fn flat_primitive_to_json(vr: VR, primitive: &PrimitiveValue) -> JsonValue {
         }
         PrimitiveValue::F64(values) => {
             if vr == VR::DS {
-                JsonValue::String(values.iter().map(ToString::to_string).collect::<Vec<_>>().join("\\"))
+                JsonValue::String(
+                    values
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join("\\"),
+                )
             } else {
                 number_or_backslash_string(
                     values
@@ -268,7 +293,10 @@ fn flat_json_to_dicom_value(
 ) -> Result<DicomValue<InMemDicomObject>, DicomJsonError> {
     if vr == VR::SQ {
         let JsonValue::Array(items) = json else {
-            return Err(invalid_json_value(keyword, "expected an array of sequence items"));
+            return Err(invalid_json_value(
+                keyword,
+                "expected an array of sequence items",
+            ));
         };
 
         let mut sequence_items = Vec::with_capacity(items.len());
@@ -311,8 +339,12 @@ fn flat_json_to_dicom_value(
         | VR::SH
         | VR::TM
         | VR::UC
-        | VR::UI => PrimitiveValue::Strs(split_multi_value(&json_value_to_text(keyword, json)?).into()),
-        VR::LT | VR::ST | VR::UR | VR::UT => PrimitiveValue::Str(json_value_to_text(keyword, json)?),
+        | VR::UI => {
+            PrimitiveValue::Strs(split_multi_value(&json_value_to_text(keyword, json)?).into())
+        }
+        VR::LT | VR::ST | VR::UR | VR::UT => {
+            PrimitiveValue::Str(json_value_to_text(keyword, json)?)
+        }
         VR::AT => PrimitiveValue::Tags(parse_tag_values(keyword, json)?.into()),
         VR::SS => PrimitiveValue::I16(json_value_to_numbers::<i16>(keyword, json)?.into()),
         VR::US => PrimitiveValue::U16(json_value_to_numbers::<u16>(keyword, json)?.into()),
@@ -342,11 +374,12 @@ fn flat_json_element_to_dicom_parts(
     bulk_data_source: Option<&[u8]>,
     transfer_syntax_uid: &str,
 ) -> Result<(VR, DicomValue<InMemDicomObject>), DicomJsonError> {
-    let (parsed_vr, inner_value) = if let Some((vr, inner_value)) = extract_flat_typed_value(keyword, json)? {
-        (vr, inner_value)
-    } else {
-        (default_vr, json.clone())
-    };
+    let (parsed_vr, inner_value) =
+        if let Some((vr, inner_value)) = extract_flat_typed_value(keyword, json)? {
+            (vr, inner_value)
+        } else {
+            (default_vr, json.clone())
+        };
 
     let value = flat_json_to_dicom_value(
         keyword,

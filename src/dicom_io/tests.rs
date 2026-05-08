@@ -8,15 +8,14 @@ use dicom_dictionary_std::uids;
 use serde_json::Value as JsonValue;
 
 use super::{
-    detect_jpeg2000_backend_from_search_path, kakadu_ffi_enabled,
-    list_transfer_syntax_support, read_dicom_bytes,
-    read_dicom_file, read_dicom_json, read_dicom_json_full, read_dicom_json_full_with_source,
-    read_dicom_json_with_source, redact_dicom_pixels_to_transfer_syntax, render_dicom_frame,
-    transcode_dicom_object,
-    write_dicom_bytes, write_dicom_file, write_dicom_json,
-    write_dicom_json_full, write_dicom_json_full_with_source,
-    write_dicom_json_with_options, write_dicom_json_with_source, BoundingBox, BoxLength, DicomJsonKeyStyle,
-    DicomJsonWriteOptions, Jpeg2000Backend, RenderOutputFormat, RenderPipelineOptions,
+    detect_jpeg2000_backend_from_search_path, kakadu_ffi_enabled, list_transfer_syntax_support,
+    read_dicom_bytes, read_dicom_file, read_dicom_json, read_dicom_json_full,
+    read_dicom_json_full_with_source, read_dicom_json_with_source,
+    redact_dicom_pixels_to_transfer_syntax, render_dicom_frame, transcode_dicom_object,
+    write_dicom_bytes, write_dicom_file, write_dicom_json, write_dicom_json_full,
+    write_dicom_json_full_with_source, write_dicom_json_with_options, write_dicom_json_with_source,
+    BoundingBox, BoxLength, DicomJsonKeyStyle, DicomJsonWriteOptions, Jpeg2000Backend,
+    RenderOutputFormat, RenderPipelineOptions,
 };
 
 const PRIVATE_TAG: Tag = Tag(0x0013, 0x1010);
@@ -27,7 +26,10 @@ const JPEG_2000_IMAGE_COMPRESSION_UID: &str = "1.2.840.10008.1.2.4.91";
 fn reads_dicom_file_fixture() {
     let object = read_dicom_file(fixture_path("dx.dcm")).unwrap();
 
-    assert_eq!(object.element(tags::MODALITY).unwrap().to_str().unwrap(), "DX");
+    assert_eq!(
+        object.element(tags::MODALITY).unwrap().to_str().unwrap(),
+        "DX"
+    );
     assert!(object.element(tags::PIXEL_DATA).is_ok());
 }
 
@@ -49,7 +51,10 @@ fn reads_dicom_bytes_fixture() {
     let bytes = fixture_bytes(fixture_path("dx.dcm"));
     let object = read_dicom_bytes(&bytes).unwrap();
 
-    assert_eq!(object.element(tags::MODALITY).unwrap().to_str().unwrap(), "DX");
+    assert_eq!(
+        object.element(tags::MODALITY).unwrap().to_str().unwrap(),
+        "DX"
+    );
     assert!(object.element(tags::PIXEL_DATA).is_ok());
 }
 
@@ -93,11 +98,17 @@ fn writes_flat_json_keys_as_hex_when_requested() {
 
     assert_eq!(json["00080060"], JsonValue::String("DX".to_owned()));
     assert_eq!(json["00131010"]["vr"], JsonValue::String("LO".to_owned()));
-    assert_eq!(json["00020010"], JsonValue::String("1.2.840.10008.1.2.1".to_owned()));
+    assert_eq!(
+        json["00020010"],
+        JsonValue::String("1.2.840.10008.1.2.1".to_owned())
+    );
 
     let roundtrip = read_dicom_json(&json_text).unwrap();
     assert_core_fields_match(&object, &roundtrip);
-    assert_eq!(roundtrip.meta().transfer_syntax(), object.meta().transfer_syntax());
+    assert_eq!(
+        roundtrip.meta().transfer_syntax(),
+        object.meta().transfer_syntax()
+    );
 }
 
 #[test]
@@ -116,8 +127,18 @@ fn writes_and_reads_flat_json_with_bulk_data_uri() {
     let roundtrip = read_dicom_json_with_source(&json, &source).unwrap();
     assert_core_fields_match(&original, &roundtrip);
     assert_eq!(
-        original.element(tags::PIXEL_DATA).unwrap().to_bytes().unwrap().len(),
-        roundtrip.element(tags::PIXEL_DATA).unwrap().to_bytes().unwrap().len(),
+        original
+            .element(tags::PIXEL_DATA)
+            .unwrap()
+            .to_bytes()
+            .unwrap()
+            .len(),
+        roundtrip
+            .element(tags::PIXEL_DATA)
+            .unwrap()
+            .to_bytes()
+            .unwrap()
+            .len(),
     );
 }
 
@@ -131,10 +152,23 @@ fn writes_and_reads_flat_json_with_bulk_data_uri_for_ct() {
     let bytes = write_dicom_bytes(&roundtrip).unwrap();
     let rewritten = read_dicom_bytes(&bytes).unwrap();
 
-    assert_eq!(roundtrip.meta().transfer_syntax(), original.meta().transfer_syntax());
     assert_eq!(
-        rewritten.element(tags::PIXEL_DATA).unwrap().fragments().unwrap().len(),
-        original.element(tags::PIXEL_DATA).unwrap().fragments().unwrap().len(),
+        roundtrip.meta().transfer_syntax(),
+        original.meta().transfer_syntax()
+    );
+    assert_eq!(
+        rewritten
+            .element(tags::PIXEL_DATA)
+            .unwrap()
+            .fragments()
+            .unwrap()
+            .len(),
+        original
+            .element(tags::PIXEL_DATA)
+            .unwrap()
+            .fragments()
+            .unwrap()
+            .len(),
     );
     assert_eq!(
         rewritten
@@ -159,7 +193,10 @@ fn writes_and_reads_full_json_with_inline_binary() {
     let value: JsonValue = serde_json::from_str(&json).unwrap();
 
     assert_eq!(value["00080060"]["vr"], JsonValue::String("CS".to_owned()));
-    assert_eq!(value["00080060"]["Keyword"], JsonValue::String("Modality".to_owned()));
+    assert_eq!(
+        value["00080060"]["Keyword"],
+        JsonValue::String("Modality".to_owned())
+    );
     assert!(value["7FE00010"]["InlineBinary"].is_string());
     assert_eq!(value["7FE00010"]["VM"], JsonValue::Number(1.into()));
 
@@ -179,7 +216,10 @@ fn writes_and_reads_full_json_with_bulk_data_uri() {
     let pixel_uri = value["7FE00010"]["BulkDataURI"].as_str().unwrap();
     assert!(pixel_uri.contains("offset="));
     assert!(pixel_uri.contains("length="));
-    assert_eq!(value["7FE00010"]["Keyword"], JsonValue::String("PixelData".to_owned()));
+    assert_eq!(
+        value["7FE00010"]["Keyword"],
+        JsonValue::String("PixelData".to_owned())
+    );
 
     let roundtrip = read_dicom_json_full_with_source(&json, &source).unwrap();
     assert_eq!(
@@ -187,10 +227,23 @@ fn writes_and_reads_full_json_with_bulk_data_uri() {
         roundtrip.element(tags::MODALITY).unwrap().to_str().unwrap(),
     );
     assert_eq!(
-        original.element(tags::PIXEL_DATA).unwrap().fragments().unwrap().len(),
-        roundtrip.element(tags::PIXEL_DATA).unwrap().fragments().unwrap().len(),
+        original
+            .element(tags::PIXEL_DATA)
+            .unwrap()
+            .fragments()
+            .unwrap()
+            .len(),
+        roundtrip
+            .element(tags::PIXEL_DATA)
+            .unwrap()
+            .fragments()
+            .unwrap()
+            .len(),
     );
-    assert_eq!(original.meta().transfer_syntax(), roundtrip.meta().transfer_syntax());
+    assert_eq!(
+        original.meta().transfer_syntax(),
+        roundtrip.meta().transfer_syntax()
+    );
 }
 
 #[test]
@@ -200,31 +253,59 @@ fn transcodes_native_dataset_to_big_endian() {
     let bytes = write_dicom_bytes(&transcoded).unwrap();
     let roundtrip = read_dicom_bytes(&bytes).unwrap();
 
-    assert_eq!(roundtrip.meta().transfer_syntax(), EXPLICIT_VR_BIG_ENDIAN_UID);
+    assert_eq!(
+        roundtrip.meta().transfer_syntax(),
+        EXPLICIT_VR_BIG_ENDIAN_UID
+    );
     assert_dataset_fields_match(&original, &roundtrip);
     assert_eq!(
-        original.element(tags::PIXEL_DATA).unwrap().to_bytes().unwrap().len(),
-        roundtrip.element(tags::PIXEL_DATA).unwrap().to_bytes().unwrap().len(),
+        original
+            .element(tags::PIXEL_DATA)
+            .unwrap()
+            .to_bytes()
+            .unwrap()
+            .len(),
+        roundtrip
+            .element(tags::PIXEL_DATA)
+            .unwrap()
+            .to_bytes()
+            .unwrap()
+            .len(),
     );
 }
 
 #[test]
 fn transcodes_native_dataset_to_encapsulated_uncompressed_and_back() {
     let original = read_dicom_file(fixture_path("dx.dcm")).unwrap();
-    let encapsulated = transcode_dicom_object(&original, uids::ENCAPSULATED_UNCOMPRESSED_EXPLICIT_VR_LITTLE_ENDIAN)
-        .unwrap();
-    let rehydrated = transcode_dicom_object(&encapsulated, uids::EXPLICIT_VR_LITTLE_ENDIAN)
-        .unwrap();
+    let encapsulated = transcode_dicom_object(
+        &original,
+        uids::ENCAPSULATED_UNCOMPRESSED_EXPLICIT_VR_LITTLE_ENDIAN,
+    )
+    .unwrap();
+    let rehydrated =
+        transcode_dicom_object(&encapsulated, uids::EXPLICIT_VR_LITTLE_ENDIAN).unwrap();
 
     assert_eq!(
         encapsulated.meta().transfer_syntax(),
         uids::ENCAPSULATED_UNCOMPRESSED_EXPLICIT_VR_LITTLE_ENDIAN,
     );
-    assert!(encapsulated.element(tags::PIXEL_DATA).unwrap().fragments().is_some());
+    assert!(encapsulated
+        .element(tags::PIXEL_DATA)
+        .unwrap()
+        .fragments()
+        .is_some());
     assert_core_fields_match(&original, &rehydrated);
     assert_eq!(
-        original.element(tags::PIXEL_DATA).unwrap().to_bytes().unwrap(),
-        rehydrated.element(tags::PIXEL_DATA).unwrap().to_bytes().unwrap(),
+        original
+            .element(tags::PIXEL_DATA)
+            .unwrap()
+            .to_bytes()
+            .unwrap(),
+        rehydrated
+            .element(tags::PIXEL_DATA)
+            .unwrap()
+            .to_bytes()
+            .unwrap(),
     );
 }
 
@@ -251,7 +332,8 @@ fn reports_jpeg_2000_transfer_syntax_capabilities() {
 #[test]
 fn redacts_monochrome_pixels_in_dicom_to_dicom_path() {
     let original = read_dicom_file(fixture_path("dx.dcm")).unwrap();
-    let original_native = transcode_dicom_object(&original, uids::EXPLICIT_VR_LITTLE_ENDIAN).unwrap();
+    let original_native =
+        transcode_dicom_object(&original, uids::EXPLICIT_VR_LITTLE_ENDIAN).unwrap();
     let redacted = redact_dicom_pixels_to_transfer_syntax(
         &original,
         uids::EXPLICIT_VR_LITTLE_ENDIAN,
@@ -265,13 +347,20 @@ fn redacts_monochrome_pixels_in_dicom_to_dicom_path() {
     )
     .unwrap();
 
-    assert_eq!(redacted.meta().transfer_syntax(), uids::EXPLICIT_VR_LITTLE_ENDIAN);
+    assert_eq!(
+        redacted.meta().transfer_syntax(),
+        uids::EXPLICIT_VR_LITTLE_ENDIAN
+    );
 
     let baseline_inside = mono_sample_value(&original_native, 0, 0).unwrap();
     let baseline_outside = mono_sample_value(&original_native, 16, 16).unwrap();
     let redacted_inside = mono_sample_value(&redacted, 0, 0).unwrap();
     let redacted_outside = mono_sample_value(&redacted, 16, 16).unwrap();
-    let bits_stored = redacted.element(tags::BITS_STORED).unwrap().uint16().unwrap();
+    let bits_stored = redacted
+        .element(tags::BITS_STORED)
+        .unwrap()
+        .uint16()
+        .unwrap();
 
     assert_ne!(baseline_inside, redacted_inside);
     assert_eq!(baseline_outside, redacted_outside);
@@ -299,7 +388,12 @@ fn redacts_rgb_pixels_when_planar_configuration_is_one() {
     let cols = object.element(tags::COLUMNS).unwrap().uint16().unwrap() as usize;
     let pixel_count = rows * cols;
 
-    let interleaved = object.element(tags::PIXEL_DATA).unwrap().to_bytes().unwrap().into_owned();
+    let interleaved = object
+        .element(tags::PIXEL_DATA)
+        .unwrap()
+        .to_bytes()
+        .unwrap()
+        .into_owned();
     if interleaved.len() < pixel_count * 3 {
         return;
     }
@@ -316,7 +410,11 @@ fn redacts_rgb_pixels_when_planar_configuration_is_one() {
         VR::US,
         PrimitiveValue::from(1u16),
     ));
-    object.put(DataElement::new(tags::PIXEL_DATA, VR::OB, PrimitiveValue::from(planar)));
+    object.put(DataElement::new(
+        tags::PIXEL_DATA,
+        VR::OB,
+        PrimitiveValue::from(planar),
+    ));
 
     let redacted = redact_dicom_pixels_to_transfer_syntax(
         &object,
@@ -337,7 +435,14 @@ fn redacts_rgb_pixels_when_planar_configuration_is_one() {
         .to_bytes()
         .unwrap()
         .into_owned();
-    assert_eq!(redacted.element(tags::PLANAR_CONFIGURATION).unwrap().uint16().unwrap(), 1);
+    assert_eq!(
+        redacted
+            .element(tags::PLANAR_CONFIGURATION)
+            .unwrap()
+            .uint16()
+            .unwrap(),
+        1
+    );
     assert_eq!(redacted_planar[0], 12);
     assert_eq!(redacted_planar[pixel_count], 34);
     assert_eq!(redacted_planar[2 * pixel_count], 56);
@@ -395,8 +500,14 @@ fn renders_dx_frame_to_png() {
     .unwrap();
 
     assert_eq!(&rendered.bytes[..8], b"\x89PNG\r\n\x1a\n");
-    assert_eq!(rendered.width, object.element(tags::COLUMNS).unwrap().uint16().unwrap());
-    assert_eq!(rendered.height, object.element(tags::ROWS).unwrap().uint16().unwrap());
+    assert_eq!(
+        rendered.width,
+        object.element(tags::COLUMNS).unwrap().uint16().unwrap()
+    );
+    assert_eq!(
+        rendered.height,
+        object.element(tags::ROWS).unwrap().uint16().unwrap()
+    );
 }
 
 #[test]
@@ -545,14 +656,19 @@ fn fixture_bytes(path: impl AsRef<Path>) -> Vec<u8> {
 }
 
 fn fixture_path(name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test/files").join(name)
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("test/files")
+        .join(name)
 }
 
 fn assert_core_fields_match(
     expected: &dicom_object::DefaultDicomObject,
     actual: &dicom_object::DefaultDicomObject,
 ) {
-    assert_eq!(expected.meta().transfer_syntax(), actual.meta().transfer_syntax());
+    assert_eq!(
+        expected.meta().transfer_syntax(),
+        actual.meta().transfer_syntax()
+    );
     assert_dataset_fields_match(expected, actual);
 }
 
@@ -561,12 +677,28 @@ fn assert_dataset_fields_match(
     actual: &dicom_object::DefaultDicomObject,
 ) {
     assert_eq!(
-        expected.element(tags::SOP_CLASS_UID).unwrap().to_str().unwrap(),
-        actual.element(tags::SOP_CLASS_UID).unwrap().to_str().unwrap(),
+        expected
+            .element(tags::SOP_CLASS_UID)
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        actual
+            .element(tags::SOP_CLASS_UID)
+            .unwrap()
+            .to_str()
+            .unwrap(),
     );
     assert_eq!(
-        expected.element(tags::SOP_INSTANCE_UID).unwrap().to_str().unwrap(),
-        actual.element(tags::SOP_INSTANCE_UID).unwrap().to_str().unwrap(),
+        expected
+            .element(tags::SOP_INSTANCE_UID)
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        actual
+            .element(tags::SOP_INSTANCE_UID)
+            .unwrap()
+            .to_str()
+            .unwrap(),
     );
     assert_eq!(
         expected.element(tags::MODALITY).unwrap().to_str().unwrap(),
@@ -600,7 +732,12 @@ fn mono_sample_value(object: &dicom_object::DefaultDicomObject, x: usize, y: usi
 
     let bits_allocated = object.element(tags::BITS_ALLOCATED).ok()?.uint16().ok()?;
     let bits_stored = object.element(tags::BITS_STORED).ok()?.uint16().ok()?;
-    let bytes = object.element(tags::PIXEL_DATA).ok()?.to_bytes().ok()?.into_owned();
+    let bytes = object
+        .element(tags::PIXEL_DATA)
+        .ok()?
+        .to_bytes()
+        .ok()?
+        .into_owned();
     let index = y * cols + x;
 
     match bits_allocated {

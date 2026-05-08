@@ -133,7 +133,10 @@ where
             .map(|item| match item {
                 JsonValue::Number(number) => parse_single_number(keyword, &number.to_string()),
                 JsonValue::String(text) => parse_single_number(keyword, text),
-                _ => Err(invalid_json_value(keyword, "expected numeric strings or numbers")),
+                _ => Err(invalid_json_value(
+                    keyword,
+                    "expected numeric strings or numbers",
+                )),
             })
             .collect(),
         _ => Err(invalid_json_value(
@@ -186,7 +189,10 @@ pub(super) fn parse_tag_values(
             .iter()
             .map(|item| {
                 let JsonValue::String(text) = item else {
-                    return Err(invalid_json_value(keyword, "expected string tag expressions"));
+                    return Err(invalid_json_value(
+                        keyword,
+                        "expected string tag expressions",
+                    ));
                 };
                 StandardDataDictionary
                     .parse_tag(text)
@@ -221,12 +227,16 @@ pub(super) fn apply_meta_element(
 ) -> Result<(), DicomJsonError> {
     match element.header().tag() {
         tags::FILE_META_INFORMATION_VERSION => {
-            let bytes = element.to_bytes().map_err(|_| DicomJsonError::InvalidJsonValue {
-                keyword: keyword_for_tag(element.header().tag()),
-                message: "expected binary file meta information version".to_owned(),
-            })?;
+            let bytes = element
+                .to_bytes()
+                .map_err(|_| DicomJsonError::InvalidJsonValue {
+                    keyword: keyword_for_tag(element.header().tag()),
+                    message: "expected binary file meta information version".to_owned(),
+                })?;
             if bytes.len() >= 2 {
-                *meta_builder = meta_builder.clone().information_version([bytes[0], bytes[1]]);
+                *meta_builder = meta_builder
+                    .clone()
+                    .information_version([bytes[0], bytes[1]]);
             }
         }
         tags::MEDIA_STORAGE_SOP_CLASS_UID => {
@@ -244,10 +254,7 @@ pub(super) fn apply_meta_element(
                 element
                     .to_str()
                     .map_err(|_| {
-                        invalid_json_value(
-                            "MediaStorageSOPInstanceUID",
-                            "expected a string value",
-                        )
+                        invalid_json_value("MediaStorageSOPInstanceUID", "expected a string value")
                     })?
                     .into_owned(),
             );
@@ -256,7 +263,9 @@ pub(super) fn apply_meta_element(
             *meta_builder = meta_builder.clone().transfer_syntax(
                 element
                     .to_str()
-                    .map_err(|_| invalid_json_value("TransferSyntaxUID", "expected a string value"))?
+                    .map_err(|_| {
+                        invalid_json_value("TransferSyntaxUID", "expected a string value")
+                    })?
                     .into_owned(),
             );
         }

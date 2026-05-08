@@ -5,25 +5,26 @@ use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{ArgAction, CommandFactory, FromArgMatches, Parser, ValueEnum};
+use dcmnorm::dicom_io::{
+    jpeg2000_backend_name, list_transfer_syntax_support, read_dicom_bytes,
+    read_dicom_json_with_options, redact_dicom_pixels_to_transfer_syntax, render_all_dicom_frames,
+    render_dicom_frame, transcode_dicom_object, write_dicom_file, write_dicom_json_with_options,
+    BoundingBox, BoxLength, DicomJsonBulkDataMode, DicomJsonFormat, DicomJsonKeyStyle,
+    DicomJsonReadOptions, DicomJsonWriteOptions, RenderOutputFormat, RenderPipelineOptions,
+};
 use dicom_core::dictionary::{DataDictionary, DataDictionaryEntry};
 use dicom_core::{Tag, VR};
 use dicom_dictionary_std::tags;
 use dicom_dictionary_std::StandardDataDictionary;
-use dcmnorm::dicom_io::{
-    jpeg2000_backend_name, list_transfer_syntax_support, read_dicom_bytes,
-    redact_dicom_pixels_to_transfer_syntax,
-    read_dicom_json_with_options, render_all_dicom_frames, render_dicom_frame,
-    transcode_dicom_object, write_dicom_file, write_dicom_json_with_options,
-    BoundingBox, BoxLength, DicomJsonBulkDataMode, DicomJsonFormat, DicomJsonKeyStyle, DicomJsonReadOptions,
-    DicomJsonWriteOptions, RenderOutputFormat, RenderPipelineOptions,
-};
 use sha2::{Digest, Sha256};
 
 #[derive(Parser, Debug)]
 #[command(name = "dcmnorm")]
 #[command(version)]
 #[command(about = "Convert, transcode, and render DICOM data")]
-#[command(long_about = "Convert between DICOM and flattened or standard DICOM JSON, transcode DICOM transfer syntaxes, render DICOM frames to raw/PNG/JPEG/MPEG4 outputs, and list transfer-syntax support for the current build. The CLI infers the operation from the input and output file types unless an explicit mode flag is provided.")]
+#[command(
+    long_about = "Convert between DICOM and flattened or standard DICOM JSON, transcode DICOM transfer syntaxes, render DICOM frames to raw/PNG/JPEG/MPEG4 outputs, and list transfer-syntax support for the current build. The CLI infers the operation from the input and output file types unless an explicit mode flag is provided."
+)]
 #[command(arg_required_else_help = true)]
 struct Cli {
     #[arg(value_name = "INPUT", help_heading = "General", display_order = 1)]
@@ -264,6 +265,24 @@ struct Cli {
         display_order = 43
     )]
     redact_color: Option<String>,
+
+    #[arg(
+        long,
+        action = ArgAction::SetTrue,
+        help = "Pad the output image to a square canvas",
+        help_heading = "Rendering",
+        display_order = 44
+    )]
+    pad: bool,
+
+    #[arg(
+        long,
+        value_name = "COLOR",
+        help = "Pad color for square canvas as R,G,B (0-255 each) or #RRGGBB hex. Defaults to 0,0,0 (black)",
+        help_heading = "Rendering",
+        display_order = 45
+    )]
+    pad_color: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -539,14 +558,13 @@ fn run_dicom_to_json(
 
     // Embed the input file:// URI in BulkDataURIs only when the user explicitly
     // passes --bulk-data-source without a value.
-    let uri_base_owned: Option<String> =
-        if bulk_data_mode == DicomJsonBulkDataMode::Uri
-            && cli.bulk_data_source.as_deref() == Some("")
-        {
-            path_to_file_uri(input_path)
-        } else {
-            None
-        };
+    let uri_base_owned: Option<String> = if bulk_data_mode == DicomJsonBulkDataMode::Uri
+        && cli.bulk_data_source.as_deref() == Some("")
+    {
+        path_to_file_uri(input_path)
+    } else {
+        None
+    };
 
     let output = write_dicom_json_with_options(
         &object,
@@ -786,6 +804,53 @@ fn run_dicom_to_render(cli: &Cli, input_bytes: &[u8]) -> Result<(), Box<dyn std:
         .transpose()?
         .unwrap_or([0, 0, 0]);
 
+    if let Some(max_dim) = cli.scale_max_size {
+        if max_dim > 65535 {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                "--scale-max-size cannot exceed 65535 (max DICOM resolution)",
+            )
+            .into());
+        }
+    }
+
+    if let Some(w) = cli.output_width {
+        if w > 65535 {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                "--output-width cannot exceed 65535 (max DICOM resolution)",
+            )
+            .into());
+        }
+    }
+
+    if let Some(h) = cli.output_height {
+        if h > 65535 {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                "--output-height cannot exceed 65535 (max DICOM resolution)",
+            )
+            .into());
+        }
+    }
+
+    let pad_color = cli
+        .pad_color
+        .as_deref()
+        .map(parse_redact_color)
+        .transpose()?
+        .unwrap_or([0, 0, 0]);
+
+    if cli.pad && cli.scale_max_size.is_none() {
+        return Err(
+            io::Error::new(ErrorKind::InvalidInput, "--pad requires --scale-max-size").into(),
+        );
+    }
+
+    if cli.pad_color.is_some() && !cli.pad {
+        return Err(io::Error::new(ErrorKind::InvalidInput, "--pad-color requires --pad").into());
+    }
+
     let options = RenderPipelineOptions {
         frame_index: cli.render_frame,
         apply_modality_lut: !cli.no_modality_lut,
@@ -798,6 +863,8 @@ fn run_dicom_to_render(cli: &Cli, input_bytes: &[u8]) -> Result<(), Box<dyn std:
         scale_max_size: cli.scale_max_size,
         bounding_boxes,
         bounding_box_color,
+        pad: cli.pad,
+        pad_color,
     };
 
     if format == RenderFormat::Mpeg4 {
@@ -899,11 +966,7 @@ fn run_json_to_dicom(cli: &Cli, input_bytes: &[u8]) -> Result<(), Box<dyn std::e
         .into());
     }
 
-    let bulk_data_source = cli
-        .bulk_data_source
-        .as_deref()
-        .map(fs::read)
-        .transpose()?;
+    let bulk_data_source = cli.bulk_data_source.as_deref().map(fs::read).transpose()?;
 
     let mut object = read_dicom_json_with_options(
         json,
@@ -1087,9 +1150,7 @@ fn parse_redact_color(s: &str) -> Result<[u8; 3], io::Error> {
         values[i] = part.trim().parse::<u8>().map_err(|_| {
             io::Error::new(
                 ErrorKind::InvalidInput,
-                format!(
-                    "invalid --redact-color value '{s}'; each component must be 0-255"
-                ),
+                format!("invalid --redact-color value '{s}'; each component must be 0-255"),
             )
         })?;
     }
@@ -1173,7 +1234,11 @@ fn keyword_for_tag(tag: Tag) -> String {
         .unwrap_or_else(|| format!("({:04X},{:04X})", tag.group(), tag.element()))
 }
 
-fn infer_direction(cli: &Cli, input: &Path, input_bytes: &[u8]) -> Result<Direction, Box<dyn std::error::Error>> {
+fn infer_direction(
+    cli: &Cli,
+    input: &Path,
+    input_bytes: &[u8],
+) -> Result<Direction, Box<dyn std::error::Error>> {
     let input_kind = detect_input_kind(input, input_bytes)?;
 
     if cli.overwrite && cli.output.is_some() {
@@ -1298,6 +1363,8 @@ fn validate_no_render_or_redaction_flags(cli: &Cli) -> Result<(), Box<dyn std::e
         || cli.scale_max_size.is_some()
         || !cli.redact_box.is_empty()
         || cli.redact_color.is_some()
+        || cli.pad
+        || cli.pad_color.is_some()
     {
         return Err(io::Error::new(
             ErrorKind::InvalidInput,
@@ -1322,6 +1389,8 @@ fn validate_non_dicom_to_dicom_render_flags(cli: &Cli) -> Result<(), Box<dyn std
         || cli.output_width.is_some()
         || cli.output_height.is_some()
         || cli.scale_max_size.is_some()
+        || cli.pad
+        || cli.pad_color.is_some()
     {
         return Err(io::Error::new(
             ErrorKind::InvalidInput,
@@ -1440,7 +1509,10 @@ fn write_multi_frame_outputs(
     }
 }
 
-fn frame_output_path(base: &Path, frame_number: usize) -> Result<PathBuf, Box<dyn std::error::Error>> {
+fn frame_output_path(
+    base: &Path,
+    frame_number: usize,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let stem = base
         .file_stem()
         .and_then(|value| value.to_str())
@@ -1564,7 +1636,10 @@ fn default_render_fps_from_dicom(object: &dicom_object::DefaultDicomObject) -> O
         .filter(|fps| fps.is_finite() && *fps > 0.0)
 }
 
-fn first_numeric_tag(object: &dicom_object::DefaultDicomObject, tag: dicom_core::Tag) -> Option<f64> {
+fn first_numeric_tag(
+    object: &dicom_object::DefaultDicomObject,
+    tag: dicom_core::Tag,
+) -> Option<f64> {
     object
         .get(tag)
         .and_then(|element| element.to_str().ok())
@@ -1575,7 +1650,10 @@ fn first_numeric_tag(object: &dicom_object::DefaultDicomObject, tag: dicom_core:
         })
 }
 
-fn numeric_values_tag(object: &dicom_object::DefaultDicomObject, tag: dicom_core::Tag) -> Option<Vec<f64>> {
+fn numeric_values_tag(
+    object: &dicom_object::DefaultDicomObject,
+    tag: dicom_core::Tag,
+) -> Option<Vec<f64>> {
     let text = object.get(tag).and_then(|element| element.to_str().ok())?;
     let values = text
         .split('\\')
@@ -1607,8 +1685,7 @@ fn looks_like_dicom(input_bytes: &[u8]) -> bool {
 mod tests {
     use super::{
         detect_output_kind, infer_direction, parse_attribute_override, parse_redact_box,
-        resolve_render_format, Cli,
-        Direction, FileKind, RenderFormat,
+        resolve_render_format, Cli, Direction, FileKind, RenderFormat,
     };
     use clap::{CommandFactory, FromArgMatches};
     use dicom_core::Tag;
@@ -1641,6 +1718,8 @@ mod tests {
             scale_max_size: None,
             redact_box: Vec::new(),
             redact_color: None,
+            pad: false,
+            pad_color: None,
             list_transfer_syntaxes: false,
             verbose: false,
         }
@@ -1672,7 +1751,9 @@ mod tests {
 
     #[test]
     fn rejects_set_without_separator() {
-        let error = parse_attribute_override("SOPClassUID").unwrap_err().to_string();
+        let error = parse_attribute_override("SOPClassUID")
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("expected KEY=VALUE"));
     }
 
@@ -1759,7 +1840,8 @@ mod tests {
     fn infers_overwrite_without_output_as_dicom_to_dicom() {
         let mut cli = base_cli();
         cli.overwrite = true;
-        cli.set.push("SOPClassUID=1.2.840.10008.5.1.4.1.1.2".to_string());
+        cli.set
+            .push("SOPClassUID=1.2.840.10008.5.1.4.1.1.2".to_string());
 
         let mut input_bytes = vec![0u8; 132];
         input_bytes[128..132].copy_from_slice(b"DICM");
@@ -1786,7 +1868,8 @@ mod tests {
         let mut cli = base_cli();
         cli.overwrite = true;
         cli.output = Some(PathBuf::from("out.dcm"));
-        cli.set.push("SOPClassUID=1.2.840.10008.5.1.4.1.1.2".to_string());
+        cli.set
+            .push("SOPClassUID=1.2.840.10008.5.1.4.1.1.2".to_string());
 
         let mut input_bytes = vec![0u8; 132];
         input_bytes[128..132].copy_from_slice(b"DICM");
