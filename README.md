@@ -104,7 +104,7 @@ cargo install --path exec/dcmnorm
 To install every CLI under `exec/` with one command, use the helper script:
 
 ```bash
-./scripts/install-exec.sh
+./scripts/install-source.sh
 ```
 
 The install script automatically detects Kakadu headers and libraries and enables
@@ -148,6 +148,12 @@ export PATH="$HOME/.local/bin:$PATH"
 ```
 
 ## GitHub Releases
+
+To install the latest published release binary from GitHub (or a specific version), use:
+
+```bash
+./scripts/install-release.sh
+```
 
 This repository includes two GitHub Actions workflows for SemVer-based CLI releases:
 
