@@ -2,16 +2,17 @@ use std::fs;
 use std::io::{self, BufRead, ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{ArgAction, CommandFactory, FromArgMatches, Parser, ValueEnum};
 use dcmnorm::dicom_io::{
     jpeg2000_backend_name, list_transfer_syntax_support, read_dicom_bytes,
     read_dicom_json_with_options, redact_dicom_pixels_to_transfer_syntax, render_all_dicom_frames,
-    render_dicom_frame, transcode_dicom_object, write_dicom_file, write_dicom_json_with_options,
-    BoundingBox, BoxLength, DicomJsonBulkDataMode, DicomJsonFormat, DicomJsonKeyStyle,
-    DicomJsonReadOptions, DicomJsonWriteOptions, RenderOutputFormat, RenderPipelineOptions,
+    render_all_dicom_video_frames, render_dicom_frame, transcode_dicom_object, write_dicom_file,
+    write_dicom_json_with_options, BoundingBox, BoxLength, DicomJsonBulkDataMode,
+    DicomJsonFormat, DicomJsonKeyStyle, DicomJsonReadOptions, DicomJsonWriteOptions,
+    RenderOutputFormat, RenderPipelineOptions,
 };
+use dcmnorm::perf;
 use dicom_core::dictionary::{DataDictionary, DataDictionaryEntry};
 use dicom_core::{Tag, VR};
 use dicom_dictionary_std::tags;
@@ -141,7 +142,7 @@ struct Cli {
     #[arg(
         long,
         value_enum,
-        help = "Render DICOM input to this format (raw/png/jpeg/mpeg4). For MPEG4 files, use the .mp4 output extension; if omitted, the format is inferred from the output extension",
+        help = "Render DICOM input to this format (raw/png/jpeg/mpeg4). For MPEG4 files, use a .mp4, .m4v, .mpeg4, or .mov output extension; if omitted, the format is inferred from the output extension",
         help_heading = "Rendering",
         display_order = 30
     )]
@@ -336,6 +337,7 @@ fn main() {
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
+    let _scope = perf::scope("cli.run");
     let version_with_hash = cli_version_with_binary_hash();
     let version_static: &'static str = Box::leak(version_with_hash.into_boxed_str());
     let matches = Cli::command().version(version_static).get_matches();
@@ -378,6 +380,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn process_one(cli: &Cli, input_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let _scope = perf::scope("cli.process_one");
     let input_bytes = fs::read(input_path)?;
     let direction = infer_direction(cli, input_path, &input_bytes)?;
 
@@ -524,6 +527,7 @@ fn run_dicom_to_json(
     input_path: &Path,
     input_bytes: &[u8],
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let _scope = perf::scope("cli.run_dicom_to_json");
     validate_no_render_or_redaction_flags(cli)?;
 
     if matches!(&cli.bulk_data_source, Some(s) if !s.is_empty()) {
@@ -542,7 +546,10 @@ fn run_dicom_to_json(
         .into());
     }
 
-    let mut object = read_dicom_bytes(input_bytes)?;
+    let mut object = {
+        let _parse_scope = perf::scope("cli.dicom_to_json.read_dicom_bytes");
+        read_dicom_bytes(input_bytes)?
+    };
     apply_attribute_overrides(cli, &mut object)?;
     verbose_log(
         cli,
@@ -566,7 +573,9 @@ fn run_dicom_to_json(
         None
     };
 
-    let output = write_dicom_json_with_options(
+    let output = {
+        let _json_scope = perf::scope("cli.dicom_to_json.write_dicom_json_with_options");
+        write_dicom_json_with_options(
         &object,
         DicomJsonWriteOptions {
             format: match cli.format {
@@ -585,7 +594,8 @@ fn run_dicom_to_json(
             },
             bulk_data_uri_base: uri_base_owned.as_deref(),
         },
-    )?;
+    )?
+    };
 
     if let Some(path) = &cli.output {
         fs::write(path, output)?;
@@ -603,6 +613,7 @@ fn run_dicom_to_dicom(
     input_path: &Path,
     input_bytes: &[u8],
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let _scope = perf::scope("cli.run_dicom_to_dicom");
     validate_non_dicom_to_dicom_render_flags(cli)?;
 
     if cli.overwrite && cli.output.is_some() {
@@ -666,7 +677,10 @@ fn run_dicom_to_dicom(
         .into());
     }
 
-    let mut object = read_dicom_bytes(input_bytes)?;
+    let mut object = {
+        let _parse_scope = perf::scope("cli.dicom_to_dicom.read_dicom_bytes");
+        read_dicom_bytes(input_bytes)?
+    };
     apply_attribute_overrides(cli, &mut object)?;
 
     if !cli.redact_box.is_empty() {
@@ -696,12 +710,15 @@ fn run_dicom_to_dicom(
                 target_transfer_syntax
             ),
         );
-        let redacted = redact_dicom_pixels_to_transfer_syntax(
+        let redacted = {
+            let _redact_scope = perf::scope("cli.dicom_to_dicom.redact_pixels");
+            redact_dicom_pixels_to_transfer_syntax(
             &object,
             target_transfer_syntax,
             &bounding_boxes,
             bounding_box_color,
-        )?;
+        )?
+        };
         write_dicom_file(&redacted, output_path)?;
         return Ok(());
     }
@@ -715,7 +732,10 @@ fn run_dicom_to_dicom(
                 target_transfer_syntax
             ),
         );
-        let transcoded = transcode_dicom_object(&object, target_transfer_syntax)?;
+        let transcoded = {
+            let _transcode_scope = perf::scope("cli.dicom_to_dicom.transcode");
+            transcode_dicom_object(&object, target_transfer_syntax)?
+        };
         write_dicom_file(&transcoded, output_path)?;
     } else {
         verbose_log(
@@ -729,6 +749,7 @@ fn run_dicom_to_dicom(
 }
 
 fn run_dicom_to_render(cli: &Cli, input_bytes: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+    let _scope = perf::scope("cli.run_dicom_to_render");
     if cli.keys != KeyFormat::Name {
         return Err(io::Error::new(
             ErrorKind::InvalidInput,
@@ -776,7 +797,10 @@ fn run_dicom_to_render(cli: &Cli, input_bytes: &[u8]) -> Result<(), Box<dyn std:
         )
     })?;
 
-    let mut object = read_dicom_bytes(input_bytes)?;
+    let mut object = {
+        let _parse_scope = perf::scope("cli.dicom_to_render.read_dicom_bytes");
+        read_dicom_bytes(input_bytes)?
+    };
     apply_attribute_overrides(cli, &mut object)?;
     let format = resolve_render_format(cli, output_path)?;
     verbose_log(
@@ -882,7 +906,10 @@ fn run_dicom_to_render(cli: &Cli, input_bytes: &[u8]) -> Result<(), Box<dyn std:
             .unwrap_or(24.0);
 
         verbose_log(cli, format!("Using MPEG4 frame rate: {fps}"));
-        write_mpeg4(&object, output_path, &options, fps, cli.verbose)?;
+        {
+            let _mpeg_scope = perf::scope("cli.dicom_to_render.write_mpeg4");
+            write_mpeg4(&object, output_path, &options, fps, cli.verbose)?;
+        }
         return Ok(());
     }
 
@@ -905,13 +932,19 @@ fn run_dicom_to_render(cli: &Cli, input_bytes: &[u8]) -> Result<(), Box<dyn std:
     }
 
     if cli.render_all_frames {
-        let rendered = render_all_dicom_frames(&object, to_render_output_format(format), &options)?;
+        let rendered = {
+            let _render_scope = perf::scope("cli.dicom_to_render.render_all_frames");
+            render_all_dicom_frames(&object, to_render_output_format(format), &options)?
+        };
         verbose_log(cli, format!("Rendered {} frame(s)", rendered.len()));
         write_multi_frame_outputs(output_path, format, rendered)?;
         return Ok(());
     }
 
-    let rendered = render_dicom_frame(&object, to_render_output_format(format), &options)?;
+    let rendered = {
+        let _render_scope = perf::scope("cli.dicom_to_render.render_single_frame");
+        render_dicom_frame(&object, to_render_output_format(format), &options)?
+    };
     verbose_log(
         cli,
         format!(
@@ -924,6 +957,7 @@ fn run_dicom_to_render(cli: &Cli, input_bytes: &[u8]) -> Result<(), Box<dyn std:
 }
 
 fn run_json_to_dicom(cli: &Cli, input_bytes: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+    let _scope = perf::scope("cli.run_json_to_dicom");
     validate_no_render_or_redaction_flags(cli)?;
 
     let output_path = cli.output.as_ref().ok_or_else(|| {
@@ -968,16 +1002,19 @@ fn run_json_to_dicom(cli: &Cli, input_bytes: &[u8]) -> Result<(), Box<dyn std::e
 
     let bulk_data_source = cli.bulk_data_source.as_deref().map(fs::read).transpose()?;
 
-    let mut object = read_dicom_json_with_options(
-        json,
-        DicomJsonReadOptions {
-            format: match cli.format {
-                JsonFormat::Flat => DicomJsonFormat::Flat,
-                JsonFormat::Standard => DicomJsonFormat::Standard,
+    let mut object = {
+        let _read_scope = perf::scope("cli.json_to_dicom.read_dicom_json_with_options");
+        read_dicom_json_with_options(
+            json,
+            DicomJsonReadOptions {
+                format: match cli.format {
+                    JsonFormat::Flat => DicomJsonFormat::Flat,
+                    JsonFormat::Standard => DicomJsonFormat::Standard,
+                },
+                bulk_data_source: bulk_data_source.as_deref(),
             },
-            bulk_data_source: bulk_data_source.as_deref(),
-        },
-    )?;
+        )?
+    };
     apply_attribute_overrides(cli, &mut object)?;
 
     verbose_log(
@@ -1256,7 +1293,7 @@ fn infer_direction(
             Some(FileKind::Render) => Ok(Direction::DicomToRender),
             None => Err(io::Error::new(
                 ErrorKind::InvalidInput,
-                "could not determine output type; use .json, .dcm/.dicom, or a render extension (.jpg/.jpeg/.png/.raw/.mp4)",
+                "could not determine output type; use .json, .dcm/.dicom, or a render extension (.jpg/.jpeg/.png/.raw/.mp4/.m4v/.mpeg4/.mov)",
             )
             .into()),
         },
@@ -1274,7 +1311,7 @@ fn infer_direction(
             .into()),
             None => Err(io::Error::new(
                 ErrorKind::InvalidInput,
-                "could not determine output type; use .json, .dcm/.dicom, or a render extension (.jpg/.jpeg/.png/.raw/.mp4)",
+                "could not determine output type; use .json, .dcm/.dicom, or a render extension (.jpg/.jpeg/.png/.raw/.mp4/.m4v/.mpeg4/.mov)",
             )
             .into()),
         },
@@ -1343,7 +1380,7 @@ fn detect_kind_from_extension(path: &Path) -> Option<FileKind> {
     match extension.as_str() {
         "json" => Some(FileKind::Json),
         "dcm" | "dicom" => Some(FileKind::Dicom),
-        "jpg" | "jpeg" | "png" | "raw" | "mp4" | "m4v" => Some(FileKind::Render),
+        "jpg" | "jpeg" | "png" | "raw" | "mp4" | "m4v" | "mpeg4" | "mov" => Some(FileKind::Render),
         _ => None,
     }
 }
@@ -1457,12 +1494,39 @@ fn resolve_render_format(
         "raw" => Ok(RenderFormat::Raw),
         "png" => Ok(RenderFormat::Png),
         "jpg" | "jpeg" => Ok(RenderFormat::Jpeg),
-        "mp4" | "m4v" => Ok(RenderFormat::Mpeg4),
+        "mp4" | "m4v" | "mpeg4" | "mov" => Ok(RenderFormat::Mpeg4),
         _ => Err(io::Error::new(
             ErrorKind::InvalidInput,
-            "render output extension must be .raw, .png, .jpg/.jpeg, or .mp4",
+            "render output extension must be .raw, .png, .jpg/.jpeg, or .mp4/.m4v/.mpeg4/.mov",
         )
         .into()),
+    }
+}
+
+fn mpeg4_muxer_name(output_path: &Path) -> &'static str {
+    match output_path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("mov") => "mov",
+        _ => "mp4",
+    }
+}
+
+fn mpeg4_video_filter() -> &'static str {
+    "pad=width=ceil(iw/2)*2:height=ceil(ih/2)*2"
+}
+
+fn mpeg4_input_pixel_format(samples_per_pixel: u16) -> Result<&'static str, io::Error> {
+    match samples_per_pixel {
+        1 => Ok("gray"),
+        3 => Ok("rgb24"),
+        other => Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            format!("unsupported rendered movie samples-per-pixel value: {other}"),
+        )),
     }
 }
 
@@ -1541,66 +1605,101 @@ fn write_mpeg4(
         .into());
     }
 
-    let frames = render_all_dicom_frames(object, RenderOutputFormat::Png, options)?;
+    let frames = render_all_dicom_video_frames(object, options)?;
     if frames.is_empty() {
         return Err(io::Error::new(ErrorKind::InvalidInput, "no frames rendered").into());
     }
 
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or(0);
-    let temp_dir = std::env::temp_dir().join(format!("dcmnorm-render-{nonce}"));
-    fs::create_dir_all(&temp_dir)?;
+    let first_frame_width = frames[0].width;
+    let first_frame_height = frames[0].height;
+    let first_frame_samples_per_pixel = frames[0].samples_per_pixel;
+    let pixel_format = mpeg4_input_pixel_format(first_frame_samples_per_pixel)?;
+    let video_size = format!("{}x{}", first_frame_width, first_frame_height);
 
-    let result = (|| -> Result<(), Box<dyn std::error::Error>> {
-        for (index, frame) in frames.into_iter().enumerate() {
-            let path = temp_dir.join(format!("frame_{:06}.png", index + 1));
-            fs::write(path, frame.bytes)?;
-        }
+    let mut command = Command::new("ffmpeg");
+    command
+        .arg("-y")
+        .arg("-framerate")
+        .arg(format!("{fps}"))
+        .arg("-f")
+        .arg("rawvideo")
+        .arg("-pixel_format")
+        .arg(pixel_format)
+        .arg("-video_size")
+        .arg(video_size)
+        .arg("-i")
+        .arg("-")
+        .arg("-vf")
+        .arg(mpeg4_video_filter())
+        .arg("-c:v")
+        .arg("libx264")
+        .arg("-pix_fmt")
+        .arg("yuv420p")
+        .arg("-f")
+        .arg(mpeg4_muxer_name(output_path))
+        .arg(output_path)
+        .stdin(Stdio::piped());
 
-        let input_pattern = temp_dir.join("frame_%06d.png");
-        let mut command = Command::new("ffmpeg");
-        command
-            .arg("-y")
-            .arg("-framerate")
-            .arg(format!("{fps}"))
-            .arg("-i")
-            .arg(input_pattern)
-            .arg("-c:v")
-            .arg("libx264")
-            .arg("-pix_fmt")
-            .arg("yuv420p")
-            .arg(output_path);
+    if !verbose {
+        command.stdout(Stdio::null()).stderr(Stdio::null());
+    }
 
-        if !verbose {
-            command.stdout(Stdio::null()).stderr(Stdio::null());
-        }
-
-        let status = command.status();
-
-        match status {
-            Ok(exit) if exit.success() => Ok(()),
-            Ok(exit) => Err(io::Error::new(
-                ErrorKind::Other,
-                format!("ffmpeg failed with exit status {exit}"),
-            )
-            .into()),
-            Err(error) if error.kind() == ErrorKind::NotFound => Err(io::Error::new(
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            return Err(io::Error::new(
                 ErrorKind::NotFound,
                 "ffmpeg executable not found in PATH (required for MPEG4 output)",
             )
-            .into()),
-            Err(error) => Err(io::Error::new(
+            .into())
+        }
+        Err(error) => {
+            return Err(io::Error::new(
                 ErrorKind::Other,
                 format!("failed to execute ffmpeg: {error}"),
             )
-            .into()),
+            .into())
         }
-    })();
+    };
 
-    let _ = fs::remove_dir_all(&temp_dir);
-    result
+    {
+        let _pipe_scope = perf::scope("cli.dicom_to_render.write_mpeg4_pipe_raw_frames");
+        let mut stdin = child.stdin.take().ok_or_else(|| {
+            io::Error::new(
+                ErrorKind::BrokenPipe,
+                "failed to open ffmpeg stdin for piped frame input",
+            )
+        })?;
+        for frame in frames {
+            if frame.width != first_frame_width
+                || frame.height != first_frame_height
+                || frame.samples_per_pixel != first_frame_samples_per_pixel
+            {
+                return Err(io::Error::new(
+                    ErrorKind::InvalidInput,
+                    "rendered movie frames must all have matching dimensions and pixel format",
+                )
+                .into());
+            }
+            stdin.write_all(&frame.bytes)?;
+        }
+    }
+
+    let status = child.wait();
+
+    match status {
+        Ok(exit) if exit.success() => Ok(()),
+        Ok(exit) => Err(io::Error::new(
+            ErrorKind::Other,
+            format!("ffmpeg failed with exit status {exit}"),
+        )
+        .into()),
+        Err(error) => Err(io::Error::new(
+            ErrorKind::Other,
+            format!("failed while waiting for ffmpeg: {error}"),
+        )
+        .into()),
+    }
 }
 
 fn verbose_log(cli: &Cli, message: impl AsRef<str>) {
@@ -1684,7 +1783,8 @@ fn looks_like_dicom(input_bytes: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        detect_output_kind, infer_direction, parse_attribute_override, parse_redact_box,
+        detect_output_kind, infer_direction, mpeg4_input_pixel_format, mpeg4_muxer_name,
+        mpeg4_video_filter, parse_attribute_override, parse_redact_box,
         resolve_render_format, Cli, Direction, FileKind, RenderFormat,
     };
     use clap::{CommandFactory, FromArgMatches};
@@ -1734,10 +1834,67 @@ mod tests {
     }
 
     #[test]
+    fn detects_mpeg4_output_as_render() {
+        assert_eq!(
+            detect_output_kind(&PathBuf::from("out.mpeg4")),
+            Some(FileKind::Render)
+        );
+    }
+
+    #[test]
+    fn detects_mov_output_as_render() {
+        assert_eq!(
+            detect_output_kind(&PathBuf::from("out.mov")),
+            Some(FileKind::Render)
+        );
+    }
+
+    #[test]
     fn infers_mpeg4_from_mp4_extension() {
         let cli = base_cli();
         let format = resolve_render_format(&cli, &PathBuf::from("out.mp4")).unwrap();
         assert_eq!(format, RenderFormat::Mpeg4);
+    }
+
+    #[test]
+    fn infers_mpeg4_from_mpeg4_extension() {
+        let cli = base_cli();
+        let format = resolve_render_format(&cli, &PathBuf::from("out.mpeg4")).unwrap();
+        assert_eq!(format, RenderFormat::Mpeg4);
+    }
+
+    #[test]
+    fn infers_mpeg4_from_mov_extension() {
+        let cli = base_cli();
+        let format = resolve_render_format(&cli, &PathBuf::from("out.mov")).unwrap();
+        assert_eq!(format, RenderFormat::Mpeg4);
+    }
+
+    #[test]
+    fn chooses_mov_muxer_for_mov_extension() {
+        assert_eq!(mpeg4_muxer_name(&PathBuf::from("out.mov")), "mov");
+    }
+
+    #[test]
+    fn chooses_mp4_muxer_for_mpeg4_extension() {
+        assert_eq!(mpeg4_muxer_name(&PathBuf::from("out.mpeg4")), "mp4");
+    }
+
+    #[test]
+    fn uses_even_dimension_padding_filter_for_movie_output() {
+        assert_eq!(
+            mpeg4_video_filter(),
+            "pad=width=ceil(iw/2)*2:height=ceil(ih/2)*2"
+        );
+    }
+
+    #[test]
+    fn maps_movie_input_pixel_formats() {
+        assert_eq!(mpeg4_input_pixel_format(1).unwrap(), "gray");
+        assert_eq!(mpeg4_input_pixel_format(3).unwrap(), "rgb24");
+
+        let error = mpeg4_input_pixel_format(2).unwrap_err().to_string();
+        assert!(error.contains("unsupported rendered movie samples-per-pixel value"));
     }
 
     #[test]

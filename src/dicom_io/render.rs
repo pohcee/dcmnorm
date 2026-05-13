@@ -1,9 +1,16 @@
-use dicom_core::{DataElement, PrimitiveValue, VR};
+use std::borrow::Cow;
+
+use crate::perf;
+use dicom_core::value::Value;
+use dicom_core::{DataElement, PrimitiveValue, Tag, VR};
 use dicom_dictionary_std::{tags, uids};
+use dicom_encoding::transfer_syntax::{Codec, TransferSyntaxIndex};
 use dicom_object::DefaultDicomObject;
+use dicom_transfer_syntax_registry::TransferSyntaxRegistry;
 use image::codecs::jpeg::JpegEncoder;
 use image::codecs::png::PngEncoder;
 use image::{ColorType, GrayImage, ImageEncoder, RgbImage};
+use rayon::prelude::*;
 
 use super::io::transcode_dicom_object;
 use super::types::RenderError;
@@ -126,6 +133,7 @@ pub fn render_dicom_frame(
     output_format: RenderOutputFormat,
     options: &RenderPipelineOptions,
 ) -> Result<RenderFrameOutput, RenderError> {
+    let _scope = perf::scope("render.render_dicom_frame");
     let frames = render_dicom_frames(object, output_format, options)?;
     let frame = frames
         .into_iter()
@@ -142,12 +150,41 @@ pub fn render_dicom_frames(
     output_format: RenderOutputFormat,
     options: &RenderPipelineOptions,
 ) -> Result<Vec<RenderFrameOutput>, RenderError> {
+    let _scope = perf::scope("render.render_dicom_frames");
     validate_user_window_overrides(options)?;
-    let working = transcode_dicom_object(object, uids::EXPLICIT_VR_LITTLE_ENDIAN)?;
-    let metadata = read_render_metadata(&working)?;
+
+    if let Some(frame_object) = try_decode_single_frame_object(object, options.frame_index)? {
+        let metadata = read_render_metadata(&frame_object)?;
+        let mut frame_options = options.clone();
+        frame_options.frame_index = 0;
+
+        if output_format == RenderOutputFormat::Raw {
+            let _raw_scope = perf::scope("render.raw_frame_extract");
+            let bytes = get_frame_bytes(&frame_object, &metadata, 0)?;
+            return Ok(vec![RenderFrameOutput {
+                width: metadata.cols,
+                height: metadata.rows,
+                samples_per_pixel: metadata.samples_per_pixel,
+                bits_allocated: metadata.bits_allocated,
+                format: RenderOutputFormat::Raw,
+                bytes,
+            }]);
+        }
+
+        let frame = render_single_frame(&frame_object, &metadata, &frame_options)?;
+        let mut frame = maybe_resize_frame(frame, &frame_options);
+        draw_bounding_boxes(&mut frame, &frame_options);
+        let frame = maybe_pad_frame(frame, &frame_options);
+        let encoded = encode_rendered_frame(&frame, output_format, frame_options.jpeg_quality)?;
+        return Ok(vec![encoded]);
+    }
+
+    let working = ensure_native_render_object(object)?;
+    let metadata = read_render_metadata(working.as_ref())?;
 
     if output_format == RenderOutputFormat::Raw {
-        let bytes = get_frame_bytes(&working, &metadata, options.frame_index)?;
+        let _raw_scope = perf::scope("render.raw_frame_extract");
+        let bytes = get_frame_bytes(working.as_ref(), &metadata, options.frame_index)?;
         return Ok(vec![RenderFrameOutput {
             width: metadata.cols,
             height: metadata.rows,
@@ -158,7 +195,7 @@ pub fn render_dicom_frames(
         }]);
     }
 
-    let frame = render_single_frame(&working, &metadata, options)?;
+    let frame = render_single_frame(working.as_ref(), &metadata, options)?;
     let mut frame = maybe_resize_frame(frame, options);
     draw_bounding_boxes(&mut frame, options);
     let frame = maybe_pad_frame(frame, options);
@@ -171,14 +208,15 @@ pub fn render_all_dicom_frames(
     output_format: RenderOutputFormat,
     options: &RenderPipelineOptions,
 ) -> Result<Vec<RenderFrameOutput>, RenderError> {
+    let _scope = perf::scope("render.render_all_dicom_frames");
     validate_user_window_overrides(options)?;
-    let working = transcode_dicom_object(object, uids::EXPLICIT_VR_LITTLE_ENDIAN)?;
-    let metadata = read_render_metadata(&working)?;
+    let working = ensure_native_render_object(object)?;
+    let metadata = read_render_metadata(working.as_ref())?;
 
     if output_format == RenderOutputFormat::Raw {
         let mut frames = Vec::with_capacity(metadata.number_of_frames);
         for frame_index in 0..metadata.number_of_frames {
-            let bytes = get_frame_bytes(&working, &metadata, frame_index)?;
+            let bytes = get_frame_bytes(working.as_ref(), &metadata, frame_index)?;
             frames.push(RenderFrameOutput {
                 width: metadata.cols,
                 height: metadata.rows,
@@ -191,16 +229,49 @@ pub fn render_all_dicom_frames(
         return Ok(frames);
     }
 
-    let rendered = render_all_frames(&working, &metadata, options)?;
-    rendered
-        .iter()
+    let rendered = render_all_frames(working.as_ref(), &metadata, options)?;
+    let _post_scope = perf::scope("render.render_all_postprocess_parallel");
+    let results = rendered
+        .into_par_iter()
         .map(|frame| {
-            let mut resized = maybe_resize_frame(frame.clone(), options);
+            let mut resized = maybe_resize_frame(frame, options);
             draw_bounding_boxes(&mut resized, options);
             let final_frame = maybe_pad_frame(resized, options);
             encode_rendered_frame(&final_frame, output_format, options.jpeg_quality)
         })
-        .collect()
+        .collect::<Vec<_>>();
+
+    results.into_iter().collect()
+}
+
+pub fn render_all_dicom_video_frames(
+    object: &DefaultDicomObject,
+    options: &RenderPipelineOptions,
+) -> Result<Vec<RenderFrameOutput>, RenderError> {
+    let _scope = perf::scope("render.render_all_dicom_video_frames");
+    validate_user_window_overrides(options)?;
+    let working = ensure_native_render_object(object)?;
+    let metadata = read_render_metadata(working.as_ref())?;
+    let rendered = render_all_frames(working.as_ref(), &metadata, options)?;
+    let _post_scope = perf::scope("render.render_all_video_postprocess_parallel");
+    let results = rendered
+        .into_par_iter()
+        .map(|frame| {
+            let mut resized = maybe_resize_frame(frame, options);
+            draw_bounding_boxes(&mut resized, options);
+            let final_frame = maybe_pad_frame(resized, options);
+            Ok(RenderFrameOutput {
+                width: final_frame.width,
+                height: final_frame.height,
+                samples_per_pixel: final_frame.samples_per_pixel,
+                bits_allocated: 8,
+                format: RenderOutputFormat::Raw,
+                bytes: final_frame.bytes,
+            })
+        })
+        .collect::<Vec<Result<RenderFrameOutput, RenderError>>>();
+
+    results.into_iter().collect()
 }
 
 pub fn render_dicom_to_recompressed_object(
@@ -334,13 +405,17 @@ fn render_all_frames(
     metadata: &RenderMetadata,
     options: &RenderPipelineOptions,
 ) -> Result<Vec<RenderedFramePixels>, RenderError> {
-    let mut rendered = Vec::with_capacity(metadata.number_of_frames);
-    for frame_index in 0..metadata.number_of_frames {
-        let mut frame_options = options.clone();
-        frame_options.frame_index = frame_index;
-        rendered.push(render_single_frame(object, metadata, &frame_options)?);
-    }
-    Ok(rendered)
+    let _scope = perf::scope("render.render_all_frames");
+    let results = (0..metadata.number_of_frames)
+        .into_par_iter()
+        .map(|frame_index| {
+            let mut frame_options = options.clone();
+            frame_options.frame_index = frame_index;
+            render_single_frame(object, metadata, &frame_options)
+        })
+        .collect::<Vec<_>>();
+
+    results.into_iter().collect()
 }
 
 fn frame_length_bytes(metadata: &RenderMetadata) -> Result<usize, RenderError> {
@@ -529,6 +604,7 @@ fn render_single_frame(
     metadata: &RenderMetadata,
     options: &RenderPipelineOptions,
 ) -> Result<RenderedFramePixels, RenderError> {
+    let _scope = perf::scope("render.render_single_frame");
     if options.frame_index >= metadata.number_of_frames {
         return Err(RenderError::InvalidFrameIndex {
             requested: options.frame_index,
@@ -825,10 +901,9 @@ fn get_frame_bytes(
     metadata: &RenderMetadata,
     frame_index: usize,
 ) -> Result<Vec<u8>, RenderError> {
+    let _scope = perf::scope("render.get_frame_bytes");
     let pixel_data = object
         .element(tags::PIXEL_DATA)
-        .map_err(|_| RenderError::MissingImageAttribute("PixelData"))?
-        .to_bytes()
         .map_err(|_| RenderError::MissingImageAttribute("PixelData"))?;
 
     let samples_per_frame = usize::from(metadata.rows)
@@ -842,6 +917,43 @@ fn get_frame_bytes(
     };
     let start = frame_index * frame_len;
     let expected = (frame_index + 1) * frame_len;
+
+    match (metadata.bits_allocated, pixel_data.value()) {
+        (1 | 8, Value::Primitive(PrimitiveValue::U8(values))) => {
+            let bytes = values.as_ref();
+            if bytes.len() < expected {
+                return Err(RenderError::InvalidPixelDataLength {
+                    expected,
+                    actual: bytes.len(),
+                });
+            }
+            return Ok(bytes[start..start + frame_len].to_vec());
+        }
+        (16, Value::Primitive(PrimitiveValue::U16(values))) => {
+            let words = values.as_ref();
+            let sample_start = frame_index * samples_per_frame;
+            let sample_end = sample_start + samples_per_frame;
+            let expected_words = (frame_index + 1) * samples_per_frame;
+
+            if words.len() < expected_words {
+                return Err(RenderError::InvalidPixelDataLength {
+                    expected: expected_words * 2,
+                    actual: words.len() * 2,
+                });
+            }
+
+            let mut frame = Vec::with_capacity(frame_len);
+            for sample in &words[sample_start..sample_end] {
+                frame.extend_from_slice(&sample.to_le_bytes());
+            }
+            return Ok(frame);
+        }
+        _ => {}
+    }
+
+    let pixel_data = pixel_data
+        .to_bytes()
+        .map_err(|_| RenderError::MissingImageAttribute("PixelData"))?;
 
     if pixel_data.len() < expected {
         return Err(RenderError::InvalidPixelDataLength {
@@ -857,6 +969,7 @@ fn decode_grayscale_values(
     frame_bytes: &[u8],
     metadata: &RenderMetadata,
 ) -> Result<Vec<f64>, RenderError> {
+    let _scope = perf::scope("render.decode_grayscale_values");
     let pixel_count = usize::from(metadata.rows) * usize::from(metadata.cols);
 
     match metadata.bits_allocated {
@@ -1099,6 +1212,7 @@ fn normalize_to_u8(values: &[f64]) -> Vec<u8> {
 }
 
 fn encode_png(frame: &RenderedFramePixels) -> Result<Vec<u8>, RenderError> {
+    let _scope = perf::scope("render.encode_png");
     let mut output = Vec::new();
     let encoder = PngEncoder::new(&mut output);
     encoder.write_image(
@@ -1111,6 +1225,7 @@ fn encode_png(frame: &RenderedFramePixels) -> Result<Vec<u8>, RenderError> {
 }
 
 fn encode_jpeg(frame: &RenderedFramePixels, quality: u8) -> Result<Vec<u8>, RenderError> {
+    let _scope = perf::scope("render.encode_jpeg");
     let mut output = Vec::new();
     let clamped_quality = quality.clamp(1, 100);
     let mut encoder = JpegEncoder::new_with_quality(&mut output, clamped_quality);
@@ -1274,15 +1389,22 @@ fn maybe_resize_frame(
         return frame;
     }
 
-    use image::imageops::{self, FilterType};
+    use image::imageops;
+    let _scope = perf::scope("render.resize_frame");
+    let filter = resize_filter(
+        u32::from(frame.width),
+        u32::from(frame.height),
+        new_width,
+        new_height,
+    );
     let resized_bytes = if frame.samples_per_pixel == 1 {
         let img = GrayImage::from_raw(u32::from(frame.width), u32::from(frame.height), frame.bytes)
             .expect("grayscale frame buffer size mismatch");
-        imageops::resize(&img, new_width, new_height, FilterType::Lanczos3).into_raw()
+        imageops::resize(&img, new_width, new_height, filter).into_raw()
     } else {
         let img = RgbImage::from_raw(u32::from(frame.width), u32::from(frame.height), frame.bytes)
             .expect("RGB frame buffer size mismatch");
-        imageops::resize(&img, new_width, new_height, FilterType::Lanczos3).into_raw()
+        imageops::resize(&img, new_width, new_height, filter).into_raw()
     };
 
     RenderedFramePixels {
@@ -1395,11 +1517,31 @@ fn scale_by_ratio(to_scale: u32, reference: u32, new_reference: u32) -> u32 {
     (scaled.round() as u32).max(1)
 }
 
+fn resize_filter(
+    source_width: u32,
+    source_height: u32,
+    target_width: u32,
+    target_height: u32,
+) -> image::imageops::FilterType {
+    use image::imageops::FilterType;
+
+    // Large downscales are substantially faster with Triangle and still look good for
+    // diagnostic render output. Use CatmullRom elsewhere for balanced quality/speed.
+    let downscale_x = target_width.saturating_mul(2) < source_width;
+    let downscale_y = target_height.saturating_mul(2) < source_height;
+    if downscale_x || downscale_y {
+        FilterType::Triangle
+    } else {
+        FilterType::CatmullRom
+    }
+}
+
 fn encode_rendered_frame(
     frame: &RenderedFramePixels,
     output_format: RenderOutputFormat,
     jpeg_quality: u8,
 ) -> Result<RenderFrameOutput, RenderError> {
+    let _scope = perf::scope("render.encode_rendered_frame");
     let bytes = match output_format {
         RenderOutputFormat::Raw => frame.bytes.clone(),
         RenderOutputFormat::Png => encode_png(frame)?,
@@ -1502,4 +1644,102 @@ fn first_numeric_value(text: Option<&str>) -> Option<f64> {
         .split('\\')
         .next()
         .and_then(|value| value.trim().parse::<f64>().ok())
+}
+
+fn ensure_native_render_object<'a>(
+    object: &'a DefaultDicomObject,
+) -> Result<Cow<'a, DefaultDicomObject>, RenderError> {
+    let source_uid = normalize_transfer_syntax_uid(object.meta().transfer_syntax());
+    let has_native_pixel_data = object
+        .get(tags::PIXEL_DATA)
+        .map(|element| matches!(element.value(), Value::Primitive(_)))
+        .unwrap_or(false);
+
+    if source_uid == uids::EXPLICIT_VR_LITTLE_ENDIAN && has_native_pixel_data {
+        return Ok(Cow::Borrowed(object));
+    }
+
+    let _scope = perf::scope("render.transcode_to_explicit_vr_le");
+    let transcoded = transcode_dicom_object(object, uids::EXPLICIT_VR_LITTLE_ENDIAN)?;
+    Ok(Cow::Owned(transcoded))
+}
+
+fn try_decode_single_frame_object(
+    object: &DefaultDicomObject,
+    frame_index: usize,
+) -> Result<Option<DefaultDicomObject>, RenderError> {
+    let source_uid = normalize_transfer_syntax_uid(object.meta().transfer_syntax());
+    if source_uid == uids::EXPLICIT_VR_LITTLE_ENDIAN {
+        return Ok(None);
+    }
+
+    let source_ts = TransferSyntaxRegistry
+        .get(source_uid)
+        .ok_or_else(|| RenderError::Transcode(super::types::TranscodeError::UnknownTransferSyntax(source_uid.to_owned())))?;
+
+    let Codec::EncapsulatedPixelData(Some(reader), _) = source_ts.codec() else {
+        return Ok(None);
+    };
+
+    let mut decoded = Vec::new();
+    let _scope = perf::scope("render.decode_single_frame_only");
+    reader
+        .decode_frame(object, frame_index as u32, &mut decoded)
+        .map_err(|error| {
+            RenderError::Transcode(super::types::TranscodeError::DecodePixelData {
+                uid: source_ts.uid().to_owned(),
+                name: source_ts.name().to_owned(),
+                message: error.to_string(),
+            })
+        })?;
+
+    let mut working = object.clone();
+    replace_with_native_frame_pixel_data(&mut working, decoded)?;
+    working.remove_element(tags::NUMBER_OF_FRAMES);
+    working.meta_mut().set_transfer_syntax(
+        TransferSyntaxRegistry
+            .get(uids::EXPLICIT_VR_LITTLE_ENDIAN)
+            .expect("explicit VR little endian transfer syntax must exist"),
+    );
+
+    Ok(Some(working))
+}
+
+fn replace_with_native_frame_pixel_data(
+    object: &mut DefaultDicomObject,
+    decoded: Vec<u8>,
+) -> Result<(), RenderError> {
+    let bits_allocated = object
+        .get(tags::BITS_ALLOCATED)
+        .and_then(|element| element.uint16().ok())
+        .ok_or(RenderError::MissingImageAttribute("BitsAllocated"))?;
+
+    let value = match bits_allocated {
+        1..=8 => PrimitiveValue::from(decoded),
+        9..=16 => {
+            if decoded.len() % 2 != 0 {
+                return Err(RenderError::InvalidPixelDataLength {
+                    expected: decoded.len() + 1,
+                    actual: decoded.len(),
+                });
+            }
+            let words: Vec<u16> = decoded
+                .chunks_exact(2)
+                .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+                .collect();
+            PrimitiveValue::U16(words.into())
+        }
+        other => return Err(RenderError::UnsupportedBitsAllocated(other)),
+    };
+
+    let vr = if bits_allocated <= 8 { VR::OB } else { VR::OW };
+    object.remove_element(Tag(0x7FE0, 0x0001));
+    object.remove_element(Tag(0x7FE0, 0x0002));
+    object.remove_element(Tag(0x7FE0, 0x0003));
+    object.put(DataElement::new(tags::PIXEL_DATA, vr, value));
+    Ok(())
+}
+
+fn normalize_transfer_syntax_uid(uid: &str) -> &str {
+    uid.trim_end_matches(|character: char| character.is_whitespace() || character == '\0')
 }

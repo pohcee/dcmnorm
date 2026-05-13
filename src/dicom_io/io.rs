@@ -3,8 +3,10 @@ use std::io::Cursor;
 use std::path::Path;
 use std::process::Command;
 
+use crate::perf;
 use dicom_core::ops::ApplyOp;
 use dicom_core::value::PixelFragmentSequence;
+use dicom_core::value::Value;
 use dicom_core::{DataElement, PrimitiveValue, Tag, VR};
 use dicom_dictionary_std::{tags, uids};
 use dicom_encoding::adapters::EncodeOptions;
@@ -14,6 +16,7 @@ use dicom_object::{
     open_file, DefaultDicomObject, FileMetaTableBuilder, InMemDicomObject, OpenFileOptions,
 };
 use dicom_transfer_syntax_registry::TransferSyntaxRegistry;
+use rayon::prelude::*;
 
 use super::jpeg_ls;
 use super::kakadu;
@@ -203,6 +206,7 @@ pub fn transcode_dicom_object(
     object: &DefaultDicomObject,
     target_transfer_syntax_uid: &str,
 ) -> Result<DefaultDicomObject, TranscodeError> {
+    let _scope = perf::scope("transcode.transcode_dicom_object");
     let source_uid = normalize_transfer_syntax_uid(object.meta().transfer_syntax());
     let target_uid = normalize_transfer_syntax_uid(target_transfer_syntax_uid);
 
@@ -394,6 +398,7 @@ fn decode_pixel_data(
     object: &mut DefaultDicomObject,
     source_ts: &dicom_encoding::TransferSyntax,
 ) -> Result<(), TranscodeError> {
+    let _scope = perf::scope("transcode.decode_pixel_data");
     if is_jpeg2000_transfer_syntax(source_ts.uid()) {
         if let Jpeg2000Backend::Kakadu { library_path } = jpeg2000_backend() {
             if let Ok(decoded) = decode_jpeg2000_with_kakadu(object, &library_path) {
@@ -473,13 +478,43 @@ fn decode_pixel_data(
     };
 
     let mut decoded = Vec::new();
-    reader
-        .decode(object, &mut decoded)
-        .map_err(|error| TranscodeError::DecodePixelData {
-            uid: source_ts.uid().to_owned(),
-            name: source_ts.name().to_owned(),
-            message: error.to_string(),
-        })?;
+    let number_of_frames = object
+        .get(tags::NUMBER_OF_FRAMES)
+        .and_then(|element| element.to_str().ok())
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(1);
+
+    if should_parallel_frame_decode(object, source_ts.uid(), number_of_frames) {
+        let _parallel_scope = perf::scope("transcode.decode_pixel_data_parallel_frames");
+        match decode_pixel_data_parallel_frames(reader.as_ref(), object, number_of_frames) {
+            Ok(bytes) => {
+                decoded = bytes;
+            }
+            Err(error) => {
+                if perf::enabled() {
+                    eprintln!(
+                        "[dcmnorm:perf] transcode.decode_pixel_data_parallel_fallback: {}",
+                        error
+                    );
+                }
+                reader
+                    .decode(object, &mut decoded)
+                    .map_err(|decode_error| TranscodeError::DecodePixelData {
+                        uid: source_ts.uid().to_owned(),
+                        name: source_ts.name().to_owned(),
+                        message: decode_error.to_string(),
+                    })?;
+            }
+        }
+    } else {
+        reader
+            .decode(object, &mut decoded)
+            .map_err(|error| TranscodeError::DecodePixelData {
+                uid: source_ts.uid().to_owned(),
+                name: source_ts.name().to_owned(),
+                message: error.to_string(),
+            })?;
+    }
 
     replace_with_native_pixel_data(object, decoded)?;
     normalize_decoded_pixel_data_attributes(object);
@@ -492,10 +527,82 @@ fn decode_pixel_data(
     Ok(())
 }
 
+fn decode_pixel_data_parallel_frames(
+    reader: &(dyn dicom_encoding::adapters::PixelDataReader + Send + Sync),
+    object: &DefaultDicomObject,
+    number_of_frames: usize,
+) -> Result<Vec<u8>, String> {
+    let frames = (0..number_of_frames)
+        .into_par_iter()
+        .map(|frame_index| {
+            let mut frame_bytes = Vec::new();
+            reader
+                .decode_frame(object, frame_index as u32, &mut frame_bytes)
+                .map_err(|error| format!("frame {} decode failed: {}", frame_index, error))?;
+            Ok(frame_bytes)
+        })
+        .collect::<Vec<Result<Vec<u8>, String>>>();
+
+    let mut decoded = Vec::new();
+    for frame in frames {
+        decoded.extend(frame?);
+    }
+
+    Ok(decoded)
+}
+
+fn should_parallel_frame_decode(
+    object: &DefaultDicomObject,
+    source_transfer_syntax_uid: &str,
+    number_of_frames: usize,
+) -> bool {
+    if number_of_frames <= 1 {
+        return false;
+    }
+
+    if !is_parallel_decode_transfer_syntax(source_transfer_syntax_uid) {
+        return false;
+    }
+
+    let Some(pixel_data) = object.get(tags::PIXEL_DATA) else {
+        return false;
+    };
+
+    let Value::PixelSequence(pixel_sequence) = pixel_data.value() else {
+        return false;
+    };
+
+    let fragment_count = pixel_sequence.fragments().len();
+    let offset_count = pixel_sequence.offset_table().len();
+
+    fragment_count == number_of_frames || offset_count >= number_of_frames.saturating_sub(1)
+}
+
+fn is_parallel_decode_transfer_syntax(uid: &str) -> bool {
+    matches!(
+        normalize_transfer_syntax_uid(uid),
+        // JPEG Baseline and Extended
+        "1.2.840.10008.1.2.4.50"
+            | "1.2.840.10008.1.2.4.51"
+            // JPEG Lossless and SV1
+            | "1.2.840.10008.1.2.4.57"
+            | "1.2.840.10008.1.2.4.70"
+            // JPEG-LS
+            | "1.2.840.10008.1.2.4.80"
+            | "1.2.840.10008.1.2.4.81"
+            // JPEG 2000
+            | "1.2.840.10008.1.2.4.90"
+            | "1.2.840.10008.1.2.4.91"
+            // RLE Lossless
+            | "1.2.840.10008.1.2.5"
+    )
+}
+
 fn encode_pixel_data(
     object: &mut DefaultDicomObject,
     target_ts: &dicom_encoding::TransferSyntax,
 ) -> Result<(), TranscodeError> {
+    let _scope = perf::scope("transcode.encode_pixel_data");
     if is_jpeg2000_transfer_syntax(target_ts.uid()) {
         return Err(TranscodeError::UnsupportedTargetTransferSyntax {
             uid: target_ts.uid().to_owned(),

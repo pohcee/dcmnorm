@@ -27,9 +27,10 @@ pub use json::{
     write_dicom_json_with_source,
 };
 pub use render::{
-    redact_dicom_pixels_to_transfer_syntax, render_all_dicom_frames, render_dicom_frame,
-    render_dicom_frames, render_dicom_to_recompressed_object, BoundingBox, BoxLength,
-    RenderFrameOutput, RenderOutputFormat, RenderPipelineOptions,
+    redact_dicom_pixels_to_transfer_syntax, render_all_dicom_frames,
+    render_all_dicom_video_frames, render_dicom_frame, render_dicom_frames,
+    render_dicom_to_recompressed_object, BoundingBox, BoxLength, RenderFrameOutput,
+    RenderOutputFormat, RenderPipelineOptions,
 };
 pub use types::{
     DicomIoError, DicomJsonBulkDataMode, DicomJsonError, DicomJsonFormat, DicomJsonKeyStyle,

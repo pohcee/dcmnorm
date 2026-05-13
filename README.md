@@ -352,6 +352,13 @@ from the DICOM instance when available (`RecommendedDisplayFrameRate`, `CineRate
 Use `--verbose` to print render/conversion diagnostics. Without `--verbose`, external
 tool output such as `ffmpeg` is suppressed unless an error occurs.
 
+For stage-by-stage performance timing, set `DCMNORM_PERF=1` (or `true`/`yes`/`on`).
+This prints scoped timings to stderr, for example:
+
+```bash
+DCMNORM_PERF=1 dcmnorm test/files/mr.dcm out.jpg --render-format jpeg --output-width 920 --output-height 758
+```
+
 Rendering supports 1-bit, 8-bit, and 16-bit monochrome pixel data, as well as RGB data.
 The render pipeline includes decompression when needed and applies modality LUT and VOI LUT/windowing by default.
 Use `--no-modality-lut` and/or `--no-voi-lut` to disable those steps, and use

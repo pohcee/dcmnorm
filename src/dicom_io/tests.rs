@@ -11,11 +11,11 @@ use super::{
     detect_jpeg2000_backend_from_search_path, kakadu_ffi_enabled, list_transfer_syntax_support,
     read_dicom_bytes, read_dicom_file, read_dicom_json, read_dicom_json_full,
     read_dicom_json_full_with_source, read_dicom_json_with_source,
-    redact_dicom_pixels_to_transfer_syntax, render_dicom_frame, transcode_dicom_object,
-    write_dicom_bytes, write_dicom_file, write_dicom_json, write_dicom_json_full,
-    write_dicom_json_full_with_source, write_dicom_json_with_options, write_dicom_json_with_source,
-    BoundingBox, BoxLength, DicomJsonKeyStyle, DicomJsonWriteOptions, Jpeg2000Backend,
-    RenderOutputFormat, RenderPipelineOptions,
+    redact_dicom_pixels_to_transfer_syntax, render_all_dicom_video_frames, render_dicom_frame,
+    transcode_dicom_object, write_dicom_bytes, write_dicom_file, write_dicom_json,
+    write_dicom_json_full, write_dicom_json_full_with_source, write_dicom_json_with_options,
+    write_dicom_json_with_source, BoundingBox, BoxLength, DicomJsonKeyStyle,
+    DicomJsonWriteOptions, Jpeg2000Backend, RenderOutputFormat, RenderPipelineOptions,
 };
 
 const PRIVATE_TAG: Tag = Tag(0x0013, 0x1010);
@@ -554,6 +554,27 @@ fn renders_dx_frame_to_raw_u8() {
 
     assert_eq!(rendered.bytes.len(), expected_len);
     assert_eq!(rendered.bits_allocated as usize, bits_allocated);
+}
+
+#[test]
+fn renders_dx_video_frames_as_raw_u8_with_consistent_shape() {
+    let object = read_dicom_file(fixture_path("dx.dcm")).unwrap();
+    let rendered = render_all_dicom_video_frames(&object, &RenderPipelineOptions::default())
+        .unwrap();
+
+    assert!(!rendered.is_empty());
+
+    let rows = object.element(tags::ROWS).unwrap().uint16().unwrap();
+    let cols = object.element(tags::COLUMNS).unwrap().uint16().unwrap();
+
+    for frame in &rendered {
+        assert_eq!(frame.format, RenderOutputFormat::Raw);
+        assert_eq!(frame.bits_allocated, 8);
+        assert_eq!(frame.width, cols);
+        assert_eq!(frame.height, rows);
+        assert_eq!(frame.samples_per_pixel, 1);
+        assert_eq!(frame.bytes.len(), usize::from(rows) * usize::from(cols));
+    }
 }
 
 #[test]

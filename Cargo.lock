@@ -354,6 +354,7 @@ dependencies = [
  "dicom-transfer-syntax-registry",
  "ffmpeg-next",
  "image",
+ "rayon",
  "serde_json",
 ]
 
