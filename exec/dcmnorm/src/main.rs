@@ -5,12 +5,12 @@ use std::process::{Command, Stdio};
 
 use clap::{ArgAction, CommandFactory, FromArgMatches, Parser, ValueEnum};
 use dcmnorm::dicom_io::{
-    jpeg2000_backend_name, list_transfer_syntax_support, read_dicom_bytes,
+    jpeg2000_backend_name, kakadu_ffi_enabled, list_transfer_syntax_support, read_dicom_bytes,
     read_dicom_json_with_options, redact_dicom_pixels_to_transfer_syntax, render_all_dicom_frames,
     render_all_dicom_video_frames, render_dicom_frame, transcode_dicom_object, write_dicom_file,
     write_dicom_json_with_options, BoundingBox, BoxLength, DicomJsonBulkDataMode,
     DicomJsonFormat, DicomJsonKeyStyle, DicomJsonReadOptions, DicomJsonWriteOptions,
-    RenderOutputFormat, RenderPipelineOptions,
+    RenderOutputFormat, RenderPipelineOptions, JPEG2000_CODEC_ENV_FLAG, JPEG2000_DEBUG_ENV_FLAG,
 };
 use dcmnorm::perf;
 use dicom_core::dictionary::{DataDictionary, DataDictionaryEntry};
@@ -53,12 +53,22 @@ struct Cli {
     verbose: bool,
 
     #[arg(
+        long,
+        value_enum,
+        default_value_t = Jpeg2000Codec::Auto,
+        help = "Force JPEG2000 decoder selection (auto/openjpeg/kakadu). Useful for codec A/B testing",
+        help_heading = "General",
+        display_order = 5
+    )]
+    jpeg2000_codec: Jpeg2000Codec,
+
+    #[arg(
         short = 'I',
         long = "stdin-paths",
         action = ArgAction::SetTrue,
         help = "Read input paths from stdin, one per line (e.g. find . -name '*.dcm' | dcmnorm -I)",
         help_heading = "General",
-        display_order = 5
+        display_order = 6
     )]
     stdin_paths: bool,
 
@@ -67,7 +77,7 @@ struct Cli {
         action = ArgAction::SetTrue,
         help = "Overwrite each input file in place. With DICOM input this writes updated DICOM back to the same path",
         help_heading = "General",
-        display_order = 6
+        display_order = 7
     )]
     overwrite: bool,
 
@@ -312,6 +322,13 @@ enum RenderFormat {
     Mpeg4,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum Jpeg2000Codec {
+    Auto,
+    Openjpeg,
+    Kakadu,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum FileKind {
     Json,
@@ -342,6 +359,25 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let version_static: &'static str = Box::leak(version_with_hash.into_boxed_str());
     let matches = Cli::command().version(version_static).get_matches();
     let cli = Cli::from_arg_matches(&matches).expect("clap generated invalid matches");
+
+    if cli.jpeg2000_codec == Jpeg2000Codec::Kakadu && !kakadu_ffi_enabled() {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "--jpeg2000-codec kakadu requested, but this build does not include kakadu-ffi",
+        )
+        .into());
+    }
+
+    let codec_env_value = match cli.jpeg2000_codec {
+        Jpeg2000Codec::Auto => "auto",
+        Jpeg2000Codec::Openjpeg => "openjpeg",
+        Jpeg2000Codec::Kakadu => "kakadu",
+    };
+    std::env::set_var(JPEG2000_CODEC_ENV_FLAG, codec_env_value);
+
+    if cli.verbose {
+        std::env::set_var(JPEG2000_DEBUG_ENV_FLAG, "1");
+    }
 
     if cli.list_transfer_syntaxes {
         print_transfer_syntax_support()?;
@@ -801,6 +837,13 @@ fn run_dicom_to_render(cli: &Cli, input_bytes: &[u8]) -> Result<(), Box<dyn std:
         let _parse_scope = perf::scope("cli.dicom_to_render.read_dicom_bytes");
         read_dicom_bytes(input_bytes)?
     };
+    verbose_log(
+        cli,
+        format!(
+            "JPEG2000 backend for this build: {}",
+            jpeg2000_backend_name()
+        ),
+    );
     apply_attribute_overrides(cli, &mut object)?;
     let format = resolve_render_format(cli, output_path)?;
     verbose_log(
@@ -1795,6 +1838,7 @@ mod tests {
         Cli {
             input: None,
             output: None,
+            jpeg2000_codec: super::Jpeg2000Codec::Auto,
             stdin_paths: false,
             overwrite: false,
             format: super::JsonFormat::Flat,

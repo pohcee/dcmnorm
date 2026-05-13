@@ -484,7 +484,11 @@ fn falls_back_to_openjpeg_when_kakadu_not_in_search_path() {
     fs::create_dir_all(&base).unwrap();
 
     let backend = detect_jpeg2000_backend_from_search_path(base.to_string_lossy().as_ref());
-    assert_eq!(backend, Jpeg2000Backend::OpenJpeg);
+    if kakadu_ffi_enabled() {
+        assert!(matches!(backend, Jpeg2000Backend::Kakadu { .. }));
+    } else {
+        assert_eq!(backend, Jpeg2000Backend::OpenJpeg);
+    }
 
     fs::remove_dir(base).unwrap();
 }

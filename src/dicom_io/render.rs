@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::sync::OnceLock;
 
 use crate::perf;
 use dicom_core::value::Value;
@@ -12,7 +13,7 @@ use image::codecs::png::PngEncoder;
 use image::{ColorType, GrayImage, ImageEncoder, RgbImage};
 use rayon::prelude::*;
 
-use super::io::transcode_dicom_object;
+use super::io::{kakadu_ffi_enabled, transcode_dicom_object, JPEG2000_DEBUG_ENV_FLAG};
 use super::types::RenderError;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1677,21 +1678,47 @@ fn try_decode_single_frame_object(
         .get(source_uid)
         .ok_or_else(|| RenderError::Transcode(super::types::TranscodeError::UnknownTransferSyntax(source_uid.to_owned())))?;
 
+    if is_jpeg2000_transfer_syntax(source_uid) && kakadu_ffi_enabled() {
+        // Route JPEG2000 through full transcode to leverage the Kakadu decode path.
+        jpeg2000_debug_log("render single-frame path defers JPEG2000 to transcode path for Kakadu decode");
+        return Ok(None);
+    }
+
     let Codec::EncapsulatedPixelData(Some(reader), _) = source_ts.codec() else {
         return Ok(None);
     };
 
     let mut decoded = Vec::new();
     let _scope = perf::scope("render.decode_single_frame_only");
+    if is_jpeg2000_transfer_syntax(source_uid) {
+        jpeg2000_debug_log(format!(
+            "render single-frame codec decode start: uid={} frame={}",
+            source_ts.uid(),
+            frame_index
+        ));
+    }
     reader
         .decode_frame(object, frame_index as u32, &mut decoded)
         .map_err(|error| {
+            if is_jpeg2000_transfer_syntax(source_uid) {
+                jpeg2000_debug_log(format!(
+                    "render single-frame codec decode failed: {}",
+                    error
+                ));
+            }
             RenderError::Transcode(super::types::TranscodeError::DecodePixelData {
                 uid: source_ts.uid().to_owned(),
                 name: source_ts.name().to_owned(),
                 message: error.to_string(),
             })
         })?;
+
+    if is_jpeg2000_transfer_syntax(source_uid) {
+        jpeg2000_debug_log(format!(
+            "render single-frame codec decode succeeded ({} decoded bytes)",
+            decoded.len()
+        ));
+    }
 
     let mut working = object.clone();
     replace_with_native_frame_pixel_data(&mut working, decoded)?;
@@ -1763,4 +1790,32 @@ fn normalize_decoded_render_attributes(object: &mut DefaultDicomObject) {
 
 fn normalize_transfer_syntax_uid(uid: &str) -> &str {
     uid.trim_end_matches(|character: char| character.is_whitespace() || character == '\0')
+}
+
+fn is_jpeg2000_transfer_syntax(uid: &str) -> bool {
+    matches!(
+        normalize_transfer_syntax_uid(uid),
+        "1.2.840.10008.1.2.4.90"
+            | "1.2.840.10008.1.2.4.91"
+            | "1.2.840.10008.1.2.4.92"
+            | "1.2.840.10008.1.2.4.93"
+    )
+}
+
+fn jpeg2000_debug_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var(JPEG2000_DEBUG_ENV_FLAG)
+            .map(|value| {
+                let normalized = value.trim().to_ascii_lowercase();
+                matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
+            })
+            .unwrap_or(false)
+    })
+}
+
+fn jpeg2000_debug_log(message: impl AsRef<str>) {
+    if jpeg2000_debug_enabled() {
+        eprintln!("[dcmnorm:jpeg2000] {}", message.as_ref());
+    }
 }

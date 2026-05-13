@@ -17,7 +17,7 @@ pub use io::{
     kakadu_ffi_enabled, list_transfer_syntax_support, read_dicom_bytes, read_dicom_file,
     transcode_dicom_bytes, transcode_dicom_file, transcode_dicom_object,
     write_dataset_as_dicom_bytes, write_dataset_as_dicom_file, write_dicom_bytes, write_dicom_file,
-    Jpeg2000Backend,
+    Jpeg2000Backend, JPEG2000_CODEC_ENV_FLAG, JPEG2000_DEBUG_ENV_FLAG,
 };
 pub use json::{
     read_dicom_json, read_dicom_json_full, read_dicom_json_full_with_source,

@@ -2,6 +2,7 @@ use std::ffi::OsStr;
 use std::io::Cursor;
 use std::path::Path;
 use std::process::Command;
+use std::sync::OnceLock;
 
 use crate::perf;
 use dicom_core::ops::ApplyOp;
@@ -23,9 +24,19 @@ use super::kakadu;
 use super::mpeg;
 use super::types::{DicomIoError, ReadError, TranscodeError, TransferSyntaxSupport, WriteError};
 
+pub const JPEG2000_DEBUG_ENV_FLAG: &str = "DCMNORM_JPEG2000_DEBUG";
+pub const JPEG2000_CODEC_ENV_FLAG: &str = "DCMNORM_JPEG2000_CODEC";
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Jpeg2000Backend {
     Kakadu { library_path: String },
+    OpenJpeg,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Jpeg2000CodecPreference {
+    Auto,
+    Kakadu,
     OpenJpeg,
 }
 
@@ -43,7 +54,25 @@ impl Jpeg2000Backend {
 }
 
 pub fn jpeg2000_backend() -> Jpeg2000Backend {
-    detect_jpeg2000_backend_from_ld_library_path(std::env::var_os("LD_LIBRARY_PATH").as_deref())
+    match jpeg2000_codec_preference() {
+        Jpeg2000CodecPreference::OpenJpeg => Jpeg2000Backend::OpenJpeg,
+        Jpeg2000CodecPreference::Auto | Jpeg2000CodecPreference::Kakadu => {
+            detect_jpeg2000_backend_from_ld_library_path(std::env::var_os("LD_LIBRARY_PATH").as_deref())
+        }
+    }
+}
+
+fn jpeg2000_codec_preference() -> Jpeg2000CodecPreference {
+    let Some(value) = std::env::var_os(JPEG2000_CODEC_ENV_FLAG) else {
+        return Jpeg2000CodecPreference::Auto;
+    };
+
+    let normalized = value.to_string_lossy().trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "openjpeg" => Jpeg2000CodecPreference::OpenJpeg,
+        "kakadu" => Jpeg2000CodecPreference::Kakadu,
+        _ => Jpeg2000CodecPreference::Auto,
+    }
 }
 
 pub fn jpeg2000_backend_name() -> &'static str {
@@ -61,34 +90,54 @@ fn detect_jpeg2000_backend_from_ld_library_path(
         return Jpeg2000Backend::OpenJpeg;
     }
 
-    let Some(search_path) = ld_library_path else {
-        return Jpeg2000Backend::OpenJpeg;
-    };
-
-    for directory in std::env::split_paths(search_path) {
-        let Ok(entries) = std::fs::read_dir(&directory) else {
-            continue;
-        };
-
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let Some(name) = path.file_name().and_then(OsStr::to_str) else {
+    if let Some(search_path) = ld_library_path {
+        for directory in std::env::split_paths(search_path) {
+            let Ok(entries) = std::fs::read_dir(&directory) else {
                 continue;
             };
 
-            if is_kakadu_library_name(name) {
-                return Jpeg2000Backend::Kakadu {
-                    library_path: path.to_string_lossy().to_string(),
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let Some(name) = path.file_name().and_then(OsStr::to_str) else {
+                    continue;
                 };
+
+                if is_kakadu_library_name(name) {
+                    return Jpeg2000Backend::Kakadu {
+                        library_path: path.to_string_lossy().to_string(),
+                    };
+                }
             }
         }
     }
 
-    Jpeg2000Backend::OpenJpeg
+    // kakadu-ffi builds are linked against Kakadu, so treat Kakadu as active
+    // even if the library filename is not discoverable in LD_LIBRARY_PATH.
+    Jpeg2000Backend::Kakadu {
+        library_path: "linked-via-loader".to_owned(),
+    }
 }
 
 fn is_kakadu_library_name(file_name: &str) -> bool {
     file_name.starts_with("libkdu") && file_name.contains(".so")
+}
+
+fn jpeg2000_debug_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var(JPEG2000_DEBUG_ENV_FLAG)
+            .map(|value| {
+                let normalized = value.trim().to_ascii_lowercase();
+                matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
+            })
+            .unwrap_or(false)
+    })
+}
+
+fn jpeg2000_debug_log(message: impl AsRef<str>) {
+    if jpeg2000_debug_enabled() {
+        eprintln!("[dcmnorm:jpeg2000] {}", message.as_ref());
+    }
 }
 
 fn is_jpeg2000_transfer_syntax(uid: &str) -> bool {
@@ -311,10 +360,7 @@ fn kakadu_ffi_available_from_backend(backend: &Jpeg2000Backend) -> bool {
     matches!(backend, Jpeg2000Backend::Kakadu { .. }) && kakadu_ffi_enabled()
 }
 
-fn decode_jpeg2000_with_kakadu(
-    object: &DefaultDicomObject,
-    _library_path: &str,
-) -> Result<Vec<u8>, String> {
+fn decode_jpeg2000_with_kakadu(object: &DefaultDicomObject) -> Result<Vec<u8>, String> {
     let rows = object
         .get(tags::ROWS)
         .and_then(|element| element.uint16().ok())
@@ -399,9 +445,35 @@ fn decode_pixel_data(
     source_ts: &dicom_encoding::TransferSyntax,
 ) -> Result<(), TranscodeError> {
     let _scope = perf::scope("transcode.decode_pixel_data");
+    let codec_preference = jpeg2000_codec_preference();
+
     if is_jpeg2000_transfer_syntax(source_ts.uid()) {
-        if let Jpeg2000Backend::Kakadu { library_path } = jpeg2000_backend() {
-            if let Ok(decoded) = decode_jpeg2000_with_kakadu(object, &library_path) {
+        let backend = jpeg2000_backend();
+        let backend_name = backend.name();
+        let number_of_frames = object
+            .get(tags::NUMBER_OF_FRAMES)
+            .and_then(|element| element.to_str().ok())
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .unwrap_or(1);
+        jpeg2000_debug_log(format!(
+            "decode start: uid={} name={} backend={} preference={:?} kakadu_ffi_enabled={} frames={}",
+            source_ts.uid(),
+            source_ts.name(),
+            backend_name,
+            codec_preference,
+            kakadu_ffi_enabled(),
+            number_of_frames
+        ));
+    }
+
+    if is_jpeg2000_transfer_syntax(source_ts.uid())
+        && kakadu_ffi_enabled()
+        && codec_preference != Jpeg2000CodecPreference::OpenJpeg
+    {
+        jpeg2000_debug_log("attempting Kakadu decode");
+        match decode_jpeg2000_with_kakadu(object) {
+            Ok(decoded) => {
+                jpeg2000_debug_log(format!("Kakadu decode succeeded ({} decoded bytes)", decoded.len()));
                 replace_with_native_pixel_data(object, decoded)?;
                 normalize_decoded_pixel_data_attributes(object);
                 object.meta_mut().set_transfer_syntax(
@@ -411,7 +483,24 @@ fn decode_pixel_data(
                 );
                 return Ok(());
             }
+            Err(error) => {
+                jpeg2000_debug_log(format!("Kakadu decode failed: {error}"));
+                if codec_preference == Jpeg2000CodecPreference::Kakadu {
+                    return Err(TranscodeError::DecodePixelData {
+                        uid: source_ts.uid().to_owned(),
+                        name: source_ts.name().to_owned(),
+                        message: format!("forced kakadu decode failed: {error}"),
+                    });
+                }
+            }
         }
+    } else if is_jpeg2000_transfer_syntax(source_ts.uid()) {
+        let reason = if codec_preference == Jpeg2000CodecPreference::OpenJpeg {
+            "Kakadu decode not attempted because DCMNORM_JPEG2000_CODEC=openjpeg"
+        } else {
+            "Kakadu decode not attempted because kakadu-ffi feature is disabled"
+        };
+        jpeg2000_debug_log(reason);
     }
 
     // Try MPEG decoding
@@ -497,6 +586,11 @@ fn decode_pixel_data(
                         error
                     );
                 }
+                if is_jpeg2000_transfer_syntax(source_ts.uid()) {
+                    jpeg2000_debug_log(format!(
+                        "parallel frame decode fallback to serial reader decode: {error}"
+                    ));
+                }
                 reader
                     .decode(object, &mut decoded)
                     .map_err(|decode_error| TranscodeError::DecodePixelData {
@@ -507,6 +601,9 @@ fn decode_pixel_data(
             }
         }
     } else {
+        if is_jpeg2000_transfer_syntax(source_ts.uid()) {
+            jpeg2000_debug_log("using codec registry reader decode path");
+        }
         reader
             .decode(object, &mut decoded)
             .map_err(|error| TranscodeError::DecodePixelData {
@@ -514,6 +611,10 @@ fn decode_pixel_data(
                 name: source_ts.name().to_owned(),
                 message: error.to_string(),
             })?;
+    }
+
+    if is_jpeg2000_transfer_syntax(source_ts.uid()) {
+        jpeg2000_debug_log(format!("codec registry reader decode succeeded ({} decoded bytes)", decoded.len()));
     }
 
     replace_with_native_pixel_data(object, decoded)?;
