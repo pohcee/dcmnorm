@@ -672,6 +672,39 @@ fn renders_rgb_fixture_when_present() {
     assert_eq!(&rendered.bytes[..8], b"\x89PNG\r\n\x1a\n");
 }
 
+#[test]
+fn renders_single_frame_with_stale_ybr_rct_after_decode() {
+    let source = read_dicom_file(fixture_path("sc.dcm")).unwrap();
+    let mut object = transcode_dicom_object(
+        &source,
+        uids::ENCAPSULATED_UNCOMPRESSED_EXPLICIT_VR_LITTLE_ENDIAN,
+    )
+    .unwrap();
+
+    let samples = object
+        .get(tags::SAMPLES_PER_PIXEL)
+        .and_then(|element| element.uint16().ok())
+        .unwrap_or(1);
+    if samples != 3 {
+        return;
+    }
+
+    object.put(DataElement::new(
+        tags::PHOTOMETRIC_INTERPRETATION,
+        VR::CS,
+        PrimitiveValue::from("YBR_RCT"),
+    ));
+
+    let rendered = render_dicom_frame(
+        &object,
+        RenderOutputFormat::Jpeg,
+        &RenderPipelineOptions::default(),
+    )
+    .unwrap();
+
+    assert_eq!(&rendered.bytes[..2], b"\xFF\xD8");
+}
+
 fn fixture_bytes(path: impl AsRef<Path>) -> Vec<u8> {
     fs::read(path).unwrap()
 }

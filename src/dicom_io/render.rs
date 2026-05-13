@@ -1695,6 +1695,7 @@ fn try_decode_single_frame_object(
 
     let mut working = object.clone();
     replace_with_native_frame_pixel_data(&mut working, decoded)?;
+    normalize_decoded_render_attributes(&mut working);
     working.remove_element(tags::NUMBER_OF_FRAMES);
     working.meta_mut().set_transfer_syntax(
         TransferSyntaxRegistry
@@ -1738,6 +1739,26 @@ fn replace_with_native_frame_pixel_data(
     object.remove_element(Tag(0x7FE0, 0x0003));
     object.put(DataElement::new(tags::PIXEL_DATA, vr, value));
     Ok(())
+}
+
+fn normalize_decoded_render_attributes(object: &mut DefaultDicomObject) {
+    let samples_per_pixel = object
+        .get(tags::SAMPLES_PER_PIXEL)
+        .and_then(|element| element.uint16().ok())
+        .unwrap_or(1);
+
+    if samples_per_pixel > 1 {
+        object.put(DataElement::new(
+            tags::PHOTOMETRIC_INTERPRETATION,
+            VR::CS,
+            PrimitiveValue::from("RGB"),
+        ));
+        object.put(DataElement::new(
+            tags::PLANAR_CONFIGURATION,
+            VR::US,
+            PrimitiveValue::from(0u16),
+        ));
+    }
 }
 
 fn normalize_transfer_syntax_uid(uid: &str) -> &str {
