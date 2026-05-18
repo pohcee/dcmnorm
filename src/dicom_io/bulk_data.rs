@@ -12,7 +12,7 @@ use super::types::{
     SEQUENCE_DELIMITATION_TAG,
 };
 
-const INLINE_BINARY_URI_THRESHOLD: usize = 32;
+pub(crate) const INLINE_BINARY_URI_THRESHOLD: usize = 32;
 
 pub(super) fn bulk_json_value<I, P>(
     tag: Tag,
@@ -44,24 +44,28 @@ pub(super) fn bulk_representation<I, P>(
 where
     P: AsRef<[u8]>,
 {
+
     if options.bulk_data_mode == DicomJsonBulkDataMode::Uri {
         if let Some(source) = options.bulk_data_source {
-            let location = locate_root_element_value(source, tag)?
-                .ok_or(DicomJsonError::BulkDataNotFound(tag))?;
-            if location.length <= INLINE_BINARY_URI_THRESHOLD {
-                let raw_bytes = &source[location.offset..location.offset + location.length];
-                return Ok(BulkRepresentation::InlineBinary(
-                    BASE64_STANDARD.encode(raw_bytes),
-                ));
+            if let Some(location) = locate_root_element_value(source, tag)? {
+                if location.length <= INLINE_BINARY_URI_THRESHOLD {
+                    let raw_bytes = &source[location.offset..location.offset + location.length];
+                    return Ok(BulkRepresentation::InlineBinary(
+                        BASE64_STANDARD.encode(raw_bytes),
+                    ));
+                }
+                let uri = match options.bulk_data_uri_base {
+                    Some(base) => format!(
+                        "{}?offset={}&length={}",
+                        base, location.offset, location.length
+                    ),
+                    None => format!("?offset={}&length={}", location.offset, location.length),
+                };
+                return Ok(BulkRepresentation::Uri(uri));
+            } else {
+                let raw_bytes = raw_value_bytes(tag, vr, value, options.bulk_data_source)?;
+                return Ok(BulkRepresentation::InlineBinary(BASE64_STANDARD.encode(raw_bytes)));
             }
-            let uri = match options.bulk_data_uri_base {
-                Some(base) => format!(
-                    "{}?offset={}&length={}",
-                    base, location.offset, location.length
-                ),
-                None => format!("?offset={}&length={}", location.offset, location.length),
-            };
-            return Ok(BulkRepresentation::Uri(uri));
         }
     }
 
@@ -237,41 +241,43 @@ fn locate_root_element_value(
     source: &[u8],
     target: Tag,
 ) -> Result<Option<ElementLocation>, DicomJsonError> {
-    let file_start = if source.len() >= 132 && &source[128..132] == b"DICM" {
-        132
+    let has_part10_preamble = source.len() >= 132 && &source[128..132] == b"DICM";
+
+    let mut position = if has_part10_preamble { 132 } else { 0 };
+    let mut transfer_syntax_uid = if has_part10_preamble {
+        uids::EXPLICIT_VR_LITTLE_ENDIAN.to_owned()
     } else {
-        0
+        uids::IMPLICIT_VR_LITTLE_ENDIAN.to_owned()
     };
 
-    let mut position = file_start;
-    let mut transfer_syntax_uid = uids::EXPLICIT_VR_LITTLE_ENDIAN.to_owned();
+    if has_part10_preamble {
+        while position + 8 <= source.len() {
+            let header = parse_element_header(source, position, true, true)?;
+            if header.tag.group() != 0x0002 {
+                break;
+            }
 
-    while position + 8 <= source.len() {
-        let header = parse_element_header(source, position, true, true)?;
-        if header.tag.group() != 0x0002 {
-            break;
+            let value_offset = position + header.header_length;
+            let Some(value_length) = header.length else {
+                return Err(DicomJsonError::InvalidBulkDataUri(
+                    "file meta group contains undefined-length element".to_owned(),
+                ));
+            };
+
+            if header.tag == target {
+                return Ok(Some(ElementLocation {
+                    offset: value_offset,
+                    length: value_length,
+                }));
+            }
+
+            if header.tag == tags::TRANSFER_SYNTAX_UID {
+                transfer_syntax_uid =
+                    decode_dicom_text(&source[value_offset..value_offset + value_length]);
+            }
+
+            position = value_offset + value_length;
         }
-
-        let value_offset = position + header.header_length;
-        let Some(value_length) = header.length else {
-            return Err(DicomJsonError::InvalidBulkDataUri(
-                "file meta group contains undefined-length element".to_owned(),
-            ));
-        };
-
-        if header.tag == target {
-            return Ok(Some(ElementLocation {
-                offset: value_offset,
-                length: value_length,
-            }));
-        }
-
-        if header.tag == tags::TRANSFER_SYNTAX_UID {
-            transfer_syntax_uid =
-                decode_dicom_text(&source[value_offset..value_offset + value_length]);
-        }
-
-        position = value_offset + value_length;
     }
 
     let syntax = transfer_syntax_from_uid(transfer_syntax_uid.as_str())?;

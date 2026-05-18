@@ -14,7 +14,7 @@ use dicom_encoding::adapters::EncodeOptions;
 use dicom_encoding::transfer_syntax::{Codec, TransferSyntaxIndex};
 use dicom_object::file::ReadPreamble;
 use dicom_object::{
-    open_file, DefaultDicomObject, FileMetaTableBuilder, InMemDicomObject, OpenFileOptions,
+    DefaultDicomObject, FileMetaTableBuilder, InMemDicomObject, OpenFileOptions,
 };
 use dicom_transfer_syntax_registry::TransferSyntaxRegistry;
 use rayon::prelude::*;
@@ -178,17 +178,55 @@ fn ffmpeg_available() -> bool {
     }
 }
 
+fn read_dicom_dataset_without_meta(bytes: &[u8]) -> Option<DefaultDicomObject> {
+    let candidate_transfer_syntaxes = [
+        uids::IMPLICIT_VR_LITTLE_ENDIAN,
+        uids::EXPLICIT_VR_LITTLE_ENDIAN,
+        "1.2.840.10008.1.2.2",
+    ];
+
+    for transfer_syntax_uid in candidate_transfer_syntaxes {
+        let Some(transfer_syntax) = TransferSyntaxRegistry.get(transfer_syntax_uid) else {
+            continue;
+        };
+
+        let Ok(dataset) = InMemDicomObject::read_dataset_with_ts(Cursor::new(bytes), transfer_syntax)
+        else {
+            continue;
+        };
+
+        if let Ok(file_object) = dataset
+            .with_meta(FileMetaTableBuilder::new().transfer_syntax(transfer_syntax_uid))
+        {
+            return Some(file_object);
+        }
+    }
+
+    None
+}
+
 pub fn read_dicom_file<P>(path: P) -> Result<DefaultDicomObject, ReadError>
 where
     P: AsRef<Path>,
 {
-    open_file(path)
+    let path_ref = path.as_ref();
+
+    OpenFileOptions::new()
+        .read_preamble(ReadPreamble::Always)
+        .open_file(path_ref)
+        .or_else(|error| match std::fs::read(path_ref) {
+            Ok(bytes) => read_dicom_dataset_without_meta(&bytes).ok_or(error),
+            Err(_) => Err(error),
+        })
 }
 
 pub fn read_dicom_bytes(bytes: impl AsRef<[u8]>) -> Result<DefaultDicomObject, ReadError> {
+    let bytes = bytes.as_ref();
+
     OpenFileOptions::new()
         .read_preamble(ReadPreamble::Always)
-        .from_reader(Cursor::new(bytes.as_ref()))
+        .from_reader(Cursor::new(bytes))
+        .or_else(|error| read_dicom_dataset_without_meta(bytes).ok_or(error))
 }
 
 pub fn write_dicom_file<P>(object: &DefaultDicomObject, path: P) -> Result<(), WriteError>

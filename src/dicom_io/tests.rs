@@ -1,3 +1,54 @@
+#[test]
+fn writes_flat_json_with_source_uri_mode_for_pixeldata_bulkdatauri() {
+    let source = fixture_bytes(fixture_path("dx.dcm"));
+    let object = read_dicom_bytes(&source).unwrap();
+
+    let json = write_dicom_json_with_source(&object, &source).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let pixel = &value["PixelData"];
+    let uri = pixel.get("BulkDataURI").and_then(|v| v.as_str()).unwrap();
+    assert!(uri.contains("offset=") && uri.contains("length="), "PixelData BulkDataURI must include offset and length, got: {}", uri);
+    assert!(!uri.contains("tag="), "PixelData BulkDataURI must not fallback to tag-based URI, got: {}", uri);
+}
+#[test]
+fn writes_flat_json_with_source_uri_mode_for_large_meta_without_part10_header() {
+    let source = fixture_bytes(repo_root_path("nometa.dcm"));
+    let object = read_dicom_bytes(&source).unwrap();
+
+    // Synthesize a large meta field (simulate >32B value)
+    use dicom_core::DataElement;
+    use dicom_core::value::PrimitiveValue;
+    use dicom_dictionary_std::tags;
+    let big_bytes = vec![0xAB; 64];
+    let mut object = object;
+    object.put(DataElement::new(
+        tags::IMPLEMENTATION_VERSION_NAME,
+        dicom_core::VR::SH,
+        PrimitiveValue::from(big_bytes.clone()),
+    ));
+
+    let json = write_dicom_json_with_source(&object, &source).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let meta = &value["ImplementationVersionName"];
+    assert!(
+        meta.get("BulkDataURI").is_none(),
+        "non-bulk meta should not emit offsetless BulkDataURI"
+    );
+}
+
+#[test]
+fn writes_flat_json_with_source_uri_mode_for_nometa_pixeldata_uses_offset_length() {
+    let source = fixture_bytes(repo_root_path("nometa.dcm"));
+    let object = read_dicom_bytes(&source).unwrap();
+
+    let json = write_dicom_json_with_source(&object, &source).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let uri = value["PixelData"]["BulkDataURI"].as_str().unwrap();
+
+    assert!(uri.contains("offset="), "missing offset in URI: {uri}");
+    assert!(uri.contains("length="), "missing length in URI: {uri}");
+    assert!(!uri.contains("tag="), "unexpected tag-based URI: {uri}");
+}
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -31,6 +82,16 @@ fn reads_dicom_file_fixture() {
         "DX"
     );
     assert!(object.element(tags::PIXEL_DATA).is_ok());
+}
+
+#[test]
+fn reads_dicom_file_without_part10_header() {
+    let object = read_dicom_file(repo_root_path("nometa.dcm")).unwrap();
+
+    assert_eq!(
+        object.element(tags::MODALITY).unwrap().to_str().unwrap(),
+        "PT"
+    );
 }
 
 #[test]
@@ -139,6 +200,28 @@ fn writes_and_reads_flat_json_with_bulk_data_uri() {
             .to_bytes()
             .unwrap()
             .len(),
+    );
+}
+
+#[test]
+fn writes_flat_json_with_source_for_file_without_part10_header() {
+    let source = fixture_bytes(repo_root_path("nometa.dcm"));
+    let object = read_dicom_bytes(&source).unwrap();
+
+    let json = write_dicom_json_with_source(&object, &source).unwrap();
+    let value: JsonValue = serde_json::from_str(&json).unwrap();
+
+    assert!(value["FileMetaInformationVersion"]["InlineBinary"].is_string());
+    assert_eq!(
+        value["Modality"],
+        JsonValue::String(
+            object
+                .element(tags::MODALITY)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .to_string()
+        )
     );
 }
 
@@ -717,6 +800,10 @@ fn fixture_path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("test/files")
         .join(name)
+}
+
+fn repo_root_path(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(name)
 }
 
 fn assert_core_fields_match(
