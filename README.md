@@ -301,6 +301,38 @@ cargo run -p dcmnorm-cli -- out.json out.dcm --bulk-data-source test/files/dx.dc
 - JSON input + DICOM output runs JSON to DICOM
 - JSON to DICOM requires an output path
 
+### Overriding Type Detection with `--input-type` and `--output-type`
+
+Use `--input-type` to explicitly specify the input file type (useful for files without or with incorrect extensions):
+
+```bash
+cargo run -p dcmnorm-cli -- noextension --input-type dicom --output-type json
+```
+
+Use `--output-type` to explicitly specify the output file type, including render formats:
+
+```bash
+cargo run -p dcmnorm-cli -- test/files/dx.dcm output --output-type json
+```
+
+Supported `--output-type` values are: `dicom`, `json`, `raw`, `png`, `jpeg`, `mpeg4`
+
+This allows you to process files that are missing extensions or have misleading names:
+
+```bash
+# Convert a DICOM file with no extension to JSON
+cargo run -p dcmnorm-cli -- dicom_data --input-type dicom
+
+# Write DICOM output without an extension
+cargo run -p dcmnorm-cli -- input.json output --output-type dicom
+
+# Render a DICOM file to an arbitrary extension as PNG
+cargo run -p dcmnorm-cli -- test/files/dx.dcm frame.img --output-type png
+
+# Render a DICOM file as MPEG4 without a recognized extension
+cargo run -p dcmnorm-cli -- test/files/ct.dcm output.video --output-type mpeg4 --render-fps 24
+```
+
 Set one or more DICOM element values while converting by repeating `--set KEY=VALUE`:
 
 ```bash
@@ -356,7 +388,13 @@ For stage-by-stage performance timing, set `DCMNORM_PERF=1` (or `true`/`yes`/`on
 This prints scoped timings to stderr, for example:
 
 ```bash
-DCMNORM_PERF=1 dcmnorm test/files/mr.dcm out.jpg --render-format jpeg --output-width 920 --output-height 758
+DCMNORM_PERF=1 dcmnorm test/files/mr.dcm out.jpg --output-width 920 --output-height 758
+```
+
+Or with an explicit render format for a file without a recognized extension:
+
+```bash
+DCMNORM_PERF=1 dcmnorm test/files/mr.dcm output.img --output-type jpeg --output-width 920 --output-height 758
 ```
 
 Rendering supports 1-bit, 8-bit, and 16-bit monochrome pixel data, as well as RGB data.

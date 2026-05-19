@@ -93,6 +93,24 @@ struct Cli {
     #[arg(
         long,
         value_enum,
+        help = "Override input type detection (dicom or json). Allows processing files without or with misleading extensions",
+        help_heading = "General",
+        display_order = 8
+    )]
+    input_type: Option<InputType>,
+
+    #[arg(
+        long,
+        value_enum,
+        help = "Override output type detection (dicom, json, raw, png, jpeg, mpeg4). For render formats (raw/png/jpeg/mpeg4), extensions .mp4/.m4v/.mpeg4/.mov are inferred as mpeg4",
+        help_heading = "General",
+        display_order = 9
+    )]
+    output_type: Option<OutputType>,
+
+    #[arg(
+        long,
+        value_enum,
         default_value_t = JsonFormat::Flat,
         help = "JSON format: flat or standard",
         help_heading = "JSON Conversion",
@@ -162,19 +180,10 @@ struct Cli {
 
     #[arg(
         long,
-        value_enum,
-        help = "Render to format (raw/png/jpeg/mpeg4). Extensions: .mp4/.m4v/.mpeg4/.mov for MPEG4, inferred otherwise",
-        help_heading = "Rendering",
-        display_order = 30
-    )]
-    render_format: Option<RenderFormat>,
-
-    #[arg(
-        long,
         default_value_t = 0,
         help = "Zero-based frame index to render",
         help_heading = "Rendering",
-        display_order = 31
+        display_order = 30
     )]
     render_frame: usize,
 
@@ -314,6 +323,22 @@ enum JsonFormat {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum InputType {
+    Dicom,
+    Json,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum OutputType {
+    Dicom,
+    Json,
+    Raw,
+    Png,
+    Jpeg,
+    Mpeg4,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 enum KeyFormat {
     Name,
     Hex,
@@ -325,7 +350,7 @@ enum BulkDataMode {
     Uri,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RenderFormat {
     Raw,
     Png,
@@ -1338,7 +1363,7 @@ fn infer_direction(
     input: &Path,
     input_bytes: &[u8],
 ) -> Result<Direction, Box<dyn std::error::Error>> {
-    let input_kind = detect_input_kind(input, input_bytes)?;
+    let input_kind = detect_input_kind(input, input_bytes, cli.input_type)?;
 
     if cli.overwrite && cli.output.is_some() {
         return Err(io::Error::new(
@@ -1349,17 +1374,17 @@ fn infer_direction(
     }
 
     match (&cli.output, input_kind) {
-        (Some(output), FileKind::Dicom) => match detect_output_kind(output) {
+        (Some(output), FileKind::Dicom) => match detect_output_kind(output, cli.output_type) {
             Some(FileKind::Json) => Ok(Direction::DicomToJson),
             Some(FileKind::Dicom) => Ok(Direction::DicomToDicom),
             Some(FileKind::Render) => Ok(Direction::DicomToRender),
             None => Err(io::Error::new(
                 ErrorKind::InvalidInput,
-                "could not determine output type; use .json, .dcm/.dicom, or a render extension (.jpg/.jpeg/.png/.raw/.mp4/.m4v/.mpeg4/.mov)",
+                "could not determine output type; use .json, .dcm/.dicom, or a render extension (.jpg/.jpeg/.png/.raw/.mp4/.m4v/.mpeg4/.mov), or use --output-type",
             )
             .into()),
         },
-        (Some(output), FileKind::Json) => match detect_output_kind(output) {
+        (Some(output), FileKind::Json) => match detect_output_kind(output, cli.output_type) {
             Some(FileKind::Dicom) => Ok(Direction::JsonToDicom),
             Some(FileKind::Render) => Err(io::Error::new(
                 ErrorKind::InvalidInput,
@@ -1373,7 +1398,7 @@ fn infer_direction(
             .into()),
             None => Err(io::Error::new(
                 ErrorKind::InvalidInput,
-                "could not determine output type; use .json, .dcm/.dicom, or a render extension (.jpg/.jpeg/.png/.raw/.mp4/.m4v/.mpeg4/.mov)",
+                "could not determine output type; use .json, .dcm/.dicom, or a render extension (.jpg/.jpeg/.png/.raw/.mp4/.m4v/.mpeg4/.mov), or use --output-type",
             )
             .into()),
         },
@@ -1410,7 +1435,15 @@ fn infer_direction(
 fn detect_input_kind(
     path: &Path,
     input_bytes: &[u8],
+    explicit_type: Option<InputType>,
 ) -> Result<FileKind, Box<dyn std::error::Error>> {
+    if let Some(input_type) = explicit_type {
+        return Ok(match input_type {
+            InputType::Dicom => FileKind::Dicom,
+            InputType::Json => FileKind::Json,
+        });
+    }
+
     if let Some(kind) = detect_kind_from_extension(path) {
         if kind != FileKind::Render {
             return Ok(kind);
@@ -1427,12 +1460,20 @@ fn detect_input_kind(
 
     Err(io::Error::new(
         ErrorKind::InvalidInput,
-        "could not determine input type; use a .json, .dcm, or .dicom extension",
+        "could not determine input type; use a .json, .dcm, or .dicom extension, or use --input-type",
     )
     .into())
 }
 
-fn detect_output_kind(path: &Path) -> Option<FileKind> {
+fn detect_output_kind(path: &Path, explicit_type: Option<OutputType>) -> Option<FileKind> {
+    if let Some(output_type) = explicit_type {
+        return Some(match output_type {
+            OutputType::Dicom => FileKind::Dicom,
+            OutputType::Json => FileKind::Json,
+            OutputType::Raw | OutputType::Png | OutputType::Jpeg | OutputType::Mpeg4 => FileKind::Render,
+        });
+    }
+
     detect_kind_from_extension(path)
 }
 
@@ -1447,8 +1488,20 @@ fn detect_kind_from_extension(path: &Path) -> Option<FileKind> {
     }
 }
 
+fn output_type_to_render_format(output_type: OutputType) -> Option<RenderFormat> {
+    match output_type {
+        OutputType::Raw => Some(RenderFormat::Raw),
+        OutputType::Png => Some(RenderFormat::Png),
+        OutputType::Jpeg => Some(RenderFormat::Jpeg),
+        OutputType::Mpeg4 => Some(RenderFormat::Mpeg4),
+        _ => None,
+    }
+}
+
 fn validate_no_render_or_redaction_flags(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
-    if cli.render_format.is_some()
+    let is_render_output = cli.output_type.map_or(false, |ot| output_type_to_render_format(ot).is_some());
+    
+    if is_render_output
         || cli.render_frame != 0
         || cli.no_modality_lut
         || cli.no_voi_lut
@@ -1467,7 +1520,7 @@ fn validate_no_render_or_redaction_flags(cli: &Cli) -> Result<(), Box<dyn std::e
     {
         return Err(io::Error::new(
             ErrorKind::InvalidInput,
-            "render options are only valid when converting DICOM to .jpg/.jpeg/.png/.raw/.mp4",
+            "render options are only valid when converting DICOM to render format (raw/png/jpeg/mpeg4)",
         )
         .into());
     }
@@ -1476,7 +1529,9 @@ fn validate_no_render_or_redaction_flags(cli: &Cli) -> Result<(), Box<dyn std::e
 }
 
 fn validate_non_dicom_to_dicom_render_flags(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
-    if cli.render_format.is_some()
+    let is_render_output = cli.output_type.map_or(false, |ot| output_type_to_render_format(ot).is_some());
+    
+    if is_render_output
         || cli.render_frame != 0
         || cli.no_modality_lut
         || cli.no_voi_lut
@@ -1537,8 +1592,10 @@ fn resolve_render_format(
     cli: &Cli,
     output_path: &Path,
 ) -> Result<RenderFormat, Box<dyn std::error::Error>> {
-    if let Some(format) = cli.render_format {
-        return Ok(format);
+    if let Some(output_type) = cli.output_type {
+        if let Some(format) = output_type_to_render_format(output_type) {
+            return Ok(format);
+        }
     }
 
     let extension = output_path
@@ -1548,7 +1605,7 @@ fn resolve_render_format(
         .ok_or_else(|| {
             io::Error::new(
                 ErrorKind::InvalidInput,
-                "render output requires --render-format when output extension is missing",
+                "render output requires --output-type (raw/png/jpeg/mpeg4) when output extension is missing",
             )
         })?;
 
@@ -1559,7 +1616,7 @@ fn resolve_render_format(
         "mp4" | "m4v" | "mpeg4" | "mov" => Ok(RenderFormat::Mpeg4),
         _ => Err(io::Error::new(
             ErrorKind::InvalidInput,
-            "render output extension must be .raw, .png, .jpg/.jpeg, or .mp4/.m4v/.mpeg4/.mov",
+            "render output extension must be .raw, .png, .jpg/.jpeg, or .mp4/.m4v/.mpeg4/.mov, or use --output-type (raw/png/jpeg/mpeg4)",
         )
         .into()),
     }
@@ -1857,6 +1914,8 @@ mod tests {
         Cli {
             input: None,
             output: None,
+            input_type: None,
+            output_type: None,
             jpeg2000_codec: super::Jpeg2000Codec::Auto,
             stdin_paths: false,
             overwrite: false,
@@ -1867,7 +1926,6 @@ mod tests {
             transfer_syntax: None,
             set: Vec::new(),
             remove: Vec::new(),
-            render_format: None,
             render_frame: 0,
             no_modality_lut: false,
             no_voi_lut: false,
@@ -1892,7 +1950,7 @@ mod tests {
     #[test]
     fn detects_mp4_output_as_render() {
         assert_eq!(
-            detect_output_kind(&PathBuf::from("out.mp4")),
+            detect_output_kind(&PathBuf::from("out.mp4"), None),
             Some(FileKind::Render)
         );
     }
@@ -1900,7 +1958,7 @@ mod tests {
     #[test]
     fn detects_mpeg4_output_as_render() {
         assert_eq!(
-            detect_output_kind(&PathBuf::from("out.mpeg4")),
+            detect_output_kind(&PathBuf::from("out.mpeg4"), None),
             Some(FileKind::Render)
         );
     }
@@ -1908,7 +1966,7 @@ mod tests {
     #[test]
     fn detects_mov_output_as_render() {
         assert_eq!(
-            detect_output_kind(&PathBuf::from("out.mov")),
+            detect_output_kind(&PathBuf::from("out.mov"), None),
             Some(FileKind::Render)
         );
     }
