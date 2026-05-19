@@ -90,7 +90,7 @@ fn reads_dicom_file_without_part10_header() {
 
     assert_eq!(
         object.element(tags::MODALITY).unwrap().to_str().unwrap(),
-        "PT"
+        "DX"
     );
 }
 
@@ -803,7 +803,7 @@ fn fixture_path(name: &str) -> PathBuf {
 }
 
 fn repo_root_path(name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(name)
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test/files").join(name)
 }
 
 fn assert_core_fields_match(

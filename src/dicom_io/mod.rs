@@ -37,3 +37,5 @@ pub use types::{
     DicomJsonReadOptions, DicomJsonWriteOptions, ReadError, RenderError, TranscodeError,
     TransferSyntaxSupport, WithMetaError, WriteError,
 };
+pub mod dicom_edit;
+pub use dicom_edit::remove_private_tags_inplace;

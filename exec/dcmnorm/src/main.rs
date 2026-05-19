@@ -12,6 +12,7 @@ use dcmnorm::dicom_io::{
     DicomJsonFormat, DicomJsonKeyStyle, DicomJsonReadOptions, DicomJsonWriteOptions,
     RenderOutputFormat, RenderPipelineOptions, JPEG2000_CODEC_ENV_FLAG, JPEG2000_DEBUG_ENV_FLAG,
 };
+use dcmnorm::remove_private_tags_inplace;
 use dcmnorm::perf;
 use dicom_core::dictionary::{DataDictionary, DataDictionaryEntry};
 use dicom_core::{Tag, VR};
@@ -30,6 +31,14 @@ use sha2::{Digest, Sha256};
 struct Cli {
     #[arg(value_name = "INPUT", help_heading = "General", display_order = 1)]
     input: Option<PathBuf>,
+    #[arg(
+        long,
+        action = ArgAction::SetTrue,
+        help = "Remove all private tags from the DICOM file before output (group odd/even, element >= 0x0010)",
+        help_heading = "DICOM Editing",
+        display_order = 23
+    )]
+    remove_private_tags: bool,
 
     #[arg(value_name = "OUTPUT", help_heading = "General", display_order = 2)]
     output: Option<PathBuf>,
@@ -587,6 +596,10 @@ fn run_dicom_to_json(
         read_dicom_bytes(input_bytes)?
     };
     apply_attribute_overrides(cli, &mut object)?;
+    if cli.remove_private_tags {
+        remove_private_tags_inplace(&mut object);
+        verbose_log(cli, "Removed all private tags from DICOM object");
+    }
     verbose_log(
         cli,
         format!(
@@ -718,6 +731,10 @@ fn run_dicom_to_dicom(
         read_dicom_bytes(input_bytes)?
     };
     apply_attribute_overrides(cli, &mut object)?;
+    if cli.remove_private_tags {
+        remove_private_tags_inplace(&mut object);
+        verbose_log(cli, "Removed all private tags from DICOM object");
+    }
 
     if !cli.redact_box.is_empty() {
         let target_transfer_syntax = cli
@@ -1866,6 +1883,7 @@ mod tests {
             pad_color: None,
             list_transfer_syntaxes: false,
             verbose: false,
+            remove_private_tags: false,
         }
     }
 
