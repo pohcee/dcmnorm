@@ -367,6 +367,7 @@ dependencies = [
  "dicom-core",
  "dicom-dictionary-std",
  "dicom-object",
+ "serde_json",
  "sha2",
 ]
 

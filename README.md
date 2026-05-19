@@ -273,6 +273,22 @@ Convert a DICOM file to standard JSON with hex keys and write to a file:
 cargo run -p dcmnorm-cli -- test/files/dx.dcm out.json --format standard --keys hex
 ```
 
+Filter DICOM attributes before conversion (only filtered tags are parsed and emitted):
+
+```bash
+cargo run -p dcmnorm-cli -- test/files/dx.dcm --filter StudyInstanceUID
+```
+
+Use multiple filters (repeat `--filter` or comma-separate values):
+
+```bash
+cargo run -p dcmnorm-cli -- test/files/dx.dcm out.json --filter StudyInstanceUID,PatientID
+```
+
+`--filter` applies only to DICOM input. The parser reads until the requested
+attributes are available, drops non-filtered attributes, and then continues with
+the normal conversion pipeline (for example, DICOM to JSON output).
+
 By default, `dcmnorm` emits bulk data as relative `BulkDataURI` values (`?offset=...&length=...`) when converting DICOM to JSON, and values of 32 bytes or less are automatically emitted as `InlineBinary`.
 
 To embed absolute `file://` URIs in `BulkDataURI`, pass `--bulk-data-source` without a value:

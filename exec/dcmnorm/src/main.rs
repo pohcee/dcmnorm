@@ -1,12 +1,13 @@
 use std::fs;
 use std::io::{self, BufRead, ErrorKind, Write};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use clap::{ArgAction, CommandFactory, FromArgMatches, Parser, ValueEnum};
 use dcmnorm::dicom_io::{
     jpeg2000_backend_name, kakadu_ffi_enabled, list_transfer_syntax_support, read_dicom_bytes,
-    read_dicom_json_with_options, redact_dicom_pixels_to_transfer_syntax,
+    read_dicom_file, read_dicom_json_with_options, redact_dicom_pixels_to_transfer_syntax,
     render_all_dicom_frames, render_all_dicom_video_frames, render_dicom_frame,
     transcode_dicom_object, write_dicom_file, write_dicom_json_with_options, BoundingBox,
     BoxLength, DicomJsonBulkDataMode, DicomJsonFormat, DicomJsonKeyStyle,
@@ -19,7 +20,10 @@ use dicom_core::dictionary::{DataDictionary, DataDictionaryEntry};
 use dicom_core::{Tag, VR};
 use dicom_dictionary_std::tags;
 use dicom_dictionary_std::StandardDataDictionary;
+use dicom_object::file::ReadPreamble;
+use dicom_object::OpenFileOptions;
 use sha2::{Digest, Sha256};
+use serde_json::Value as JsonValue;
 
 #[derive(Parser, Debug)]
 #[command(name = "dcmnorm")]
@@ -90,6 +94,18 @@ struct Cli {
         display_order = 6
     )]
     stdin_paths: bool,
+
+    #[arg(
+        long,
+        value_name = "KEY",
+        action = ArgAction::Append,
+        value_delimiter = ',',
+        num_args = 1,
+        help = "Filter DICOM by keyword/tag (repeat or comma-separate, e.g. --filter StudyInstanceUID,PatientID). Only filtered elements are parsed/output for DICOM input",
+        help_heading = "General",
+        display_order = 7
+    )]
+    filter: Vec<String>,
 
     #[arg(
         long,
@@ -527,8 +543,192 @@ fn run_check_dicom(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
+fn read_dicom_object_for_filter(
+    input_path: &Path,
+    requests: &[FilterRequest],
+) -> Result<dicom_object::DefaultDicomObject, dcmnorm::dicom_io::ReadError> {
+    let Some(max_tag) = requests
+        .iter()
+        .map(|request| request.tag)
+        .max_by_key(|tag| ((tag.group() as u32) << 16) | tag.element() as u32)
+    else {
+        return read_dicom_file(input_path);
+    };
+
+    let Some(stop_tag) = next_tag(max_tag) else {
+        return read_dicom_file(input_path);
+    };
+
+    OpenFileOptions::new()
+        .read_preamble(ReadPreamble::Always)
+        .read_until(stop_tag)
+        .open_file(input_path)
+        .or_else(|error| match std::fs::read(input_path) {
+            Ok(bytes) => read_dicom_bytes(&bytes).map_err(|_| error),
+            Err(_) => Err(error),
+        })
+}
+
+fn next_tag(tag: Tag) -> Option<Tag> {
+    if tag.element() < u16::MAX {
+        return Some(Tag(tag.group(), tag.element() + 1));
+    }
+
+    if tag.group() < u16::MAX {
+        return Some(Tag(tag.group() + 1, 0));
+    }
+
+    None
+}
+
+#[derive(Clone, Debug)]
+struct FilterRequest {
+    tag: Tag,
+}
+
+fn parse_filter_requests(keys: &[String]) -> Result<Vec<FilterRequest>, io::Error> {
+    let mut requests = Vec::with_capacity(keys.len());
+
+    for key in keys {
+        let display_key = key.trim();
+        if display_key.is_empty() {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                "--filter KEY cannot be empty",
+            ));
+        }
+
+        let tag = StandardDataDictionary.parse_tag(display_key).ok_or_else(|| {
+            io::Error::new(
+                ErrorKind::InvalidInput,
+                format!(
+                    "invalid --filter key '{display_key}'; use a DICOM keyword like StudyInstanceUID or a tag expression like (0020,000D)"
+                ),
+            )
+        })?;
+
+        requests.push(FilterRequest { tag });
+    }
+
+    Ok(requests)
+}
+
+fn apply_filter_to_object(
+    object: &mut dicom_object::DefaultDicomObject,
+    requests: &[FilterRequest],
+) {
+    let keep_tags = requests.iter().map(|request| request.tag).collect::<Vec<_>>();
+    let remove_tags = object
+        .iter()
+        .map(|element| element.header().tag)
+        .filter(|tag| !keep_tags.contains(tag))
+        .collect::<Vec<_>>();
+
+    for tag in remove_tags {
+        object.remove_element(tag);
+    }
+}
+
+fn infer_direction_for_filter(
+    cli: &Cli,
+    input: &Path,
+) -> Result<Direction, Box<dyn std::error::Error>> {
+    let input_kind = detect_input_kind_for_filter(input, cli.input_type)?;
+    if input_kind != FileKind::Dicom {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "--filter is only supported for DICOM input",
+        )
+        .into());
+    }
+
+    if cli.overwrite && cli.output.is_some() {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "--overwrite cannot be combined with an explicit output path",
+        )
+        .into());
+    }
+
+    match &cli.output {
+        Some(output) => match detect_output_kind(output, cli.output_type) {
+            Some(FileKind::Json) => Ok(Direction::DicomToJson),
+            Some(FileKind::Dicom) => Ok(Direction::DicomToDicom),
+            Some(FileKind::Render) => Ok(Direction::DicomToRender),
+            None => Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                "could not determine output type; use .json, .dcm/.dicom, or a render extension (.jpg/.jpeg/.png/.raw/.mp4/.m4v/.mpeg4/.mov), or use --output-type",
+            )
+            .into()),
+        },
+        None => {
+            if cli.overwrite {
+                Ok(Direction::DicomToDicom)
+            } else {
+                Ok(Direction::DicomToJson)
+            }
+        }
+    }
+}
+
+fn detect_input_kind_for_filter(
+    path: &Path,
+    explicit_type: Option<InputType>,
+) -> Result<FileKind, Box<dyn std::error::Error>> {
+    if let Some(input_type) = explicit_type {
+        return Ok(match input_type {
+            InputType::Dicom => FileKind::Dicom,
+            InputType::Json => FileKind::Json,
+        });
+    }
+
+    if let Some(kind) = detect_kind_from_extension(path) {
+        if kind != FileKind::Render {
+            return Ok(kind);
+        }
+    }
+
+    if probe_dicom_file_for_sop_class_uid(path).unwrap_or(false) {
+        return Ok(FileKind::Dicom);
+    }
+
+    let mut file = fs::File::open(path)?;
+    let mut head = vec![0u8; 4096];
+    let read = file.read(&mut head)?;
+    head.truncate(read);
+
+    if looks_like_json(&head) {
+        return Ok(FileKind::Json);
+    }
+
+    Err(io::Error::new(
+        ErrorKind::InvalidInput,
+        "could not determine input type; use a .json, .dcm, or .dicom extension, or use --input-type",
+    )
+    .into())
+}
+
 fn process_one(cli: &Cli, input_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let _scope = perf::scope("cli.process_one");
+
+    if !cli.filter.is_empty() {
+        let requests = parse_filter_requests(&cli.filter)?;
+        let direction = infer_direction_for_filter(cli, input_path)?;
+        let mut object = read_dicom_object_for_filter(input_path, &requests)?;
+        apply_filter_to_object(&mut object, &requests);
+
+        return match direction {
+            Direction::DicomToJson => run_dicom_to_json_with_object(cli, input_path, None, object),
+            Direction::DicomToDicom => run_dicom_to_dicom_with_object(cli, input_path, object),
+            Direction::DicomToRender => run_dicom_to_render_with_object(cli, object),
+            Direction::JsonToDicom => Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                "--filter is only supported for DICOM input",
+            )
+            .into()),
+        };
+    }
+
     let input_bytes = fs::read(input_path)?;
     let direction = infer_direction(cli, input_path, &input_bytes)?;
 
@@ -675,6 +875,20 @@ fn run_dicom_to_json(
     input_path: &Path,
     input_bytes: &[u8],
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let object = {
+        let _parse_scope = perf::scope("cli.dicom_to_json.read_dicom_bytes");
+        read_dicom_bytes(input_bytes)?
+    };
+
+    run_dicom_to_json_with_object(cli, input_path, Some(input_bytes), object)
+}
+
+fn run_dicom_to_json_with_object(
+    cli: &Cli,
+    input_path: &Path,
+    input_bytes: Option<&[u8]>,
+    mut object: dicom_object::DefaultDicomObject,
+) -> Result<(), Box<dyn std::error::Error>> {
     let _scope = perf::scope("cli.run_dicom_to_json");
     validate_no_render_or_redaction_flags(cli)?;
 
@@ -694,10 +908,6 @@ fn run_dicom_to_json(
         .into());
     }
 
-    let mut object = {
-        let _parse_scope = perf::scope("cli.dicom_to_json.read_dicom_bytes");
-        read_dicom_bytes(input_bytes)?
-    };
     apply_attribute_overrides(cli, &mut object)?;
     if cli.remove_private_tags {
         remove_private_tags_inplace(&mut object);
@@ -725,7 +935,7 @@ fn run_dicom_to_json(
         None
     };
 
-    let output = {
+    let mut output = {
         let _json_scope = perf::scope("cli.dicom_to_json.write_dicom_json_with_options");
         write_dicom_json_with_options(
         &object,
@@ -739,15 +949,20 @@ fn run_dicom_to_json(
                 KeyFormat::Name => DicomJsonKeyStyle::Name,
                 KeyFormat::Hex => DicomJsonKeyStyle::Hex,
             },
-            bulk_data_source: if bulk_data_mode == DicomJsonBulkDataMode::Uri {
-                Some(input_bytes)
-            } else {
-                None
-            },
+            bulk_data_source: if bulk_data_mode == DicomJsonBulkDataMode::Uri { input_bytes } else { None },
             bulk_data_uri_base: uri_base_owned.as_deref(),
         },
     )?
     };
+
+    if !cli.filter.is_empty() {
+        let filter_requests = parse_filter_requests(&cli.filter)?;
+        let keep_tags = filter_requests
+            .iter()
+            .map(|request| request.tag)
+            .collect::<Vec<_>>();
+        output = filter_json_output_to_tags(output, &keep_tags)?;
+    }
 
     if let Some(path) = &cli.output {
         fs::write(path, output)?;
@@ -760,10 +975,42 @@ fn run_dicom_to_json(
     Ok(())
 }
 
+fn filter_json_output_to_tags(
+    output: String,
+    keep_tags: &[Tag],
+) -> Result<String, Box<dyn std::error::Error>> {
+    let mut value: JsonValue = serde_json::from_str(&output)?;
+    let JsonValue::Object(ref mut map) = value else {
+        return Ok(output);
+    };
+
+    map.retain(|key, _| {
+        StandardDataDictionary
+            .parse_tag(key)
+            .map(|tag| keep_tags.contains(&tag))
+            .unwrap_or(false)
+    });
+
+    Ok(serde_json::to_string(&value)?)
+}
+
 fn run_dicom_to_dicom(
     cli: &Cli,
     input_path: &Path,
     input_bytes: &[u8],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let object = {
+        let _parse_scope = perf::scope("cli.dicom_to_dicom.read_dicom_bytes");
+        read_dicom_bytes(input_bytes)?
+    };
+
+    run_dicom_to_dicom_with_object(cli, input_path, object)
+}
+
+fn run_dicom_to_dicom_with_object(
+    cli: &Cli,
+    input_path: &Path,
+    mut object: dicom_object::DefaultDicomObject,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let _scope = perf::scope("cli.run_dicom_to_dicom");
     validate_non_dicom_to_dicom_render_flags(cli)?;
@@ -829,10 +1076,6 @@ fn run_dicom_to_dicom(
         .into());
     }
 
-    let mut object = {
-        let _parse_scope = perf::scope("cli.dicom_to_dicom.read_dicom_bytes");
-        read_dicom_bytes(input_bytes)?
-    };
     apply_attribute_overrides(cli, &mut object)?;
     if cli.remove_private_tags {
         remove_private_tags_inplace(&mut object);
@@ -905,6 +1148,18 @@ fn run_dicom_to_dicom(
 }
 
 fn run_dicom_to_render(cli: &Cli, input_bytes: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+    let object = {
+        let _parse_scope = perf::scope("cli.dicom_to_render.read_dicom_bytes");
+        read_dicom_bytes(input_bytes)?
+    };
+
+    run_dicom_to_render_with_object(cli, object)
+}
+
+fn run_dicom_to_render_with_object(
+    cli: &Cli,
+    mut object: dicom_object::DefaultDicomObject,
+) -> Result<(), Box<dyn std::error::Error>> {
     let _scope = perf::scope("cli.run_dicom_to_render");
     if cli.keys != KeyFormat::Name {
         return Err(io::Error::new(
@@ -953,10 +1208,6 @@ fn run_dicom_to_render(cli: &Cli, input_bytes: &[u8]) -> Result<(), Box<dyn std:
         )
     })?;
 
-    let mut object = {
-        let _parse_scope = perf::scope("cli.dicom_to_render.read_dicom_bytes");
-        read_dicom_bytes(input_bytes)?
-    };
     verbose_log(
         cli,
         format!(
@@ -1632,6 +1883,7 @@ fn validate_check_dicom_flags(cli: &Cli) -> Result<(), Box<dyn std::error::Error
         || cli.redact_color.is_some()
         || cli.pad
         || cli.pad_color.is_some()
+        || !cli.filter.is_empty()
     {
         return Err(io::Error::new(
             ErrorKind::InvalidInput,
@@ -2017,13 +2269,39 @@ fn looks_like_dicom(input_bytes: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        detect_output_kind, infer_direction, mpeg4_input_pixel_format, mpeg4_muxer_name,
-        mpeg4_video_filter, parse_attribute_override, parse_redact_box,
+        apply_filter_to_object, detect_output_kind, infer_direction, mpeg4_input_pixel_format,
+        mpeg4_muxer_name, mpeg4_video_filter, next_tag, parse_attribute_override,
+        parse_filter_requests, parse_redact_box, run_dicom_to_json_with_object,
         resolve_render_format, Cli, Direction, FileKind, RenderFormat,
     };
     use clap::{CommandFactory, FromArgMatches};
+    use dicom_dictionary_std::tags;
+    use dcmnorm::dicom_io::read_dicom_file;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
     use dicom_core::Tag;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
+
+    fn repo_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf()
+    }
+
+    fn fixture_path(name: &str) -> PathBuf {
+        repo_root().join("test").join("files").join(name)
+    }
+
+    fn temp_output_path(stem: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("dcmnorm-{stem}-{nanos}.json"))
+    }
 
     fn base_cli() -> Cli {
         Cli {
@@ -2033,6 +2311,7 @@ mod tests {
             output_type: None,
             jpeg2000_codec: super::Jpeg2000Codec::Auto,
             stdin_paths: false,
+            filter: Vec::new(),
             overwrite: false,
             check_dicom: false,
             format: super::JsonFormat::Flat,
@@ -2072,6 +2351,108 @@ mod tests {
 
         assert!(cli.check_dicom);
         assert_eq!(cli.input, Some(PathBuf::from("in.dcm")));
+    }
+
+    #[test]
+    fn parses_filter_flag_with_keyword() {
+        let matches = Cli::command()
+            .try_get_matches_from(["dcmnorm", "--filter", "StudyInstanceUID", "in.dcm"])
+            .unwrap();
+        let cli = Cli::from_arg_matches(&matches).unwrap();
+
+        assert_eq!(cli.filter, vec!["StudyInstanceUID".to_string()]);
+    }
+
+    #[test]
+    fn parses_filter_flag_with_comma_separated_values() {
+        let matches = Cli::command()
+            .try_get_matches_from([
+                "dcmnorm",
+                "--filter",
+                "StudyInstanceUID,PatientID",
+                "in.dcm",
+            ])
+            .unwrap();
+        let cli = Cli::from_arg_matches(&matches).unwrap();
+
+        assert_eq!(
+            cli.filter,
+            vec!["StudyInstanceUID".to_string(), "PatientID".to_string()]
+        );
+    }
+
+    #[test]
+    fn computes_next_tag_for_element_and_group_boundaries() {
+        assert_eq!(next_tag(Tag(0x0010, 0x0010)), Some(Tag(0x0010, 0x0011)));
+        assert_eq!(next_tag(Tag(0x0010, 0xFFFF)), Some(Tag(0x0011, 0x0000)));
+        assert_eq!(next_tag(Tag(0xFFFF, 0xFFFF)), None);
+    }
+
+    #[test]
+    fn parses_filter_requests_with_keyword_and_tag_expression() {
+        let requests = parse_filter_requests(&[
+            "StudyInstanceUID".to_string(),
+            "(0008,0060)".to_string(),
+        ])
+        .unwrap();
+
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].tag, tags::STUDY_INSTANCE_UID);
+        assert_eq!(requests[1].tag, tags::MODALITY);
+    }
+
+    #[test]
+    fn apply_filter_keeps_only_requested_tags() {
+        let requests = parse_filter_requests(&["StudyInstanceUID".to_string()]).unwrap();
+        let mut object = read_dicom_file(fixture_path("dx.dcm")).unwrap();
+
+        apply_filter_to_object(&mut object, &requests);
+
+        assert!(object.get(tags::STUDY_INSTANCE_UID).is_some());
+        assert!(object.get(tags::MODALITY).is_none());
+        assert!(object.get(tags::PIXEL_DATA).is_none());
+    }
+
+    #[test]
+    fn filtered_dicom_to_json_writes_only_filtered_attributes() {
+        let requests = parse_filter_requests(&["StudyInstanceUID".to_string()]).unwrap();
+        let input_path = fixture_path("dx.dcm");
+        let mut object = read_dicom_file(&input_path).unwrap();
+        apply_filter_to_object(&mut object, &requests);
+
+        let mut cli = base_cli();
+        let output_path = temp_output_path("filtered-dicom-to-json");
+        cli.output = Some(output_path.clone());
+        cli.filter = vec!["StudyInstanceUID".to_string()];
+
+        run_dicom_to_json_with_object(&cli, Path::new(&input_path), None, object).unwrap();
+
+        let json = fs::read_to_string(&output_path).unwrap();
+        let _ = fs::remove_file(&output_path);
+        assert!(json.contains("\"StudyInstanceUID\""));
+        assert!(!json.contains("\"Modality\""));
+        assert!(!json.contains("\"FileMetaInformationVersion\""));
+        assert!(!json.contains("\"TransferSyntaxUID\""));
+    }
+
+    #[test]
+    fn filtered_dicom_to_json_can_emit_requested_file_meta_attribute() {
+        let requests = parse_filter_requests(&["MediaStorageSOPClassUID".to_string()]).unwrap();
+        let input_path = fixture_path("dx.dcm");
+        let mut object = read_dicom_file(&input_path).unwrap();
+        apply_filter_to_object(&mut object, &requests);
+
+        let mut cli = base_cli();
+        let output_path = temp_output_path("filtered-file-meta-to-json");
+        cli.output = Some(output_path.clone());
+        cli.filter = vec!["MediaStorageSOPClassUID".to_string()];
+
+        run_dicom_to_json_with_object(&cli, Path::new(&input_path), None, object).unwrap();
+
+        let json = fs::read_to_string(&output_path).unwrap();
+        let _ = fs::remove_file(&output_path);
+        assert!(json.contains("\"MediaStorageSOPClassUID\""));
+        assert!(!json.contains("\"StudyInstanceUID\""));
     }
 
     #[test]
