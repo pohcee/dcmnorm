@@ -60,7 +60,7 @@ use serde_json::Value as JsonValue;
 
 use super::{
     detect_jpeg2000_backend_from_search_path, kakadu_ffi_enabled, list_transfer_syntax_support,
-    read_dicom_bytes, read_dicom_file, read_dicom_json, read_dicom_json_full,
+    probe_dicom_file_for_sop_class_uid, read_dicom_bytes, read_dicom_file, read_dicom_json, read_dicom_json_full,
     read_dicom_json_full_with_source, read_dicom_json_with_source,
     redact_dicom_pixels_to_transfer_syntax, render_all_dicom_video_frames, render_dicom_frame,
     transcode_dicom_object, write_dicom_bytes, write_dicom_file, write_dicom_json,
@@ -134,6 +134,31 @@ fn reads_dicom_file_without_part10_header() {
         object.element(tags::MODALITY).unwrap().to_str().unwrap(),
         "DX"
     );
+}
+
+#[test]
+fn probes_dicom_file_with_part10_header() {
+    let is_valid = probe_dicom_file_for_sop_class_uid(fixture_path("dx.dcm")).unwrap();
+    assert!(is_valid);
+}
+
+#[test]
+fn probes_dicom_file_without_part10_header() {
+    let is_valid = probe_dicom_file_for_sop_class_uid(repo_root_path("nometa.dcm")).unwrap();
+    assert!(is_valid);
+}
+
+#[test]
+fn probe_rejects_non_dicom_file() {
+    let is_valid = probe_dicom_file_for_sop_class_uid(fixture_path("notdicom.txt")).unwrap();
+    assert!(!is_valid);
+}
+
+#[test]
+fn probe_rejects_directory_path() {
+    let is_valid = probe_dicom_file_for_sop_class_uid(fixture_path(""))
+        .expect("directory metadata should be readable");
+    assert!(!is_valid);
 }
 
 #[test]

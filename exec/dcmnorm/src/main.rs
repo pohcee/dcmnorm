@@ -6,11 +6,12 @@ use std::process::{Command, Stdio};
 use clap::{ArgAction, CommandFactory, FromArgMatches, Parser, ValueEnum};
 use dcmnorm::dicom_io::{
     jpeg2000_backend_name, kakadu_ffi_enabled, list_transfer_syntax_support, read_dicom_bytes,
-    read_dicom_json_with_options, redact_dicom_pixels_to_transfer_syntax, render_all_dicom_frames,
-    render_all_dicom_video_frames, render_dicom_frame, transcode_dicom_object, write_dicom_file,
-    write_dicom_json_with_options, BoundingBox, BoxLength, DicomJsonBulkDataMode,
-    DicomJsonFormat, DicomJsonKeyStyle, DicomJsonReadOptions, DicomJsonWriteOptions,
-    RenderOutputFormat, RenderPipelineOptions, JPEG2000_CODEC_ENV_FLAG, JPEG2000_DEBUG_ENV_FLAG,
+    read_dicom_json_with_options, redact_dicom_pixels_to_transfer_syntax,
+    render_all_dicom_frames, render_all_dicom_video_frames, render_dicom_frame,
+    transcode_dicom_object, write_dicom_file, write_dicom_json_with_options, BoundingBox,
+    BoxLength, DicomJsonBulkDataMode, DicomJsonFormat, DicomJsonKeyStyle,
+    DicomJsonReadOptions, DicomJsonWriteOptions, RenderOutputFormat, RenderPipelineOptions,
+    JPEG2000_CODEC_ENV_FLAG, JPEG2000_DEBUG_ENV_FLAG, probe_dicom_file_for_sop_class_uid,
 };
 use dcmnorm::remove_private_tags_inplace;
 use dcmnorm::perf;
@@ -55,9 +56,18 @@ struct Cli {
     #[arg(
         long,
         action = ArgAction::SetTrue,
-        help = "Emit verbose conversion and rendering diagnostics",
+        help = "Check whether INPUT is a valid DICOM file and print matching paths",
         help_heading = "General",
         display_order = 4
+    )]
+    check_dicom: bool,
+
+    #[arg(
+        long,
+        action = ArgAction::SetTrue,
+        help = "Emit verbose conversion and rendering diagnostics",
+        help_heading = "General",
+        display_order = 5
     )]
     verbose: bool,
 
@@ -384,7 +394,9 @@ const NEGATIVE_ZERO_ANCHOR: i32 = i32::MIN;
 
 fn main() {
     if let Err(error) = run() {
-        eprintln!("{error}");
+        if !error.to_string().is_empty() {
+            eprintln!("{error}");
+        }
         std::process::exit(1);
     }
 }
@@ -420,6 +432,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
+    if cli.check_dicom {
+        validate_check_dicom_flags(&cli)?;
+        return run_check_dicom(&cli);
+    }
+
     if cli.stdin_paths {
         let stdin = io::stdin();
         let mut any_error = false;
@@ -449,6 +466,65 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     })?;
 
     process_one(&cli, input_path)
+}
+
+fn run_check_dicom(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+    let mut stdout = io::stdout().lock();
+
+    if cli.stdin_paths {
+        let stdin = io::stdin();
+        let mut any_error = false;
+        for line in stdin.lock().lines() {
+            let line = line?;
+            let line = line.trim().to_string();
+            if line.is_empty() {
+                continue;
+            }
+            let input_path = PathBuf::from(&line);
+            let Ok(metadata) = fs::metadata(&input_path) else {
+                any_error = true;
+                continue;
+            };
+
+            if !metadata.is_file() {
+                any_error = true;
+                continue;
+            }
+
+            match probe_dicom_file_for_sop_class_uid(&input_path) {
+                Ok(true) => {
+                    writeln!(stdout, "{}", input_path.display())?;
+                }
+                Ok(false) => {
+                    any_error = true;
+                }
+                Err(error) => {
+                    let _ = error;
+                    any_error = true;
+                }
+            }
+        }
+
+        if any_error {
+            return Err(io::Error::new(ErrorKind::InvalidInput, "").into());
+        }
+        return Ok(());
+    }
+
+    let input_path = cli.input.as_ref().ok_or_else(|| {
+        io::Error::new(
+            ErrorKind::InvalidInput,
+            "an input path is required for --check-dicom",
+        )
+    })?;
+
+    match probe_dicom_file_for_sop_class_uid(input_path) {
+        Ok(true) => {
+            writeln!(stdout, "{}", input_path.display())?;
+            Ok(())
+        }
+        Ok(false) | Err(_) => Err(io::Error::new(ErrorKind::InvalidInput, "").into()),
+    }
 }
 
 fn process_one(cli: &Cli, input_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
@@ -1528,6 +1604,45 @@ fn validate_no_render_or_redaction_flags(cli: &Cli) -> Result<(), Box<dyn std::e
     Ok(())
 }
 
+fn validate_check_dicom_flags(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+    if cli.output.is_some()
+        || cli.overwrite
+        || cli.input_type.is_some()
+        || cli.output_type.is_some()
+        || cli.transfer_syntax.is_some()
+        || !cli.set.is_empty()
+        || !cli.remove.is_empty()
+        || cli.remove_private_tags
+        || cli.format != JsonFormat::Flat
+        || cli.keys != KeyFormat::Name
+        || cli.bulk_data != BulkDataMode::Uri
+        || cli.bulk_data_source.is_some()
+        || cli.render_frame != 0
+        || cli.render_all_frames
+        || cli.render_fps.is_some()
+        || cli.no_modality_lut
+        || cli.no_voi_lut
+        || cli.window_center.is_some()
+        || cli.window_width.is_some()
+        || cli.jpeg_quality != 90
+        || cli.output_width.is_some()
+        || cli.output_height.is_some()
+        || cli.scale_max_size.is_some()
+        || !cli.redact_box.is_empty()
+        || cli.redact_color.is_some()
+        || cli.pad
+        || cli.pad_color.is_some()
+    {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "--check-dicom only accepts INPUT (or --stdin-paths) and optional --verbose",
+        )
+        .into());
+    }
+
+    Ok(())
+}
+
 fn validate_non_dicom_to_dicom_render_flags(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     let is_render_output = cli.output_type.map_or(false, |ot| output_type_to_render_format(ot).is_some());
     
@@ -1919,6 +2034,7 @@ mod tests {
             jpeg2000_codec: super::Jpeg2000Codec::Auto,
             stdin_paths: false,
             overwrite: false,
+            check_dicom: false,
             format: super::JsonFormat::Flat,
             keys: super::KeyFormat::Name,
             bulk_data: super::BulkDataMode::Uri,
@@ -1945,6 +2061,17 @@ mod tests {
             verbose: false,
             remove_private_tags: false,
         }
+    }
+
+    #[test]
+    fn parses_check_dicom_flag() {
+        let matches = Cli::command()
+            .try_get_matches_from(["dcmnorm", "--check-dicom", "in.dcm"])
+            .unwrap();
+        let cli = Cli::from_arg_matches(&matches).unwrap();
+
+        assert!(cli.check_dicom);
+        assert_eq!(cli.input, Some(PathBuf::from("in.dcm")));
     }
 
     #[test]

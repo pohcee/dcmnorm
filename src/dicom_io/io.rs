@@ -1,5 +1,6 @@
 use std::ffi::OsStr;
 use std::io::Cursor;
+use std::io::Read;
 use std::path::Path;
 use std::process::Command;
 use std::sync::OnceLock;
@@ -26,6 +27,10 @@ use super::types::{DicomIoError, ReadError, TranscodeError, TransferSyntaxSuppor
 
 pub const JPEG2000_DEBUG_ENV_FLAG: &str = "DCMNORM_JPEG2000_DEBUG";
 pub const JPEG2000_CODEC_ENV_FLAG: &str = "DCMNORM_JPEG2000_CODEC";
+const DICOM_PROBE_CHUNK_SIZE: usize = 64 * 1024;
+const ITEM_TAG: Tag = Tag(0xFFFE, 0xE000);
+const ITEM_DELIMITATION_TAG: Tag = Tag(0xFFFE, 0xE00D);
+const SEQUENCE_DELIMITATION_TAG: Tag = Tag(0xFFFE, 0xE0DD);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Jpeg2000Backend {
@@ -227,6 +232,367 @@ pub fn read_dicom_bytes(bytes: impl AsRef<[u8]>) -> Result<DefaultDicomObject, R
         .read_preamble(ReadPreamble::Always)
         .from_reader(Cursor::new(bytes))
         .or_else(|error| read_dicom_dataset_without_meta(bytes).ok_or(error))
+}
+
+pub fn probe_dicom_file_for_sop_class_uid<P>(path: P) -> Result<bool, std::io::Error>
+where
+    P: AsRef<Path>,
+{
+    let path_ref = path.as_ref();
+    let metadata = std::fs::metadata(path_ref)?;
+    if !metadata.is_file() {
+        return Ok(false);
+    }
+
+    let mut file = std::fs::File::open(path_ref)?;
+    let mut bytes = Vec::with_capacity(DICOM_PROBE_CHUNK_SIZE * 2);
+    let mut chunk = vec![0u8; DICOM_PROBE_CHUNK_SIZE];
+
+    loop {
+        let read = file.read(&mut chunk)?;
+        if read > 0 {
+            bytes.extend_from_slice(&chunk[..read]);
+        }
+        let eof = read == 0;
+
+        match probe_dicom_bytes_for_sop_class_uid(&bytes, eof) {
+            DicomProbeStatus::Found => return Ok(true),
+            DicomProbeStatus::NeedMore if !eof => continue,
+            DicomProbeStatus::NeedMore | DicomProbeStatus::NotFound | DicomProbeStatus::Invalid => {
+                return Ok(false)
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DicomProbeStatus {
+    Found,
+    NeedMore,
+    NotFound,
+    Invalid,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProbeParseError {
+    NeedMore,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ProbeTransferSyntax {
+    explicit_vr: bool,
+    little_endian: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ProbeHeader {
+    tag: Tag,
+    header_length: usize,
+    length: Option<usize>,
+}
+
+fn probe_dicom_bytes_for_sop_class_uid(source: &[u8], eof: bool) -> DicomProbeStatus {
+    if source.len() >= 132 && &source[128..132] == b"DICM" {
+        return probe_part10_for_sop_class_uid(source, eof);
+    }
+
+    probe_dataset_without_meta_for_sop_class_uid(source, eof)
+}
+
+fn probe_part10_for_sop_class_uid(source: &[u8], eof: bool) -> DicomProbeStatus {
+    let mut position = 132;
+    let mut transfer_syntax = ProbeTransferSyntax {
+        explicit_vr: true,
+        little_endian: true,
+    };
+
+    while position + 8 <= source.len() {
+        let header = match parse_probe_element_header(source, position, true, true) {
+            Ok(header) => header,
+            Err(ProbeParseError::NeedMore) => return DicomProbeStatus::NeedMore,
+        };
+
+        if header.tag.group() != 0x0002 {
+            break;
+        }
+
+        let value_offset = position + header.header_length;
+        let Some(value_length) = header.length else {
+            return DicomProbeStatus::Invalid;
+        };
+
+        if value_offset + value_length > source.len() {
+            return DicomProbeStatus::NeedMore;
+        }
+
+        if header.tag == tags::TRANSFER_SYNTAX_UID {
+            let uid = decode_probe_text(&source[value_offset..value_offset + value_length]);
+            transfer_syntax = probe_transfer_syntax_from_uid(uid.as_str());
+        }
+
+        position = value_offset + value_length;
+    }
+
+    probe_dataset_for_sop_class_uid(
+        source,
+        position,
+        transfer_syntax.explicit_vr,
+        transfer_syntax.little_endian,
+        eof,
+    )
+}
+
+fn probe_dataset_without_meta_for_sop_class_uid(source: &[u8], eof: bool) -> DicomProbeStatus {
+    let mut any_need_more = false;
+    let syntaxes = [
+        ProbeTransferSyntax {
+            explicit_vr: false,
+            little_endian: true,
+        },
+        ProbeTransferSyntax {
+            explicit_vr: true,
+            little_endian: true,
+        },
+        ProbeTransferSyntax {
+            explicit_vr: true,
+            little_endian: false,
+        },
+    ];
+
+    for syntax in syntaxes {
+        match probe_dataset_for_sop_class_uid(source, 0, syntax.explicit_vr, syntax.little_endian, eof)
+        {
+            DicomProbeStatus::Found => return DicomProbeStatus::Found,
+            DicomProbeStatus::NeedMore => any_need_more = true,
+            DicomProbeStatus::NotFound | DicomProbeStatus::Invalid => {}
+        }
+    }
+
+    if any_need_more && !eof {
+        DicomProbeStatus::NeedMore
+    } else {
+        DicomProbeStatus::Invalid
+    }
+}
+
+fn probe_dataset_for_sop_class_uid(
+    source: &[u8],
+    mut position: usize,
+    explicit_vr: bool,
+    little_endian: bool,
+    eof: bool,
+) -> DicomProbeStatus {
+    while position + 8 <= source.len() {
+        let header = match parse_probe_element_header(source, position, explicit_vr, little_endian) {
+            Ok(header) => header,
+            Err(ProbeParseError::NeedMore) => return DicomProbeStatus::NeedMore,
+        };
+        let value_offset = position + header.header_length;
+
+        if header.tag == tags::SOP_CLASS_UID {
+            let Some(length) = header.length else {
+                return DicomProbeStatus::Invalid;
+            };
+
+            if length == 0 || value_offset + length > source.len() {
+                return DicomProbeStatus::NeedMore;
+            }
+
+            let value = decode_probe_text(&source[value_offset..value_offset + length]);
+            if value.is_empty() {
+                return DicomProbeStatus::Invalid;
+            }
+
+            return DicomProbeStatus::Found;
+        }
+
+        position = if let Some(length) = header.length {
+            let end = value_offset.saturating_add(length);
+            if end > source.len() {
+                return DicomProbeStatus::NeedMore;
+            }
+            end
+        } else {
+            match skip_probe_undefined_length_value(source, value_offset, explicit_vr, little_endian) {
+                Ok(end_of_value) => end_of_value + 8,
+                Err(ProbeParseError::NeedMore) => return DicomProbeStatus::NeedMore,
+            }
+        };
+    }
+
+    if eof {
+        DicomProbeStatus::NotFound
+    } else {
+        DicomProbeStatus::NeedMore
+    }
+}
+
+fn skip_probe_undefined_length_value(
+    source: &[u8],
+    mut position: usize,
+    explicit_vr: bool,
+    little_endian: bool,
+) -> Result<usize, ProbeParseError> {
+    while position + 8 <= source.len() {
+        let tag = read_probe_tag(source, position, little_endian)?;
+        if tag == SEQUENCE_DELIMITATION_TAG || tag == ITEM_DELIMITATION_TAG {
+            return Ok(position);
+        }
+
+        if tag == ITEM_TAG {
+            let item_length = read_probe_u32(source, position + 4, little_endian)? as usize;
+            position += 8;
+            position = if item_length == u32::MAX as usize {
+                skip_probe_undefined_length_value(source, position, explicit_vr, little_endian)? + 8
+            } else {
+                let end = position.saturating_add(item_length);
+                if end > source.len() {
+                    return Err(ProbeParseError::NeedMore);
+                }
+                end
+            };
+            continue;
+        }
+
+        let header = parse_probe_element_header(source, position, explicit_vr, little_endian)?;
+        let value_offset = position + header.header_length;
+        position = if let Some(length) = header.length {
+            let end = value_offset.saturating_add(length);
+            if end > source.len() {
+                return Err(ProbeParseError::NeedMore);
+            }
+            end
+        } else {
+            skip_probe_undefined_length_value(source, value_offset, explicit_vr, little_endian)? + 8
+        };
+    }
+
+    Err(ProbeParseError::NeedMore)
+}
+
+fn parse_probe_element_header(
+    source: &[u8],
+    position: usize,
+    explicit_vr: bool,
+    little_endian: bool,
+) -> Result<ProbeHeader, ProbeParseError> {
+    let tag = read_probe_tag(source, position, little_endian)?;
+
+    if explicit_vr {
+        if position + 8 > source.len() {
+            return Err(ProbeParseError::NeedMore);
+        }
+
+        let vr_bytes = [source[position + 4], source[position + 5]];
+        let vr = VR::from_binary(vr_bytes).unwrap_or(VR::UN);
+        if matches!(
+            vr,
+            VR::OB
+                | VR::OD
+                | VR::OF
+                | VR::OL
+                | VR::OV
+                | VR::OW
+                | VR::SQ
+                | VR::UC
+                | VR::UR
+                | VR::UT
+                | VR::UN
+        ) {
+            if position + 12 > source.len() {
+                return Err(ProbeParseError::NeedMore);
+            }
+
+            let length = read_probe_u32(source, position + 8, little_endian)?;
+            Ok(ProbeHeader {
+                tag,
+                header_length: 12,
+                length: if length == u32::MAX {
+                    None
+                } else {
+                    Some(length as usize)
+                },
+            })
+        } else {
+            let length = read_probe_u16(source, position + 6, little_endian)? as usize;
+            Ok(ProbeHeader {
+                tag,
+                header_length: 8,
+                length: Some(length),
+            })
+        }
+    } else {
+        if position + 8 > source.len() {
+            return Err(ProbeParseError::NeedMore);
+        }
+
+        let length = read_probe_u32(source, position + 4, little_endian)?;
+        Ok(ProbeHeader {
+            tag,
+            header_length: 8,
+            length: if length == u32::MAX {
+                None
+            } else {
+                Some(length as usize)
+            },
+        })
+    }
+}
+
+fn read_probe_tag(source: &[u8], position: usize, little_endian: bool) -> Result<Tag, ProbeParseError> {
+    Ok(Tag(
+        read_probe_u16(source, position, little_endian)?,
+        read_probe_u16(source, position + 2, little_endian)?,
+    ))
+}
+
+fn read_probe_u16(source: &[u8], position: usize, little_endian: bool) -> Result<u16, ProbeParseError> {
+    let Some(bytes) = source.get(position..position + 2) else {
+        return Err(ProbeParseError::NeedMore);
+    };
+
+    Ok(if little_endian {
+        u16::from_le_bytes([bytes[0], bytes[1]])
+    } else {
+        u16::from_be_bytes([bytes[0], bytes[1]])
+    })
+}
+
+fn read_probe_u32(source: &[u8], position: usize, little_endian: bool) -> Result<u32, ProbeParseError> {
+    let Some(bytes) = source.get(position..position + 4) else {
+        return Err(ProbeParseError::NeedMore);
+    };
+
+    Ok(if little_endian {
+        u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+    } else {
+        u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+    })
+}
+
+fn decode_probe_text(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes)
+        .trim_matches(char::from(0))
+        .trim_end()
+        .to_owned()
+}
+
+fn probe_transfer_syntax_from_uid(uid: &str) -> ProbeTransferSyntax {
+    match uid {
+        uids::IMPLICIT_VR_LITTLE_ENDIAN => ProbeTransferSyntax {
+            explicit_vr: false,
+            little_endian: true,
+        },
+        "1.2.840.10008.1.2.2" => ProbeTransferSyntax {
+            explicit_vr: true,
+            little_endian: false,
+        },
+        _ => ProbeTransferSyntax {
+            // Most transfer syntaxes use explicit VR little endian.
+            explicit_vr: true,
+            little_endian: true,
+        },
+    }
 }
 
 pub fn write_dicom_file<P>(object: &DefaultDicomObject, path: P) -> Result<(), WriteError>

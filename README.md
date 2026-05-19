@@ -301,6 +301,30 @@ cargo run -p dcmnorm-cli -- out.json out.dcm --bulk-data-source test/files/dx.dc
 - JSON input + DICOM output runs JSON to DICOM
 - JSON to DICOM requires an output path
 
+### Validate Files with `--check-dicom`
+
+Use `--check-dicom` to validate DICOM files by checking for a Part 10 header first,
+then falling back to dataset parsing up to `SOPClassUID` for streams without file meta.
+
+Single file:
+
+```bash
+cargo run -p dcmnorm-cli -- --check-dicom test/files/dx.dcm
+```
+
+Read paths from stdin (`-I` / `--stdin-paths`) and print only valid DICOM paths:
+
+```bash
+find . -type f | dcmnorm -I --check-dicom
+```
+
+`--check-dicom` behavior:
+
+- prints only successful (valid DICOM) paths to stdout
+- suppresses per-file failure messages
+- returns exit code `0` when all inputs are valid
+- returns exit code `1` if any input is invalid, unreadable, or not a regular file
+
 ### Overriding Type Detection with `--input-type` and `--output-type`
 
 Use `--input-type` to explicitly specify the input file type (useful for files without or with incorrect extensions):
