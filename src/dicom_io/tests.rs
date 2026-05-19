@@ -65,8 +65,9 @@ use super::{
     redact_dicom_pixels_to_transfer_syntax, render_all_dicom_video_frames, render_dicom_frame,
     transcode_dicom_object, write_dicom_bytes, write_dicom_file, write_dicom_json,
     write_dicom_json_full, write_dicom_json_full_with_source, write_dicom_json_with_options,
-    write_dicom_json_with_source, BoundingBox, BoxLength, DicomJsonKeyStyle,
-    DicomJsonWriteOptions, Jpeg2000Backend, RenderOutputFormat, RenderPipelineOptions,
+    write_dicom_json_with_source, BoundingBox, BoxLength, DicomJsonBulkDataMode,
+    DicomJsonKeyStyle, DicomJsonWriteOptions, Jpeg2000Backend, RenderOutputFormat,
+    RenderPipelineOptions,
 };
 
 const PRIVATE_TAG: Tag = Tag(0x0013, 0x1010);
@@ -227,6 +228,50 @@ fn writes_and_reads_flat_json_with_bulk_data_uri() {
     assert!(pixel_uri.contains("length="));
 
     let roundtrip = read_dicom_json_with_source(&json, &source).unwrap();
+    assert_core_fields_match(&original, &roundtrip);
+    assert_eq!(
+        original
+            .element(tags::PIXEL_DATA)
+            .unwrap()
+            .to_bytes()
+            .unwrap()
+            .len(),
+        roundtrip
+            .element(tags::PIXEL_DATA)
+            .unwrap()
+            .to_bytes()
+            .unwrap()
+            .len(),
+    );
+}
+
+#[test]
+fn reads_flat_json_with_file_bulk_data_uri_without_source() {
+    let source_path = fixture_path("dx.dcm");
+    let source = fixture_bytes(source_path.clone());
+    let original = read_dicom_bytes(&source).unwrap();
+
+    let canonical = source_path.canonicalize().unwrap();
+    let uri_base = format!(
+        "file://{}",
+        canonical
+            .to_string_lossy()
+            .replace('%', "%25")
+            .replace(' ', "%20")
+    );
+
+    let json = write_dicom_json_with_options(
+        &original,
+        DicomJsonWriteOptions {
+            bulk_data_mode: DicomJsonBulkDataMode::Uri,
+            bulk_data_source: Some(&source),
+            bulk_data_uri_base: Some(uri_base.as_str()),
+            ..DicomJsonWriteOptions::default()
+        },
+    )
+    .unwrap();
+
+    let roundtrip = read_dicom_json(&json).unwrap();
     assert_core_fields_match(&original, &roundtrip);
     assert_eq!(
         original

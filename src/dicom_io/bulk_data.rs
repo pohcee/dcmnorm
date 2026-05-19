@@ -4,6 +4,7 @@ use dicom_core::value::{PixelFragmentSequence, Value as DicomValue};
 use dicom_core::{PrimitiveValue, Tag, VR};
 use dicom_dictionary_std::{tags, uids};
 use serde_json::{Map as JsonMap, Value as JsonValue};
+use std::fs;
 
 use super::common::invalid_json_value;
 use super::types::{
@@ -114,9 +115,10 @@ pub(super) fn resolve_flat_bulk_bytes(
     }
 
     if let Some(JsonValue::String(uri)) = object.get("BulkDataURI") {
-        let source =
-            bulk_data_source.ok_or_else(|| DicomJsonError::MissingBulkDataSource(uri.clone()))?;
-        return Ok(Some(resolve_bulk_data_uri(uri, source)?));
+        return Ok(Some(resolve_bulk_data_uri_with_optional_source(
+            uri,
+            bulk_data_source,
+        )?));
     }
 
     Ok(None)
@@ -139,9 +141,10 @@ pub(super) fn resolve_standard_bulk_bytes(
     }
 
     if let Some(JsonValue::String(uri)) = object.get("BulkDataURI") {
-        let source =
-            bulk_data_source.ok_or_else(|| DicomJsonError::MissingBulkDataSource(uri.clone()))?;
-        return Ok(Some(resolve_bulk_data_uri(uri, source)?));
+        return Ok(Some(resolve_bulk_data_uri_with_optional_source(
+            uri,
+            bulk_data_source,
+        )?));
     }
 
     if is_bulk_vr(vr) && tag == tags::PIXEL_DATA {
@@ -208,6 +211,91 @@ pub(super) fn resolve_bulk_data_uri(uri: &str, source: &[u8]) -> Result<Vec<u8>,
     }
 
     Ok(source[offset..end].to_vec())
+}
+
+fn resolve_bulk_data_uri_with_optional_source(
+    uri: &str,
+    bulk_data_source: Option<&[u8]>,
+) -> Result<Vec<u8>, DicomJsonError> {
+    if let Some(source) = bulk_data_source {
+        return resolve_bulk_data_uri(uri, source);
+    }
+
+    if let Some(source) = try_read_bulk_data_uri_source(uri)? {
+        return resolve_bulk_data_uri(uri, source.as_slice());
+    }
+
+    Err(DicomJsonError::MissingBulkDataSource(uri.to_owned()))
+}
+
+fn try_read_bulk_data_uri_source(uri: &str) -> Result<Option<Vec<u8>>, DicomJsonError> {
+    let Some(path) = file_path_from_bulk_data_uri(uri)? else {
+        return Ok(None);
+    };
+
+    fs::read(path)
+        .map(Some)
+        .map_err(|_| DicomJsonError::MissingBulkDataSource(uri.to_owned()))
+}
+
+fn file_path_from_bulk_data_uri(uri: &str) -> Result<Option<String>, DicomJsonError> {
+    if !uri.starts_with("file://") {
+        return Ok(None);
+    }
+
+    let after_scheme = &uri[7..];
+    let path_part = after_scheme
+        .split_once('?')
+        .map(|(path, _)| path)
+        .unwrap_or(after_scheme);
+
+    if path_part.is_empty() {
+        return Err(DicomJsonError::InvalidBulkDataUri(uri.to_owned()));
+    }
+
+    let local_path = if let Some(path) = path_part.strip_prefix("localhost/") {
+        format!("/{path}")
+    } else {
+        path_part.to_owned()
+    };
+
+    percent_decode_uri_path(local_path.as_str())
+        .map(Some)
+        .ok_or_else(|| DicomJsonError::InvalidBulkDataUri(uri.to_owned()))
+}
+
+fn percent_decode_uri_path(path: &str) -> Option<String> {
+    let bytes = path.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            if index + 2 >= bytes.len() {
+                return None;
+            }
+
+            let hi = decode_hex_nibble(bytes[index + 1])?;
+            let lo = decode_hex_nibble(bytes[index + 2])?;
+            decoded.push((hi << 4) | lo);
+            index += 3;
+            continue;
+        }
+
+        decoded.push(bytes[index]);
+        index += 1;
+    }
+
+    String::from_utf8(decoded).ok()
+}
+
+fn decode_hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 fn parse_bulk_data_uri(uri: &str) -> Result<(usize, usize), DicomJsonError> {
