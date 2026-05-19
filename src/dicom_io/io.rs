@@ -513,7 +513,7 @@ fn decode_pixel_data(
             Ok(decoded) => {
                 jpeg2000_debug_log(format!("Kakadu decode succeeded ({} decoded bytes)", decoded.len()));
                 replace_with_native_pixel_data(object, decoded)?;
-                normalize_decoded_pixel_data_attributes(object);
+                normalize_decoded_pixel_data_attributes(object, source_ts.uid());
                 object.meta_mut().set_transfer_syntax(
                     TransferSyntaxRegistry
                         .get(uids::EXPLICIT_VR_LITTLE_ENDIAN)
@@ -546,7 +546,7 @@ fn decode_pixel_data(
         match mpeg::decode_mpeg_pixel_data(object) {
             Ok(decoded) => {
                 replace_with_native_pixel_data(object, decoded)?;
-                normalize_decoded_pixel_data_attributes(object);
+                normalize_decoded_pixel_data_attributes(object, source_ts.uid());
                 object.meta_mut().set_transfer_syntax(
                     TransferSyntaxRegistry
                         .get(uids::EXPLICIT_VR_LITTLE_ENDIAN)
@@ -569,7 +569,7 @@ fn decode_pixel_data(
         match jpeg_ls::decode_jpeg_ls_pixel_data(object) {
             Ok(decoded) => {
                 replace_with_native_pixel_data(object, decoded)?;
-                normalize_decoded_pixel_data_attributes(object);
+                normalize_decoded_pixel_data_attributes(object, source_ts.uid());
                 object.meta_mut().set_transfer_syntax(
                     TransferSyntaxRegistry
                         .get(uids::EXPLICIT_VR_LITTLE_ENDIAN)
@@ -656,7 +656,7 @@ fn decode_pixel_data(
     }
 
     replace_with_native_pixel_data(object, decoded)?;
-    normalize_decoded_pixel_data_attributes(object);
+    normalize_decoded_pixel_data_attributes(object, source_ts.uid());
     object.meta_mut().set_transfer_syntax(
         TransferSyntaxRegistry
             .get(uids::EXPLICIT_VR_LITTLE_ENDIAN)
@@ -912,17 +912,31 @@ fn native_pixel_vr(bits_allocated: u16) -> VR {
     }
 }
 
-fn normalize_decoded_pixel_data_attributes(object: &mut DefaultDicomObject) {
+fn normalize_decoded_pixel_data_attributes(object: &mut DefaultDicomObject, source_ts_uid: &str) {
     let samples_per_pixel = object
         .get(tags::SAMPLES_PER_PIXEL)
         .and_then(|element| element.uint16().ok())
         .unwrap_or(1);
 
     if samples_per_pixel > 1 {
+        let current_photometric = object
+            .get(tags::PHOTOMETRIC_INTERPRETATION)
+            .and_then(|element| element.to_str().ok())
+            .map(|value| value.trim().to_owned())
+            .unwrap_or_default();
+        let is_rle = normalize_transfer_syntax_uid(source_ts_uid) == uids::RLE_LOSSLESS;
+        let is_ybr = current_photometric.starts_with("YBR_FULL")
+            || current_photometric == "YBR_PARTIAL_422";
+        let target_photometric = if is_rle && is_ybr {
+            current_photometric
+        } else {
+            "RGB".to_owned()
+        };
+
         object.put(DataElement::new(
             tags::PHOTOMETRIC_INTERPRETATION,
             VR::CS,
-            PrimitiveValue::from("RGB"),
+            PrimitiveValue::from(target_photometric),
         ));
         object.put(DataElement::new(
             tags::PLANAR_CONFIGURATION,

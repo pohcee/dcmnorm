@@ -723,10 +723,11 @@ fn render_rgb_frame(
     metadata: &RenderMetadata,
     options: &RenderPipelineOptions,
 ) -> Result<RenderedFramePixels, RenderError> {
-    if !matches!(
-        metadata.photometric_interpretation.as_str(),
-        "RGB" | "YBR_FULL" | "YBR_FULL_422"
-    ) {
+    let is_ybr_full = metadata.photometric_interpretation == "YBR_FULL";
+    let is_ybr_422 = metadata.photometric_interpretation == "YBR_FULL_422";
+    let is_rgb = metadata.photometric_interpretation == "RGB";
+
+    if !is_rgb && !is_ybr_full && !is_ybr_422 {
         return Err(RenderError::UnsupportedPhotometricInterpretation(
             metadata.photometric_interpretation.clone(),
         ));
@@ -734,7 +735,6 @@ fn render_rgb_frame(
 
     let frame_bytes = get_frame_bytes(object, metadata, options.frame_index)?;
     let pixel_count = usize::from(metadata.rows) * usize::from(metadata.cols);
-    let expected_components = pixel_count * 3;
 
     let rendered = if metadata.bits_allocated == 8 {
         if metadata.planar_configuration > 1 {
@@ -743,30 +743,107 @@ fn render_rgb_frame(
             ));
         }
 
-        if frame_bytes.len() < expected_components {
-            return Err(RenderError::InvalidPixelDataLength {
-                expected: expected_components,
-                actual: frame_bytes.len(),
-            });
-        }
-
-        if metadata.planar_configuration == 0 {
-            frame_bytes[..expected_components].to_vec()
-        } else {
-            let mut interleaved = vec![0u8; expected_components];
-            let plane_len = pixel_count;
-            if frame_bytes.len() < plane_len * 3 {
+        if is_ybr_422 {
+            let expected_bytes = pixel_count * 2;
+            if frame_bytes.len() < expected_bytes {
                 return Err(RenderError::InvalidPixelDataLength {
-                    expected: plane_len * 3,
+                    expected: expected_bytes,
                     actual: frame_bytes.len(),
                 });
             }
-            for index in 0..pixel_count {
-                interleaved[index * 3] = frame_bytes[index];
-                interleaved[index * 3 + 1] = frame_bytes[plane_len + index];
-                interleaved[index * 3 + 2] = frame_bytes[2 * plane_len + index];
+
+            let mut rgb = Vec::with_capacity(pixel_count * 3);
+            if metadata.planar_configuration == 0 {
+                // Y0, Y1, Cb0, Cr0, Y2, Y3, Cb2, Cr2, ...
+                for chunk in frame_bytes.chunks_exact(4).take(pixel_count / 2) {
+                    let y0 = chunk[0];
+                    let y1 = chunk[1];
+                    let cb = chunk[2];
+                    let cr = chunk[3];
+
+                    let (r0, g0, b0) = ybr_to_rgb(y0, cb, cr);
+                    let (r1, g1, b1) = ybr_to_rgb(y1, cb, cr);
+
+                    rgb.push(r0);
+                    rgb.push(g0);
+                    rgb.push(b0);
+                    rgb.push(r1);
+                    rgb.push(g1);
+                    rgb.push(b1);
+                }
+            } else {
+                // Planar: Y plane (pixel_count), Cb plane (pixel_count/2), Cr plane (pixel_count/2)
+                let y_plane = &frame_bytes[0..pixel_count];
+                let cb_plane = &frame_bytes[pixel_count..pixel_count + pixel_count / 2];
+                let cr_plane =
+                    &frame_bytes[pixel_count + pixel_count / 2..pixel_count + pixel_count];
+
+                for i in 0..pixel_count / 2 {
+                    let y0 = y_plane[i * 2];
+                    let y1 = y_plane[i * 2 + 1];
+                    let cb = cb_plane[i];
+                    let cr = cr_plane[i];
+
+                    let (r0, g0, b0) = ybr_to_rgb(y0, cb, cr);
+                    let (r1, g1, b1) = ybr_to_rgb(y1, cb, cr);
+
+                    rgb.push(r0);
+                    rgb.push(g0);
+                    rgb.push(b0);
+                    rgb.push(r1);
+                    rgb.push(g1);
+                    rgb.push(b1);
+                }
             }
-            interleaved
+            rgb
+        } else {
+            let expected_components = pixel_count * 3;
+            if frame_bytes.len() < expected_components {
+                return Err(RenderError::InvalidPixelDataLength {
+                    expected: expected_components,
+                    actual: frame_bytes.len(),
+                });
+            }
+
+            if metadata.planar_configuration == 0 {
+                let bytes = &frame_bytes[..expected_components];
+                if is_ybr_full {
+                    bytes
+                        .chunks_exact(3)
+                        .flat_map(|chunk| {
+                            let (r, g, b) = ybr_to_rgb(chunk[0], chunk[1], chunk[2]);
+                            [r, g, b]
+                        })
+                        .collect()
+                } else {
+                    bytes.to_vec()
+                }
+            } else {
+                let mut rgb = vec![0u8; expected_components];
+                let plane_len = pixel_count;
+                if frame_bytes.len() < plane_len * 3 {
+                    return Err(RenderError::InvalidPixelDataLength {
+                        expected: plane_len * 3,
+                        actual: frame_bytes.len(),
+                    });
+                }
+                for index in 0..pixel_count {
+                    let c0 = frame_bytes[index];
+                    let c1 = frame_bytes[plane_len + index];
+                    let c2 = frame_bytes[2 * plane_len + index];
+
+                    let (r, g, b) = if is_ybr_full {
+                        ybr_to_rgb(c0, c1, c2)
+                    } else {
+                        (c0, c1, c2)
+                    };
+
+                    rgb[index * 3] = r;
+                    rgb[index * 3 + 1] = g;
+                    rgb[index * 3 + 2] = b;
+                }
+                rgb
+            }
         }
     } else if metadata.bits_allocated == 16 {
         if metadata.planar_configuration > 1 {
@@ -774,6 +851,14 @@ fn render_rgb_frame(
                 metadata.planar_configuration,
             ));
         }
+
+        if is_ybr_422 {
+            return Err(RenderError::UnsupportedPhotometricInterpretation(
+                metadata.photometric_interpretation.clone(),
+            ));
+        }
+
+        let expected_components = pixel_count * 3;
 
         let expected_bytes = expected_components * 2;
         if frame_bytes.len() < expected_bytes {
@@ -789,9 +874,28 @@ fn render_rgb_frame(
             frame_bytes
                 .chunks_exact(2)
                 .take(expected_components)
-                .map(|chunk| {
-                    let sample = u16::from_le_bytes([chunk[0], chunk[1]]);
-                    ((f64::from(sample) / max_value) * 255.0).clamp(0.0, 255.0) as u8
+                .collect::<Vec<_>>()
+                .chunks_exact(3)
+                .flat_map(|chunk| {
+                    let c0 = {
+                        let sample = u16::from_le_bytes([chunk[0][0], chunk[0][1]]);
+                        ((f64::from(sample) / max_value) * 255.0).clamp(0.0, 255.0) as u8
+                    };
+                    let c1 = {
+                        let sample = u16::from_le_bytes([chunk[1][0], chunk[1][1]]);
+                        ((f64::from(sample) / max_value) * 255.0).clamp(0.0, 255.0) as u8
+                    };
+                    let c2 = {
+                        let sample = u16::from_le_bytes([chunk[2][0], chunk[2][1]]);
+                        ((f64::from(sample) / max_value) * 255.0).clamp(0.0, 255.0) as u8
+                    };
+
+                    let (r, g, b) = if is_ybr_full {
+                        ybr_to_rgb(c0, c1, c2)
+                    } else {
+                        (c0, c1, c2)
+                    };
+                    [r, g, b]
                 })
                 .collect()
         } else {
@@ -814,9 +918,14 @@ fn render_rgb_frame(
 
             let mut interleaved = vec![0u8; expected_components];
             for index in 0..pixel_count {
-                interleaved[index * 3] = planes[0][index];
-                interleaved[index * 3 + 1] = planes[1][index];
-                interleaved[index * 3 + 2] = planes[2][index];
+                let (r, g, b) = if is_ybr_full {
+                    ybr_to_rgb(planes[0][index], planes[1][index], planes[2][index])
+                } else {
+                    (planes[0][index], planes[1][index], planes[2][index])
+                };
+                interleaved[index * 3] = r;
+                interleaved[index * 3 + 1] = g;
+                interleaved[index * 3 + 2] = b;
             }
             interleaved
         }
@@ -832,6 +941,22 @@ fn render_rgb_frame(
         samples_per_pixel: 3,
         bytes: rendered,
     })
+}
+
+fn ybr_to_rgb(y: u8, cb: u8, cr: u8) -> (u8, u8, u8) {
+    let y = y as f32;
+    let cb = cb as f32 - 128.0;
+    let cr = cr as f32 - 128.0;
+
+    let r = y + 1.4020 * cr;
+    let g = y - 0.3441 * cb - 0.7141 * cr;
+    let b = y + 1.7720 * cb;
+
+    (
+        r.clamp(0.0, 255.0) as u8,
+        g.clamp(0.0, 255.0) as u8,
+        b.clamp(0.0, 255.0) as u8,
+    )
 }
 
 fn read_render_metadata(object: &DefaultDicomObject) -> Result<RenderMetadata, RenderError> {
@@ -907,9 +1032,15 @@ fn get_frame_bytes(
         .element(tags::PIXEL_DATA)
         .map_err(|_| RenderError::MissingImageAttribute("PixelData"))?;
 
+    let samples_per_pixel = if metadata.photometric_interpretation == "YBR_FULL_422" {
+        2
+    } else {
+        metadata.samples_per_pixel
+    };
+
     let samples_per_frame = usize::from(metadata.rows)
         * usize::from(metadata.cols)
-        * usize::from(metadata.samples_per_pixel);
+        * usize::from(samples_per_pixel);
     let frame_len = match metadata.bits_allocated {
         1 => samples_per_frame.div_ceil(8),
         8 => samples_per_frame,
@@ -1722,7 +1853,7 @@ fn try_decode_single_frame_object(
 
     let mut working = object.clone();
     replace_with_native_frame_pixel_data(&mut working, decoded)?;
-    normalize_decoded_render_attributes(&mut working);
+    normalize_decoded_render_attributes(&mut working, source_uid);
     working.remove_element(tags::NUMBER_OF_FRAMES);
     working.meta_mut().set_transfer_syntax(
         TransferSyntaxRegistry
@@ -1768,17 +1899,31 @@ fn replace_with_native_frame_pixel_data(
     Ok(())
 }
 
-fn normalize_decoded_render_attributes(object: &mut DefaultDicomObject) {
+fn normalize_decoded_render_attributes(object: &mut DefaultDicomObject, source_ts_uid: &str) {
     let samples_per_pixel = object
         .get(tags::SAMPLES_PER_PIXEL)
         .and_then(|element| element.uint16().ok())
         .unwrap_or(1);
 
     if samples_per_pixel > 1 {
+        let current_photometric = object
+            .get(tags::PHOTOMETRIC_INTERPRETATION)
+            .and_then(|element| element.to_str().ok())
+            .map(|value| value.trim().to_owned())
+            .unwrap_or_default();
+        let is_rle = normalize_transfer_syntax_uid(source_ts_uid) == uids::RLE_LOSSLESS;
+        let is_ybr = current_photometric.starts_with("YBR_FULL")
+            || current_photometric == "YBR_PARTIAL_422";
+        let target_photometric = if is_rle && is_ybr {
+            current_photometric
+        } else {
+            "RGB".to_owned()
+        };
+
         object.put(DataElement::new(
             tags::PHOTOMETRIC_INTERPRETATION,
             VR::CS,
-            PrimitiveValue::from("RGB"),
+            PrimitiveValue::from(target_photometric),
         ));
         object.put(DataElement::new(
             tags::PLANAR_CONFIGURATION,

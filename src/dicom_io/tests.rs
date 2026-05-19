@@ -74,6 +74,47 @@ const EXPLICIT_VR_BIG_ENDIAN_UID: &str = "1.2.840.10008.1.2.2";
 const JPEG_2000_IMAGE_COMPRESSION_UID: &str = "1.2.840.10008.1.2.4.91";
 
 #[test]
+fn transcodes_rle_ybr_full_preserving_photometric_interpretation() {
+    let source = read_dicom_file(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test.dcm")).unwrap();
+    let transcoded = transcode_dicom_object(&source, uids::EXPLICIT_VR_LITTLE_ENDIAN).unwrap();
+
+    let photometric = transcoded
+        .element(tags::PHOTOMETRIC_INTERPRETATION)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .trim()
+        .to_owned();
+    assert_eq!(photometric, "YBR_FULL");
+
+    let planar = transcoded
+        .element(tags::PLANAR_CONFIGURATION)
+        .unwrap()
+        .uint16()
+        .unwrap();
+    assert_eq!(planar, 0);
+}
+
+#[test]
+fn renders_rle_ybr_full_without_pink_cast() {
+    let source = read_dicom_file(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test.dcm")).unwrap();
+    let rendered = render_dicom_frame(
+        &source,
+        RenderOutputFormat::Png,
+        &RenderPipelineOptions::default(),
+    )
+    .unwrap();
+
+    let image = image::load_from_memory(&rendered.bytes).unwrap().to_rgb8();
+    let first = image.get_pixel(0, 0).0;
+
+    // Top-left pixel is background and should render near black, not cyan/magenta.
+    assert!(first[0] <= 5, "expected low red channel, got {}", first[0]);
+    assert!(first[1] <= 5, "expected low green channel, got {}", first[1]);
+    assert!(first[2] <= 5, "expected low blue channel, got {}", first[2]);
+}
+
+#[test]
 fn reads_dicom_file_fixture() {
     let object = read_dicom_file(fixture_path("dx.dcm")).unwrap();
 
