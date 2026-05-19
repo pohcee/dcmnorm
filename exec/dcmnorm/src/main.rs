@@ -29,18 +29,18 @@ use sha2::{Digest, Sha256};
 )]
 #[command(arg_required_else_help = true)]
 struct Cli {
-    #[arg(value_name = "INPUT", help_heading = "General", display_order = 1)]
+    #[arg(value_name = "INPUT", help = "Input DICOM or JSON file", help_heading = "General", display_order = 1)]
     input: Option<PathBuf>,
     #[arg(
         long,
         action = ArgAction::SetTrue,
-        help = "Remove all private tags from the DICOM file before output (group odd/even, element >= 0x0010)",
+        help = "Remove all private tags (odd group or element >= 0x0010)",
         help_heading = "DICOM Editing",
         display_order = 23
     )]
     remove_private_tags: bool,
 
-    #[arg(value_name = "OUTPUT", help_heading = "General", display_order = 2)]
+    #[arg(value_name = "OUTPUT", help = "Output DICOM, JSON, or rendered file", help_heading = "General", display_order = 2)]
     output: Option<PathBuf>,
 
     #[arg(
@@ -84,7 +84,7 @@ struct Cli {
     #[arg(
         long,
         action = ArgAction::SetTrue,
-        help = "Overwrite each input file in place. With DICOM input this writes updated DICOM back to the same path",
+        help = "Overwrite input file in place",
         help_heading = "General",
         display_order = 7
     )]
@@ -94,6 +94,7 @@ struct Cli {
         long,
         value_enum,
         default_value_t = JsonFormat::Flat,
+        help = "JSON format: flat or standard",
         help_heading = "JSON Conversion",
         display_order = 10
     )]
@@ -103,6 +104,7 @@ struct Cli {
         long,
         value_enum,
         default_value_t = KeyFormat::Name,
+        help = "JSON object keys: name or hex tag",
         help_heading = "JSON Conversion",
         display_order = 11
     )]
@@ -112,7 +114,7 @@ struct Cli {
         long,
         value_enum,
         default_value_t = BulkDataMode::Uri,
-        help = "Bulk data encoding mode for DICOM to JSON. In uri mode, values over 32 bytes use BulkDataURI (relative by default; use --bulk-data-source with no value to embed file:// URIs)",
+        help = "Bulk data encoding: inline or uri (>32 bytes). Use --bulk-data-source to resolve or embed file:// URIs",
         help_heading = "JSON Conversion",
         display_order = 12
     )]
@@ -123,7 +125,7 @@ struct Cli {
         value_name = "SOURCE",
         num_args = 0..=1,
         default_missing_value = "",
-        help = "For JSON-to-DICOM: path to the original DICOM file used to resolve BulkDataURIs. For DICOM-to-JSON with --bulk-data uri: pass this flag with no value to embed the input file path as file:// in each BulkDataURI",
+        help = "For JSON-to-DICOM: path to resolve BulkDataURIs. For DICOM-to-JSON: omit value to embed input path as file://",
         help_heading = "JSON Conversion",
         display_order = 13
     )]
@@ -142,7 +144,7 @@ struct Cli {
         long,
         value_name = "KEY=VALUE",
         action = ArgAction::Append,
-        help = "Set or replace a DICOM element value. KEY can be a keyword (e.g. SOPClassUID) or tag expression (e.g. (0008,0016)). Repeat this option to set multiple elements",
+        help = "Set or replace element: KEY as keyword (e.g. SOPClassUID) or tag (0008,0016). Repeat for multiple",
         help_heading = "DICOM Editing",
         display_order = 21
     )]
@@ -152,7 +154,7 @@ struct Cli {
         long,
         value_name = "KEY",
         action = ArgAction::Append,
-        help = "Remove a DICOM element. KEY can be a keyword (e.g. PatientName) or tag expression (e.g. (0010,0010)). Repeat this option to remove multiple elements",
+        help = "Remove element: KEY as keyword (e.g. PatientName) or tag (0010,0010). Repeat for multiple",
         help_heading = "DICOM Editing",
         display_order = 22
     )]
@@ -161,7 +163,7 @@ struct Cli {
     #[arg(
         long,
         value_enum,
-        help = "Render DICOM input to this format (raw/png/jpeg/mpeg4). For MPEG4 files, use a .mp4, .m4v, .mpeg4, or .mov output extension; if omitted, the format is inferred from the output extension",
+        help = "Render to format (raw/png/jpeg/mpeg4). Extensions: .mp4/.m4v/.mpeg4/.mov for MPEG4, inferred otherwise",
         help_heading = "Rendering",
         display_order = 30
     )]
@@ -179,7 +181,7 @@ struct Cli {
     #[arg(
         long,
         action = ArgAction::SetTrue,
-        help = "Render and export all frames for multiframe images. For image outputs, OUTPUT is expanded to STEM_000001.EXT, STEM_000002.EXT, and so on",
+        help = "Export all frames with OUTPUT expanded to STEM_NNNNNN.EXT",
         help_heading = "Rendering",
         display_order = 32
     )]
@@ -188,7 +190,7 @@ struct Cli {
     #[arg(
         long,
         value_name = "FPS",
-        help = "Frames per second when writing MPEG4/.mp4 output (defaults to DICOM frame rate metadata when available, else 24)",
+        help = "Frames per second for MPEG4 (defaults to DICOM metadata, else 24)",
         help_heading = "Rendering",
         display_order = 33
     )]
@@ -242,7 +244,7 @@ struct Cli {
     #[arg(
         long,
         value_name = "PIXELS",
-        help = "Set the output width in pixels. If --output-height is also set, the image is scaled exactly; otherwise the height is computed from the aspect ratio",
+        help = "Output width; if height is set, scale exactly; else preserve aspect ratio",
         help_heading = "Rendering",
         display_order = 39
     )]
@@ -251,7 +253,7 @@ struct Cli {
     #[arg(
         long,
         value_name = "PIXELS",
-        help = "Set the output height in pixels. If --output-width is also set, the image is scaled exactly; otherwise the width is computed from the aspect ratio",
+        help = "Output height; if width is set, scale exactly; else preserve aspect ratio",
         help_heading = "Rendering",
         display_order = 40
     )]
@@ -271,7 +273,7 @@ struct Cli {
         value_name = "X,Y,W,H",
         action = ArgAction::Append,
         allow_hyphen_values = true,
-        help = "Draw a filled bounding box for redaction at position X,Y with size W×H (output-image pixels, after any scaling). X/Y may be negative to anchor from right/bottom (for example -20 is 20 px from the right/bottom edge). W/H accept pixels (40) or percentages (25%). Repeat to add multiple boxes",
+        help = "Add redaction box at X,Y (in output pixels) with size W×H. Negative coords anchor from right/bottom. W/H as pixels or %%. Repeat for multiple",
         help_heading = "Rendering",
         display_order = 42
     )]
