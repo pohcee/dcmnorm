@@ -11,6 +11,7 @@ use dicom_transfer_syntax_registry::TransferSyntaxRegistry;
 use image::codecs::jpeg::JpegEncoder;
 use image::codecs::png::PngEncoder;
 use image::{ColorType, GrayImage, ImageEncoder, RgbImage};
+use lcms2::{Intent, PixelFormat, Profile, Transform};
 use rayon::prelude::*;
 
 use super::io::{kakadu_ffi_enabled, transcode_dicom_object, JPEG2000_DEBUG_ENV_FLAG};
@@ -55,6 +56,7 @@ pub struct RenderPipelineOptions {
     pub frame_index: usize,
     pub apply_modality_lut: bool,
     pub apply_voi_lut: bool,
+    pub apply_icc_profile: bool,
     pub window_center: Option<f64>,
     pub window_width: Option<f64>,
     pub jpeg_quality: u8,
@@ -84,6 +86,7 @@ impl Default for RenderPipelineOptions {
             frame_index: 0,
             apply_modality_lut: true,
             apply_voi_lut: true,
+            apply_icc_profile: true,
             window_center: None,
             window_width: None,
             jpeg_quality: 90,
@@ -613,11 +616,54 @@ fn render_single_frame(
         });
     }
 
-    match metadata.samples_per_pixel {
+    let mut rendered = match metadata.samples_per_pixel {
         1 => render_grayscale_frame(object, metadata, options),
         3 => render_rgb_frame(object, metadata, options),
         other => Err(RenderError::UnsupportedSamplesPerPixel(other)),
+    }?;
+
+    if options.apply_icc_profile && rendered.samples_per_pixel == 3 {
+        apply_embedded_icc_profile(object, &mut rendered.bytes);
     }
+
+    Ok(rendered)
+}
+
+fn apply_embedded_icc_profile(object: &DefaultDicomObject, rgb_bytes: &mut [u8]) {
+    if rgb_bytes.is_empty() || rgb_bytes.len() % 3 != 0 {
+        return;
+    }
+
+    let Some(icc_profile_bytes) = read_icc_profile_bytes(object) else {
+        return;
+    };
+
+    let Ok(input_profile) = Profile::new_icc(&icc_profile_bytes) else {
+        return;
+    };
+
+    let output_profile = Profile::new_srgb();
+
+    let Ok(transform) = Transform::new(
+        &input_profile,
+        PixelFormat::RGB_8,
+        &output_profile,
+        PixelFormat::RGB_8,
+        Intent::Perceptual,
+    ) else {
+        return;
+    };
+
+    transform.transform_in_place(rgb_bytes);
+}
+
+fn read_icc_profile_bytes(object: &DefaultDicomObject) -> Option<Vec<u8>> {
+    let element = object.get(tags::ICC_PROFILE)?;
+    let bytes = element.to_bytes().ok()?;
+    if bytes.is_empty() {
+        return None;
+    }
+    Some(bytes.into_owned())
 }
 
 fn render_grayscale_frame(
