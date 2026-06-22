@@ -7,8 +7,16 @@ fn writes_flat_json_with_source_uri_mode_for_pixeldata_bulkdatauri() {
     let value: serde_json::Value = serde_json::from_str(&json).unwrap();
     let pixel = &value["PixelData"];
     let uri = pixel.get("BulkDataURI").and_then(|v| v.as_str()).unwrap();
-    assert!(uri.contains("offset=") && uri.contains("length="), "PixelData BulkDataURI must include offset and length, got: {}", uri);
-    assert!(!uri.contains("tag="), "PixelData BulkDataURI must not fallback to tag-based URI, got: {}", uri);
+    assert!(
+        uri.contains("offset=") && uri.contains("length="),
+        "PixelData BulkDataURI must include offset and length, got: {}",
+        uri
+    );
+    assert!(
+        !uri.contains("tag="),
+        "PixelData BulkDataURI must not fallback to tag-based URI, got: {}",
+        uri
+    );
 }
 #[test]
 fn writes_flat_json_with_source_uri_mode_for_large_meta_without_part10_header() {
@@ -16,8 +24,8 @@ fn writes_flat_json_with_source_uri_mode_for_large_meta_without_part10_header() 
     let object = read_dicom_bytes(&source).unwrap();
 
     // Synthesize a large meta field (simulate >32B value)
-    use dicom_core::DataElement;
     use dicom_core::value::PrimitiveValue;
+    use dicom_core::DataElement;
     use dicom_dictionary_std::tags;
     let big_bytes = vec![0xAB; 64];
     let mut object = object;
@@ -49,6 +57,79 @@ fn writes_flat_json_with_source_uri_mode_for_nometa_pixeldata_uses_offset_length
     assert!(uri.contains("length="), "missing length in URI: {uri}");
     assert!(!uri.contains("tag="), "unexpected tag-based URI: {uri}");
 }
+
+#[test]
+fn writes_flat_json_with_source_uri_mode_for_nested_bulk_value() {
+    let mut source = fixture_bytes(fixture_path("dx.dcm"));
+    let nested_payload = vec![0x5A; 64];
+    append_nested_icc_profile_sequence(&mut source, &nested_payload);
+
+    let object = read_dicom_bytes(&source).unwrap();
+    let json = write_dicom_json_with_source(&object, &source).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+    let icc = &value["OpticalPathSequence"][0]["ICCProfile"];
+    let uri = icc["BulkDataURI"]
+        .as_str()
+        .expect("nested ICCProfile should emit BulkDataURI");
+    assert!(uri.contains("offset="), "missing offset in URI: {uri}");
+    assert!(uri.contains("length="), "missing length in URI: {uri}");
+    assert!(
+        icc["InlineBinary"].is_null(),
+        "nested ICCProfile should not fallback to InlineBinary"
+    );
+}
+
+fn append_nested_icc_profile_sequence(bytes: &mut Vec<u8>, payload: &[u8]) {
+    let sequence_tag = Tag(0x0048, 0x0105); // OpticalPathSequence
+    let icc_profile_tag = Tag(0x0028, 0x2000); // ICCProfile
+
+    append_explicit_vr_header(bytes, sequence_tag, *b"SQ", u32::MAX);
+    append_item_header(bytes, u32::MAX);
+    append_explicit_vr_header(bytes, icc_profile_tag, *b"OB", payload.len() as u32);
+    bytes.extend_from_slice(payload);
+    append_item_delimitation(bytes);
+    append_sequence_delimitation(bytes);
+}
+
+fn append_explicit_vr_header(bytes: &mut Vec<u8>, tag: Tag, vr: [u8; 2], len: u32) {
+    bytes.extend_from_slice(&tag.group().to_le_bytes());
+    bytes.extend_from_slice(&tag.element().to_le_bytes());
+    bytes.extend_from_slice(&vr);
+
+    if uses_32_bit_vr_length(vr) {
+        bytes.extend_from_slice(&[0, 0]);
+        bytes.extend_from_slice(&len.to_le_bytes());
+    } else {
+        bytes.extend_from_slice(&(len as u16).to_le_bytes());
+    }
+}
+
+fn append_item_header(bytes: &mut Vec<u8>, len: u32) {
+    bytes.extend_from_slice(&0xFFFEu16.to_le_bytes());
+    bytes.extend_from_slice(&0xE000u16.to_le_bytes());
+    bytes.extend_from_slice(&len.to_le_bytes());
+}
+
+fn append_item_delimitation(bytes: &mut Vec<u8>) {
+    bytes.extend_from_slice(&0xFFFEu16.to_le_bytes());
+    bytes.extend_from_slice(&0xE00Du16.to_le_bytes());
+    bytes.extend_from_slice(&0u32.to_le_bytes());
+}
+
+fn append_sequence_delimitation(bytes: &mut Vec<u8>) {
+    bytes.extend_from_slice(&0xFFFEu16.to_le_bytes());
+    bytes.extend_from_slice(&0xE0DDu16.to_le_bytes());
+    bytes.extend_from_slice(&0u32.to_le_bytes());
+}
+
+fn uses_32_bit_vr_length(vr: [u8; 2]) -> bool {
+    matches!(
+        &vr,
+        b"OB" | b"OD" | b"OF" | b"OL" | b"OV" | b"OW" | b"SQ" | b"UC" | b"UR" | b"UT" | b"UN"
+    )
+}
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -60,14 +141,13 @@ use serde_json::Value as JsonValue;
 
 use super::{
     detect_jpeg2000_backend_from_search_path, kakadu_ffi_enabled, list_transfer_syntax_support,
-    probe_dicom_file_for_sop_class_uid, read_dicom_bytes, read_dicom_file, read_dicom_json, read_dicom_json_full,
-    read_dicom_json_full_with_source, read_dicom_json_with_source,
+    probe_dicom_file_for_sop_class_uid, read_dicom_bytes, read_dicom_file, read_dicom_json,
+    read_dicom_json_full, read_dicom_json_full_with_source, read_dicom_json_with_source,
     redact_dicom_pixels_to_transfer_syntax, render_all_dicom_video_frames, render_dicom_frame,
     transcode_dicom_object, write_dicom_bytes, write_dicom_file, write_dicom_json,
     write_dicom_json_full, write_dicom_json_full_with_source, write_dicom_json_with_options,
-    write_dicom_json_with_source, BoundingBox, BoxLength, DicomJsonBulkDataMode,
-    DicomJsonKeyStyle, DicomJsonWriteOptions, Jpeg2000Backend, RenderOutputFormat,
-    RenderPipelineOptions,
+    write_dicom_json_with_source, BoundingBox, BoxLength, DicomJsonBulkDataMode, DicomJsonKeyStyle,
+    DicomJsonWriteOptions, Jpeg2000Backend, RenderOutputFormat, RenderPipelineOptions,
 };
 
 const PRIVATE_TAG: Tag = Tag(0x0013, 0x1010);
@@ -76,7 +156,8 @@ const JPEG_2000_IMAGE_COMPRESSION_UID: &str = "1.2.840.10008.1.2.4.91";
 
 #[test]
 fn transcodes_rle_ybr_full_preserving_photometric_interpretation() {
-    let source = read_dicom_file(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test.dcm")).unwrap();
+    let source =
+        read_dicom_file(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test.dcm")).unwrap();
     let transcoded = transcode_dicom_object(&source, uids::EXPLICIT_VR_LITTLE_ENDIAN).unwrap();
 
     let photometric = transcoded
@@ -98,7 +179,8 @@ fn transcodes_rle_ybr_full_preserving_photometric_interpretation() {
 
 #[test]
 fn renders_rle_ybr_full_without_pink_cast() {
-    let source = read_dicom_file(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test.dcm")).unwrap();
+    let source =
+        read_dicom_file(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test.dcm")).unwrap();
     let rendered = render_dicom_frame(
         &source,
         RenderOutputFormat::Png,
@@ -111,7 +193,11 @@ fn renders_rle_ybr_full_without_pink_cast() {
 
     // Top-left pixel is background and should render near black, not cyan/magenta.
     assert!(first[0] <= 5, "expected low red channel, got {}", first[0]);
-    assert!(first[1] <= 5, "expected low green channel, got {}", first[1]);
+    assert!(
+        first[1] <= 5,
+        "expected low green channel, got {}",
+        first[1]
+    );
     assert!(first[2] <= 5, "expected low blue channel, got {}", first[2]);
 }
 
@@ -757,8 +843,8 @@ fn renders_dx_frame_to_raw_u8() {
 #[test]
 fn renders_dx_video_frames_as_raw_u8_with_consistent_shape() {
     let object = read_dicom_file(fixture_path("dx.dcm")).unwrap();
-    let rendered = render_all_dicom_video_frames(&object, &RenderPipelineOptions::default())
-        .unwrap();
+    let rendered =
+        render_all_dicom_video_frames(&object, &RenderPipelineOptions::default()).unwrap();
 
     assert!(!rendered.is_empty());
 
@@ -914,7 +1000,9 @@ fn fixture_path(name: &str) -> PathBuf {
 }
 
 fn repo_root_path(name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test/files").join(name)
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("test/files")
+        .join(name)
 }
 
 fn assert_core_fields_match(
