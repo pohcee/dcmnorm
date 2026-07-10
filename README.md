@@ -261,6 +261,99 @@ cargo test --workspace
 
 ## CLI Usage
 
+Get the full option reference from either help form:
+
+```bash
+dcmnorm -h
+dcmnorm --help
+```
+
+`dcmnorm` command shape:
+
+```text
+dcmnorm [OPTIONS] [INPUT] [OUTPUT]
+```
+
+Positional arguments:
+
+- `[INPUT]`: input DICOM or JSON file
+- `[OUTPUT]`: output DICOM, JSON, or rendered file
+
+General options:
+
+- `-h`, `--help`
+- `-V`, `--version`
+- `--list-transfer-syntaxes`
+- `--check-dicom`
+- `--jpeg2000-codec <auto|openjpeg|kakadu>`
+- `--verbose`
+- `-I`, `--stdin-paths`
+- `--filter <KEY>`
+- `--overwrite`
+- `--input-type <dicom|json>`
+- `--output-type <dicom|json|raw|png|jpeg|mpeg4>`
+
+DICOM Editing:
+
+- `--set <KEY=VALUE>`
+- `--remove <KEY>`
+- `--remove-private-tags`
+
+JSON Conversion:
+
+- `--format <flat|standard>`
+- `--keys <name|hex>`
+- `--bulk-data <inline|uri>`
+- `--bulk-data-source [<SOURCE>]`
+
+DICOM Transcoding:
+
+- `--transfer-syntax <UID>`
+
+Rendering:
+
+- `--render-frame <N>`
+- `--render-all-frames`
+- `--render-fps <FPS>`
+- `--no-modality-lut`
+- `--no-voi-lut`
+- `--no-icc-profile`
+- `--window-center <FLOAT>`
+- `--window-width <FLOAT>`
+- `--jpeg-quality <1-100>`
+- `--output-width <PIXELS>`
+- `--output-height <PIXELS>`
+- `--scale-max-size <PIXELS>`
+- `--redact-box <X,Y,W,H>`
+- `--redact-color <R,G,B|#RRGGBB>`
+- `--pad`
+- `--pad-color <R,G,B|#RRGGBB>`
+
+### Environment Variables
+
+Runtime environment variables:
+
+- `DCMNORM_PERF`
+    - Enables scoped performance timing logs to stderr.
+    - Truthy values: `1`, `true`, `yes`, `on`.
+- `DCMNORM_JPEG2000_CODEC`
+    - JPEG 2000 decoder preference: `auto`, `openjpeg`, or `kakadu`.
+    - The CLI always sets this from `--jpeg2000-codec` (default `auto`).
+- `DCMNORM_JPEG2000_DEBUG`
+    - Enables JPEG 2000 debug logging when truthy.
+    - `--verbose` sets this to `1`.
+- `LD_LIBRARY_PATH`
+    - Used to discover Kakadu shared libraries (`libkdu*.so`) at runtime.
+
+Build-time environment variables (primarily for `--features kakadu-ffi`):
+
+- `KAKADU_INCLUDE_DIR`
+    - Explicit include directory containing Kakadu headers.
+- `KAKADU_LIB_DIR`
+    - Explicit library directory containing `libkdu*.so`.
+- `KAKADU_LIB_NAME`
+    - Optional Kakadu library base name override for linker configuration.
+
 Convert a DICOM file to flattened JSON using named keys:
 
 ```bash

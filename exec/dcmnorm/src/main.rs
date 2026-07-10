@@ -32,6 +32,9 @@ use serde_json::Value as JsonValue;
 #[command(
     long_about = "Convert between DICOM and flattened or standard DICOM JSON, transcode DICOM transfer syntaxes, render DICOM frames to raw/PNG/JPEG/MPEG4 outputs, and list transfer-syntax support for the current build. The CLI infers the operation from the input and output file types unless an explicit mode flag is provided."
 )]
+#[command(
+    after_help = "Environment:\n  DCMNORM_PERF            Enable scoped perf logs (1/true/yes/on)\n  DCMNORM_JPEG2000_CODEC JPEG 2000 decoder preference: auto|openjpeg|kakadu\n                         (set by --jpeg2000-codec)\n  DCMNORM_JPEG2000_DEBUG Enable JPEG 2000 debug logs (1/true/yes/on)\n                         (set to 1 by --verbose)\n  LD_LIBRARY_PATH         Used to discover Kakadu libkdu*.so at runtime\n\nBuild-time Kakadu variables (for --features kakadu-ffi):\n  KAKADU_INCLUDE_DIR      Path containing Kakadu headers\n  KAKADU_LIB_DIR          Path containing libkdu*.so\n  KAKADU_LIB_NAME         Optional Kakadu library base name override"
+)]
 #[command(arg_required_else_help = true)]
 struct Cli {
     #[arg(value_name = "INPUT", help = "Input DICOM or JSON file", help_heading = "General", display_order = 1)]
@@ -251,10 +254,19 @@ struct Cli {
 
     #[arg(
         long,
+        action = ArgAction::SetTrue,
+        help = "Disable applying embedded ICC profile during RGB rendering",
+        help_heading = "Rendering",
+        display_order = 36
+    )]
+    no_icc_profile: bool,
+
+    #[arg(
+        long,
         value_name = "FLOAT",
         help = "Override VOI window center for rendering",
         help_heading = "Rendering",
-        display_order = 36
+        display_order = 37
     )]
     window_center: Option<f64>,
 
@@ -263,7 +275,7 @@ struct Cli {
         value_name = "FLOAT",
         help = "Override VOI window width for rendering",
         help_heading = "Rendering",
-        display_order = 37
+        display_order = 38
     )]
     window_width: Option<f64>,
 
@@ -272,7 +284,7 @@ struct Cli {
         default_value_t = 90,
         help = "JPEG quality for rendered JPEG output (1-100)",
         help_heading = "Rendering",
-        display_order = 38
+        display_order = 39
     )]
     jpeg_quality: u8,
 
@@ -281,7 +293,7 @@ struct Cli {
         value_name = "PIXELS",
         help = "Output width; if height is set, scale exactly; else preserve aspect ratio",
         help_heading = "Rendering",
-        display_order = 39
+        display_order = 40
     )]
     output_width: Option<u32>,
 
@@ -290,7 +302,7 @@ struct Cli {
         value_name = "PIXELS",
         help = "Output height; if width is set, scale exactly; else preserve aspect ratio",
         help_heading = "Rendering",
-        display_order = 40
+        display_order = 41
     )]
     output_height: Option<u32>,
 
@@ -299,7 +311,7 @@ struct Cli {
         value_name = "PIXELS",
         help = "Scale output while preserving aspect ratio so the longer side equals this value",
         help_heading = "Rendering",
-        display_order = 41
+        display_order = 42
     )]
     scale_max_size: Option<u32>,
 
@@ -310,7 +322,7 @@ struct Cli {
         allow_hyphen_values = true,
         help = "Add redaction box at X,Y (in output pixels) with size W×H. Negative coords anchor from right/bottom. W/H as pixels or %%. Repeat for multiple",
         help_heading = "Rendering",
-        display_order = 42
+        display_order = 43
     )]
     redact_box: Vec<String>,
 
@@ -319,7 +331,7 @@ struct Cli {
         value_name = "COLOR",
         help = "Fill color for redaction boxes as R,G,B (0-255 each) or #RRGGBB hex. Defaults to 0,0,0 (black)",
         help_heading = "Rendering",
-        display_order = 43
+        display_order = 44
     )]
     redact_color: Option<String>,
 
@@ -328,7 +340,7 @@ struct Cli {
         action = ArgAction::SetTrue,
         help = "Pad the output image to a square canvas",
         help_heading = "Rendering",
-        display_order = 44
+        display_order = 45
     )]
     pad: bool,
 
@@ -337,7 +349,7 @@ struct Cli {
         value_name = "COLOR",
         help = "Pad color for square canvas as R,G,B (0-255 each) or #RRGGBB hex. Defaults to 0,0,0 (black)",
         help_heading = "Rendering",
-        display_order = 45
+        display_order = 46
     )]
     pad_color: Option<String>,
 }
@@ -714,13 +726,32 @@ fn process_one(cli: &Cli, input_path: &Path) -> Result<(), Box<dyn std::error::E
     if !cli.filter.is_empty() {
         let requests = parse_filter_requests(&cli.filter)?;
         let direction = infer_direction_for_filter(cli, input_path)?;
-        let mut object = read_dicom_object_for_filter(input_path, &requests)?;
-        apply_filter_to_object(&mut object, &requests);
+        // For URI bulk-data JSON output, parse from full bytes so PixelData can
+        // keep source mapping needed for BulkDataURI emission.
+        let (mut object, filter_input_bytes) = if direction == Direction::DicomToJson
+            && cli.bulk_data == BulkDataMode::Uri
+        {
+            let input_bytes = fs::read(input_path)?;
+            (read_dicom_bytes(&input_bytes)?, Some(input_bytes))
+        } else {
+            (read_dicom_object_for_filter(input_path, &requests)?, None)
+        };
 
         return match direction {
-            Direction::DicomToJson => run_dicom_to_json_with_object(cli, input_path, None, object),
-            Direction::DicomToDicom => run_dicom_to_dicom_with_object(cli, input_path, object),
-            Direction::DicomToRender => run_dicom_to_render_with_object(cli, object),
+            Direction::DicomToJson => run_dicom_to_json_with_object(
+                cli,
+                input_path,
+                filter_input_bytes.as_deref(),
+                object,
+            ),
+            Direction::DicomToDicom => {
+                apply_filter_to_object(&mut object, &requests);
+                run_dicom_to_dicom_with_object(cli, input_path, object)
+            }
+            Direction::DicomToRender => {
+                apply_filter_to_object(&mut object, &requests);
+                run_dicom_to_render_with_object(cli, object)
+            }
             Direction::JsonToDicom => Err(io::Error::new(
                 ErrorKind::InvalidInput,
                 "--filter is only supported for DICOM input",
@@ -1293,6 +1324,7 @@ fn run_dicom_to_render_with_object(
         frame_index: cli.render_frame,
         apply_modality_lut: !cli.no_modality_lut,
         apply_voi_lut: !cli.no_voi_lut,
+        apply_icc_profile: !cli.no_icc_profile,
         window_center: cli.window_center,
         window_width: cli.window_width,
         jpeg_quality: cli.jpeg_quality,
@@ -1832,6 +1864,7 @@ fn validate_no_render_or_redaction_flags(cli: &Cli) -> Result<(), Box<dyn std::e
         || cli.render_frame != 0
         || cli.no_modality_lut
         || cli.no_voi_lut
+        || cli.no_icc_profile
         || cli.window_center.is_some()
         || cli.window_width.is_some()
         || cli.jpeg_quality != 90
@@ -1873,6 +1906,7 @@ fn validate_check_dicom_flags(cli: &Cli) -> Result<(), Box<dyn std::error::Error
         || cli.render_fps.is_some()
         || cli.no_modality_lut
         || cli.no_voi_lut
+        || cli.no_icc_profile
         || cli.window_center.is_some()
         || cli.window_width.is_some()
         || cli.jpeg_quality != 90
@@ -1902,6 +1936,7 @@ fn validate_non_dicom_to_dicom_render_flags(cli: &Cli) -> Result<(), Box<dyn std
         || cli.render_frame != 0
         || cli.no_modality_lut
         || cli.no_voi_lut
+        || cli.no_icc_profile
         || cli.window_center.is_some()
         || cli.window_width.is_some()
         || cli.jpeg_quality != 90
@@ -2324,6 +2359,7 @@ mod tests {
             render_frame: 0,
             no_modality_lut: false,
             no_voi_lut: false,
+            no_icc_profile: false,
             window_center: None,
             window_width: None,
             jpeg_quality: 90,
@@ -2453,6 +2489,25 @@ mod tests {
         let _ = fs::remove_file(&output_path);
         assert!(json.contains("\"MediaStorageSOPClassUID\""));
         assert!(!json.contains("\"StudyInstanceUID\""));
+    }
+
+    #[test]
+    fn filtered_process_one_uses_bulk_data_uri_for_pixel_data() {
+        let input_path = fixture_path("dx.dcm");
+        let output_path = temp_output_path("filtered-pixeldata-uri");
+
+        let mut cli = base_cli();
+        cli.output = Some(output_path.clone());
+        cli.filter = vec!["PixelData".to_string()];
+
+        super::process_one(&cli, &input_path).unwrap();
+
+        let json = fs::read_to_string(&output_path).unwrap();
+        let _ = fs::remove_file(&output_path);
+
+        assert!(json.contains("\"PixelData\""));
+        assert!(json.contains("\"BulkDataURI\""));
+        assert!(!json.contains("\"InlineBinary\""));
     }
 
     #[test]

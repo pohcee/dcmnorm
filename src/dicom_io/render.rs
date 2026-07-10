@@ -11,6 +11,7 @@ use dicom_transfer_syntax_registry::TransferSyntaxRegistry;
 use image::codecs::jpeg::JpegEncoder;
 use image::codecs::png::PngEncoder;
 use image::{ColorType, GrayImage, ImageEncoder, RgbImage};
+use lcms2::{Intent, PixelFormat, Profile, Transform};
 use rayon::prelude::*;
 
 use super::io::{kakadu_ffi_enabled, transcode_dicom_object, JPEG2000_DEBUG_ENV_FLAG};
@@ -55,6 +56,7 @@ pub struct RenderPipelineOptions {
     pub frame_index: usize,
     pub apply_modality_lut: bool,
     pub apply_voi_lut: bool,
+    pub apply_icc_profile: bool,
     pub window_center: Option<f64>,
     pub window_width: Option<f64>,
     pub jpeg_quality: u8,
@@ -84,6 +86,7 @@ impl Default for RenderPipelineOptions {
             frame_index: 0,
             apply_modality_lut: true,
             apply_voi_lut: true,
+            apply_icc_profile: true,
             window_center: None,
             window_width: None,
             jpeg_quality: 90,
@@ -613,11 +616,54 @@ fn render_single_frame(
         });
     }
 
-    match metadata.samples_per_pixel {
+    let mut rendered = match metadata.samples_per_pixel {
         1 => render_grayscale_frame(object, metadata, options),
         3 => render_rgb_frame(object, metadata, options),
         other => Err(RenderError::UnsupportedSamplesPerPixel(other)),
+    }?;
+
+    if options.apply_icc_profile && rendered.samples_per_pixel == 3 {
+        apply_embedded_icc_profile(object, &mut rendered.bytes);
     }
+
+    Ok(rendered)
+}
+
+fn apply_embedded_icc_profile(object: &DefaultDicomObject, rgb_bytes: &mut [u8]) {
+    if rgb_bytes.is_empty() || rgb_bytes.len() % 3 != 0 {
+        return;
+    }
+
+    let Some(icc_profile_bytes) = read_icc_profile_bytes(object) else {
+        return;
+    };
+
+    let Ok(input_profile) = Profile::new_icc(&icc_profile_bytes) else {
+        return;
+    };
+
+    let output_profile = Profile::new_srgb();
+
+    let Ok(transform) = Transform::new(
+        &input_profile,
+        PixelFormat::RGB_8,
+        &output_profile,
+        PixelFormat::RGB_8,
+        Intent::Perceptual,
+    ) else {
+        return;
+    };
+
+    transform.transform_in_place(rgb_bytes);
+}
+
+fn read_icc_profile_bytes(object: &DefaultDicomObject) -> Option<Vec<u8>> {
+    let element = object.get(tags::ICC_PROFILE)?;
+    let bytes = element.to_bytes().ok()?;
+    if bytes.is_empty() {
+        return None;
+    }
+    Some(bytes.into_owned())
 }
 
 fn render_grayscale_frame(
@@ -723,11 +769,15 @@ fn render_rgb_frame(
     metadata: &RenderMetadata,
     options: &RenderPipelineOptions,
 ) -> Result<RenderedFramePixels, RenderError> {
-    let is_ybr_full = metadata.photometric_interpretation == "YBR_FULL";
+    let is_ybr_full = matches!(
+        metadata.photometric_interpretation.as_str(),
+        "YBR_FULL" | "YBR_ICT"
+    );
+    let is_ybr_rct = metadata.photometric_interpretation == "YBR_RCT";
     let is_ybr_422 = metadata.photometric_interpretation == "YBR_FULL_422";
     let is_rgb = metadata.photometric_interpretation == "RGB";
 
-    if !is_rgb && !is_ybr_full && !is_ybr_422 {
+    if !is_rgb && !is_ybr_full && !is_ybr_422 && !is_ybr_rct {
         return Err(RenderError::UnsupportedPhotometricInterpretation(
             metadata.photometric_interpretation.clone(),
         ));
@@ -806,7 +856,14 @@ fn render_rgb_frame(
             }
 
             if metadata.planar_configuration == 0 {
-                let bytes = &frame_bytes[..expected_components];
+                let mut bytes = frame_bytes[..expected_components].to_vec();
+                maybe_repair_zeroed_lower_half_chroma(
+                    &mut bytes,
+                    usize::from(metadata.cols),
+                    usize::from(metadata.rows),
+                    is_ybr_full,
+                    is_ybr_rct,
+                );
                 if is_ybr_full {
                     bytes
                         .chunks_exact(3)
@@ -815,8 +872,16 @@ fn render_rgb_frame(
                             [r, g, b]
                         })
                         .collect()
+                } else if is_ybr_rct {
+                    bytes
+                        .chunks_exact(3)
+                        .flat_map(|chunk| {
+                            let (r, g, b) = ybr_rct_to_rgb(chunk[0], chunk[1], chunk[2]);
+                            [r, g, b]
+                        })
+                        .collect()
                 } else {
-                    bytes.to_vec()
+                    bytes
                 }
             } else {
                 let mut rgb = vec![0u8; expected_components];
@@ -834,6 +899,8 @@ fn render_rgb_frame(
 
                     let (r, g, b) = if is_ybr_full {
                         ybr_to_rgb(c0, c1, c2)
+                    } else if is_ybr_rct {
+                        ybr_rct_to_rgb(c0, c1, c2)
                     } else {
                         (c0, c1, c2)
                     };
@@ -892,6 +959,8 @@ fn render_rgb_frame(
 
                     let (r, g, b) = if is_ybr_full {
                         ybr_to_rgb(c0, c1, c2)
+                    } else if is_ybr_rct {
+                        ybr_rct_to_rgb(c0, c1, c2)
                     } else {
                         (c0, c1, c2)
                     };
@@ -920,6 +989,8 @@ fn render_rgb_frame(
             for index in 0..pixel_count {
                 let (r, g, b) = if is_ybr_full {
                     ybr_to_rgb(planes[0][index], planes[1][index], planes[2][index])
+                } else if is_ybr_rct {
+                    ybr_rct_to_rgb(planes[0][index], planes[1][index], planes[2][index])
                 } else {
                     (planes[0][index], planes[1][index], planes[2][index])
                 };
@@ -956,6 +1027,80 @@ fn ybr_to_rgb(y: u8, cb: u8, cr: u8) -> (u8, u8, u8) {
         r.clamp(0.0, 255.0) as u8,
         g.clamp(0.0, 255.0) as u8,
         b.clamp(0.0, 255.0) as u8,
+    )
+}
+
+fn maybe_repair_zeroed_lower_half_chroma(
+    interleaved: &mut [u8],
+    width: usize,
+    height: usize,
+    is_ybr_full: bool,
+    is_ybr_rct: bool,
+) {
+    if !(is_ybr_full || is_ybr_rct) {
+        return;
+    }
+    if height < 2 || height % 2 != 0 || interleaved.len() < width * height * 3 {
+        return;
+    }
+
+    let half = height / 2;
+    let top_zero_ratio = zero_chroma_ratio(interleaved, width, 0, half);
+    let bottom_zero_ratio = zero_chroma_ratio(interleaved, width, half, height);
+
+    // Repair only when lower-half chroma is almost entirely zero while the top-half is not,
+    // which indicates malformed decoder output seen in some JPEG2000 WSI frames.
+    if bottom_zero_ratio < 0.98 || top_zero_ratio > 0.50 {
+        return;
+    }
+
+    for y in half..height {
+        let src_y = y - half;
+        for x in 0..width {
+            let index = (y * width + x) * 3;
+            if interleaved[index + 1] == 0 && interleaved[index + 2] == 0 {
+                let src_index = (src_y * width + x) * 3;
+                interleaved[index + 1] = interleaved[src_index + 1];
+                interleaved[index + 2] = interleaved[src_index + 2];
+            }
+        }
+    }
+}
+
+fn zero_chroma_ratio(interleaved: &[u8], width: usize, y_start: usize, y_end: usize) -> f64 {
+    let mut zero_pairs = 0usize;
+    let mut total = 0usize;
+
+    for y in y_start..y_end {
+        for x in 0..width {
+            let index = (y * width + x) * 3;
+            if interleaved[index + 1] == 0 && interleaved[index + 2] == 0 {
+                zero_pairs += 1;
+            }
+            total += 1;
+        }
+    }
+
+    if total == 0 {
+        0.0
+    } else {
+        zero_pairs as f64 / total as f64
+    }
+}
+
+fn ybr_rct_to_rgb(y: u8, cb: u8, cr: u8) -> (u8, u8, u8) {
+    let y = i32::from(y);
+    let cb = i32::from(cb) - 128;
+    let cr = i32::from(cr) - 128;
+
+    let g = y - ((cb + cr) >> 2);
+    let r = cr + g;
+    let b = cb + g;
+
+    (
+        r.clamp(0, 255) as u8,
+        g.clamp(0, 255) as u8,
+        b.clamp(0, 255) as u8,
     )
 }
 
@@ -1417,7 +1562,14 @@ fn draw_bounding_boxes(frame: &mut RenderedFramePixels, options: &RenderPipeline
 
 #[cfg(test)]
 mod tests {
-    use super::{clamped_box, BoundingBox, BoxLength};
+    use super::{
+        clamped_box, normalize_decoded_render_attributes, ybr_rct_to_rgb, ybr_to_rgb,
+        BoundingBox, BoxLength,
+    };
+    use crate::dicom_io::read_dicom_file;
+    use dicom_core::{DataElement, PrimitiveValue, VR};
+    use dicom_dictionary_std::tags;
+    use std::path::PathBuf;
 
     #[test]
     fn resolves_negative_offsets_from_right_and_bottom() {
@@ -1504,6 +1656,50 @@ mod tests {
         assert_eq!(result.bytes[5], 255);
         assert_eq!(result.bytes[6], 255);
         assert_eq!(result.bytes[7], 100);
+    }
+
+    #[test]
+    fn ybr_ict_neutral_chroma_maps_to_gray() {
+        assert_eq!(ybr_to_rgb(243, 128, 128), (243, 243, 243));
+    }
+
+    #[test]
+    fn ybr_rct_round_trip_example() {
+        // RGB (200,100,50) -> YBR_RCT (112,78,228) for 8-bit data.
+        assert_eq!(ybr_rct_to_rgb(112, 78, 228), (200, 100, 50));
+    }
+
+    #[test]
+    fn normalize_decoded_attributes_keeps_ybr_ict() {
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("test")
+            .join("files")
+            .join("dx.dcm");
+        let mut object = read_dicom_file(&fixture).expect("fixture should be readable");
+        object.put(DataElement::new(
+            tags::SAMPLES_PER_PIXEL,
+            VR::US,
+            PrimitiveValue::from(3u16),
+        ));
+        object.put(DataElement::new(
+            tags::PHOTOMETRIC_INTERPRETATION,
+            VR::CS,
+            PrimitiveValue::from("YBR_ICT"),
+        ));
+
+        normalize_decoded_render_attributes(&mut object, "1.2.840.10008.1.2.4.91");
+
+        let photometric = object
+            .get(tags::PHOTOMETRIC_INTERPRETATION)
+            .and_then(|element| element.to_str().ok())
+            .unwrap_or_default();
+        assert_eq!(photometric, "YBR_ICT");
+
+        let planar = object
+            .get(tags::PLANAR_CONFIGURATION)
+            .and_then(|element| element.uint16().ok())
+            .unwrap_or(u16::MAX);
+        assert_eq!(planar, 0);
     }
 }
 
@@ -1792,8 +1988,37 @@ fn ensure_native_render_object<'a>(
     }
 
     let _scope = perf::scope("render.transcode_to_explicit_vr_le");
-    let transcoded = transcode_dicom_object(object, uids::EXPLICIT_VR_LITTLE_ENDIAN)?;
+    let mut transcoded = transcode_dicom_object(object, uids::EXPLICIT_VR_LITTLE_ENDIAN)?;
+    preserve_source_jpeg2000_ybr_photometric(object, &mut transcoded, source_uid);
     Ok(Cow::Owned(transcoded))
+}
+
+fn preserve_source_jpeg2000_ybr_photometric(
+    source: &DefaultDicomObject,
+    target: &mut DefaultDicomObject,
+    source_ts_uid: &str,
+) {
+    if !is_jpeg2000_transfer_syntax(source_ts_uid) {
+        return;
+    }
+
+    let Some(source_photometric) = source
+        .get(tags::PHOTOMETRIC_INTERPRETATION)
+        .and_then(|element| element.to_str().ok())
+        .map(|value| value.trim().to_owned())
+    else {
+        return;
+    };
+
+    if !source_photometric.starts_with("YBR_") {
+        return;
+    }
+
+    target.put(DataElement::new(
+        tags::PHOTOMETRIC_INTERPRETATION,
+        VR::CS,
+        PrimitiveValue::from(source_photometric),
+    ));
 }
 
 fn try_decode_single_frame_object(
@@ -1899,7 +2124,7 @@ fn replace_with_native_frame_pixel_data(
     Ok(())
 }
 
-fn normalize_decoded_render_attributes(object: &mut DefaultDicomObject, source_ts_uid: &str) {
+fn normalize_decoded_render_attributes(object: &mut DefaultDicomObject, _source_ts_uid: &str) {
     let samples_per_pixel = object
         .get(tags::SAMPLES_PER_PIXEL)
         .and_then(|element| element.uint16().ok())
@@ -1911,10 +2136,8 @@ fn normalize_decoded_render_attributes(object: &mut DefaultDicomObject, source_t
             .and_then(|element| element.to_str().ok())
             .map(|value| value.trim().to_owned())
             .unwrap_or_default();
-        let is_rle = normalize_transfer_syntax_uid(source_ts_uid) == uids::RLE_LOSSLESS;
-        let is_ybr = current_photometric.starts_with("YBR_FULL")
-            || current_photometric == "YBR_PARTIAL_422";
-        let target_photometric = if is_rle && is_ybr {
+        let is_ybr = current_photometric.starts_with("YBR_");
+        let target_photometric = if is_ybr {
             current_photometric
         } else {
             "RGB".to_owned()

@@ -45,16 +45,21 @@ pub(super) fn bulk_representation<I, P>(
 where
     P: AsRef<[u8]>,
 {
+    let raw_bytes = raw_value_bytes(tag, vr, value, None)?;
+    let expected_bytes_for_lookup = match value {
+        DicomValue::PixelSequence(_) => None,
+        _ => Some(raw_bytes.as_slice()),
+    };
 
     if options.bulk_data_mode == DicomJsonBulkDataMode::Uri {
         if let Some(source) = options.bulk_data_source {
-            if let Some(location) = locate_root_element_value(source, tag)? {
-                if location.length <= INLINE_BINARY_URI_THRESHOLD {
-                    let raw_bytes = &source[location.offset..location.offset + location.length];
-                    return Ok(BulkRepresentation::InlineBinary(
-                        BASE64_STANDARD.encode(raw_bytes),
-                    ));
-                }
+            if raw_bytes.len() <= INLINE_BINARY_URI_THRESHOLD {
+                return Ok(BulkRepresentation::InlineBinary(
+                    BASE64_STANDARD.encode(&raw_bytes),
+                ));
+            }
+
+            if let Some(location) = locate_element_value(source, tag, expected_bytes_for_lookup)? {
                 let uri = match options.bulk_data_uri_base {
                     Some(base) => format!(
                         "{}?offset={}&length={}",
@@ -63,16 +68,16 @@ where
                     None => format!("?offset={}&length={}", location.offset, location.length),
                 };
                 return Ok(BulkRepresentation::Uri(uri));
-            } else {
-                let raw_bytes = raw_value_bytes(tag, vr, value, options.bulk_data_source)?;
-                return Ok(BulkRepresentation::InlineBinary(BASE64_STANDARD.encode(raw_bytes)));
             }
+
+            return Ok(BulkRepresentation::InlineBinary(
+                BASE64_STANDARD.encode(&raw_bytes),
+            ));
         }
     }
 
-    let raw_bytes = raw_value_bytes(tag, vr, value, options.bulk_data_source)?;
     Ok(BulkRepresentation::InlineBinary(
-        BASE64_STANDARD.encode(raw_bytes),
+        BASE64_STANDARD.encode(&raw_bytes),
     ))
 }
 
@@ -86,7 +91,7 @@ where
     P: AsRef<[u8]>,
 {
     if let Some(source) = bulk_data_source {
-        if let Some(location) = locate_root_element_value(source, tag)? {
+        if let Some(location) = locate_element_value(source, tag, None)? {
             return Ok(source[location.offset..location.offset + location.length].to_vec());
         }
     }
@@ -325,9 +330,10 @@ fn parse_bulk_data_uri(uri: &str) -> Result<(usize, usize), DicomJsonError> {
     }
 }
 
-fn locate_root_element_value(
+fn locate_element_value(
     source: &[u8],
     target: Tag,
+    expected_bytes: Option<&[u8]>,
 ) -> Result<Option<ElementLocation>, DicomJsonError> {
     let has_part10_preamble = source.len() >= 132 && &source[128..132] == b"DICM";
 
@@ -352,7 +358,9 @@ fn locate_root_element_value(
                 ));
             };
 
-            if header.tag == target {
+            if header.tag == target
+                && value_matches(source, value_offset, value_length, expected_bytes)
+            {
                 return Ok(Some(ElementLocation {
                     offset: value_offset,
                     length: value_length,
@@ -369,13 +377,28 @@ fn locate_root_element_value(
     }
 
     let syntax = transfer_syntax_from_uid(transfer_syntax_uid.as_str())?;
-    locate_tag_in_dataset(
+    if let Some(location) = locate_tag_in_dataset(
         source,
         position,
         target,
         syntax.explicit_vr,
         syntax.little_endian,
-    )
+        expected_bytes,
+    )? {
+        return Ok(Some(location));
+    }
+
+    if let Some(expected) = expected_bytes {
+        return locate_element_value_by_matching_bytes(
+            source,
+            target,
+            expected,
+            syntax.explicit_vr,
+            syntax.little_endian,
+        );
+    }
+
+    Ok(None)
 }
 
 fn locate_tag_in_dataset(
@@ -384,26 +407,26 @@ fn locate_tag_in_dataset(
     target: Tag,
     explicit_vr: bool,
     little_endian: bool,
+    expected_bytes: Option<&[u8]>,
 ) -> Result<Option<ElementLocation>, DicomJsonError> {
     while position + 8 <= source.len() {
         let header = parse_element_header(source, position, explicit_vr, little_endian)?;
         let value_offset = position + header.header_length;
+        let length = if let Some(length) = header.length {
+            length
+        } else {
+            skip_undefined_length_value(source, value_offset, explicit_vr, little_endian)?
+                .saturating_sub(value_offset)
+        };
 
-        if header.tag == target {
-            let length = if let Some(length) = header.length {
-                length
-            } else {
-                skip_undefined_length_value(source, value_offset, explicit_vr, little_endian)?
-                    .saturating_sub(value_offset)
-            };
-
+        if header.tag == target && value_matches(source, value_offset, length, expected_bytes) {
             return Ok(Some(ElementLocation {
                 offset: value_offset,
                 length,
             }));
         }
 
-        position = if let Some(length) = header.length {
+        position = if header.length.is_some() {
             value_offset + length
         } else {
             skip_undefined_length_value(source, value_offset, explicit_vr, little_endian)? + 8
@@ -411,6 +434,115 @@ fn locate_tag_in_dataset(
     }
 
     Ok(None)
+}
+
+fn locate_element_value_by_matching_bytes(
+    source: &[u8],
+    target: Tag,
+    expected: &[u8],
+    explicit_vr: bool,
+    little_endian: bool,
+) -> Result<Option<ElementLocation>, DicomJsonError> {
+    if expected.is_empty() {
+        return Ok(None);
+    }
+
+    let mut search_start = 0;
+    while search_start + expected.len() <= source.len() {
+        let Some(relative_match) = find_subslice(&source[search_start..], expected) else {
+            break;
+        };
+        let value_offset = search_start + relative_match;
+
+        if let Some(location) = try_locate_header_for_value_offset(
+            source,
+            target,
+            value_offset,
+            expected.len(),
+            explicit_vr,
+            little_endian,
+        )? {
+            return Ok(Some(location));
+        }
+
+        search_start = value_offset + 1;
+    }
+
+    Ok(None)
+}
+
+fn try_locate_header_for_value_offset(
+    source: &[u8],
+    target: Tag,
+    value_offset: usize,
+    expected_length: usize,
+    explicit_vr: bool,
+    little_endian: bool,
+) -> Result<Option<ElementLocation>, DicomJsonError> {
+    let header_lengths: &[usize] = if explicit_vr { &[8, 12] } else { &[8] };
+
+    for header_length in header_lengths {
+        if value_offset < *header_length {
+            continue;
+        }
+
+        let header_offset = value_offset - *header_length;
+        let Ok(header) = parse_element_header(source, header_offset, explicit_vr, little_endian)
+        else {
+            continue;
+        };
+
+        if header.tag != target {
+            continue;
+        }
+
+        if header_offset + header.header_length != value_offset {
+            continue;
+        }
+
+        let length = if let Some(length) = header.length {
+            length
+        } else {
+            skip_undefined_length_value(source, value_offset, explicit_vr, little_endian)?
+                .saturating_sub(value_offset)
+        };
+
+        if length == expected_length {
+            return Ok(Some(ElementLocation {
+                offset: value_offset,
+                length,
+            }));
+        }
+    }
+
+    Ok(None)
+}
+
+fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || needle.len() > haystack.len() {
+        return None;
+    }
+
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+fn value_matches(
+    source: &[u8],
+    value_offset: usize,
+    value_length: usize,
+    expected_bytes: Option<&[u8]>,
+) -> bool {
+    let Some(expected) = expected_bytes else {
+        return true;
+    };
+
+    value_length == expected.len()
+        && source
+            .get(value_offset..value_offset + value_length)
+            .map(|bytes| bytes == expected)
+            .unwrap_or(false)
 }
 
 fn skip_undefined_length_value(
