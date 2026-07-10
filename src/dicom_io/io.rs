@@ -595,14 +595,28 @@ fn probe_transfer_syntax_from_uid(uid: &str) -> ProbeTransferSyntax {
     }
 }
 
-pub fn write_dicom_file<P>(object: &DefaultDicomObject, path: P) -> Result<(), WriteError>
+/// Recomputes the file meta group length before writing.
+///
+/// `dicom-object` can leave `information_group_length` stale relative to the
+/// meta elements it actually serializes (e.g. when the meta table gains a
+/// media storage SOP class/instance UID inferred from the data set after the
+/// group length was last computed). Writing that stale length produces a
+/// file whose meta group boundary doesn't match its real content, which
+/// corrupts everything read after it.
+fn refresh_meta_group_length(object: &mut DefaultDicomObject) {
+    object.meta_mut().update_information_group_length();
+}
+
+pub fn write_dicom_file<P>(object: &mut DefaultDicomObject, path: P) -> Result<(), WriteError>
 where
     P: AsRef<Path>,
 {
+    refresh_meta_group_length(object);
     object.write_to_file(path).map(|_| ())
 }
 
-pub fn write_dicom_bytes(object: &DefaultDicomObject) -> Result<Vec<u8>, WriteError> {
+pub fn write_dicom_bytes(object: &mut DefaultDicomObject) -> Result<Vec<u8>, WriteError> {
+    refresh_meta_group_length(object);
     let mut bytes = Vec::new();
     object.write_all(&mut bytes)?;
     Ok(bytes)
@@ -702,8 +716,8 @@ pub fn transcode_dicom_bytes(
     target_transfer_syntax_uid: &str,
 ) -> Result<Vec<u8>, TranscodeError> {
     let object = read_dicom_bytes(bytes)?;
-    let transcoded = transcode_dicom_object(&object, target_transfer_syntax_uid)?;
-    Ok(write_dicom_bytes(&transcoded)?)
+    let mut transcoded = transcode_dicom_object(&object, target_transfer_syntax_uid)?;
+    Ok(write_dicom_bytes(&mut transcoded)?)
 }
 
 pub fn transcode_dicom_file<P, Q>(
@@ -716,8 +730,8 @@ where
     Q: AsRef<Path>,
 {
     let object = read_dicom_file(input_path)?;
-    let transcoded = transcode_dicom_object(&object, target_transfer_syntax_uid)?;
-    write_dicom_file(&transcoded, output_path)?;
+    let mut transcoded = transcode_dicom_object(&object, target_transfer_syntax_uid)?;
+    write_dicom_file(&mut transcoded, output_path)?;
     Ok(())
 }
 

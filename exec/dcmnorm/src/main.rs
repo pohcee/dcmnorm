@@ -1140,7 +1140,7 @@ fn run_dicom_to_dicom_with_object(
                 target_transfer_syntax
             ),
         );
-        let redacted = {
+        let mut redacted = {
             let _redact_scope = perf::scope("cli.dicom_to_dicom.redact_pixels");
             redact_dicom_pixels_to_transfer_syntax(
             &object,
@@ -1149,7 +1149,7 @@ fn run_dicom_to_dicom_with_object(
             bounding_box_color,
         )?
         };
-        write_dicom_file(&redacted, output_path)?;
+        write_dicom_file(&mut redacted, output_path)?;
         return Ok(());
     }
 
@@ -1162,17 +1162,17 @@ fn run_dicom_to_dicom_with_object(
                 target_transfer_syntax
             ),
         );
-        let transcoded = {
+        let mut transcoded = {
             let _transcode_scope = perf::scope("cli.dicom_to_dicom.transcode");
             transcode_dicom_object(&object, target_transfer_syntax)?
         };
-        write_dicom_file(&transcoded, output_path)?;
+        write_dicom_file(&mut transcoded, output_path)?;
     } else {
         verbose_log(
             cli,
             format!("Writing updated DICOM to {}", output_path.display()),
         );
-        write_dicom_file(&object, output_path)?;
+        write_dicom_file(&mut object, output_path)?;
     }
 
     Ok(())
@@ -1471,7 +1471,7 @@ fn run_json_to_dicom(cli: &Cli, input_bytes: &[u8]) -> Result<(), Box<dyn std::e
             output_path.display()
         ),
     );
-    write_dicom_file(&object, output_path)?;
+    write_dicom_file(&mut object, output_path)?;
     Ok(())
 }
 

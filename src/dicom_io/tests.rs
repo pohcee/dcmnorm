@@ -283,10 +283,10 @@ fn remove_private_tags_removes_all_private_tags() {
 
 #[test]
 fn writes_dicom_file_fixture_round_trip() {
-    let original = read_dicom_file(fixture_path("dx.dcm")).unwrap();
+    let mut original = read_dicom_file(fixture_path("dx.dcm")).unwrap();
     let output_path = temp_file_path("dicom-file-roundtrip");
 
-    write_dicom_file(&original, &output_path).unwrap();
+    write_dicom_file(&mut original, &output_path).unwrap();
     let roundtrip = read_dicom_file(&output_path).unwrap();
 
     assert_core_fields_match(&original, &roundtrip);
@@ -308,11 +308,45 @@ fn reads_dicom_bytes_fixture() {
 
 #[test]
 fn writes_dicom_bytes_fixture_round_trip() {
-    let original = read_dicom_file(fixture_path("dx.dcm")).unwrap();
-    let bytes = write_dicom_bytes(&original).unwrap();
+    let mut original = read_dicom_file(fixture_path("dx.dcm")).unwrap();
+    let bytes = write_dicom_bytes(&mut original).unwrap();
     let roundtrip = read_dicom_bytes(&bytes).unwrap();
 
     assert_core_fields_match(&original, &roundtrip);
+}
+
+#[test]
+fn writes_dicom_file_with_explicit_length_nested_sequences_stays_readable() {
+    // sr.dcm encodes its ContentSequence and nested CONTAINER/CONTAINS items
+    // with explicit (defined) lengths rather than undefined-length
+    // delimiters, and its file meta group omits MediaStorageSOPClassUID and
+    // MediaStorageSOPInstanceUID (they get inferred from the data set on
+    // read). Editing and rewriting such a file must still produce a fully
+    // parseable data set, not just one that passes a shallow SOP Class UID
+    // probe.
+    let mut object = read_dicom_file(fixture_path("sr.dcm")).unwrap();
+    object.put_str(tags::PATIENT_NAME, dicom_core::VR::PN, "TEST");
+
+    let bytes = write_dicom_bytes(&mut object).unwrap();
+    let roundtrip = read_dicom_bytes(&bytes).unwrap();
+
+    assert_eq!(
+        roundtrip
+            .element(tags::PATIENT_NAME)
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "TEST"
+    );
+    assert_eq!(
+        roundtrip
+            .element(tags::CONTENT_SEQUENCE)
+            .unwrap()
+            .items()
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 #[test]
@@ -462,8 +496,8 @@ fn writes_and_reads_flat_json_with_bulk_data_uri_for_ct() {
     let original = read_dicom_bytes(&source).unwrap();
     let json = write_dicom_json_with_source(&original, &source).unwrap();
 
-    let roundtrip = read_dicom_json_with_source(&json, &source).unwrap();
-    let bytes = write_dicom_bytes(&roundtrip).unwrap();
+    let mut roundtrip = read_dicom_json_with_source(&json, &source).unwrap();
+    let bytes = write_dicom_bytes(&mut roundtrip).unwrap();
     let rewritten = read_dicom_bytes(&bytes).unwrap();
 
     assert_eq!(
@@ -563,8 +597,8 @@ fn writes_and_reads_full_json_with_bulk_data_uri() {
 #[test]
 fn transcodes_native_dataset_to_big_endian() {
     let original = read_dicom_file(fixture_path("dx.dcm")).unwrap();
-    let transcoded = transcode_dicom_object(&original, EXPLICIT_VR_BIG_ENDIAN_UID).unwrap();
-    let bytes = write_dicom_bytes(&transcoded).unwrap();
+    let mut transcoded = transcode_dicom_object(&original, EXPLICIT_VR_BIG_ENDIAN_UID).unwrap();
+    let bytes = write_dicom_bytes(&mut transcoded).unwrap();
     let roundtrip = read_dicom_bytes(&bytes).unwrap();
 
     assert_eq!(
