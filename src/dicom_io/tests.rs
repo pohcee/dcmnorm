@@ -595,6 +595,125 @@ fn writes_and_reads_full_json_with_bulk_data_uri() {
 }
 
 #[test]
+fn writes_full_json_with_source_uri_mode_for_nested_bulk_value() {
+    let mut source = fixture_bytes(fixture_path("dx.dcm"));
+    let nested_payload = vec![0x5A; 64];
+    append_nested_icc_profile_sequence(&mut source, &nested_payload);
+
+    let object = read_dicom_bytes(&source).unwrap();
+    let json = write_dicom_json_full_with_source(&object, &source).unwrap();
+    let value: JsonValue = serde_json::from_str(&json).unwrap();
+
+    let icc = &value["00480105"]["Value"][0]["00282000"];
+    let uri = icc["BulkDataURI"]
+        .as_str()
+        .expect("nested ICCProfile should emit BulkDataURI in standard JSON too");
+    assert!(uri.contains("offset="), "missing offset in URI: {uri}");
+    assert!(uri.contains("length="), "missing length in URI: {uri}");
+    assert!(
+        icc["InlineBinary"].is_null(),
+        "nested ICCProfile should not fallback to InlineBinary"
+    );
+
+    let roundtrip = read_dicom_json_full_with_source(&json, &source).unwrap();
+    let optical_path = roundtrip
+        .element(Tag(0x0048, 0x0105))
+        .unwrap()
+        .items()
+        .unwrap();
+    let icc_profile = optical_path[0].element(Tag(0x0028, 0x2000)).unwrap();
+    assert_eq!(icc_profile.to_bytes().unwrap().into_owned(), nested_payload);
+}
+
+#[test]
+fn writes_and_reads_full_json_pn_with_ideographic_and_phonetic() {
+    let mut object = read_dicom_file(fixture_path("dx.dcm")).unwrap();
+    object.put(DataElement::new(
+        tags::PATIENT_NAME,
+        VR::PN,
+        PrimitiveValue::from("Yamada^Tarou=山田^太郎=やまだ^たろう"),
+    ));
+
+    let json = write_dicom_json_full(&object).unwrap();
+    let value: JsonValue = serde_json::from_str(&json).unwrap();
+    let name = &value["00100010"]["Value"][0];
+    assert_eq!(name["Alphabetic"], JsonValue::String("Yamada^Tarou".to_owned()));
+    assert_eq!(
+        name["Ideographic"],
+        JsonValue::String("山田^太郎".to_owned())
+    );
+    assert_eq!(
+        name["Phonetic"],
+        JsonValue::String("やまだ^たろう".to_owned())
+    );
+
+    let roundtrip = read_dicom_json_full(&json).unwrap();
+    assert_eq!(
+        roundtrip
+            .element(tags::PATIENT_NAME)
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "Yamada^Tarou=山田^太郎=やまだ^たろう"
+    );
+}
+
+#[test]
+fn writes_and_reads_full_json_numeric_nan_and_infinity() {
+    let mut object = read_dicom_file(fixture_path("dx.dcm")).unwrap();
+    object.put(DataElement::new(
+        Tag(0x0018, 0x9432), // ReconstructionAngle, VR FD
+        VR::FD,
+        PrimitiveValue::from([f64::NAN, f64::INFINITY, f64::NEG_INFINITY]),
+    ));
+
+    let json = write_dicom_json_full(&object).unwrap();
+    let value: JsonValue = serde_json::from_str(&json).unwrap();
+    let values = value["00189432"]["Value"].as_array().unwrap();
+    assert_eq!(values[0], JsonValue::String("NaN".to_owned()));
+    assert_eq!(values[1], JsonValue::String("inf".to_owned()));
+    assert_eq!(values[2], JsonValue::String("-inf".to_owned()));
+
+    let roundtrip = read_dicom_json_full(&json).unwrap();
+    let restored = roundtrip
+        .element(Tag(0x0018, 0x9432))
+        .unwrap()
+        .to_multi_float64()
+        .unwrap();
+    assert!(restored[0].is_nan());
+    assert_eq!(restored[1], f64::INFINITY);
+    assert_eq!(restored[2], f64::NEG_INFINITY);
+}
+
+#[test]
+fn writes_and_reads_full_json_large_integer_falls_back_to_string() {
+    let mut object = read_dicom_file(fixture_path("dx.dcm")).unwrap();
+    let large_value = 876_543_245_678u64;
+    object.put(DataElement::new(
+        Tag(0x0028, 0x9422), // PixelOffsetTableUV placeholder tag, VR UV
+        VR::UV,
+        PrimitiveValue::U64(vec![large_value].into()),
+    ));
+
+    let json = write_dicom_json_full(&object).unwrap();
+    let value: JsonValue = serde_json::from_str(&json).unwrap();
+    assert_eq!(
+        value["00289422"]["Value"][0],
+        JsonValue::String(large_value.to_string())
+    );
+
+    let roundtrip = read_dicom_json_full(&json).unwrap();
+    assert_eq!(
+        roundtrip
+            .element(Tag(0x0028, 0x9422))
+            .unwrap()
+            .to_multi_int::<u64>()
+            .unwrap()[0],
+        large_value
+    );
+}
+
+#[test]
 fn transcodes_native_dataset_to_big_endian() {
     let original = read_dicom_file(fixture_path("dx.dcm")).unwrap();
     let mut transcoded = transcode_dicom_object(&original, EXPLICIT_VR_BIG_ENDIAN_UID).unwrap();

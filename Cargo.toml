@@ -21,7 +21,6 @@ base64 = "0.22"
 dicom-core = "0.9.1"
 dicom-dictionary-std = "0.9.0"
 dicom-encoding = "0.9.1"
-dicom-json = "0.9.0"
 dicom-object = "0.9.1"
 dicom-transfer-syntax-registry = { version = "0.9.1", default-features = false, features = ["native", "deflate", "openjpeg-sys"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }

@@ -189,11 +189,6 @@ pub(super) fn is_bulk_value<I, P>(tag: Tag, vr: VR, value: &DicomValue<I, P>) ->
         || (primitive_is_bulk(vr) && tag != tags::WAVEFORM_DATA)
 }
 
-pub(super) fn needs_custom_standard_bulk<I, P>(tag: Tag, vr: VR, value: &DicomValue<I, P>) -> bool {
-    matches!(value, DicomValue::PixelSequence(_))
-        || (primitive_is_bulk(vr) && tag == tags::PIXEL_DATA)
-}
-
 pub(super) fn primitive_is_bulk(vr: VR) -> bool {
     matches!(
         vr,
