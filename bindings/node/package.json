@@ -1,0 +1,26 @@
+{
+  "name": "@pohcee/dcmnorm-node",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Native Node.js bindings for dcmnorm (in-process, no CLI subprocess)",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "napi": {
+    "binaryName": "dcmnorm-node",
+    "targets": [
+      "x86_64-unknown-linux-gnu",
+      "aarch64-unknown-linux-gnu"
+    ]
+  },
+  "engines": {
+    "node": ">= 18"
+  },
+  "scripts": {
+    "build": "napi build --platform --release",
+    "build:debug": "napi build --platform",
+    "test": "node test/smoke.js"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^3.7.3"
+  }
+}

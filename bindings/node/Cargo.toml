@@ -1,0 +1,18 @@
+[package]
+name = "dcmnorm-node"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+dcmnorm = { path = "../.." }
+dicom-core = "0.9.1"
+dicom-object = "0.9.1"
+napi = { version = "3", default-features = false, features = ["napi4"] }
+napi-derive = "3"
+
+[build-dependencies]
+napi-build = "2"
