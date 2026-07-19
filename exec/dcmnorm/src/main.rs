@@ -6,22 +6,22 @@ use std::process::{Command, Stdio};
 
 use clap::{ArgAction, CommandFactory, FromArgMatches, Parser, ValueEnum};
 use dcmnorm::dicom_io::{
-    jpeg2000_backend_name, kakadu_ffi_enabled, list_transfer_syntax_support, read_dicom_bytes,
-    read_dicom_file, read_dicom_json_with_options, redact_dicom_pixels_to_transfer_syntax,
-    render_all_dicom_frames, render_all_dicom_video_frames, render_dicom_frame,
-    transcode_dicom_object, write_dicom_file, write_dicom_json_with_options, BoundingBox,
-    BoxLength, DicomJsonBulkDataMode, DicomJsonFormat, DicomJsonKeyStyle,
-    DicomJsonReadOptions, DicomJsonWriteOptions, RenderOutputFormat, RenderPipelineOptions,
-    JPEG2000_CODEC_ENV_FLAG, JPEG2000_DEBUG_ENV_FLAG, probe_dicom_file_for_sop_class_uid,
+    apply_filter_to_object, jpeg2000_backend_name, kakadu_ffi_enabled, list_transfer_syntax_support,
+    next_tag, parse_attribute_override, parse_filter_requests, parse_tag_key, read_dicom_bytes,
+    read_dicom_json_with_options, read_dicom_object_for_filter,
+    redact_dicom_pixels_to_transfer_syntax, render_all_dicom_frames,
+    render_all_dicom_video_frames, render_dicom_frame, transcode_dicom_object, write_dicom_file,
+    write_dicom_json_with_options, BoundingBox, BoxLength, DicomJsonBulkDataMode, DicomJsonFormat,
+    DicomJsonKeyStyle, DicomJsonReadOptions, DicomJsonWriteOptions,
+    RenderOutputFormat, RenderPipelineOptions, JPEG2000_CODEC_ENV_FLAG, JPEG2000_DEBUG_ENV_FLAG,
+    probe_dicom_file_for_sop_class_uid,
 };
 use dcmnorm::remove_private_tags_inplace;
 use dcmnorm::perf;
 use dicom_core::dictionary::{DataDictionary, DataDictionaryEntry};
-use dicom_core::{Tag, VR};
+use dicom_core::Tag;
 use dicom_dictionary_std::tags;
 use dicom_dictionary_std::StandardDataDictionary;
-use dicom_object::file::ReadPreamble;
-use dicom_object::OpenFileOptions;
 use sha2::{Digest, Sha256};
 use serde_json::Value as JsonValue;
 
@@ -552,92 +552,6 @@ fn run_check_dicom(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             Ok(())
         }
         Ok(false) | Err(_) => Err(io::Error::new(ErrorKind::InvalidInput, "").into()),
-    }
-}
-
-fn read_dicom_object_for_filter(
-    input_path: &Path,
-    requests: &[FilterRequest],
-) -> Result<dicom_object::DefaultDicomObject, dcmnorm::dicom_io::ReadError> {
-    let Some(max_tag) = requests
-        .iter()
-        .map(|request| request.tag)
-        .max_by_key(|tag| ((tag.group() as u32) << 16) | tag.element() as u32)
-    else {
-        return read_dicom_file(input_path);
-    };
-
-    let Some(stop_tag) = next_tag(max_tag) else {
-        return read_dicom_file(input_path);
-    };
-
-    OpenFileOptions::new()
-        .read_preamble(ReadPreamble::Always)
-        .read_until(stop_tag)
-        .open_file(input_path)
-        .or_else(|error| match std::fs::read(input_path) {
-            Ok(bytes) => read_dicom_bytes(&bytes).map_err(|_| error),
-            Err(_) => Err(error),
-        })
-}
-
-fn next_tag(tag: Tag) -> Option<Tag> {
-    if tag.element() < u16::MAX {
-        return Some(Tag(tag.group(), tag.element() + 1));
-    }
-
-    if tag.group() < u16::MAX {
-        return Some(Tag(tag.group() + 1, 0));
-    }
-
-    None
-}
-
-#[derive(Clone, Debug)]
-struct FilterRequest {
-    tag: Tag,
-}
-
-fn parse_filter_requests(keys: &[String]) -> Result<Vec<FilterRequest>, io::Error> {
-    let mut requests = Vec::with_capacity(keys.len());
-
-    for key in keys {
-        let display_key = key.trim();
-        if display_key.is_empty() {
-            return Err(io::Error::new(
-                ErrorKind::InvalidInput,
-                "--filter KEY cannot be empty",
-            ));
-        }
-
-        let tag = StandardDataDictionary.parse_tag(display_key).ok_or_else(|| {
-            io::Error::new(
-                ErrorKind::InvalidInput,
-                format!(
-                    "invalid --filter key '{display_key}'; use a DICOM keyword like StudyInstanceUID or a tag expression like (0020,000D)"
-                ),
-            )
-        })?;
-
-        requests.push(FilterRequest { tag });
-    }
-
-    Ok(requests)
-}
-
-fn apply_filter_to_object(
-    object: &mut dicom_object::DefaultDicomObject,
-    requests: &[FilterRequest],
-) {
-    let keep_tags = requests.iter().map(|request| request.tag).collect::<Vec<_>>();
-    let remove_tags = object
-        .iter()
-        .map(|element| element.header().tag)
-        .filter(|tag| !keep_tags.contains(tag))
-        .collect::<Vec<_>>();
-
-    for tag in remove_tags {
-        object.remove_element(tag);
     }
 }
 
@@ -1638,76 +1552,6 @@ fn parse_redact_color(s: &str) -> Result<[u8; 3], io::Error> {
         })?;
     }
     Ok(values)
-}
-
-fn parse_tag_key(key: &str) -> Result<Tag, io::Error> {
-    let key = key.trim();
-    if key.is_empty() {
-        return Err(io::Error::new(
-            ErrorKind::InvalidInput,
-            "--remove KEY cannot be empty",
-        ));
-    }
-
-    StandardDataDictionary.parse_tag(key).ok_or_else(|| {
-        io::Error::new(
-            ErrorKind::InvalidInput,
-            format!(
-                "invalid --remove key '{key}'; use a DICOM keyword like PatientName or a tag expression like (0010,0010)"
-            ),
-        )
-    })
-}
-
-fn parse_attribute_override(assignment: &str) -> Result<(Tag, VR, String), io::Error> {
-    let (raw_key, raw_value) = assignment.split_once('=').ok_or_else(|| {
-        io::Error::new(
-            ErrorKind::InvalidInput,
-            format!(
-                "invalid --set value '{assignment}'; expected KEY=VALUE, for example SOPClassUID=1.2.840.10008.5.1.4.1.1.2"
-            ),
-        )
-    })?;
-
-    let key = raw_key.trim();
-    if key.is_empty() {
-        return Err(io::Error::new(
-            ErrorKind::InvalidInput,
-            format!("invalid --set value '{assignment}'; KEY cannot be empty"),
-        ));
-    }
-
-    let tag = StandardDataDictionary.parse_tag(key).ok_or_else(|| {
-        io::Error::new(
-            ErrorKind::InvalidInput,
-            format!(
-                "invalid --set key '{key}'; use a DICOM keyword like SOPClassUID or a tag expression like (0008,0016)"
-            ),
-        )
-    })?;
-
-    let vr = StandardDataDictionary
-        .by_tag(tag)
-        .map(|entry| entry.vr().relaxed())
-        .ok_or_else(|| {
-            io::Error::new(
-                ErrorKind::InvalidInput,
-                format!(
-                    "could not determine VR for --set key '{key}'; use a standard DICOM attribute"
-                ),
-            )
-        })?;
-
-    if vr == VR::SQ {
-        return Err(io::Error::new(
-            ErrorKind::InvalidInput,
-            format!(
-                "--set does not currently support sequence attributes ({key}); set non-sequence elements instead"
-            ),
-        ));
-    }
-
-    Ok((tag, vr, raw_value.to_owned()))
 }
 
 fn keyword_for_tag(tag: Tag) -> String {

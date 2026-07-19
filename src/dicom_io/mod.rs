@@ -1,5 +1,6 @@
 mod bulk_data;
 mod common;
+mod filter;
 mod flat_json;
 mod io;
 mod jpeg_ls;
@@ -12,6 +13,10 @@ mod standard_json;
 mod tests;
 mod types;
 
+pub use filter::{
+    apply_filter_to_object, next_tag, parse_filter_requests, read_dicom_object_for_filter,
+    FilterRequest,
+};
 pub use io::{
     detect_jpeg2000_backend_from_search_path, jpeg2000_backend, jpeg2000_backend_name,
     kakadu_ffi_enabled, list_transfer_syntax_support, probe_dicom_file_for_sop_class_uid,
@@ -38,4 +43,7 @@ pub use types::{
     TransferSyntaxSupport, WithMetaError, WriteError,
 };
 pub mod dicom_edit;
-pub use dicom_edit::remove_private_tags_inplace;
+pub use dicom_edit::{
+    parse_attribute_override, parse_tag_key, remove_attribute, remove_private_tags_inplace,
+    set_attribute,
+};
