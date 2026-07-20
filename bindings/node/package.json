@@ -18,9 +18,26 @@
   "scripts": {
     "build": "napi build --platform --release",
     "build:debug": "napi build --platform",
-    "test": "node test/smoke.js"
+    "build:docker": "./build-in-docker.sh",
+    "test": "node test/smoke.js",
+    "release": "release-it --ci",
+    "release-dryrun": "release-it --verbose --dry-run --ci"
+  },
+  "release-it": {
+    "git": {
+      "requireCleanWorkingDir": false,
+      "tagName": "dcmnorm-node-v${version}",
+      "tagAnnotation": "dcmnorm-node release v${version}"
+    },
+    "npm": {
+      "publish": false
+    },
+    "hooks": {
+      "before:init": "npm run build:docker && npm test"
+    }
   },
   "devDependencies": {
-    "@napi-rs/cli": "^3.7.3"
+    "@napi-rs/cli": "^3.7.3",
+    "release-it": "^19.0.4"
   }
 }
