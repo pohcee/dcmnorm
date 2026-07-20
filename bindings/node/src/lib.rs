@@ -7,10 +7,10 @@ use napi_derive::napi;
 
 use dcmnorm::dicom_io::{
     apply_filter_to_object, parse_attribute_override, parse_filter_requests, parse_tag_key,
-    probe_dicom_file_for_sop_class_uid, read_dicom_file, read_dicom_object_for_filter,
-    remove_attribute, remove_private_tags_inplace, set_attribute, transcode_dicom_file,
-    write_dicom_file, write_dicom_json_with_options, DicomJsonFormat, DicomJsonKeyStyle,
-    DicomJsonWriteOptions,
+    probe_dicom_file_for_sop_class_uid, read_dicom_bytes, read_dicom_file,
+    read_dicom_object_for_filter, remove_attribute, remove_private_tags_inplace, set_attribute,
+    transcode_dicom_file, write_dicom_file, write_dicom_json_with_options, DicomJsonBulkDataMode,
+    DicomJsonFormat, DicomJsonKeyStyle, DicomJsonWriteOptions,
 };
 
 fn to_napi_err(err: impl std::fmt::Display) -> Error {
@@ -56,6 +56,21 @@ fn parse_key_style(value: Option<&str>) -> Result<DicomJsonKeyStyle> {
     }
 }
 
+// The dcmnorm CLI's --bulk-data flag defaults to Uri (a small "?offset=..&length=.."
+// reference), overriding DicomJsonWriteOptions::default()'s InlineBinary at the CLI
+// layer - so callers here need the same override, not the library default, or
+// PixelData ends up fully base64-inlined (~1000x larger output for a typical image)
+// instead of referenced. Confirmed empirically against the CLI's actual output.
+fn parse_bulk_data_mode(value: Option<&str>) -> Result<DicomJsonBulkDataMode> {
+    match value {
+        None | Some("uri") => Ok(DicomJsonBulkDataMode::Uri),
+        Some("inline") => Ok(DicomJsonBulkDataMode::InlineBinary),
+        Some(other) => Err(Error::from_reason(format!(
+            "invalid bulkData '{other}'; expected 'uri' or 'inline'"
+        ))),
+    }
+}
+
 /// Reads only the requested tags from a DICOM file, stopping as soon as the
 /// highest one has been parsed. Mirrors `dcmnorm --filter ... --format flat
 /// --keys hex`. Keys accept DICOM keywords (`StudyInstanceUID`) or tag
@@ -78,11 +93,20 @@ impl Task for ReadTagsTask {
             let mut object =
                 read_dicom_object_for_filter(&self.file_path, &requests).map_err(to_napi_err)?;
             apply_filter_to_object(&mut object, &requests);
+            // bulk_data_mode: Uri needs the *source file bytes* to compute a valid
+            // "?offset=..&length=.." reference (see read_json below) - which the
+            // read_until fast path above deliberately doesn't read. That's fine for
+            // every real caller today (short UID/string tags have no bulk-data VR to
+            // begin with, so this never applies to them), but filtering for a
+            // bulk-eligible tag (e.g. PixelData) will silently fall back to
+            // inline-embedding its bytes rather than erroring or matching the CLI's
+            // (slower - it always reads the whole file for this) URI behavior.
             write_dicom_json_with_options(
                 &object,
                 DicomJsonWriteOptions {
                     format: DicomJsonFormat::Flat,
                     key_style: DicomJsonKeyStyle::Hex,
+                    bulk_data_mode: DicomJsonBulkDataMode::Uri,
                     ..Default::default()
                 },
             )
@@ -108,12 +132,17 @@ pub fn read_tags(file_path: String, tags: Vec<String>) -> AsyncTask<ReadTagsTask
 pub struct ReadJsonOptions {
     pub format: Option<String>,
     pub key_style: Option<String>,
+    /// 'uri' (default, matches the CLI) emits PixelData/other bulk elements as a
+    /// small "?offset=..&length=.." reference; 'inline' base64-embeds them, which
+    /// for a typical image is orders of magnitude larger.
+    pub bulk_data: Option<String>,
 }
 
 pub struct ReadJsonTask {
     file_path: PathBuf,
     format: DicomJsonFormat,
     key_style: DicomJsonKeyStyle,
+    bulk_data_mode: DicomJsonBulkDataMode,
 }
 
 impl Task for ReadJsonTask {
@@ -122,12 +151,27 @@ impl Task for ReadJsonTask {
 
     fn compute(&mut self) -> Result<Self::Output> {
         guarded(|| {
-            let object = read_dicom_file(&self.file_path).map_err(to_napi_err)?;
+            // Uri mode needs the source bytes to compute a valid "?offset=..&length=.."
+            // reference for bulk-data elements (PixelData etc.) - mirrors exactly how
+            // the CLI itself does this (see run_dicom_to_json_with_object in main.rs:
+            // `bulk_data_source: if bulk_data_mode == Uri { input_bytes } else { None }`).
+            // Without it, write_dicom_json_with_options silently falls back to
+            // base64-inlining those elements instead - ~1000x larger output for a
+            // typical image, confirmed empirically against the CLI's actual output.
+            let (object, file_bytes) = if self.bulk_data_mode == DicomJsonBulkDataMode::Uri {
+                let bytes = std::fs::read(&self.file_path).map_err(|e| to_napi_err(e))?;
+                let object = read_dicom_bytes(&bytes).map_err(to_napi_err)?;
+                (object, Some(bytes))
+            } else {
+                (read_dicom_file(&self.file_path).map_err(to_napi_err)?, None)
+            };
             write_dicom_json_with_options(
                 &object,
                 DicomJsonWriteOptions {
                     format: self.format,
                     key_style: self.key_style,
+                    bulk_data_mode: self.bulk_data_mode,
+                    bulk_data_source: file_bytes.as_deref(),
                     ..Default::default()
                 },
             )
@@ -141,7 +185,8 @@ impl Task for ReadJsonTask {
 }
 
 /// Reads the full DICOM dataset as JSON. Mirrors plain `dcmnorm file.dcm`
-/// (flat/name keys by default) or `--format standard --keys hex`.
+/// (flat/name keys, bulk data as a URI reference, by default) or
+/// `--format standard --keys hex --bulk-data inline`.
 #[napi]
 pub fn read_json(
     file_path: String,
@@ -150,10 +195,12 @@ pub fn read_json(
     let options = options.unwrap_or_default();
     let format = parse_json_format(options.format.as_deref())?;
     let key_style = parse_key_style(options.key_style.as_deref())?;
+    let bulk_data_mode = parse_bulk_data_mode(options.bulk_data.as_deref())?;
     Ok(AsyncTask::new(ReadJsonTask {
         file_path: PathBuf::from(file_path),
         format,
         key_style,
+        bulk_data_mode,
     }))
 }
 

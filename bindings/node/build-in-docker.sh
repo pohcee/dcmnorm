@@ -22,7 +22,11 @@ docker run --rm -v "$SCRIPT_DIR/../..":/repo -w /repo/bindings/node \
     . "$HOME/.cargo/env"
     npm install --no-save --no-audit --no-fund @napi-rs/cli
     npx napi build --platform --release
-    # The container runs as root, so the volume-mounted output would otherwise be
-    # root-owned on the host - hand it back to whoever invoked this script.
+    # The container runs as root, so everything it touched on the volume mount -
+    # the .node output here *and* the shared workspace target/ dir cargo writes
+    # into - would otherwise be left root-owned on the host. Hand it all back to
+    # whoever invoked this script (a stray root-owned target/ file breaks the
+    # next host-side `cargo build` with a permission error).
     chown "$HOST_UID:$HOST_GID" *.node
+    chown -R "$HOST_UID:$HOST_GID" /repo/target
   '

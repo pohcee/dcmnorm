@@ -23,6 +23,15 @@ const tagsJson = await binding.readTags(fixture, ["StudyInstanceUID", "SOPInstan
   const fullJson = await binding.readJson(fixture);
   const full = JSON.parse(fullJson);
   assert.ok(Object.keys(full).length > Object.keys(tags).length, "full readJson should have more keys than the filtered readTags");
+  assert.ok(full.PixelData && typeof full.PixelData.BulkDataURI === "string" && !("InlineBinary" in full.PixelData),
+    "readJson's default bulkData mode should be 'uri' (matching the CLI), not inline-embed PixelData");
+  assert.ok(fullJson.length < 5000,
+    `readJson output for a filtered non-bulk fixture should stay small (was ${fullJson.length} bytes) - a huge payload means PixelData got inlined instead of referenced`);
+
+  const inlineJson = await binding.readJson(fixture, { bulkData: "inline" });
+  const inline = JSON.parse(inlineJson);
+  assert.ok(typeof inline.PixelData.InlineBinary === "string" && inline.PixelData.InlineBinary.length > 1000,
+    "readJson with bulkData: 'inline' should base64-embed PixelData");
 
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "dcmnorm-node-smoke-"));
   const edited = path.join(tmpDir, "edited.dcm");

@@ -22,13 +22,20 @@ export interface EditTagsOptions {
 
 /**
  * Reads the full DICOM dataset as JSON. Mirrors plain `dcmnorm file.dcm`
- * (flat/name keys by default) or `--format standard --keys hex`.
+ * (flat/name keys, bulk data as a URI reference, by default) or
+ * `--format standard --keys hex --bulk-data inline`.
  */
 export declare function readJson(filePath: string, options?: ReadJsonOptions | undefined | null): Promise<unknown>
 
 export interface ReadJsonOptions {
   format?: string
   keyStyle?: string
+  /**
+   * 'uri' (default, matches the CLI) emits PixelData/other bulk elements as a
+   * small "?offset=..&length=.." reference; 'inline' base64-embeds them, which
+   * for a typical image is orders of magnitude larger.
+   */
+  bulkData?: string
 }
 
 export declare function readTags(filePath: string, tags: Array<string>): Promise<unknown>
