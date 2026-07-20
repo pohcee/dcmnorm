@@ -7,7 +7,7 @@ use std::process::{Command, Stdio};
 use clap::{ArgAction, CommandFactory, FromArgMatches, Parser, ValueEnum};
 use dcmnorm::dicom_io::{
     apply_filter_to_object, jpeg2000_backend_name, kakadu_ffi_enabled, list_transfer_syntax_support,
-    next_tag, parse_attribute_override, parse_filter_requests, parse_tag_key, read_dicom_bytes,
+    parse_attribute_override, parse_filter_requests, parse_tag_key, read_dicom_bytes,
     read_dicom_json_with_options, read_dicom_object_for_filter,
     redact_dicom_pixels_to_transfer_syntax, render_all_dicom_frames,
     render_all_dicom_video_frames, render_dicom_frame, transcode_dicom_object, write_dicom_file,
@@ -2149,13 +2149,13 @@ fn looks_like_dicom(input_bytes: &[u8]) -> bool {
 mod tests {
     use super::{
         apply_filter_to_object, detect_output_kind, infer_direction, mpeg4_input_pixel_format,
-        mpeg4_muxer_name, mpeg4_video_filter, next_tag, parse_attribute_override,
+        mpeg4_muxer_name, mpeg4_video_filter, parse_attribute_override,
         parse_filter_requests, parse_redact_box, run_dicom_to_json_with_object,
         resolve_render_format, Cli, Direction, FileKind, RenderFormat,
     };
     use clap::{CommandFactory, FromArgMatches};
     use dicom_dictionary_std::tags;
-    use dcmnorm::dicom_io::read_dicom_file;
+    use dcmnorm::dicom_io::{next_tag, read_dicom_file};
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
     use dicom_core::Tag;
