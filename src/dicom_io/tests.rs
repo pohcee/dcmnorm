@@ -1177,6 +1177,70 @@ fn renders_single_frame_with_stale_ybr_rct_after_decode() {
 }
 
 #[test]
+fn renders_jpeg_baseline_frame_mislabeled_ybr_full_422_without_pink_cast() {
+    // Real-world JPEG-baseline secondary-capture images are frequently tagged
+    // YBR_FULL_422 even though the JPEG codec already decodes to RGB. The
+    // single-frame fast path (try_decode_single_frame_object) must not
+    // re-apply a YCbCr->RGB conversion on top of already-RGB bytes -
+    // regression test for a bug that produced a magenta/green corrupted
+    // image for exactly this combination.
+    let Some(path) = optional_fixture_path("wsi.dcm") else {
+        return;
+    };
+
+    let source = read_dicom_file(&path).unwrap();
+    assert_eq!(
+        source
+            .meta()
+            .transfer_syntax()
+            .trim_end_matches(['\0', ' ']),
+        "1.2.840.10008.1.2.4.50",
+        "fixture must be JPEG baseline to exercise the single-frame decode path"
+    );
+
+    let reference = render_dicom_frame(
+        &source,
+        RenderOutputFormat::Png,
+        &RenderPipelineOptions::default(),
+    )
+    .unwrap();
+    let reference_pixel = *image::load_from_memory(&reference.bytes)
+        .unwrap()
+        .to_rgb8()
+        .get_pixel(0, 0);
+
+    let mut mislabeled = source.clone();
+    mislabeled.put(DataElement::new(
+        tags::PHOTOMETRIC_INTERPRETATION,
+        VR::CS,
+        PrimitiveValue::from("YBR_FULL_422"),
+    ));
+
+    let mislabeled_rendered = render_dicom_frame(
+        &mislabeled,
+        RenderOutputFormat::Png,
+        &RenderPipelineOptions::default(),
+    )
+    .unwrap();
+    let mislabeled_pixel = *image::load_from_memory(&mislabeled_rendered.bytes)
+        .unwrap()
+        .to_rgb8()
+        .get_pixel(0, 0);
+
+    for channel in 0..3 {
+        let diff = (i16::from(reference_pixel[channel]) - i16::from(mislabeled_pixel[channel]))
+            .abs();
+        assert!(
+            diff <= 4,
+            "channel {} diverged after YBR_FULL_422 mislabel: reference={:?} mislabeled={:?}",
+            channel,
+            reference_pixel,
+            mislabeled_pixel,
+        );
+    }
+}
+
+#[test]
 fn renders_wsi_fixture_without_green_seam() {
     let Some(path) = optional_fixture_path("wsi.dcm") else {
         return;

@@ -2124,7 +2124,7 @@ fn replace_with_native_frame_pixel_data(
     Ok(())
 }
 
-fn normalize_decoded_render_attributes(object: &mut DefaultDicomObject, _source_ts_uid: &str) {
+fn normalize_decoded_render_attributes(object: &mut DefaultDicomObject, source_ts_uid: &str) {
     let samples_per_pixel = object
         .get(tags::SAMPLES_PER_PIXEL)
         .and_then(|element| element.uint16().ok())
@@ -2136,8 +2136,15 @@ fn normalize_decoded_render_attributes(object: &mut DefaultDicomObject, _source_
             .and_then(|element| element.to_str().ok())
             .map(|value| value.trim().to_owned())
             .unwrap_or_default();
+        // Only RLE Lossless and JPEG2000 decoders hand back raw, un-converted
+        // YBR component samples; JPEG (baseline/extended) already returns RGB,
+        // so keeping a YBR_* label for those would cause render_rgb_frame to
+        // apply a second, incorrect YCbCr->RGB conversion. Mirrors the
+        // equivalent check in normalize_decoded_pixel_data_attributes (io.rs).
+        let preserves_ybr_on_decode = normalize_transfer_syntax_uid(source_ts_uid) == uids::RLE_LOSSLESS
+            || is_jpeg2000_transfer_syntax(source_ts_uid);
         let is_ybr = current_photometric.starts_with("YBR_");
-        let target_photometric = if is_ybr {
+        let target_photometric = if preserves_ybr_on_decode && is_ybr {
             current_photometric
         } else {
             "RGB".to_owned()
