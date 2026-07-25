@@ -156,7 +156,12 @@ pub(super) fn resolve_standard_bulk_bytes(
         return Ok(None);
     }
 
-    Ok(None)
+    // No InlineBinary/BulkDataURI given for a non-PixelData bulk element (VM 0):
+    // this is how a legitimately empty OB/OW/UN/etc. element round-trips, since
+    // the writer omits both keys rather than emit an empty one of them (see
+    // write_standard_json_value). PixelData is excluded above since an empty
+    // image is never legitimate and more likely signals a caller bug.
+    Ok(Some(Vec::new()))
 }
 
 pub(super) fn raw_bytes_to_dicom_value(
@@ -217,12 +222,17 @@ fn resolve_bulk_data_uri_with_optional_source(
     uri: &str,
     bulk_data_source: Option<&[u8]>,
 ) -> Result<Vec<u8>, DicomJsonError> {
-    if let Some(source) = bulk_data_source {
-        return resolve_bulk_data_uri(uri, source);
-    }
-
+    // "file://" is a self-contained reference to an arbitrary file on disk and
+    // never depends on bulk_data_source - check it first, regardless of whether
+    // a source was given, so a document can mix "?offset=..&length=.." elements
+    // (resolved against bulk_data_source) with "file://" elements (resolved
+    // independently) in the same write.
     if let Some(source) = try_read_bulk_data_uri_source(uri)? {
         return resolve_bulk_data_uri(uri, source.as_slice());
+    }
+
+    if let Some(source) = bulk_data_source {
+        return resolve_bulk_data_uri(uri, source);
     }
 
     Err(DicomJsonError::MissingBulkDataSource(uri.to_owned()))

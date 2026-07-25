@@ -142,11 +142,12 @@ use serde_json::Value as JsonValue;
 use super::{
     detect_jpeg2000_backend_from_search_path, kakadu_ffi_enabled, list_transfer_syntax_support,
     probe_dicom_file_for_sop_class_uid, read_dicom_bytes, read_dicom_file, read_dicom_json,
-    read_dicom_json_full, read_dicom_json_full_with_source, read_dicom_json_with_source,
-    redact_dicom_pixels_to_transfer_syntax, render_all_dicom_video_frames, render_dicom_frame,
-    transcode_dicom_object, write_dicom_bytes, write_dicom_file, write_dicom_json,
-    write_dicom_json_full, write_dicom_json_full_with_source, write_dicom_json_with_options,
-    write_dicom_json_with_source, BoundingBox, BoxLength, DicomJsonBulkDataMode, DicomJsonKeyStyle,
+    read_dicom_json_full, read_dicom_json_full_with_source, read_dicom_json_with_options,
+    read_dicom_json_with_source, redact_dicom_pixels_to_transfer_syntax,
+    render_all_dicom_video_frames, render_dicom_frame, transcode_dicom_object, write_dicom_bytes,
+    write_dicom_file, write_dicom_json, write_dicom_json_full, write_dicom_json_full_with_source,
+    write_dicom_json_with_options, write_dicom_json_with_source, BoundingBox, BoxLength,
+    DicomJsonBulkDataMode, DicomJsonFormat, DicomJsonKeyStyle, DicomJsonReadOptions,
     DicomJsonWriteOptions, Jpeg2000Backend, RenderOutputFormat, RenderPipelineOptions,
 };
 
@@ -466,6 +467,167 @@ fn reads_flat_json_with_file_bulk_data_uri_without_source() {
             .unwrap()
             .len(),
     );
+}
+
+fn icc_bytes(object: &dicom_object::DefaultDicomObject) -> Vec<u8> {
+    let sequence_tag = Tag(0x0048, 0x0105); // OpticalPathSequence
+    let icc_profile_tag = Tag(0x0028, 0x2000); // ICCProfile
+
+    let dicom_core::value::Value::Sequence(sequence) =
+        object.element(sequence_tag).unwrap().value()
+    else {
+        panic!("OpticalPathSequence did not decode as a sequence");
+    };
+
+    sequence.items()[0]
+        .element(icc_profile_tag)
+        .unwrap()
+        .to_bytes()
+        .unwrap()
+        .into_owned()
+}
+
+#[test]
+fn reads_json_with_bulk_data_source_and_separate_file_bulk_data_uri_together() {
+    // Regression test for resolve_bulk_data_uri_with_optional_source: it must
+    // check a "file://" BulkDataURI before falling back to bulk_data_source,
+    // not the other way around, so a document can reference bulk data from
+    // more than one place in the same read - some elements via "?offset=..
+    // &length=.." into bulk_data_source, others via their own separate
+    // "file://" path. This is exactly index-file's "iw" transform's shape:
+    // pre-existing elements resolved against the original .dcm, freshly
+    // attached PixelData resolved from its own temp file. Getting the
+    // priority backwards doesn't just miss the second file - it feeds the
+    // "file://...?offset=..&length=.." URI's offset/length to the WRONG
+    // buffer (bulk_data_source instead of the file it names).
+    let mut source = fixture_bytes(fixture_path("dx.dcm"));
+    let nested_payload = vec![0x5A; 64];
+    append_nested_icc_profile_sequence(&mut source, &nested_payload);
+    let original = read_dicom_bytes(&source).unwrap();
+
+    // Both PixelData and ICCProfile come out as bare "?offset=..&length=.."
+    // references into `source` (no bulk_data_uri_base given).
+    let json = write_dicom_json_with_options(
+        &original,
+        DicomJsonWriteOptions {
+            bulk_data_mode: DicomJsonBulkDataMode::Uri,
+            bulk_data_source: Some(&source),
+            ..DicomJsonWriteOptions::default()
+        },
+    )
+    .unwrap();
+
+    // Move ICCProfile's payload into its own separate file instead, referenced
+    // by a "file://" BulkDataURI wholly independent of `source`.
+    let icc_path = temp_file_path("dcmnorm-test-icc-separate-source");
+    fs::write(&icc_path, &nested_payload).unwrap();
+    let mut value: JsonValue = serde_json::from_str(&json).unwrap();
+    value["OpticalPathSequence"][0]["ICCProfile"] = serde_json::json!({
+        "BulkDataURI": format!(
+            "file://{}?offset=0&length={}",
+            icc_path.canonicalize().unwrap().to_string_lossy(),
+            nested_payload.len(),
+        )
+    });
+    let modified_json = serde_json::to_string(&value).unwrap();
+
+    let roundtrip = read_dicom_json_with_options(
+        &modified_json,
+        DicomJsonReadOptions {
+            format: DicomJsonFormat::Flat,
+            bulk_data_source: Some(&source),
+        },
+    );
+    fs::remove_file(&icc_path).ok();
+    let roundtrip = roundtrip.unwrap();
+
+    // PixelData still resolves against `source` ...
+    assert_eq!(
+        original
+            .element(tags::PIXEL_DATA)
+            .unwrap()
+            .to_bytes()
+            .unwrap()
+            .into_owned(),
+        roundtrip
+            .element(tags::PIXEL_DATA)
+            .unwrap()
+            .to_bytes()
+            .unwrap()
+            .into_owned(),
+    );
+    // ... while ICCProfile resolves from its own separate file, not `source`.
+    assert_eq!(icc_bytes(&roundtrip), nested_payload);
+}
+
+#[test]
+fn reads_json_with_two_independent_file_bulk_data_uris() {
+    // Two bulk elements, each referenced by its own "file://" BulkDataURI, with
+    // no bulk_data_source at all - each must resolve from its own file without
+    // being confused with the other's.
+    let mut source = fixture_bytes(fixture_path("dx.dcm"));
+    let nested_payload = vec![0x5A; 64];
+    append_nested_icc_profile_sequence(&mut source, &nested_payload);
+    let original = read_dicom_bytes(&source).unwrap();
+
+    let pixel_data = original
+        .element(tags::PIXEL_DATA)
+        .unwrap()
+        .to_bytes()
+        .unwrap()
+        .into_owned();
+
+    let pixel_path = temp_file_path("dcmnorm-test-pixeldata-separate-source");
+    let icc_path = temp_file_path("dcmnorm-test-icc-separate-source-2");
+    fs::write(&pixel_path, &pixel_data).unwrap();
+    fs::write(&icc_path, &nested_payload).unwrap();
+
+    let json = write_dicom_json_with_options(
+        &original,
+        DicomJsonWriteOptions {
+            bulk_data_mode: DicomJsonBulkDataMode::InlineBinary,
+            ..DicomJsonWriteOptions::default()
+        },
+    )
+    .unwrap();
+    let mut value: JsonValue = serde_json::from_str(&json).unwrap();
+    value["PixelData"] = serde_json::json!({
+        "BulkDataURI": format!(
+            "file://{}?offset=0&length={}",
+            pixel_path.canonicalize().unwrap().to_string_lossy(),
+            pixel_data.len(),
+        )
+    });
+    value["OpticalPathSequence"][0]["ICCProfile"] = serde_json::json!({
+        "BulkDataURI": format!(
+            "file://{}?offset=0&length={}",
+            icc_path.canonicalize().unwrap().to_string_lossy(),
+            nested_payload.len(),
+        )
+    });
+    let modified_json = serde_json::to_string(&value).unwrap();
+
+    let roundtrip = read_dicom_json_with_options(
+        &modified_json,
+        DicomJsonReadOptions {
+            format: DicomJsonFormat::Flat,
+            bulk_data_source: None,
+        },
+    );
+    fs::remove_file(&pixel_path).ok();
+    fs::remove_file(&icc_path).ok();
+    let roundtrip = roundtrip.unwrap();
+
+    assert_eq!(
+        roundtrip
+            .element(tags::PIXEL_DATA)
+            .unwrap()
+            .to_bytes()
+            .unwrap()
+            .into_owned(),
+        pixel_data,
+    );
+    assert_eq!(icc_bytes(&roundtrip), nested_payload);
 }
 
 #[test]

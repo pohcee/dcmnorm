@@ -592,3 +592,4 @@ module.exports.editTags = nativeBinding.editTags
 module.exports.readJson = nativeBinding.readJson
 module.exports.readTags = nativeBinding.readTags
 module.exports.transcode = nativeBinding.transcode
+module.exports.writeJson = nativeBinding.writeJson

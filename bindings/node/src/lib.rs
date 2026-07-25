@@ -8,9 +8,10 @@ use napi_derive::napi;
 use dcmnorm::dicom_io::{
     apply_filter_to_object, parse_attribute_override, parse_filter_requests, parse_tag_key,
     probe_dicom_file_for_sop_class_uid, read_dicom_bytes, read_dicom_file,
-    read_dicom_object_for_filter, remove_attribute, remove_private_tags_inplace, set_attribute,
-    transcode_dicom_file, write_dicom_file, write_dicom_json_with_options, DicomJsonBulkDataMode,
-    DicomJsonFormat, DicomJsonKeyStyle, DicomJsonWriteOptions,
+    read_dicom_json_with_options, read_dicom_object_for_filter, remove_attribute,
+    remove_private_tags_inplace, set_attribute, transcode_dicom_file, write_dicom_file,
+    write_dicom_json_with_options, DicomJsonBulkDataMode, DicomJsonFormat, DicomJsonKeyStyle,
+    DicomJsonReadOptions, DicomJsonWriteOptions,
 };
 
 fn to_napi_err(err: impl std::fmt::Display) -> Error {
@@ -201,6 +202,77 @@ pub fn read_json(
         format,
         key_style,
         bulk_data_mode,
+    }))
+}
+
+#[napi(object)]
+#[derive(Default)]
+pub struct WriteJsonOptions {
+    pub format: Option<String>,
+    /// Resolves "?offset=..&length=.." BulkDataURIs (readJson's default 'uri'
+    /// bulkData mode emits these for bulk elements already in the source file)
+    /// against this file's bytes - mirrors the CLI's `--bulk-data-source`. Not
+    /// needed for InlineBinary or "file://" BulkDataURI elements, which are
+    /// self-contained and resolved independently of this option.
+    pub bulk_data_source_path: Option<String>,
+}
+
+pub struct WriteJsonTask {
+    json: String,
+    output_path: PathBuf,
+    format: DicomJsonFormat,
+    bulk_data_source_path: Option<PathBuf>,
+}
+
+impl Task for WriteJsonTask {
+    type Output = ();
+    type JsValue = ();
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        guarded(|| {
+            let bulk_data_source = self
+                .bulk_data_source_path
+                .as_ref()
+                .map(std::fs::read)
+                .transpose()
+                .map_err(to_napi_err)?;
+
+            let mut object = read_dicom_json_with_options(
+                &self.json,
+                DicomJsonReadOptions {
+                    format: self.format,
+                    bulk_data_source: bulk_data_source.as_deref(),
+                },
+            )
+            .map_err(to_napi_err)?;
+
+            write_dicom_file(&mut object, &self.output_path).map_err(to_napi_err)
+        })
+    }
+
+    fn resolve(&mut self, _env: Env, _output: Self::Output) -> Result<Self::JsValue> {
+        Ok(())
+    }
+}
+
+/// Writes a DICOM file from JSON (flat or standard format, auto never guessed -
+/// pass the same `format` used to read it). Mirrors `dcmnorm dataset.json out.dcm`.
+/// Sequence elements are always (re)written with undefined length, so this does
+/// not carry forward stale defined-length byte counts from whatever encoding the
+/// JSON was originally read from - see dicom_io::json's DataSetSequence handling.
+#[napi]
+pub fn write_json(
+    json: String,
+    output_path: String,
+    options: Option<WriteJsonOptions>,
+) -> Result<AsyncTask<WriteJsonTask>> {
+    let options = options.unwrap_or_default();
+    let format = parse_json_format(options.format.as_deref())?;
+    Ok(AsyncTask::new(WriteJsonTask {
+        json,
+        output_path: PathBuf::from(output_path),
+        format,
+        bulk_data_source_path: options.bulk_data_source_path.map(PathBuf::from),
     }))
 }
 

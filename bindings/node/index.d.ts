@@ -45,3 +45,24 @@ export declare function readTags(filePath: string, tags: Array<string>): Promise
  * `dcmnorm --transfer-syntax UID in.dcm out.dcm`.
  */
 export declare function transcode(filePath: string, outputPath: string, transferSyntaxUid: string): Promise<unknown>
+
+/**
+ * Writes a DICOM file from JSON (flat or standard format, auto never guessed -
+ * pass the same `format` used to read it). Mirrors `dcmnorm dataset.json out.dcm`.
+ * Sequence elements are always (re)written with undefined length, so this does
+ * not carry forward stale defined-length byte counts from whatever encoding the
+ * JSON was originally read from - see dicom_io::json's DataSetSequence handling.
+ */
+export declare function writeJson(json: string, outputPath: string, options?: WriteJsonOptions | undefined | null): Promise<unknown>
+
+export interface WriteJsonOptions {
+  format?: string
+  /**
+   * Resolves "?offset=..&length=.." BulkDataURIs (readJson's default 'uri'
+   * bulkData mode emits these for bulk elements already in the source file)
+   * against this file's bytes - mirrors the CLI's `--bulk-data-source`. Not
+   * needed for InlineBinary or "file://" BulkDataURI elements, which are
+   * self-contained and resolved independently of this option.
+   */
+  bulkDataSourcePath?: string
+}
