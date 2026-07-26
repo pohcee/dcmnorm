@@ -452,8 +452,14 @@ fn handle_find(
             }
             0x0000u16
         }
-        // 0xC000: "Unable to process" (generic C-FIND failure).
-        Err(_) => 0xC000u16,
+        // 0xC000: "Unable to process" (generic C-FIND failure). Logged, not just swallowed - the
+        // handler's own error (e.g. a malformed match JS returned, an HTTP failure it hit) is the
+        // only trace of *why* a C-FIND failed, since the DIMSE status code itself carries none of
+        // that detail to the SCU.
+        Err(error) => {
+            eprintln!("[dicom-scp] C-FIND on_find handler failed: {error}");
+            0xC000u16
+        }
     };
 
     let final_response = InMemDicomObject::command_from_element_iter([
@@ -494,7 +500,11 @@ fn handle_move(
             // 0xC000: "Unable to process" (generic C-MOVE failure - matches the queueing failure
             // this SCP's predecessor reported here, since the actual transfer's own success/
             // failure is reported separately and asynchronously by whatever performs it).
-            Ok(false) | Err(_) => 0xC000,
+            Ok(false) => 0xC000,
+            Err(error) => {
+                eprintln!("[dicom-scp] C-MOVE on_move handler failed: {error}");
+                0xC000
+            }
         }
     };
 
