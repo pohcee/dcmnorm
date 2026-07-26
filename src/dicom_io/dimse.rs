@@ -205,15 +205,39 @@ fn send_command(
     Ok(())
 }
 
-fn send_data(assoc: &mut ClientAssociation<TcpStream>, pc_id: u8, data: Vec<u8>) -> Result<(), DimseError> {
-    assoc.send(&Pdu::PData {
-        data: vec![PDataValue {
-            presentation_context_id: pc_id,
-            value_type: PDataValueType::Data,
-            is_last: true,
-            data,
-        }],
-    })?;
+/// Sends a Command followed by its Data Set (the Identifier for C-FIND/C-MOVE, or the instance
+/// for C-STORE) as a single P-DATA-TF PDU - one `assoc.send()`, one write - whenever both fit
+/// under the negotiated PDU size. Splitting them into two separate PDUs/writes (as this used to
+/// do unconditionally for C-FIND/C-MOVE) leaves a gap between them that, since `dicom-ul`'s
+/// TcpStream never sets TCP_NODELAY, Nagle's algorithm can stretch out unpredictably - at least
+/// one real-world SCP encountered in production doesn't tolerate that gap and drops or garbles
+/// the association. Falls back to two PDUs (fragmenting the data set via `send_pdata`) only when
+/// combined they don't fit in one.
+fn send_command_with_data(
+    assoc: &mut ClientAssociation<TcpStream>,
+    pc_id: u8,
+    command: &InMemDicomObject,
+    data: Vec<u8>,
+) -> Result<(), DimseError> {
+    let mut command_data = Vec::with_capacity(128);
+    command.write_dataset_with_ts(&mut command_data, implicit_vr_le())?;
+
+    let combined_len = command_data.len() + data.len();
+    if combined_len < assoc.acceptor_max_pdu_length().saturating_sub(100) as usize {
+        assoc.send(&Pdu::PData {
+            data: vec![
+                PDataValue { presentation_context_id: pc_id, value_type: PDataValueType::Command, is_last: true, data: command_data },
+                PDataValue { presentation_context_id: pc_id, value_type: PDataValueType::Data, is_last: true, data },
+            ],
+        })?;
+    } else {
+        assoc.send(&Pdu::PData {
+            data: vec![PDataValue { presentation_context_id: pc_id, value_type: PDataValueType::Command, is_last: true, data: command_data }],
+        })?;
+        let mut writer = assoc.send_pdata(pc_id);
+        std::io::Write::write_all(&mut writer, &data)?;
+        drop(writer);
+    }
     Ok(())
 }
 
@@ -453,25 +477,7 @@ fn send_and_receive_store(
         DataElement::new(tags::AFFECTED_SOP_INSTANCE_UID, VR::UI, dicom_value!(Str, &file.sop_instance_uid)),
     ]);
 
-    let mut command_data = Vec::with_capacity(128);
-    command.write_dataset_with_ts(&mut command_data, implicit_vr_le())?;
-
-    let combined_len = command_data.len() + object_data.len();
-    if combined_len < assoc.acceptor_max_pdu_length().saturating_sub(100) as usize {
-        assoc.send(&Pdu::PData {
-            data: vec![
-                PDataValue { presentation_context_id: pc.id, value_type: PDataValueType::Command, is_last: true, data: command_data },
-                PDataValue { presentation_context_id: pc.id, value_type: PDataValueType::Data, is_last: true, data: object_data },
-            ],
-        })?;
-    } else {
-        assoc.send(&Pdu::PData {
-            data: vec![PDataValue { presentation_context_id: pc.id, value_type: PDataValueType::Command, is_last: true, data: command_data }],
-        })?;
-        let mut writer = assoc.send_pdata(pc.id);
-        std::io::Write::write_all(&mut writer, &object_data)?;
-        drop(writer);
-    }
+    send_command_with_data(assoc, pc.id, &command, object_data)?;
 
     let response = receive_command(assoc)?;
     command_status(&response)
@@ -551,7 +557,7 @@ pub fn find_scu(
         DataElement::new(tags::COMMAND_DATA_SET_TYPE, VR::US, dicom_value!(U16, [0x0001])),
     ]);
 
-    if let Err(error) = send_command(&mut assoc, pc.id, &command).and_then(|_| send_data(&mut assoc, pc.id, identifier_data)) {
+    if let Err(error) = send_command_with_data(&mut assoc, pc.id, &command, identifier_data) {
         let _ = assoc.abort();
         return Err(error);
     }
@@ -667,7 +673,7 @@ pub fn move_scu(
         DataElement::new(tags::COMMAND_DATA_SET_TYPE, VR::US, dicom_value!(U16, [0x0001])),
     ]);
 
-    if let Err(error) = send_command(&mut assoc, pc.id, &command).and_then(|_| send_data(&mut assoc, pc.id, identifier_data)) {
+    if let Err(error) = send_command_with_data(&mut assoc, pc.id, &command, identifier_data) {
         let _ = assoc.abort();
         return Err(error);
     }

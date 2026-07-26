@@ -1674,13 +1674,6 @@ fn dimse_recv_command(
     }
 }
 
-fn dimse_recv_data(association: &mut dicom_ul::ServerAssociation<std::net::TcpStream>) -> Vec<u8> {
-    match association.receive().unwrap() {
-        dicom_ul::pdu::Pdu::PData { data } => data[0].data.clone(),
-        other => panic!("expected a Data P-Data PDU, got {other:?}"),
-    }
-}
-
 fn dimse_send_command(
     association: &mut dicom_ul::ServerAssociation<std::net::TcpStream>,
     pc_id: u8,
@@ -1735,11 +1728,13 @@ fn echo_scu_round_trips_success_status() {
     scp_handle.join().unwrap();
 }
 
-/// Receives a C-STORE-RQ's Command + Data, tolerating either of `store_scu`'s two send paths:
-/// a small file combines both into one PDU (2 PDataValues in a single `receive()`), while a
-/// large file sends the Command alone, then streams the Data separately via `send_pdata`
-/// (arriving as its own PData PDU(s), read here with `receive_pdata()`).
-fn dimse_recv_store_request(
+/// Receives a Command + its Data Set (C-STORE's dataset, or C-FIND/C-MOVE's Identifier),
+/// tolerating either of `send_command_with_data`'s two send paths: small enough combines both
+/// into one PDU (2 PDataValues in a single `receive()`), while anything too large for one PDU
+/// (store_scu's only, in practice - find/move identifiers are always small) sends the Command
+/// alone, then streams the Data separately via `send_pdata` (arriving as its own PData PDU(s),
+/// read here with `receive_pdata()`).
+fn dimse_recv_command_with_data(
     association: &mut dicom_ul::ServerAssociation<std::net::TcpStream>,
 ) -> (u8, InMemDicomObject, Vec<u8>) {
     match association.receive().unwrap() {
@@ -1772,7 +1767,7 @@ fn store_scu_round_trips_status_per_file() {
 
     let expected_sop_class_uid = sop_class_uid.clone();
     let (scp_handle, addr) = spawn_mock_scp(sop_class_uid, move |association| {
-        let (pc_id, request, dataset_bytes) = dimse_recv_store_request(association);
+        let (pc_id, request, dataset_bytes) = dimse_recv_command_with_data(association);
         assert!(!dataset_bytes.is_empty());
         assert_eq!(
             request.element(tags::AFFECTED_SOP_CLASS_UID).unwrap().to_str().unwrap(),
@@ -1820,7 +1815,7 @@ fn store_scu_streams_data_for_large_files() {
 
     let expected_sop_class_uid = sop_class_uid.clone();
     let (scp_handle, addr) = spawn_mock_scp(sop_class_uid, move |association| {
-        let (pc_id, request, dataset_bytes) = dimse_recv_store_request(association);
+        let (pc_id, request, dataset_bytes) = dimse_recv_command_with_data(association);
         assert!(dataset_bytes.len() > 16384, "expected a large streamed dataset, got {} bytes", dataset_bytes.len());
         assert_eq!(
             request.element(tags::AFFECTED_SOP_CLASS_UID).unwrap().to_str().unwrap(),
@@ -1860,15 +1855,14 @@ fn store_scu_streams_data_for_large_files() {
 fn find_scu_collects_pending_matches_until_success_status() {
     let abstract_syntax = uids::STUDY_ROOT_QUERY_RETRIEVE_INFORMATION_MODEL_FIND;
     let (scp_handle, addr) = spawn_mock_scp(abstract_syntax, move |association| {
-        let request = dimse_recv_command(association);
-        let message_id = dimse_message_id(&request);
         let pc = association.presentation_contexts()[0].clone();
         let ts = {
             use dicom_encoding::TransferSyntaxIndex;
             dicom_transfer_syntax_registry::TransferSyntaxRegistry.get(&pc.transfer_syntax).unwrap()
         };
 
-        let identifier_bytes = dimse_recv_data(association);
+        let (_pc_id, request, identifier_bytes) = dimse_recv_command_with_data(association);
+        let message_id = dimse_message_id(&request);
         let query = InMemDicomObject::read_dataset_with_ts(identifier_bytes.as_slice(), ts).unwrap();
         assert_eq!(query.element(tags::QUERY_RETRIEVE_LEVEL).unwrap().to_str().unwrap(), "STUDY");
         assert_eq!(query.element(tags::PATIENT_ID).unwrap().to_str().unwrap(), "MRN123");
@@ -1936,14 +1930,12 @@ fn find_scu_collects_pending_matches_until_success_status() {
 fn move_scu_collects_suboperation_progress_until_terminal_status() {
     let abstract_syntax = uids::STUDY_ROOT_QUERY_RETRIEVE_INFORMATION_MODEL_MOVE;
     let (scp_handle, addr) = spawn_mock_scp(abstract_syntax, move |association| {
-        let request = dimse_recv_command(association);
+        let (pc_id, request, _identifier_bytes) = dimse_recv_command_with_data(association);
         let message_id = dimse_message_id(&request);
         assert_eq!(
             request.element(tags::MOVE_DESTINATION).unwrap().to_str().unwrap(),
             "GENERICAE",
         );
-        let pc_id = association.presentation_contexts()[0].id;
-        let _identifier_bytes = dimse_recv_data(association);
 
         let pending = InMemDicomObject::command_from_element_iter([
             DataElement::new(tags::AFFECTED_SOP_CLASS_UID, VR::UI, dicom_value!(Str, abstract_syntax)),
