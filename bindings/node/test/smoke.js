@@ -2,11 +2,57 @@ const assert = require("assert");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
+const { execFileSync } = require("child_process");
 const binding = require("../index.js");
 
 const fixture = path.join(__dirname, "..", "..", "..", "test", "files", "us.dcm");
 
+// The addon must run on the oldest glibc among its consumers' runtime images - node:22-slim
+// (edge services), Debian bookworm, GLIBC 2.36 - even though render-server's node:24-trixie-slim
+// has a newer one (2.41). build-in-docker.sh builds inside node:22-slim for exactly this reason,
+// but nothing stops a plain host `npm run build` (e.g. during dev iteration) from silently
+// producing a binary linked against the *host's* (often newer) glibc instead - which then loads
+// fine here but dlopen-fails only once actually deployed. Catch that here, since `npm test` runs
+// unconditionally as part of every release (see package.json's release-it "before:init" hook),
+// regardless of which build script produced the binary.
+const MAX_ALLOWED_GLIBC = "2.36";
+
+function compareVersions(a, b) {
+  const [aMaj, aMin] = a.split(".").map(Number);
+  const [bMaj, bMin] = b.split(".").map(Number);
+  return aMaj !== bMaj ? aMaj - bMaj : aMin - bMin;
+}
+
+function checkGlibcCompatibility() {
+  // Actual filename varies by target (e.g. dcmnorm-node.linux-x64-gnu.node) - glob for whatever
+  // .node file is actually present rather than hardcoding one.
+  const dir = path.join(__dirname, "..");
+  const nodeFiles = fs.readdirSync(dir).filter((f) => f.endsWith(".node"));
+  if (nodeFiles.length === 0) return; // nothing built yet (e.g. WASI-only environment) - nothing to check
+
+  for (const file of nodeFiles) {
+    if (!file.includes("linux")) continue; // GLIBC only applies to Linux gnu targets
+    let output;
+    try {
+      output = execFileSync("objdump", ["-T", path.join(dir, file)], { encoding: "utf8" });
+    } catch (error) {
+      console.warn(`Skipping GLIBC compatibility check for ${file}: objdump unavailable (${error.message})`);
+      continue;
+    }
+    const versions = [...output.matchAll(/GLIBC_([0-9]+\.[0-9]+)/g)].map((m) => m[1]);
+    const maxRequired = versions.reduce((max, v) => (compareVersions(v, max) > 0 ? v : max), "0.0");
+    assert.ok(
+      compareVersions(maxRequired, MAX_ALLOWED_GLIBC) <= 0,
+      `${file} requires GLIBC_${maxRequired}, but the oldest consumer runtime (node:22-slim) only has ` +
+        `GLIBC_${MAX_ALLOWED_GLIBC} - it was likely built directly on the host instead of via ` +
+        `'npm run build:docker' (build-in-docker.sh), which links against node:22-slim's own glibc. ` +
+        `Rebuild with 'npm run build:docker' before committing.`,
+    );
+  }
+}
+
 async function main() {
+  checkGlibcCompatibility();
   assert.strictEqual(await binding.checkDicom(fixture), true, "checkDicom should be true for a real DICOM file");
   assert.strictEqual(await binding.checkDicom(__filename), false, "checkDicom should be false for a non-DICOM file");
 
