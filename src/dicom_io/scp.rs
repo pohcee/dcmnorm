@@ -428,12 +428,22 @@ fn handle_find(
     let final_status = match handlers.on_find(&filter) {
         Ok(studies) => {
             for study in &studies {
-                let elements: Vec<_> = FIND_RESPONSE_FIELDS
-                    .iter()
-                    .filter_map(|(keyword, tag, vr)| {
-                        study.get(*keyword).map(|value| DataElement::new(*tag, *vr, dicom_value!(Str, value.clone())))
-                    })
-                    .collect();
+                // SpecificCharacterSet is declared unconditionally (not just when a value
+                // actually needs it) - PS3.5 6.1.2.3's default repertoire (used when this is
+                // absent) is 7-bit ASCII, and `on_find` results come from customer data
+                // (patient/study text) that isn't guaranteed to be ASCII-only. Without this,
+                // dicom-rs's writer hard-fails on encountering the first non-ASCII byte in any
+                // LO/SH/PN/etc. value below - aborting the whole C-FIND response (and, since
+                // that error propagates out of this association's handling loop, the connection
+                // itself) rather than just garbling that one field.
+                let mut elements = vec![DataElement::new(
+                    tags::SPECIFIC_CHARACTER_SET,
+                    VR::CS,
+                    dicom_value!(Str, "ISO_IR 192"),
+                )];
+                elements.extend(FIND_RESPONSE_FIELDS.iter().filter_map(|(keyword, tag, vr)| {
+                    study.get(*keyword).map(|value| DataElement::new(*tag, *vr, dicom_value!(Str, value.clone())))
+                }));
                 let match_dataset = InMemDicomObject::from_element_iter(elements);
                 let mut match_bytes = Vec::new();
                 match_dataset.write_dataset_with_ts(&mut match_bytes, negotiated_ts).map_err(|_| ())?;

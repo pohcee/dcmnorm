@@ -2139,3 +2139,59 @@ fn scp_round_trips_echo_store_find_move_against_the_scu_functions() {
     scp.stop();
     fs::remove_dir_all(&cache_dir).ok();
 }
+
+/// Regression test for a production incident: a C-FIND match whose text contained a non-ASCII
+/// character (an en dash, "–") made `handle_find` fail to encode that one match's dataset -
+/// aborting the whole C-FIND response and, since that error propagated out of the association's
+/// handling loop, closing the connection out from under the client. The client-side symptom was
+/// indistinguishable from the peer dropping the connection for any other reason ("DICOM
+/// association error: Connection closed by peer"), which is what made this hard to place
+/// initially. Fixed by declaring SpecificCharacterSet (ISO_IR 192 / UTF-8) on every outgoing
+/// match dataset - see the comment at its call site in `handle_find`.
+#[test]
+fn scp_find_response_with_non_ascii_text_does_not_close_the_connection() {
+    let cache_dir = std::env::temp_dir().join(format!(
+        "dcmnorm-scp-nonascii-test-{}",
+        SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+    ));
+    fs::create_dir_all(&cache_dir).unwrap();
+
+    let mut find_match = std::collections::HashMap::new();
+    find_match.insert("StudyInstanceUID".to_owned(), "1.2.3.4.5".to_owned());
+    find_match.insert("StudyDescription".to_owned(), "CT Chest \u{2013} followup".to_owned());
+
+    let handlers = std::sync::Arc::new(TestScpHandlers {
+        find_query: std::sync::Mutex::new(None),
+        find_response: vec![find_match],
+        move_calls: std::sync::Mutex::new(Vec::new()),
+        move_result: true,
+        association_complete: std::sync::Mutex::new(None),
+    });
+
+    let scp = start_scp(
+        0,
+        cache_dir.clone(),
+        handlers.clone(),
+        ScpOptions { ae_title: "TEST-SCP".to_owned(), ..Default::default() },
+    )
+    .unwrap();
+    let destination = format!("127.0.0.1:{}", scp.local_port());
+
+    let matches = find_scu(
+        &destination,
+        &std::collections::HashMap::new(),
+        FindScuOptions {
+            calling_ae_title: "TEST-SCU".to_owned(),
+            called_ae_title: None,
+            max_pdu_length: 16384,
+            timeout: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(matches.len(), 1);
+    let match_value: serde_json::Value = serde_json::from_str(&matches[0]).unwrap();
+    assert_eq!(match_value["00081030"], "CT Chest \u{2013} followup");
+
+    scp.stop();
+    fs::remove_dir_all(&cache_dir).ok();
+}
