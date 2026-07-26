@@ -1,5 +1,6 @@
 mod bulk_data;
 mod common;
+mod dimse;
 mod filter;
 mod flat_json;
 mod io;
@@ -8,11 +9,17 @@ mod json;
 mod kakadu;
 mod mpeg;
 mod render;
+mod scp;
 mod standard_json;
 #[cfg(test)]
 mod tests;
 mod types;
 
+pub use dimse::{
+    echo_scu, find_scu, move_scu, store_scu, DimseError, EchoScuOptions, FindScuOptions,
+    MoveScuOptions, MoveScuResult, StoreScuOptions, StoreScuResult,
+};
+pub use scp::{start_scp, DicomScp, ScpError, ScpHandlers, ScpOptions};
 pub use filter::{
     apply_filter_to_object, next_tag, parse_filter_requests, read_dicom_object_for_filter,
     FilterRequest,
@@ -34,8 +41,8 @@ pub use json::{
 pub use render::{
     redact_dicom_pixels_to_transfer_syntax, render_all_dicom_frames,
     render_all_dicom_video_frames, render_dicom_frame, render_dicom_frames,
-    render_dicom_to_recompressed_object, BoundingBox, BoxLength, RenderFrameOutput,
-    RenderOutputFormat, RenderPipelineOptions,
+    render_dicom_to_recompressed_object, write_dicom_video, BoundingBox, BoxLength,
+    RenderFrameOutput, RenderOutputFormat, RenderPipelineOptions,
 };
 pub use types::{
     DicomIoError, DicomJsonBulkDataMode, DicomJsonError, DicomJsonFormat, DicomJsonKeyStyle,

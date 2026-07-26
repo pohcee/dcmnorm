@@ -587,9 +587,17 @@ if (!nativeBinding) {
 }
 
 module.exports = nativeBinding
+module.exports.DicomServerHandle = nativeBinding.DicomServerHandle
 module.exports.checkDicom = nativeBinding.checkDicom
+module.exports.echoScu = nativeBinding.echoScu
 module.exports.editTags = nativeBinding.editTags
+module.exports.findScu = nativeBinding.findScu
+module.exports.moveScu = nativeBinding.moveScu
 module.exports.readJson = nativeBinding.readJson
 module.exports.readTags = nativeBinding.readTags
+module.exports.renderFrame = nativeBinding.renderFrame
+module.exports.renderMovie = nativeBinding.renderMovie
+module.exports.startDicomServer = nativeBinding.startDicomServer
+module.exports.storeScu = nativeBinding.storeScu
 module.exports.transcode = nativeBinding.transcode
 module.exports.writeJson = nativeBinding.writeJson

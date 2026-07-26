@@ -11,8 +11,10 @@ crate-type = ["cdylib"]
 dcmnorm = { path = "../.." }
 dicom-core = "0.9.1"
 dicom-object = "0.9.1"
+futures = "0.3"
 napi = { version = "3", default-features = false, features = ["napi4"] }
 napi-derive = "3"
+serde_json = "1.0"
 
 [build-dependencies]
 napi-build = "2"

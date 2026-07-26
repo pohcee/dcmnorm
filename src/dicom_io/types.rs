@@ -206,6 +206,7 @@ pub enum RenderError {
     InvalidWindow(String),
     Transcode(TranscodeError),
     ImageEncoding(image::ImageError),
+    Video(String),
 }
 
 impl fmt::Display for RenderError {
@@ -243,6 +244,7 @@ impl fmt::Display for RenderError {
             Self::InvalidWindow(message) => write!(formatter, "invalid VOI window configuration: {message}"),
             Self::Transcode(error) => write!(formatter, "failed to transcode DICOM data for rendering: {error}"),
             Self::ImageEncoding(error) => write!(formatter, "failed to encode rendered image: {error}"),
+            Self::Video(message) => write!(formatter, "failed to render video: {message}"),
         }
     }
 }
@@ -259,7 +261,8 @@ impl Error for RenderError {
             | Self::UnsupportedPhotometricInterpretation(_)
             | Self::InvalidFrameIndex { .. }
             | Self::InvalidPixelDataLength { .. }
-            | Self::InvalidWindow(_) => None,
+            | Self::InvalidWindow(_)
+            | Self::Video(_) => None,
         }
     }
 }
