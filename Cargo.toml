@@ -34,3 +34,12 @@ rayon = "1.10"
 
 [build-dependencies]
 cc = "1.2"
+
+# Patched copy of jpeg-decoder 0.3.2: the Predictor::Ra (JPEG Lossless SV1) fast path in
+# src/decoder/lossless.rs ignores restart-interval boundaries entirely, and the generic
+# predictor path checks a stale scalar instead of a per-pixel restart flag. Both produce
+# corrupted output (periodic banding) on any lossless JPEG that uses restart markers, which
+# is common in mammography (Hologic C-View/tomosynthesis) DICOM. See vendor/jpeg-decoder
+# for the fix; remove this patch once upstream (image-rs/jpeg-decoder) releases a fix.
+[patch.crates-io]
+jpeg-decoder = { path = "vendor/jpeg-decoder" }
