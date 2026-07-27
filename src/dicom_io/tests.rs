@@ -1985,6 +1985,73 @@ fn move_scu_collects_suboperation_progress_until_terminal_status() {
     scp_handle.join().unwrap();
 }
 
+/// Regression test for a RamSoft PACS C-MOVE SCP: on a Failure status it sends a Type 1C
+/// Identifier (Failed SOP Instance UID List, PS3.7 Table 9.3-5) as its own P-DATA-TF, separate
+/// from the command PDU - unlike `find_scu`'s per-match Identifier, which `dimse_send_command`'s
+/// callers combine into a single `Pdu::PData`. Before the `command_has_dataset` drain in
+/// `move_scu`, that stray PDU was still on the wire when `release()` next called `receive()`
+/// expecting `Pdu::ReleaseRP`, and dicom-ul rejected it as "unexpected response from peer".
+#[test]
+fn move_scu_drains_failed_sop_instance_uid_list_sent_as_separate_pdu() {
+    let abstract_syntax = uids::STUDY_ROOT_QUERY_RETRIEVE_INFORMATION_MODEL_MOVE;
+    let (scp_handle, addr) = spawn_mock_scp(abstract_syntax, move |association| {
+        let (pc_id, request, _identifier_bytes) = dimse_recv_command_with_data(association);
+        let message_id = dimse_message_id(&request);
+
+        // Final response: status=Failure (0xA702, "refused: out of resources - unable to
+        // perform sub-operations"), CommandDataSetType != 0x0101 so an Identifier follows.
+        let final_response = InMemDicomObject::command_from_element_iter([
+            DataElement::new(tags::AFFECTED_SOP_CLASS_UID, VR::UI, dicom_value!(Str, abstract_syntax)),
+            DataElement::new(tags::COMMAND_FIELD, VR::US, dicom_value!(U16, [0x8021])),
+            DataElement::new(tags::MESSAGE_ID_BEING_RESPONDED_TO, VR::US, dicom_value!(U16, [message_id])),
+            DataElement::new(tags::COMMAND_DATA_SET_TYPE, VR::US, dicom_value!(U16, [0x0001])),
+            DataElement::new(tags::STATUS, VR::US, dicom_value!(U16, [0xA702])),
+            DataElement::new(tags::NUMBER_OF_REMAINING_SUBOPERATIONS, VR::US, dicom_value!(U16, [0])),
+            DataElement::new(tags::NUMBER_OF_COMPLETED_SUBOPERATIONS, VR::US, dicom_value!(U16, [0])),
+            DataElement::new(tags::NUMBER_OF_FAILED_SUBOPERATIONS, VR::US, dicom_value!(U16, [1])),
+            DataElement::new(tags::NUMBER_OF_WARNING_SUBOPERATIONS, VR::US, dicom_value!(U16, [0])),
+        ]);
+        dimse_send_command(association, pc_id, &final_response);
+
+        // The Identifier arrives as its own P-DATA-TF, not combined with the command above -
+        // this is the shape that tripped up release() before the fix.
+        let identifier = InMemDicomObject::from_element_iter([DataElement::new(
+            tags::FAILED_SOP_INSTANCE_UID_LIST,
+            VR::UI,
+            dicom_value!(Str, "1.2.3.4.5.6"),
+        )]);
+        let mut identifier_bytes = Vec::new();
+        identifier.write_dataset_with_ts(&mut identifier_bytes, dimse_implicit_vr_le()).unwrap();
+        association
+            .send(&dicom_ul::pdu::Pdu::PData {
+                data: vec![dicom_ul::pdu::PDataValue {
+                    presentation_context_id: pc_id,
+                    value_type: dicom_ul::pdu::PDataValueType::Data,
+                    is_last: true,
+                    data: identifier_bytes,
+                }],
+            })
+            .unwrap();
+    });
+
+    let result = move_scu(
+        &addr.to_string(),
+        "GENERICAE",
+        "1.2.3.4.5",
+        MoveScuOptions {
+            calling_ae_title: "TEST-SCU".to_owned(),
+            called_ae_title: Some("MOCK-SCP".to_owned()),
+            max_pdu_length: 16384,
+            timeout: None,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(result.status, 0xA702);
+    assert_eq!(result.failed, 1);
+    scp_handle.join().unwrap();
+}
+
 // ---------------------------------------------------------------------------------------------
 // DICOM SCP - end-to-end round trip against the same SCU functions tested above
 // ---------------------------------------------------------------------------------------------

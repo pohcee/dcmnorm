@@ -272,6 +272,18 @@ fn command_u16(command: &InMemDicomObject, tag: dicom_core::Tag) -> u16 {
     command.element(tag).ok().and_then(|element| element.to_int::<u16>().ok()).unwrap_or(0)
 }
 
+/// Whether a received command's `CommandDataSetType` (PS3.7 E.2) says a data set follows it as
+/// its own P-DATA-TF - `0x0101` means none, anything else (including the field being absent,
+/// which shouldn't happen for a well-formed response but shouldn't be misread as "dataset
+/// present" either) means one does.
+fn command_has_dataset(command: &InMemDicomObject) -> bool {
+    command
+        .element(tags::COMMAND_DATA_SET_TYPE)
+        .ok()
+        .and_then(|element| element.to_int::<u16>().ok())
+        .is_some_and(|value| value != 0x0101)
+}
+
 /// `0xFF00` ("pending, matches follow") and `0xFF01` ("pending, optional keys not supported")
 /// are the two DICOM-defined pending statuses for C-FIND/C-MOVE responses - see PS3.7 C.4.
 fn is_pending_status(status: u16) -> bool {
@@ -693,6 +705,18 @@ pub fn move_scu(
                 return Err(error);
             }
         };
+
+        // PS3.7 Table 9.3-5: a C-MOVE-RSP with Failure/Warning/Cancel status may carry a Type 1C
+        // Identifier (Failed SOP Instance UID List) as its own P-DATA-TF following the command -
+        // some SCPs (e.g. RamSoft) send this even for a Failure that fails the whole study. If we
+        // don't drain it here it's still sitting on the wire when `release()` next calls
+        // `receive()` expecting A-RELEASE-RP, which dicom-ul then rejects as an unexpected PDU.
+        if command_has_dataset(&response) {
+            if let Err(error) = read_pdata_to_end(&mut assoc) {
+                let _ = assoc.abort();
+                return Err(error);
+            }
+        }
 
         let result = MoveScuResult {
             status,
