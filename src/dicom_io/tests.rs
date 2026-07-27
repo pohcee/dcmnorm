@@ -150,7 +150,7 @@ use super::{
     write_dicom_json, write_dicom_json_full, write_dicom_json_full_with_source,
     write_dicom_json_with_options, write_dicom_json_with_source, BoundingBox, BoxLength,
     DicomJsonBulkDataMode, DicomJsonFormat, DicomJsonKeyStyle, DicomJsonReadOptions,
-    DicomJsonWriteOptions, EchoScuOptions, FindScuOptions, Jpeg2000Backend, MoveScuOptions,
+    DicomJsonWriteOptions, DimseError, EchoScuOptions, FindScuOptions, Jpeg2000Backend, MoveScuOptions,
     RenderOutputFormat, RenderPipelineOptions, ScpHandlers, ScpOptions, StoreScuOptions,
 };
 
@@ -1794,6 +1794,7 @@ fn store_scu_round_trips_status_per_file() {
             called_ae_title: Some("MOCK-SCP".to_owned()),
             max_pdu_length: 16384,
             never_transcode: true,
+            timeout: None,
             on_log: None,
         },
     )
@@ -1843,6 +1844,7 @@ fn store_scu_streams_data_for_large_files() {
             called_ae_title: Some("MOCK-SCP".to_owned()),
             max_pdu_length: 16384,
             never_transcode: true,
+            timeout: None,
             on_log: None,
         },
     )
@@ -1977,6 +1979,8 @@ fn move_scu_collects_suboperation_progress_until_terminal_status() {
             called_ae_title: Some("MOCK-SCP".to_owned()),
             max_pdu_length: 16384,
             timeout: None,
+            stale_data_path: None,
+            stale_data_timeout: None,
             on_log: None,
         },
     )
@@ -2048,6 +2052,8 @@ fn move_scu_drains_failed_sop_instance_uid_list_sent_as_separate_pdu() {
             called_ae_title: Some("MOCK-SCP".to_owned()),
             max_pdu_length: 16384,
             timeout: None,
+            stale_data_path: None,
+            stale_data_timeout: None,
             on_log: None,
         },
     )
@@ -2055,6 +2061,241 @@ fn move_scu_drains_failed_sop_instance_uid_list_sent_as_separate_pdu() {
 
     assert_eq!(result.status, 0xA702);
     assert_eq!(result.failed, 1);
+    scp_handle.join().unwrap();
+}
+
+/// Regression test for the bug this whole absolute-timeout mechanism exists to fix: a peer that
+/// keeps an association alive by responding with periodic pending statuses, but never actually
+/// reaches a terminal status, used to hang `move_scu` forever - each individual read had its own
+/// per-syscall timeout, but a fresh response before it elapsed reset that window indefinitely.
+/// `options.timeout` is now an absolute deadline (via `poll_bounded`), so this must return
+/// `AbsoluteTimeout` once it elapses, not hang past it.
+#[test]
+fn move_scu_aborts_on_absolute_timeout_despite_continued_pending_responses() {
+    let abstract_syntax = uids::STUDY_ROOT_QUERY_RETRIEVE_INFORMATION_MODEL_MOVE;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let scp = dicom_ul::association::server::ServerAssociationOptions::new()
+        .ae_title("MOCK-SCP")
+        .with_abstract_syntax(abstract_syntax);
+
+    let scp_handle = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let mut association = scp.establish(stream).unwrap();
+        let (pc_id, request, _identifier_bytes) = dimse_recv_command_with_data(&mut association);
+        let message_id = dimse_message_id(&request);
+
+        // Keeps sending "still working" pending responses well past the client's configured
+        // absolute timeout - real progress never happens, but the association never goes quiet
+        // either. Ignores send errors past that point: once the client's deadline trips and it
+        // aborts, further sends here fail (broken pipe) - expected, not a test failure.
+        for _ in 0..20 {
+            let pending = InMemDicomObject::command_from_element_iter([
+                DataElement::new(tags::AFFECTED_SOP_CLASS_UID, VR::UI, dicom_value!(Str, abstract_syntax)),
+                DataElement::new(tags::COMMAND_FIELD, VR::US, dicom_value!(U16, [0x8021])),
+                DataElement::new(tags::MESSAGE_ID_BEING_RESPONDED_TO, VR::US, dicom_value!(U16, [message_id])),
+                DataElement::new(tags::COMMAND_DATA_SET_TYPE, VR::US, dicom_value!(U16, [0x0101])),
+                DataElement::new(tags::STATUS, VR::US, dicom_value!(U16, [0xFF00])),
+                DataElement::new(tags::NUMBER_OF_REMAINING_SUBOPERATIONS, VR::US, dicom_value!(U16, [1])),
+                DataElement::new(tags::NUMBER_OF_COMPLETED_SUBOPERATIONS, VR::US, dicom_value!(U16, [0])),
+                DataElement::new(tags::NUMBER_OF_FAILED_SUBOPERATIONS, VR::US, dicom_value!(U16, [0])),
+                DataElement::new(tags::NUMBER_OF_WARNING_SUBOPERATIONS, VR::US, dicom_value!(U16, [0])),
+            ]);
+            if association.send(&dicom_ul::pdu::Pdu::PData {
+                data: vec![dicom_ul::pdu::PDataValue {
+                    presentation_context_id: pc_id,
+                    value_type: dicom_ul::pdu::PDataValueType::Command,
+                    is_last: true,
+                    data: {
+                        let mut buf = Vec::new();
+                        pending.write_dataset_with_ts(&mut buf, dimse_implicit_vr_le()).unwrap();
+                        buf
+                    },
+                }],
+            }).is_err() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(40));
+        }
+    });
+
+    let result = move_scu(
+        &addr.to_string(),
+        "GENERICAE",
+        "1.2.3.4.5",
+        MoveScuOptions {
+            calling_ae_title: "TEST-SCU".to_owned(),
+            called_ae_title: Some("MOCK-SCP".to_owned()),
+            max_pdu_length: 16384,
+            timeout: Some(std::time::Duration::from_millis(200)),
+            stale_data_path: None,
+            stale_data_timeout: None,
+            on_log: None,
+        },
+    );
+
+    assert!(matches!(result, Err(DimseError::AbsoluteTimeout)), "expected AbsoluteTimeout, got {result:?}");
+    scp_handle.join().unwrap();
+}
+
+/// A retrieve's cache directory going quiet is a faster, more specific signal than the absolute
+/// timeout that a source PACS has stopped making real progress - even if it's still nominally
+/// "alive" at the protocol level (periodic pending responses, as here). No absolute `timeout` is
+/// set, so only `stale_data_timeout` can end this call; it must fire well before the test would
+/// otherwise hang.
+#[test]
+fn move_scu_aborts_when_stale_data_path_receives_no_new_files() {
+    let abstract_syntax = uids::STUDY_ROOT_QUERY_RETRIEVE_INFORMATION_MODEL_MOVE;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let scp = dicom_ul::association::server::ServerAssociationOptions::new()
+        .ae_title("MOCK-SCP")
+        .with_abstract_syntax(abstract_syntax);
+
+    let scp_handle = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let mut association = scp.establish(stream).unwrap();
+        let (pc_id, request, _identifier_bytes) = dimse_recv_command_with_data(&mut association);
+        let message_id = dimse_message_id(&request);
+
+        for _ in 0..20 {
+            let pending = InMemDicomObject::command_from_element_iter([
+                DataElement::new(tags::AFFECTED_SOP_CLASS_UID, VR::UI, dicom_value!(Str, abstract_syntax)),
+                DataElement::new(tags::COMMAND_FIELD, VR::US, dicom_value!(U16, [0x8021])),
+                DataElement::new(tags::MESSAGE_ID_BEING_RESPONDED_TO, VR::US, dicom_value!(U16, [message_id])),
+                DataElement::new(tags::COMMAND_DATA_SET_TYPE, VR::US, dicom_value!(U16, [0x0101])),
+                DataElement::new(tags::STATUS, VR::US, dicom_value!(U16, [0xFF00])),
+                DataElement::new(tags::NUMBER_OF_REMAINING_SUBOPERATIONS, VR::US, dicom_value!(U16, [1])),
+                DataElement::new(tags::NUMBER_OF_COMPLETED_SUBOPERATIONS, VR::US, dicom_value!(U16, [0])),
+                DataElement::new(tags::NUMBER_OF_FAILED_SUBOPERATIONS, VR::US, dicom_value!(U16, [0])),
+                DataElement::new(tags::NUMBER_OF_WARNING_SUBOPERATIONS, VR::US, dicom_value!(U16, [0])),
+            ]);
+            if association.send(&dicom_ul::pdu::Pdu::PData {
+                data: vec![dicom_ul::pdu::PDataValue {
+                    presentation_context_id: pc_id,
+                    value_type: dicom_ul::pdu::PDataValueType::Command,
+                    is_last: true,
+                    data: {
+                        let mut buf = Vec::new();
+                        pending.write_dataset_with_ts(&mut buf, dimse_implicit_vr_le()).unwrap();
+                        buf
+                    },
+                }],
+            }).is_err() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(40));
+        }
+    });
+
+    // Deliberately never written to - this is what makes the connection "stale" despite the
+    // peer's continued pending responses.
+    let watch_dir = std::env::temp_dir().join(format!(
+        "dcmnorm-stale-data-test-{}",
+        SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+    ));
+    fs::create_dir_all(&watch_dir).unwrap();
+
+    let result = move_scu(
+        &addr.to_string(),
+        "GENERICAE",
+        "1.2.3.4.5",
+        MoveScuOptions {
+            calling_ae_title: "TEST-SCU".to_owned(),
+            called_ae_title: Some("MOCK-SCP".to_owned()),
+            max_pdu_length: 16384,
+            timeout: None,
+            stale_data_path: Some(watch_dir.clone()),
+            stale_data_timeout: Some(std::time::Duration::from_millis(200)),
+            on_log: None,
+        },
+    );
+
+    match &result {
+        Err(DimseError::StaleDataConnection { path }) => assert_eq!(path, &watch_dir),
+        other => panic!("expected StaleDataConnection, got {other:?}"),
+    }
+    scp_handle.join().unwrap();
+    fs::remove_dir_all(&watch_dir).ok();
+}
+
+/// `find_scu` shares `move_scu`'s absolute-timeout mechanism (`poll_bounded`) - a peer that
+/// accepts the association but never responds to the C-FIND-RQ at all must still be bounded by
+/// `options.timeout`, not left to hang until the caller's own outer timeout (e.g. a queue
+/// visibility timeout) eventually reclaims the task.
+#[test]
+fn find_scu_aborts_on_absolute_timeout_when_peer_never_responds() {
+    let abstract_syntax = uids::STUDY_ROOT_QUERY_RETRIEVE_INFORMATION_MODEL_FIND;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let scp = dicom_ul::association::server::ServerAssociationOptions::new()
+        .ae_title("MOCK-SCP")
+        .with_abstract_syntax(abstract_syntax);
+
+    let scp_handle = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let mut association = scp.establish(stream).unwrap();
+        let _ = dimse_recv_command_with_data(&mut association);
+        // Silence: never sends a C-FIND-RSP. Held open long enough to outlast the client's
+        // configured timeout, proving the client gives up on its own rather than waiting on us.
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    });
+
+    let mut query = std::collections::HashMap::new();
+    query.insert("PatientID".to_owned(), "MRN123".to_owned());
+    let result = find_scu(
+        &addr.to_string(),
+        &query,
+        FindScuOptions {
+            calling_ae_title: "TEST-SCU".to_owned(),
+            called_ae_title: Some("MOCK-SCP".to_owned()),
+            max_pdu_length: 16384,
+            timeout: Some(std::time::Duration::from_millis(200)),
+            on_log: None,
+        },
+    );
+
+    assert!(matches!(result, Err(DimseError::AbsoluteTimeout)), "expected AbsoluteTimeout, got {result:?}");
+    scp_handle.join().unwrap();
+}
+
+/// `store_scu` gained an absolute `timeout` (it had none at all before) alongside the same
+/// `poll_bounded` mechanism as `move_scu`/`find_scu` - a peer that accepts the association but
+/// never responds to the C-STORE-RQ must not be able to hang the call indefinitely.
+#[test]
+fn store_scu_aborts_on_absolute_timeout_when_peer_never_responds() {
+    let source = fixture_path("sr.dcm");
+    let object = read_dicom_file(&source).unwrap();
+    let sop_class_uid = object.meta().media_storage_sop_class_uid.trim_end_matches(['\0', ' ']).to_owned();
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let scp = dicom_ul::association::server::ServerAssociationOptions::new()
+        .ae_title("MOCK-SCP")
+        .with_abstract_syntax(sop_class_uid.clone());
+
+    let scp_handle = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let mut association = scp.establish(stream).unwrap();
+        let _ = dimse_recv_command_with_data(&mut association);
+        // Silence: never sends a C-STORE-RSP.
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    });
+
+    let result = store_scu(
+        &addr.to_string(),
+        &[source],
+        StoreScuOptions {
+            calling_ae_title: "TEST-SCU".to_owned(),
+            called_ae_title: Some("MOCK-SCP".to_owned()),
+            max_pdu_length: 16384,
+            never_transcode: true,
+            timeout: Some(std::time::Duration::from_millis(200)),
+            on_log: None,
+        },
+    );
+
+    assert!(matches!(result, Err(DimseError::AbsoluteTimeout)), "expected AbsoluteTimeout, got {result:?}");
     scp_handle.join().unwrap();
 }
 
@@ -2151,6 +2392,7 @@ fn scp_round_trips_echo_store_find_move_against_the_scu_functions() {
             called_ae_title: None,
             max_pdu_length: 16384,
             never_transcode: true,
+            timeout: None,
             on_log: None,
         },
     )
@@ -2199,6 +2441,8 @@ fn scp_round_trips_echo_store_find_move_against_the_scu_functions() {
             called_ae_title: None,
             max_pdu_length: 16384,
             timeout: None,
+            stale_data_path: None,
+            stale_data_timeout: None,
             on_log: None,
         },
     )

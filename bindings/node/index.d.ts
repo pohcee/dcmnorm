@@ -80,7 +80,19 @@ export interface MoveScuOptions {
   callingAeTitle?: string
   calledAeTitle?: string
   maxPduLength?: number
+  /** Absolute ceiling (connect through release) for the whole call - not reset by activity. */
   timeoutMs?: number
+  /**
+   * Directory to watch for local write progress (e.g. this retrieve's own cache destination)
+   * - see `staleDataTimeoutMs`. Both must be set for the watch to run.
+   */
+  watchPath?: string
+  /**
+   * How long `watchPath` may go without a new/modified file before the connection is
+   * considered stale and aborted - independent of, and typically much shorter than,
+   * `timeoutMs`.
+   */
+  staleDataTimeoutMs?: number
 }
 
 export interface MoveScuResult {
@@ -194,6 +206,8 @@ export interface StoreScuOptions {
   calledAeTitle?: string
   maxPduLength?: number
   neverTranscode?: boolean
+  /** Absolute ceiling (connect through release) for the whole call - not reset by activity. */
+  timeoutMs?: number
 }
 
 export interface StoreScuResult {

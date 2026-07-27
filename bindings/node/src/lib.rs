@@ -494,6 +494,8 @@ pub struct StoreScuOptions {
     pub called_ae_title: Option<String>,
     pub max_pdu_length: Option<u32>,
     pub never_transcode: Option<bool>,
+    /// Absolute ceiling (connect through release) for the whole call - not reset by activity.
+    pub timeout_ms: Option<u32>,
 }
 
 #[napi(object)]
@@ -523,6 +525,7 @@ impl Task for StoreScuTask {
                     called_ae_title: self.options.called_ae_title.clone(),
                     max_pdu_length: self.options.max_pdu_length.unwrap_or(16384),
                     never_transcode: self.options.never_transcode.unwrap_or(false),
+                    timeout: self.options.timeout_ms.map(|ms| Duration::from_millis(ms as u64)),
                     on_log: dimse_logger(self.on_log.take()),
                 },
             )
@@ -626,7 +629,15 @@ pub struct MoveScuOptions {
     pub calling_ae_title: Option<String>,
     pub called_ae_title: Option<String>,
     pub max_pdu_length: Option<u32>,
+    /// Absolute ceiling (connect through release) for the whole call - not reset by activity.
     pub timeout_ms: Option<u32>,
+    /// Directory to watch for local write progress (e.g. this retrieve's own cache destination)
+    /// - see `staleDataTimeoutMs`. Both must be set for the watch to run.
+    pub watch_path: Option<String>,
+    /// How long `watchPath` may go without a new/modified file before the connection is
+    /// considered stale and aborted - independent of, and typically much shorter than,
+    /// `timeoutMs`.
+    pub stale_data_timeout_ms: Option<u32>,
 }
 
 #[napi(object)]
@@ -661,6 +672,8 @@ impl Task for MoveScuTask {
                     called_ae_title: self.options.called_ae_title.clone(),
                     max_pdu_length: self.options.max_pdu_length.unwrap_or(16384),
                     timeout: self.options.timeout_ms.map(|ms| Duration::from_millis(ms as u64)),
+                    stale_data_path: self.options.watch_path.clone().map(PathBuf::from),
+                    stale_data_timeout: self.options.stale_data_timeout_ms.map(|ms| Duration::from_millis(ms as u64)),
                     on_log: dimse_logger(self.on_log.take()),
                 },
             )

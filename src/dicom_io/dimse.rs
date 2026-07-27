@@ -20,7 +20,7 @@ use std::fmt;
 use std::io::Read;
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use dicom_core::dictionary::{DataDictionary, DataDictionaryEntry};
 use dicom_core::{dicom_value, DataElement, VR};
@@ -58,6 +58,17 @@ pub enum DimseError {
     /// (missing Status, malformed PDU sequence, etc.) - not one of the specific, expected error
     /// paths above.
     Protocol(String),
+    /// The operation's absolute wall-clock ceiling (`*ScuOptions::timeout`) elapsed before it
+    /// reached a terminal state. Distinct from `Io`'s per-read timeout: this fires even if
+    /// individual reads keep succeeding - e.g. a peer sending periodic pending-status responses
+    /// without ever making real progress - since it's checked against a fixed deadline computed
+    /// once at the start of the call, not reset by activity. See `poll_bounded`.
+    AbsoluteTimeout,
+    /// A `move_scu` retrieve's own `stale_data_path` hasn't had a file created/modified within
+    /// `stale_data_timeout`, even though the association with the source is still nominally
+    /// alive (e.g. it keeps sending pending C-MOVE-RSPs) - a faster, more specific signal than
+    /// `AbsoluteTimeout` for a retrieve that's stopped actually writing data to our own storage.
+    StaleDataConnection { path: PathBuf },
 }
 
 impl fmt::Display for DimseError {
@@ -80,6 +91,12 @@ impl fmt::Display for DimseError {
             Self::NoFilesToSend => write!(formatter, "no valid DICOM files to send"),
             Self::InvalidQueryKey(key) => write!(formatter, "invalid query key '{key}'"),
             Self::Protocol(message) => write!(formatter, "DIMSE protocol error: {message}"),
+            Self::AbsoluteTimeout => write!(formatter, "operation exceeded its absolute timeout"),
+            Self::StaleDataConnection { path } => write!(
+                formatter,
+                "no new data written under {} within the configured staleness window; treating the connection as stale",
+                path.display()
+            ),
         }
     }
 }
@@ -98,7 +115,9 @@ impl StdError for DimseError {
             | Self::NoAcceptablePresentationContext { .. }
             | Self::NoFilesToSend
             | Self::InvalidQueryKey(_)
-            | Self::Protocol(_) => None,
+            | Self::Protocol(_)
+            | Self::AbsoluteTimeout
+            | Self::StaleDataConnection { .. } => None,
         }
     }
 }
@@ -303,6 +322,117 @@ fn read_pdata_to_end(assoc: &mut ClientAssociation<TcpStream>) -> Result<Vec<u8>
     Ok(buffer)
 }
 
+// ---------------------------------------------------------------------------------------------
+// Absolute-deadline enforcement
+//
+// `establish`'s `read_timeout` (set once, via `TcpStream::set_read_timeout`) bounds each
+// individual blocking read syscall, but a fresh call gets a fresh window - so a peer that keeps
+// the association alive by responding periodically (e.g. repeated pending C-MOVE-RSPs) can hold
+// a read loop open indefinitely even though nothing is really progressing. `poll_bounded` below
+// converts that per-syscall timeout into a genuine absolute ceiling for the whole operation by
+// re-deriving each read's timeout from however much of a fixed deadline is left, so it can only
+// ever shrink - never reset - as the operation runs.
+// ---------------------------------------------------------------------------------------------
+
+/// How often `poll_bounded` re-checks the deadline/stale-data watch while waiting for a read
+/// that hasn't produced anything yet. Short enough that a 60s stale-data window (see
+/// `StaleDataWatch`) gets several checks; long enough not to matter as syscall/CPU overhead at
+/// this call frequency.
+const POLL_INTERVAL: Duration = Duration::from_secs(5);
+
+/// True if `error`'s source chain bottoms out in an `io::Error` of kind `WouldBlock` or
+/// `TimedOut` - i.e. this was just a `poll_bounded` tick finding nothing to read yet, not a real
+/// failure. Walks the chain rather than matching a specific `DimseError`/`AssociationError`/
+/// `ReadError` shape since a read timeout can surface wrapped in any of several dicom-ul
+/// variants (`ReceivePdu`, `ReceivePduItem`, ...) depending on exactly where mid-PDU it landed.
+fn is_read_timeout(error: &DimseError) -> bool {
+    let mut current: &(dyn StdError + 'static) = error;
+    loop {
+        if let Some(io_error) = current.downcast_ref::<std::io::Error>() {
+            return matches!(io_error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut);
+        }
+        match current.source() {
+            Some(source) => current = source,
+            None => return false,
+        }
+    }
+}
+
+/// Watches a local directory's newest file mtime on behalf of a `move_scu` retrieve, so a
+/// connection that's technically still alive (the peer keeps responding) but has stopped
+/// actually writing new data to our own storage - e.g. a C-STORE receiver stalled downstream, or
+/// a peer sending no-progress keepalive pending statuses - can be caught well before the
+/// absolute deadline. `move_scu` has no other way to observe this: the instances a C-MOVE
+/// retrieve causes to be written arrive over a *separate* inbound association this call has no
+/// visibility into (see `MoveScuOptions::stale_data_path`), so this polls the filesystem instead.
+struct StaleDataWatch {
+    path: PathBuf,
+    stale_after: Duration,
+    last_progress_at: Instant,
+    last_mtime: Option<std::time::SystemTime>,
+}
+
+impl StaleDataWatch {
+    fn new(path: PathBuf, stale_after: Duration) -> Self {
+        Self { path, stale_after, last_progress_at: Instant::now(), last_mtime: None }
+    }
+
+    /// Newest mtime among the directory's files, or `None` if it doesn't exist yet (nothing has
+    /// arrived at all) or is empty - either way, "no progress observed", not an error.
+    fn newest_mtime(&self) -> Option<std::time::SystemTime> {
+        std::fs::read_dir(&self.path).ok()?.filter_map(|entry| entry.ok()?.metadata().ok()?.modified().ok()).max()
+    }
+
+    fn check(&mut self) -> Result<(), DimseError> {
+        let newest = self.newest_mtime();
+        if newest.is_some() && newest != self.last_mtime {
+            self.last_mtime = newest;
+            self.last_progress_at = Instant::now();
+        }
+        if self.last_progress_at.elapsed() >= self.stale_after {
+            return Err(DimseError::StaleDataConnection { path: self.path.clone() });
+        }
+        Ok(())
+    }
+}
+
+/// Runs `op` (a `receive_command`/`read_pdata_to_end`-shaped blocking read), re-issuing it with
+/// ever-shrinking read timeouts until it produces something other than a plain "nothing arrived
+/// this tick" timeout. Between ticks, checks `deadline` (`AbsoluteTimeout` once passed) and
+/// `stale_watch` (`StaleDataConnection` once its window elapses) - either aborts the wait
+/// immediately without another read attempt. A `deadline` of `None` disables the absolute
+/// ceiling entirely (ticks stay at `POLL_INTERVAL`, matching pre-existing behavior for callers
+/// that don't opt in).
+fn poll_bounded<T>(
+    assoc: &mut ClientAssociation<TcpStream>,
+    deadline: Option<Instant>,
+    mut stale_watch: Option<&mut StaleDataWatch>,
+    mut op: impl FnMut(&mut ClientAssociation<TcpStream>) -> Result<T, DimseError>,
+) -> Result<T, DimseError> {
+    loop {
+        if let Some(deadline) = deadline {
+            if Instant::now() >= deadline {
+                return Err(DimseError::AbsoluteTimeout);
+            }
+        }
+        if let Some(watch) = stale_watch.as_mut() {
+            watch.check()?;
+        }
+
+        let tick = match deadline {
+            Some(deadline) => POLL_INTERVAL.min(deadline.saturating_duration_since(Instant::now())).max(Duration::from_millis(1)),
+            None => POLL_INTERVAL,
+        };
+        assoc.inner_stream().set_read_timeout(Some(tick)).map_err(DimseError::Io)?;
+
+        match op(assoc) {
+            Ok(value) => return Ok(value),
+            Err(error) if is_read_timeout(&error) => continue,
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 fn command_status(command: &InMemDicomObject) -> Result<u16, DimseError> {
     command
         .element(tags::STATUS)
@@ -401,6 +531,9 @@ pub struct StoreScuOptions {
     /// When true, only the file's own transfer syntax is proposed - a peer that doesn't support
     /// it fails that file rather than receiving a transcoded copy.
     pub never_transcode: bool,
+    /// Absolute ceiling for the whole call - connect through release - not reset by activity
+    /// (see `poll_bounded`).
+    pub timeout: Option<Duration>,
     pub on_log: Option<Box<dyn DimseLogger>>,
 }
 
@@ -445,6 +578,7 @@ pub fn store_scu(
     options: StoreScuOptions,
 ) -> Result<Vec<StoreScuResult>, DimseError> {
     let logger = options.on_log.as_deref();
+    let deadline = options.timeout.map(|timeout| Instant::now() + timeout);
     let probed: Vec<StoreFile> = files.iter().filter_map(|path| probe_store_file(path).ok()).collect();
     if probed.is_empty() {
         return Err(DimseError::NoFilesToSend);
@@ -472,7 +606,7 @@ pub fn store_scu(
         options.called_ae_title.as_deref(),
         options.max_pdu_length,
         &presentation_contexts,
-        None,
+        options.timeout,
         logger,
     )?;
 
@@ -481,7 +615,7 @@ pub fn store_scu(
     let mut results = Vec::with_capacity(probed.len());
     for (index, file) in probed.iter().enumerate() {
         let message_id = (index + 1) as u16;
-        match send_and_receive_store(&mut assoc, file, &negotiated, message_id, logger) {
+        match send_and_receive_store(&mut assoc, file, &negotiated, message_id, deadline, logger) {
             Ok(status) => results.push(StoreScuResult { sop_instance_uid: file.sop_instance_uid.clone(), status }),
             Err(error) => {
                 log_event(logger, || format!("aborting association after error on {}: {error}", file.sop_instance_uid));
@@ -522,6 +656,7 @@ fn send_and_receive_store(
     file: &StoreFile,
     negotiated: &[PresentationContextNegotiated],
     message_id: u16,
+    deadline: Option<Instant>,
     logger: Option<&dyn DimseLogger>,
 ) -> Result<u16, DimseError> {
     let (pc, target_ts) = select_store_presentation_context(file, negotiated)?;
@@ -554,7 +689,7 @@ fn send_and_receive_store(
 
     send_command_with_data(assoc, pc.id, &command, object_data)?;
 
-    let response = receive_command(assoc)?;
+    let response = poll_bounded(assoc, deadline, None, receive_command)?;
     let status = command_status(&response)?;
     log_event(logger, || format!("received C-STORE-RSP #{message_id}: status=0x{status:04X}"));
     Ok(status)
@@ -568,6 +703,8 @@ pub struct FindScuOptions {
     pub calling_ae_title: String,
     pub called_ae_title: Option<String>,
     pub max_pdu_length: u32,
+    /// Absolute ceiling for the whole call - connect through release - not reset by activity
+    /// (see `poll_bounded`).
     pub timeout: Option<Duration>,
     pub on_log: Option<Box<dyn DimseLogger>>,
 }
@@ -606,6 +743,7 @@ pub fn find_scu(
     options: FindScuOptions,
 ) -> Result<Vec<String>, DimseError> {
     let logger = options.on_log.as_deref();
+    let deadline = options.timeout.map(|timeout| Instant::now() + timeout);
     let abstract_syntax = uids::STUDY_ROOT_QUERY_RETRIEVE_INFORMATION_MODEL_FIND;
 
     let mut assoc = establish(
@@ -653,7 +791,7 @@ pub fn find_scu(
 
     let mut matches = Vec::new();
     loop {
-        let response = match receive_command(&mut assoc) {
+        let response = match poll_bounded(&mut assoc, deadline, None, receive_command) {
             Ok(response) => response,
             Err(error) => {
                 log_event(logger, || format!("aborting association after error: {error}"));
@@ -681,7 +819,7 @@ pub fn find_scu(
             return Err(DimseError::Protocol(format!("C-FIND-RSP failed with status {status:#06X}")));
         }
 
-        let bytes = match read_pdata_to_end(&mut assoc) {
+        let bytes = match poll_bounded(&mut assoc, deadline, None, read_pdata_to_end) {
             Ok(bytes) => bytes,
             Err(error) => {
                 log_event(logger, || format!("aborting association after error: {error}"));
@@ -711,9 +849,17 @@ pub struct MoveScuOptions {
     pub calling_ae_title: String,
     pub called_ae_title: Option<String>,
     pub max_pdu_length: u32,
-    /// Per-PDU-wait read timeout - a slow-but-progressing move keeps resetting this on every
-    /// pending C-MOVE-RSP, so this should be generous rather than a hard overall deadline.
+    /// Absolute ceiling for the whole call - connect through release - not reset by activity
+    /// (see `poll_bounded`). A peer that keeps the association alive with periodic pending
+    /// C-MOVE-RSPs but never actually finishes still gets cut off once this elapses.
     pub timeout: Option<Duration>,
+    /// Directory to watch for local write progress (see `StaleDataWatch`) - typically this
+    /// retrieve's own cache destination (`<cachepath>/S_<studyInstanceUid>`). Both this and
+    /// `stale_data_timeout` must be set for the watch to run; `None` disables it.
+    pub stale_data_path: Option<PathBuf>,
+    /// How long `stale_data_path` may go without a new/modified file before the connection is
+    /// considered stale and aborted - independent of, and typically much shorter than, `timeout`.
+    pub stale_data_timeout: Option<Duration>,
     pub on_log: Option<Box<dyn DimseLogger>>,
 }
 
@@ -738,6 +884,11 @@ pub fn move_scu(
     options: MoveScuOptions,
 ) -> Result<MoveScuResult, DimseError> {
     let logger = options.on_log.as_deref();
+    let deadline = options.timeout.map(|timeout| Instant::now() + timeout);
+    let mut stale_watch = match (options.stale_data_path, options.stale_data_timeout) {
+        (Some(path), Some(stale_after)) => Some(StaleDataWatch::new(path, stale_after)),
+        _ => None,
+    };
     let abstract_syntax = uids::STUDY_ROOT_QUERY_RETRIEVE_INFORMATION_MODEL_MOVE;
 
     let mut assoc = establish(
@@ -783,7 +934,7 @@ pub fn move_scu(
     }
 
     loop {
-        let response = match receive_command(&mut assoc) {
+        let response = match poll_bounded(&mut assoc, deadline, stale_watch.as_mut(), receive_command) {
             Ok(response) => response,
             Err(error) => {
                 log_event(logger, || format!("aborting association after error: {error}"));
@@ -806,7 +957,7 @@ pub fn move_scu(
         // don't drain it here it's still sitting on the wire when `release()` next calls
         // `receive()` expecting A-RELEASE-RP, which dicom-ul then rejects as an unexpected PDU.
         if command_has_dataset(&response) {
-            if let Err(error) = read_pdata_to_end(&mut assoc) {
+            if let Err(error) = poll_bounded(&mut assoc, deadline, stale_watch.as_mut(), read_pdata_to_end) {
                 log_event(logger, || format!("aborting association after error: {error}"));
                 let _ = assoc.abort();
                 return Err(error);
