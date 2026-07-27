@@ -19,9 +19,11 @@ export declare function checkDicom(filePath: string): Promise<unknown>
 /**
  * Performs a C-ECHO (DICOM Verification) against `destination` ("host:port"). Resolves with the
  * response Status code (0 = success); rejects only if the association itself could not be
- * established (unreachable host, no accepted presentation context, etc).
+ * established (unreachable host, no accepted presentation context, etc). `onLog`, if given, is
+ * called (synchronously, no return value expected) with a debug line for each notable DIMSE
+ * event - association open/close, the request sent, the response received.
  */
-export declare function echoScu(destination: string, options?: EchoScuOptions | undefined | null): Promise<unknown>
+export declare function echoScu(destination: string, options?: EchoScuOptions | undefined | null, onLog?: (((err: Error | null, arg: string) => any)) | undefined | null): Promise<unknown>
 
 export interface EchoScuOptions {
   callingAeTitle?: string
@@ -48,9 +50,12 @@ export interface EditTagsOptions {
  * values: empty string is a universal-match "return key" (mirrors findscu's bare `-k TAG`),
  * non-empty constrains the match (mirrors `-k TAG=value`); `QueryRetrieveLevel` defaults to
  * `"STUDY"` if not given. Resolves with one flat/hex-keyed DICOM JSON string per match (parse
- * JS-side, same shape as `readJson({format: "flat", keyStyle: "hex"})`).
+ * JS-side, same shape as `readJson({format: "flat", keyStyle: "hex"})`). `onLog`, if given, is
+ * called (synchronously, no return value expected) with a debug line for each notable DIMSE
+ * event - association open/close, and each C-FIND-RQ/RSP (query values are not logged, only the
+ * tag keys queried, since the Identifier commonly carries PHI).
  */
-export declare function findScu(destination: string, query: Record<string, string>, options?: FindScuOptions | undefined | null): Promise<unknown>
+export declare function findScu(destination: string, query: Record<string, string>, options?: FindScuOptions | undefined | null, onLog?: (((err: Error | null, arg: string) => any)) | undefined | null): Promise<unknown>
 
 export interface FindScuOptions {
   callingAeTitle?: string
@@ -64,9 +69,12 @@ export interface FindScuOptions {
  * `studyInstanceUid` to `moveDestinationAe` (an AE title `destination` already knows how to
  * reach, not a socket address). Blocks until the move reaches a terminal status; resolves with
  * that terminal status and sub-operation counts regardless of success/warning/failure - the
- * caller decides what's retryable, this only rejects if the association itself failed.
+ * caller decides what's retryable, this only rejects if the association itself failed. `onLog`,
+ * if given, is called (synchronously, no return value expected) with a debug line for each
+ * notable DIMSE event - association open/close, and each C-MOVE-RQ/RSP (including every pending
+ * response, so a slow multi-instance move is visible sub-operation by sub-operation).
  */
-export declare function moveScu(destination: string, moveDestinationAe: string, studyInstanceUid: string, options?: MoveScuOptions | undefined | null): Promise<unknown>
+export declare function moveScu(destination: string, moveDestinationAe: string, studyInstanceUid: string, options?: MoveScuOptions | undefined | null, onLog?: (((err: Error | null, arg: string) => any)) | undefined | null): Promise<unknown>
 
 export interface MoveScuOptions {
   callingAeTitle?: string
@@ -176,9 +184,10 @@ export declare function startDicomServer(port: number, cachePath: string, aeTitl
  * `{sopInstanceUid, status}` per file that could be read and sent - a non-zero Status is just
  * data in the result (the peer rejected that instance), not a rejected Promise; this only
  * rejects if the association itself could not be established, or none of `files` could be read
- * as DICOM at all.
+ * as DICOM at all. `onLog`, if given, is called (synchronously, no return value expected) with a
+ * debug line for each notable DIMSE event - association open/close, and each C-STORE-RQ/RSP.
  */
-export declare function storeScu(destination: string, files: Array<string>, options?: StoreScuOptions | undefined | null): Promise<unknown>
+export declare function storeScu(destination: string, files: Array<string>, options?: StoreScuOptions | undefined | null, onLog?: (((err: Error | null, arg: string) => any)) | undefined | null): Promise<unknown>
 
 export interface StoreScuOptions {
   callingAeTitle?: string

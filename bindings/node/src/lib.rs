@@ -15,7 +15,7 @@ use dcmnorm::dicom_io::{
     start_scp as dcm_start_scp, store_scu as dcm_store_scu, transcode_dicom_file, write_dicom_file,
     write_dicom_json_with_options, write_dicom_video as dcm_write_dicom_video,
     DicomJsonBulkDataMode, DicomJsonFormat, DicomJsonKeyStyle, DicomJsonReadOptions,
-    DicomJsonWriteOptions, DicomScp, EchoScuOptions as DcmEchoScuOptions,
+    DicomJsonWriteOptions, DicomScp, DimseLogger, EchoScuOptions as DcmEchoScuOptions,
     FindScuOptions as DcmFindScuOptions, MoveScuOptions as DcmMoveScuOptions,
     RenderOutputFormat as DcmRenderOutputFormat, RenderPipelineOptions as DcmRenderPipelineOptions,
     ScpHandlers as DcmScpHandlers, ScpOptions as DcmScpOptions, StoreScuOptions as DcmStoreScuOptions,
@@ -416,6 +416,25 @@ pub fn check_dicom(file_path: String) -> AsyncTask<CheckDicomTask> {
 // DIMSE: echoScu / storeScu / findScu / moveScu
 // ---------------------------------------------------------------------------------------------
 
+/// Bridges dcmnorm's `DimseLogger` trait onto a JS callback via a fire-and-forget
+/// `ThreadsafeFunction` - unlike the SCP handlers below, a log line needs no return value, so
+/// this skips the call_with_return_value/oneshot-channel bridging those use and just dispatches
+/// non-blocking. Each `*_scu` call below runs on a napi worker thread (via `AsyncTask`), not the
+/// JS thread, which is exactly what `ThreadsafeFunction` is for.
+struct NapiDimseLogger {
+    callback: ThreadsafeFunction<String>,
+}
+
+impl DimseLogger for NapiDimseLogger {
+    fn log(&self, message: String) {
+        self.callback.call(Ok(message), ThreadsafeFunctionCallMode::NonBlocking);
+    }
+}
+
+fn dimse_logger(on_log: Option<ThreadsafeFunction<String>>) -> Option<Box<dyn DimseLogger>> {
+    on_log.map(|callback| Box::new(NapiDimseLogger { callback }) as Box<dyn DimseLogger>)
+}
+
 #[napi(object)]
 #[derive(Default)]
 pub struct EchoScuOptions {
@@ -427,6 +446,7 @@ pub struct EchoScuOptions {
 pub struct EchoScuTask {
     destination: String,
     options: EchoScuOptions,
+    on_log: Option<ThreadsafeFunction<String>>,
 }
 
 impl Task for EchoScuTask {
@@ -441,6 +461,7 @@ impl Task for EchoScuTask {
                     calling_ae_title: self.options.calling_ae_title.clone().unwrap_or_else(|| "GENERICAE".to_owned()),
                     called_ae_title: self.options.called_ae_title.clone(),
                     timeout: self.options.timeout_ms.map(|ms| Duration::from_millis(ms as u64)),
+                    on_log: dimse_logger(self.on_log.take()),
                 },
             )
             .map_err(to_napi_err)
@@ -454,10 +475,16 @@ impl Task for EchoScuTask {
 
 /// Performs a C-ECHO (DICOM Verification) against `destination` ("host:port"). Resolves with the
 /// response Status code (0 = success); rejects only if the association itself could not be
-/// established (unreachable host, no accepted presentation context, etc).
+/// established (unreachable host, no accepted presentation context, etc). `onLog`, if given, is
+/// called (synchronously, no return value expected) with a debug line for each notable DIMSE
+/// event - association open/close, the request sent, the response received.
 #[napi]
-pub fn echo_scu(destination: String, options: Option<EchoScuOptions>) -> AsyncTask<EchoScuTask> {
-    AsyncTask::new(EchoScuTask { destination, options: options.unwrap_or_default() })
+pub fn echo_scu(
+    destination: String,
+    options: Option<EchoScuOptions>,
+    on_log: Option<ThreadsafeFunction<String>>,
+) -> AsyncTask<EchoScuTask> {
+    AsyncTask::new(EchoScuTask { destination, options: options.unwrap_or_default(), on_log })
 }
 
 #[napi(object)]
@@ -479,6 +506,7 @@ pub struct StoreScuTask {
     destination: String,
     files: Vec<PathBuf>,
     options: StoreScuOptions,
+    on_log: Option<ThreadsafeFunction<String>>,
 }
 
 impl Task for StoreScuTask {
@@ -495,6 +523,7 @@ impl Task for StoreScuTask {
                     called_ae_title: self.options.called_ae_title.clone(),
                     max_pdu_length: self.options.max_pdu_length.unwrap_or(16384),
                     never_transcode: self.options.never_transcode.unwrap_or(false),
+                    on_log: dimse_logger(self.on_log.take()),
                 },
             )
             .map_err(to_napi_err)?;
@@ -514,17 +543,20 @@ impl Task for StoreScuTask {
 /// `{sopInstanceUid, status}` per file that could be read and sent - a non-zero Status is just
 /// data in the result (the peer rejected that instance), not a rejected Promise; this only
 /// rejects if the association itself could not be established, or none of `files` could be read
-/// as DICOM at all.
+/// as DICOM at all. `onLog`, if given, is called (synchronously, no return value expected) with a
+/// debug line for each notable DIMSE event - association open/close, and each C-STORE-RQ/RSP.
 #[napi]
 pub fn store_scu(
     destination: String,
     files: Vec<String>,
     options: Option<StoreScuOptions>,
+    on_log: Option<ThreadsafeFunction<String>>,
 ) -> AsyncTask<StoreScuTask> {
     AsyncTask::new(StoreScuTask {
         destination,
         files: files.into_iter().map(PathBuf::from).collect(),
         options: options.unwrap_or_default(),
+        on_log,
     })
 }
 
@@ -541,6 +573,7 @@ pub struct FindScuTask {
     destination: String,
     query: HashMap<String, String>,
     options: FindScuOptions,
+    on_log: Option<ThreadsafeFunction<String>>,
 }
 
 impl Task for FindScuTask {
@@ -557,6 +590,7 @@ impl Task for FindScuTask {
                     called_ae_title: self.options.called_ae_title.clone(),
                     max_pdu_length: self.options.max_pdu_length.unwrap_or(16384),
                     timeout: self.options.timeout_ms.map(|ms| Duration::from_millis(ms as u64)),
+                    on_log: dimse_logger(self.on_log.take()),
                 },
             )
             .map_err(to_napi_err)
@@ -572,14 +606,18 @@ impl Task for FindScuTask {
 /// values: empty string is a universal-match "return key" (mirrors findscu's bare `-k TAG`),
 /// non-empty constrains the match (mirrors `-k TAG=value`); `QueryRetrieveLevel` defaults to
 /// `"STUDY"` if not given. Resolves with one flat/hex-keyed DICOM JSON string per match (parse
-/// JS-side, same shape as `readJson({format: "flat", keyStyle: "hex"})`).
+/// JS-side, same shape as `readJson({format: "flat", keyStyle: "hex"})`). `onLog`, if given, is
+/// called (synchronously, no return value expected) with a debug line for each notable DIMSE
+/// event - association open/close, and each C-FIND-RQ/RSP (query values are not logged, only the
+/// tag keys queried, since the Identifier commonly carries PHI).
 #[napi]
 pub fn find_scu(
     destination: String,
     query: HashMap<String, String>,
     options: Option<FindScuOptions>,
+    on_log: Option<ThreadsafeFunction<String>>,
 ) -> AsyncTask<FindScuTask> {
-    AsyncTask::new(FindScuTask { destination, query, options: options.unwrap_or_default() })
+    AsyncTask::new(FindScuTask { destination, query, options: options.unwrap_or_default(), on_log })
 }
 
 #[napi(object)]
@@ -605,6 +643,7 @@ pub struct MoveScuTask {
     move_destination_ae: String,
     study_instance_uid: String,
     options: MoveScuOptions,
+    on_log: Option<ThreadsafeFunction<String>>,
 }
 
 impl Task for MoveScuTask {
@@ -622,6 +661,7 @@ impl Task for MoveScuTask {
                     called_ae_title: self.options.called_ae_title.clone(),
                     max_pdu_length: self.options.max_pdu_length.unwrap_or(16384),
                     timeout: self.options.timeout_ms.map(|ms| Duration::from_millis(ms as u64)),
+                    on_log: dimse_logger(self.on_log.take()),
                 },
             )
             .map_err(to_napi_err)?;
@@ -644,19 +684,24 @@ impl Task for MoveScuTask {
 /// `studyInstanceUid` to `moveDestinationAe` (an AE title `destination` already knows how to
 /// reach, not a socket address). Blocks until the move reaches a terminal status; resolves with
 /// that terminal status and sub-operation counts regardless of success/warning/failure - the
-/// caller decides what's retryable, this only rejects if the association itself failed.
+/// caller decides what's retryable, this only rejects if the association itself failed. `onLog`,
+/// if given, is called (synchronously, no return value expected) with a debug line for each
+/// notable DIMSE event - association open/close, and each C-MOVE-RQ/RSP (including every pending
+/// response, so a slow multi-instance move is visible sub-operation by sub-operation).
 #[napi]
 pub fn move_scu(
     destination: String,
     move_destination_ae: String,
     study_instance_uid: String,
     options: Option<MoveScuOptions>,
+    on_log: Option<ThreadsafeFunction<String>>,
 ) -> AsyncTask<MoveScuTask> {
     AsyncTask::new(MoveScuTask {
         destination,
         move_destination_ae,
         study_instance_uid,
         options: options.unwrap_or_default(),
+        on_log,
     })
 }
 

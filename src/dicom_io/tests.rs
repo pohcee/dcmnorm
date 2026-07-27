@@ -1720,6 +1720,7 @@ fn echo_scu_round_trips_success_status() {
             calling_ae_title: "TEST-SCU".to_owned(),
             called_ae_title: Some("MOCK-SCP".to_owned()),
             timeout: None,
+            on_log: None,
         },
     )
     .unwrap();
@@ -1793,6 +1794,7 @@ fn store_scu_round_trips_status_per_file() {
             called_ae_title: Some("MOCK-SCP".to_owned()),
             max_pdu_length: 16384,
             never_transcode: true,
+            on_log: None,
         },
     )
     .unwrap();
@@ -1841,6 +1843,7 @@ fn store_scu_streams_data_for_large_files() {
             called_ae_title: Some("MOCK-SCP".to_owned()),
             max_pdu_length: 16384,
             never_transcode: true,
+            on_log: None,
         },
     )
     .unwrap();
@@ -1915,6 +1918,7 @@ fn find_scu_collects_pending_matches_until_success_status() {
             called_ae_title: Some("MOCK-SCP".to_owned()),
             max_pdu_length: 16384,
             timeout: None,
+            on_log: None,
         },
     )
     .unwrap();
@@ -1973,6 +1977,7 @@ fn move_scu_collects_suboperation_progress_until_terminal_status() {
             called_ae_title: Some("MOCK-SCP".to_owned()),
             max_pdu_length: 16384,
             timeout: None,
+            on_log: None,
         },
     )
     .unwrap();
@@ -2043,6 +2048,7 @@ fn move_scu_drains_failed_sop_instance_uid_list_sent_as_separate_pdu() {
             called_ae_title: Some("MOCK-SCP".to_owned()),
             max_pdu_length: 16384,
             timeout: None,
+            on_log: None,
         },
     )
     .unwrap();
@@ -2125,7 +2131,7 @@ fn scp_round_trips_echo_store_find_move_against_the_scu_functions() {
     // C-ECHO
     let status = echo_scu(
         &destination,
-        EchoScuOptions { calling_ae_title: "TEST-SCU".to_owned(), called_ae_title: None, timeout: None },
+        EchoScuOptions { calling_ae_title: "TEST-SCU".to_owned(), called_ae_title: None, timeout: None, on_log: None },
     )
     .unwrap();
     assert_eq!(status, 0);
@@ -2145,6 +2151,7 @@ fn scp_round_trips_echo_store_find_move_against_the_scu_functions() {
             called_ae_title: None,
             max_pdu_length: 16384,
             never_transcode: true,
+            on_log: None,
         },
     )
     .unwrap();
@@ -2172,6 +2179,7 @@ fn scp_round_trips_echo_store_find_move_against_the_scu_functions() {
             called_ae_title: None,
             max_pdu_length: 16384,
             timeout: None,
+            on_log: None,
         },
     )
     .unwrap();
@@ -2191,6 +2199,7 @@ fn scp_round_trips_echo_store_find_move_against_the_scu_functions() {
             called_ae_title: None,
             max_pdu_length: 16384,
             timeout: None,
+            on_log: None,
         },
     )
     .unwrap();
@@ -2252,6 +2261,7 @@ fn scp_find_response_with_non_ascii_text_does_not_close_the_connection() {
             called_ae_title: None,
             max_pdu_length: 16384,
             timeout: None,
+            on_log: None,
         },
     )
     .unwrap();

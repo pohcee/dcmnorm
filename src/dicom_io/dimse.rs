@@ -139,6 +139,23 @@ impl From<std::io::Error> for DimseError {
     }
 }
 
+/// Optional sink for DIMSE debug detail - association negotiation, each command sent/received,
+/// and the eventual release/abort - that every `*_scu` function below reports through if its
+/// Options carry one via `on_log`. A trait (rather than a plain `Fn(String)`) so the napi
+/// binding can implement it once over a `ThreadsafeFunction`, matching how `ScpHandlers` bridges
+/// its own callbacks across that same boundary.
+pub trait DimseLogger: Send + Sync {
+    fn log(&self, message: String);
+}
+
+/// Calls `logger.log(message())` if a logger is present - `message` is only built when
+/// something is actually listening, so this costs nothing when no logger was supplied.
+fn log_event(logger: Option<&dyn DimseLogger>, message: impl FnOnce() -> String) {
+    if let Some(logger) = logger {
+        logger.log(message());
+    }
+}
+
 pub(super) fn transfer_syntax(uid: &str) -> Result<&'static TransferSyntax, DimseError> {
     TransferSyntaxRegistry
         .get(uid)
@@ -167,7 +184,16 @@ fn establish(
     max_pdu_length: u32,
     presentation_contexts: &[(String, Vec<String>)],
     timeout: Option<Duration>,
+    logger: Option<&dyn DimseLogger>,
 ) -> Result<ClientAssociation<TcpStream>, DimseError> {
+    log_event(logger, || {
+        format!(
+            "opening association to {destination} (calling AE {calling_ae_title:?}, called AE {:?}, max PDU {max_pdu_length}, {} presentation context(s) proposed)",
+            called_ae_title.unwrap_or("<none>"),
+            presentation_contexts.len()
+        )
+    });
+
     let mut options = ClientAssociationOptions::new()
         .calling_ae_title(calling_ae_title.to_owned())
         .max_pdu_length(max_pdu_length);
@@ -184,7 +210,24 @@ fn establish(
         options = options.read_timeout(timeout).write_timeout(timeout).connection_timeout(timeout);
     }
 
-    Ok(options.establish_with(destination)?)
+    match options.establish_with(destination) {
+        Ok(assoc) => {
+            log_event(logger, || {
+                let negotiated = assoc
+                    .presentation_contexts()
+                    .iter()
+                    .map(|pc| format!("#{} {} / {}", pc.id, pc.abstract_syntax, pc.transfer_syntax))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("association established; negotiated presentation context(s): [{negotiated}]")
+            });
+            Ok(assoc)
+        }
+        Err(error) => {
+            log_event(logger, || format!("association failed: {error}"));
+            Err(error.into())
+        }
+    }
 }
 
 fn send_command(
@@ -298,11 +341,13 @@ pub struct EchoScuOptions {
     pub calling_ae_title: String,
     pub called_ae_title: Option<String>,
     pub timeout: Option<Duration>,
+    pub on_log: Option<Box<dyn DimseLogger>>,
 }
 
 /// Performs a C-ECHO (DICOM Verification) against `destination` ("host:port"). Returns the
 /// response Status code (0 = success) - callers decide what threshold counts as "up".
 pub fn echo_scu(destination: &str, options: EchoScuOptions) -> Result<u16, DimseError> {
+    let logger = options.on_log.as_deref();
     let mut assoc = establish(
         destination,
         &options.calling_ae_title,
@@ -310,6 +355,7 @@ pub fn echo_scu(destination: &str, options: EchoScuOptions) -> Result<u16, Dimse
         dicom_ul::pdu::DEFAULT_MAX_PDU,
         &[(uids::VERIFICATION.to_owned(), default_transfer_syntaxes())],
         options.timeout,
+        logger,
     )?;
 
     let pc = assoc
@@ -325,18 +371,22 @@ pub fn echo_scu(destination: &str, options: EchoScuOptions) -> Result<u16, Dimse
         DataElement::new(tags::COMMAND_DATA_SET_TYPE, VR::US, dicom_value!(U16, [0x0101])),
     ]);
 
+    log_event(logger, || "sending C-ECHO-RQ (message id 1)".to_owned());
     let result = send_command(&mut assoc, pc.id, &command).and_then(|_| receive_command(&mut assoc));
 
     let response = match result {
         Ok(response) => response,
         Err(error) => {
+            log_event(logger, || format!("aborting association after error: {error}"));
             let _ = assoc.abort();
             return Err(error);
         }
     };
 
     let status = command_status(&response)?;
+    log_event(logger, || format!("received C-ECHO-RSP: status=0x{status:04X}"));
     assoc.release()?;
+    log_event(logger, || "association released".to_owned());
     Ok(status)
 }
 
@@ -351,6 +401,7 @@ pub struct StoreScuOptions {
     /// When true, only the file's own transfer syntax is proposed - a peer that doesn't support
     /// it fails that file rather than receiving a transcoded copy.
     pub never_transcode: bool,
+    pub on_log: Option<Box<dyn DimseLogger>>,
 }
 
 #[derive(Clone, Debug)]
@@ -393,6 +444,7 @@ pub fn store_scu(
     files: &[PathBuf],
     options: StoreScuOptions,
 ) -> Result<Vec<StoreScuResult>, DimseError> {
+    let logger = options.on_log.as_deref();
     let probed: Vec<StoreFile> = files.iter().filter_map(|path| probe_store_file(path).ok()).collect();
     if probed.is_empty() {
         return Err(DimseError::NoFilesToSend);
@@ -421,6 +473,7 @@ pub fn store_scu(
         options.max_pdu_length,
         &presentation_contexts,
         None,
+        logger,
     )?;
 
     let negotiated = assoc.presentation_contexts().to_vec();
@@ -428,9 +481,10 @@ pub fn store_scu(
     let mut results = Vec::with_capacity(probed.len());
     for (index, file) in probed.iter().enumerate() {
         let message_id = (index + 1) as u16;
-        match send_and_receive_store(&mut assoc, file, &negotiated, message_id) {
+        match send_and_receive_store(&mut assoc, file, &negotiated, message_id, logger) {
             Ok(status) => results.push(StoreScuResult { sop_instance_uid: file.sop_instance_uid.clone(), status }),
             Err(error) => {
+                log_event(logger, || format!("aborting association after error on {}: {error}", file.sop_instance_uid));
                 let _ = assoc.abort();
                 return Err(error);
             }
@@ -438,6 +492,7 @@ pub fn store_scu(
     }
 
     assoc.release()?;
+    log_event(logger, || format!("association released ({} instance(s) sent)", results.len()));
     Ok(results)
 }
 
@@ -467,6 +522,7 @@ fn send_and_receive_store(
     file: &StoreFile,
     negotiated: &[PresentationContextNegotiated],
     message_id: u16,
+    logger: Option<&dyn DimseLogger>,
 ) -> Result<u16, DimseError> {
     let (pc, target_ts) = select_store_presentation_context(file, negotiated)?;
 
@@ -489,10 +545,19 @@ fn send_and_receive_store(
         DataElement::new(tags::AFFECTED_SOP_INSTANCE_UID, VR::UI, dicom_value!(Str, &file.sop_instance_uid)),
     ]);
 
+    log_event(logger, || {
+        format!(
+            "sending C-STORE-RQ #{message_id}: SOP instance {} (class {}, transfer syntax {})",
+            file.sop_instance_uid, file.sop_class_uid, target_ts.uid()
+        )
+    });
+
     send_command_with_data(assoc, pc.id, &command, object_data)?;
 
     let response = receive_command(assoc)?;
-    command_status(&response)
+    let status = command_status(&response)?;
+    log_event(logger, || format!("received C-STORE-RSP #{message_id}: status=0x{status:04X}"));
+    Ok(status)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -504,6 +569,7 @@ pub struct FindScuOptions {
     pub called_ae_title: Option<String>,
     pub max_pdu_length: u32,
     pub timeout: Option<Duration>,
+    pub on_log: Option<Box<dyn DimseLogger>>,
 }
 
 fn put_query_attribute(identifier: &mut InMemDicomObject, key: &str, value: &str) -> Result<(), DimseError> {
@@ -539,6 +605,7 @@ pub fn find_scu(
     query: &HashMap<String, String>,
     options: FindScuOptions,
 ) -> Result<Vec<String>, DimseError> {
+    let logger = options.on_log.as_deref();
     let abstract_syntax = uids::STUDY_ROOT_QUERY_RETRIEVE_INFORMATION_MODEL_FIND;
 
     let mut assoc = establish(
@@ -548,6 +615,7 @@ pub fn find_scu(
         options.max_pdu_length,
         &[(abstract_syntax.to_owned(), default_transfer_syntaxes())],
         options.timeout,
+        logger,
     )?;
 
     let pc = assoc
@@ -569,7 +637,16 @@ pub fn find_scu(
         DataElement::new(tags::COMMAND_DATA_SET_TYPE, VR::US, dicom_value!(U16, [0x0001])),
     ]);
 
+    // Logs query key names only, not values - an Identifier commonly carries PHI (PatientName,
+    // PatientID) that a debug log shouldn't echo even at the debug tier.
+    log_event(logger, || {
+        let mut keys: Vec<&str> = query.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        format!("sending C-FIND-RQ (message id 1); query key(s): [{}]", keys.join(", "))
+    });
+
     if let Err(error) = send_command_with_data(&mut assoc, pc.id, &command, identifier_data) {
+        log_event(logger, || format!("aborting association after error: {error}"));
         let _ = assoc.abort();
         return Err(error);
     }
@@ -579,6 +656,7 @@ pub fn find_scu(
         let response = match receive_command(&mut assoc) {
             Ok(response) => response,
             Err(error) => {
+                log_event(logger, || format!("aborting association after error: {error}"));
                 let _ = assoc.abort();
                 return Err(error);
             }
@@ -586,15 +664,19 @@ pub fn find_scu(
         let status = match command_status(&response) {
             Ok(status) => status,
             Err(error) => {
+                log_event(logger, || format!("aborting association after error: {error}"));
                 let _ = assoc.abort();
                 return Err(error);
             }
         };
 
+        log_event(logger, || format!("received C-FIND-RSP: status=0x{status:04X}"));
+
         if status == 0x0000 {
             break;
         }
         if !is_pending_status(status) {
+            log_event(logger, || format!("aborting association: C-FIND-RSP failed with status 0x{status:04X}"));
             let _ = assoc.abort();
             return Err(DimseError::Protocol(format!("C-FIND-RSP failed with status {status:#06X}")));
         }
@@ -602,6 +684,7 @@ pub fn find_scu(
         let bytes = match read_pdata_to_end(&mut assoc) {
             Ok(bytes) => bytes,
             Err(error) => {
+                log_event(logger, || format!("aborting association after error: {error}"));
                 let _ = assoc.abort();
                 return Err(error);
             }
@@ -616,6 +699,7 @@ pub fn find_scu(
     }
 
     assoc.release()?;
+    log_event(logger, || format!("association released ({} match(es))", matches.len()));
     Ok(matches)
 }
 
@@ -630,6 +714,7 @@ pub struct MoveScuOptions {
     /// Per-PDU-wait read timeout - a slow-but-progressing move keeps resetting this on every
     /// pending C-MOVE-RSP, so this should be generous rather than a hard overall deadline.
     pub timeout: Option<Duration>,
+    pub on_log: Option<Box<dyn DimseLogger>>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -652,6 +737,7 @@ pub fn move_scu(
     study_instance_uid: &str,
     options: MoveScuOptions,
 ) -> Result<MoveScuResult, DimseError> {
+    let logger = options.on_log.as_deref();
     let abstract_syntax = uids::STUDY_ROOT_QUERY_RETRIEVE_INFORMATION_MODEL_MOVE;
 
     let mut assoc = establish(
@@ -661,6 +747,7 @@ pub fn move_scu(
         options.max_pdu_length,
         &[(abstract_syntax.to_owned(), default_transfer_syntaxes())],
         options.timeout,
+        logger,
     )?;
 
     let pc = assoc
@@ -685,7 +772,12 @@ pub fn move_scu(
         DataElement::new(tags::COMMAND_DATA_SET_TYPE, VR::US, dicom_value!(U16, [0x0001])),
     ]);
 
+    log_event(logger, || {
+        format!("sending C-MOVE-RQ: study {study_instance_uid} -> move destination AE {move_destination_ae}")
+    });
+
     if let Err(error) = send_command_with_data(&mut assoc, pc.id, &command, identifier_data) {
+        log_event(logger, || format!("aborting association after error: {error}"));
         let _ = assoc.abort();
         return Err(error);
     }
@@ -694,6 +786,7 @@ pub fn move_scu(
         let response = match receive_command(&mut assoc) {
             Ok(response) => response,
             Err(error) => {
+                log_event(logger, || format!("aborting association after error: {error}"));
                 let _ = assoc.abort();
                 return Err(error);
             }
@@ -701,6 +794,7 @@ pub fn move_scu(
         let status = match command_status(&response) {
             Ok(status) => status,
             Err(error) => {
+                log_event(logger, || format!("aborting association after error: {error}"));
                 let _ = assoc.abort();
                 return Err(error);
             }
@@ -713,6 +807,7 @@ pub fn move_scu(
         // `receive()` expecting A-RELEASE-RP, which dicom-ul then rejects as an unexpected PDU.
         if command_has_dataset(&response) {
             if let Err(error) = read_pdata_to_end(&mut assoc) {
+                log_event(logger, || format!("aborting association after error: {error}"));
                 let _ = assoc.abort();
                 return Err(error);
             }
@@ -726,11 +821,19 @@ pub fn move_scu(
             remaining: command_u16(&response, tags::NUMBER_OF_REMAINING_SUBOPERATIONS),
         };
 
+        log_event(logger, || {
+            format!(
+                "received C-MOVE-RSP: status=0x{status:04X} completed={} failed={} warning={} remaining={}",
+                result.completed, result.failed, result.warning, result.remaining
+            )
+        });
+
         if is_pending_status(status) {
             continue;
         }
 
         assoc.release()?;
+        log_event(logger, || "association released".to_owned());
         return Ok(result);
     }
 }

@@ -16,8 +16,8 @@ mod tests;
 mod types;
 
 pub use dimse::{
-    echo_scu, find_scu, move_scu, store_scu, DimseError, EchoScuOptions, FindScuOptions,
-    MoveScuOptions, MoveScuResult, StoreScuOptions, StoreScuResult,
+    echo_scu, find_scu, move_scu, store_scu, DimseError, DimseLogger, EchoScuOptions,
+    FindScuOptions, MoveScuOptions, MoveScuResult, StoreScuOptions, StoreScuResult,
 };
 pub use scp::{start_scp, DicomScp, ScpError, ScpHandlers, ScpOptions};
 pub use filter::{
