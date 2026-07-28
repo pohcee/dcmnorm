@@ -23,7 +23,7 @@ use std::fmt;
 use std::io::Read;
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -45,6 +45,45 @@ use super::types::{
     DicomJsonError, DicomJsonFormat, DicomJsonKeyStyle, DicomJsonWriteOptions, ReadError,
     TranscodeError, WriteError,
 };
+
+/// Which DICOM UL teardown verb an external `cancel` request is asking for - see
+/// [`CancelSignal`]. `Release` sends a real A-RELEASE-RQ and waits (briefly) for the peer's
+/// A-RELEASE-RP, matching a normal successful terminal response's own teardown path. `Abort`
+/// sends A-ABORT and returns immediately without waiting on the peer at all - faster and more
+/// certain when the caller needs to be assured the association is over as soon as possible.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CancelMode {
+    Release,
+    Abort,
+}
+
+/// A shared flag an external caller uses to ask an in-progress SCU call to stop waiting and
+/// tear down its association - checked once per `poll_bounded` tick (see its doc comment).
+/// Replaces a plain `AtomicBool` so a caller can ask for either DICOM UL teardown verb
+/// ([`CancelMode`]), not just "cancel".
+pub struct CancelSignal(AtomicU8);
+
+impl CancelSignal {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self(AtomicU8::new(0)))
+    }
+
+    pub fn request(&self, mode: CancelMode) {
+        let value = match mode {
+            CancelMode::Release => 1,
+            CancelMode::Abort => 2,
+        };
+        self.0.store(value, Ordering::SeqCst);
+    }
+
+    pub fn requested(&self) -> Option<CancelMode> {
+        match self.0.load(Ordering::SeqCst) {
+            1 => Some(CancelMode::Release),
+            2 => Some(CancelMode::Abort),
+            _ => None,
+        }
+    }
+}
 
 #[derive(Debug)]
 pub enum DimseError {
@@ -74,11 +113,12 @@ pub enum DimseError {
     /// alive (e.g. it keeps sending pending C-MOVE-RSPs) - a faster, more specific signal than
     /// `AbsoluteTimeout` for a retrieve that's stopped actually writing data to our own storage.
     StaleDataConnection { path: PathBuf },
-    /// An external caller (`MoveScuOptions::cancel`) asked this operation to stop waiting - not
+    /// An external caller (`*ScuOptions::cancel`) asked this operation to stop waiting - not
     /// a peer/protocol failure. `move_scu` catches this itself and turns it into a successful,
     /// `cancelled: true` result rather than letting it propagate as an error to its caller (see
-    /// `poll_bounded` and `move_scu`).
-    Cancelled,
+    /// `poll_bounded` and `move_scu`); `echo_scu`/`store_scu`/`find_scu` have no equivalent
+    /// "we already know the outcome" case, so it propagates as a plain error for them.
+    Cancelled(CancelMode),
 }
 
 impl fmt::Display for DimseError {
@@ -107,7 +147,12 @@ impl fmt::Display for DimseError {
                 "no new data written under {} within the configured staleness window; treating the connection as stale",
                 path.display()
             ),
-            Self::Cancelled => write!(formatter, "operation was cancelled by the caller"),
+            Self::Cancelled(CancelMode::Release) => {
+                write!(formatter, "operation was cancelled by the caller (graceful release)")
+            }
+            Self::Cancelled(CancelMode::Abort) => {
+                write!(formatter, "operation was cancelled by the caller (hard abort)")
+            }
         }
     }
 }
@@ -129,7 +174,7 @@ impl StdError for DimseError {
             | Self::Protocol(_)
             | Self::AbsoluteTimeout
             | Self::StaleDataConnection { .. }
-            | Self::Cancelled => None,
+            | Self::Cancelled(_) => None,
         }
     }
 }
@@ -389,11 +434,13 @@ fn release_and_log(assoc: ClientAssociation<TcpStream>, logger: Option<&dyn Dims
 // ever shrink - never reset - as the operation runs.
 // ---------------------------------------------------------------------------------------------
 
-/// How often `poll_bounded` re-checks the deadline/stale-data watch while waiting for a read
-/// that hasn't produced anything yet. Short enough that a 60s stale-data window (see
-/// `StaleDataWatch`) gets several checks; long enough not to matter as syscall/CPU overhead at
-/// this call frequency.
-const POLL_INTERVAL: Duration = Duration::from_secs(5);
+/// How often `poll_bounded` re-checks the deadline/stale-data watch/cancel signal while waiting
+/// for a read that hasn't produced anything yet. Short enough that a 60s stale-data window (see
+/// `StaleDataWatch`) gets several checks, and that an external `cancel` request (see
+/// `CancelSignal`) - which a caller may now be synchronously awaiting the real completion of, via
+/// `abort()`/`release()` on the napi handle - is noticed well under a second rather than up to the
+/// old 5s tick; still long enough not to matter as syscall/CPU overhead at this call frequency.
+const POLL_INTERVAL: Duration = Duration::from_millis(500);
 
 /// True if `error`'s source chain bottoms out in an `io::Error` of kind `WouldBlock` or
 /// `TimedOut` - i.e. this was just a `poll_bounded` tick finding nothing to read yet, not a real
@@ -462,7 +509,7 @@ fn poll_bounded<T>(
     assoc: &mut ClientAssociation<TcpStream>,
     deadline: Option<Instant>,
     mut stale_watch: Option<&mut StaleDataWatch>,
-    cancel: Option<&AtomicBool>,
+    cancel: Option<&CancelSignal>,
     mut op: impl FnMut(&mut ClientAssociation<TcpStream>) -> Result<T, DimseError>,
 ) -> Result<T, DimseError> {
     loop {
@@ -475,8 +522,8 @@ fn poll_bounded<T>(
             watch.check()?;
         }
         if let Some(cancel) = cancel {
-            if cancel.load(Ordering::SeqCst) {
-                return Err(DimseError::Cancelled);
+            if let Some(mode) = cancel.requested() {
+                return Err(DimseError::Cancelled(mode));
             }
         }
 
@@ -533,12 +580,18 @@ pub struct EchoScuOptions {
     pub called_ae_title: Option<String>,
     pub timeout: Option<Duration>,
     pub on_log: Option<Box<dyn DimseLogger>>,
+    /// Lets an external caller interrupt an in-progress echo - see `MoveScuOptions.cancel` for
+    /// the general shape. Unlike move, there's no "we already know the outcome" success case
+    /// here: a cancelled echo is just `Err(DimseError::Cancelled(_))`, same as any other failure.
+    pub cancel: Option<Arc<CancelSignal>>,
 }
 
 /// Performs a C-ECHO (DICOM Verification) against `destination` ("host:port"). Returns the
 /// response Status code (0 = success) - callers decide what threshold counts as "up".
 pub fn echo_scu(destination: &str, options: EchoScuOptions) -> Result<u16, DimseError> {
     let logger = options.on_log.as_deref();
+    let deadline = options.timeout.map(|timeout| Instant::now() + timeout);
+    let cancel = options.cancel.as_deref();
     let mut assoc = establish(
         destination,
         &options.calling_ae_title,
@@ -563,7 +616,8 @@ pub fn echo_scu(destination: &str, options: EchoScuOptions) -> Result<u16, Dimse
     ]);
 
     log_event(logger, || "sending C-ECHO-RQ (message id 1)".to_owned());
-    let result = send_command(&mut assoc, pc.id, &command).and_then(|_| receive_command(&mut assoc));
+    let result = send_command(&mut assoc, pc.id, &command)
+        .and_then(|_| poll_bounded(&mut assoc, deadline, None, cancel, receive_command));
 
     let response = match result {
         Ok(response) => response,
@@ -595,6 +649,10 @@ pub struct StoreScuOptions {
     /// (see `poll_bounded`).
     pub timeout: Option<Duration>,
     pub on_log: Option<Box<dyn DimseLogger>>,
+    /// Lets an external caller interrupt an in-progress send - see `MoveScuOptions.cancel` for
+    /// the general shape. Unlike move, there's no "we already know the outcome" success case
+    /// here: a cancelled send is just `Err(DimseError::Cancelled(_))`, same as any other failure.
+    pub cancel: Option<Arc<CancelSignal>>,
 }
 
 #[derive(Clone, Debug)]
@@ -639,6 +697,7 @@ pub fn store_scu(
 ) -> Result<Vec<StoreScuResult>, DimseError> {
     let logger = options.on_log.as_deref();
     let deadline = options.timeout.map(|timeout| Instant::now() + timeout);
+    let cancel = options.cancel.as_deref();
     let probed: Vec<StoreFile> = files.iter().filter_map(|path| probe_store_file(path).ok()).collect();
     if probed.is_empty() {
         return Err(DimseError::NoFilesToSend);
@@ -675,7 +734,7 @@ pub fn store_scu(
     let mut results = Vec::with_capacity(probed.len());
     for (index, file) in probed.iter().enumerate() {
         let message_id = (index + 1) as u16;
-        match send_and_receive_store(&mut assoc, file, &negotiated, message_id, deadline, logger) {
+        match send_and_receive_store(&mut assoc, file, &negotiated, message_id, deadline, cancel, logger) {
             Ok(status) => results.push(StoreScuResult { sop_instance_uid: file.sop_instance_uid.clone(), status }),
             Err(error) => {
                 log_event(logger, || format!("aborting association after error on {}: {error}", file.sop_instance_uid));
@@ -716,6 +775,7 @@ fn send_and_receive_store(
     negotiated: &[PresentationContextNegotiated],
     message_id: u16,
     deadline: Option<Instant>,
+    cancel: Option<&CancelSignal>,
     logger: Option<&dyn DimseLogger>,
 ) -> Result<u16, DimseError> {
     let (pc, target_ts) = select_store_presentation_context(file, negotiated)?;
@@ -748,7 +808,7 @@ fn send_and_receive_store(
 
     send_command_with_data(assoc, pc.id, &command, object_data)?;
 
-    let response = poll_bounded(assoc, deadline, None, None, receive_command)?;
+    let response = poll_bounded(assoc, deadline, None, cancel, receive_command)?;
     let status = command_status(&response)?;
     log_event(logger, || format!("received C-STORE-RSP #{message_id}: status=0x{status:04X}"));
     Ok(status)
@@ -766,6 +826,10 @@ pub struct FindScuOptions {
     /// (see `poll_bounded`).
     pub timeout: Option<Duration>,
     pub on_log: Option<Box<dyn DimseLogger>>,
+    /// Lets an external caller interrupt an in-progress query - see `MoveScuOptions.cancel` for
+    /// the general shape. Unlike move, there's no "we already know the outcome" success case
+    /// here: a cancelled query is just `Err(DimseError::Cancelled(_))`, same as any other failure.
+    pub cancel: Option<Arc<CancelSignal>>,
 }
 
 fn put_query_attribute(identifier: &mut InMemDicomObject, key: &str, value: &str) -> Result<(), DimseError> {
@@ -803,6 +867,7 @@ pub fn find_scu(
 ) -> Result<Vec<String>, DimseError> {
     let logger = options.on_log.as_deref();
     let deadline = options.timeout.map(|timeout| Instant::now() + timeout);
+    let cancel = options.cancel.as_deref();
     let abstract_syntax = uids::STUDY_ROOT_QUERY_RETRIEVE_INFORMATION_MODEL_FIND;
 
     let mut assoc = establish(
@@ -850,7 +915,7 @@ pub fn find_scu(
 
     let mut matches = Vec::new();
     loop {
-        let response = match poll_bounded(&mut assoc, deadline, None, None, receive_command) {
+        let response = match poll_bounded(&mut assoc, deadline, None, cancel, receive_command) {
             Ok(response) => response,
             Err(error) => {
                 log_event(logger, || format!("aborting association after error: {error}"));
@@ -878,7 +943,7 @@ pub fn find_scu(
             return Err(DimseError::Protocol(format!("C-FIND-RSP failed with status {status:#06X}")));
         }
 
-        let bytes = match poll_bounded(&mut assoc, deadline, None, None, read_pdata_to_end) {
+        let bytes = match poll_bounded(&mut assoc, deadline, None, cancel, read_pdata_to_end) {
             Ok(bytes) => bytes,
             Err(error) => {
                 log_event(logger, || format!("aborting association after error: {error}"));
@@ -925,7 +990,7 @@ pub struct MoveScuOptions {
     /// one) - checked each `poll_bounded` tick alongside `timeout`/`stale_data_timeout`. Setting
     /// it produces a successful, `cancelled: true` result (see `move_scu`), not an error, since
     /// cancellation only happens when the data is already known to be in hand.
-    pub cancel: Option<Arc<AtomicBool>>,
+    pub cancel: Option<Arc<CancelSignal>>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -939,6 +1004,35 @@ pub struct MoveScuResult {
     /// C-MOVE-RSP from the peer - the sub-operation counts above reflect the last pending
     /// response seen before cancellation, not a real terminal count.
     pub cancelled: bool,
+    /// Which teardown verb actually produced `cancelled: true` - `None` when `cancelled` is
+    /// `false` (a real terminal C-MOVE-RSP). Lets a caller/log line distinguish a graceful
+    /// release from a hard abort instead of just seeing `cancelled: true` either way.
+    pub cancelled_via: Option<CancelMode>,
+}
+
+/// Tears down `assoc` per the requested `mode` and builds the resulting `cancelled: true`
+/// `MoveScuResult` - the shared tail of both `Cancelled` arms in `move_scu`'s response loop.
+/// `Release` matches a normal successful terminal response's own teardown (a real A-RELEASE-RQ,
+/// log-only on failure - see `release_and_log`). `Abort` sends A-ABORT and returns immediately
+/// without waiting on the peer at all, for a caller that needs to be assured the association is
+/// over as fast as possible rather than giving the peer a chance to ACK a clean release.
+fn handle_move_cancelled(
+    assoc: ClientAssociation<TcpStream>,
+    logger: Option<&dyn DimseLogger>,
+    mode: CancelMode,
+    last_result: MoveScuResult,
+) -> MoveScuResult {
+    match mode {
+        CancelMode::Release => {
+            log_event(logger, || "cancelled by caller - releasing association".to_owned());
+            release_and_log(assoc, logger, || "association released after cancellation".to_owned());
+        }
+        CancelMode::Abort => {
+            log_event(logger, || "cancelled by caller - aborting association".to_owned());
+            let _ = assoc.abort();
+        }
+    }
+    MoveScuResult { cancelled: true, cancelled_via: Some(mode), status: 0, ..last_result }
 }
 
 /// Performs a C-MOVE (Study Root Query/Retrieve), asking `destination` to push
@@ -1011,10 +1105,8 @@ pub fn move_scu(
     loop {
         let response = match poll_bounded(&mut assoc, deadline, stale_watch.as_mut(), cancel, receive_command) {
             Ok(response) => response,
-            Err(DimseError::Cancelled) => {
-                log_event(logger, || "cancelled by caller - releasing association".to_owned());
-                release_and_log(assoc, logger, || "association released after cancellation".to_owned());
-                return Ok(MoveScuResult { cancelled: true, status: 0, ..last_result });
+            Err(DimseError::Cancelled(mode)) => {
+                return Ok(handle_move_cancelled(assoc, logger, mode, last_result));
             }
             Err(error) => {
                 log_event(logger, || format!("aborting association after error: {error}"));
@@ -1039,10 +1131,8 @@ pub fn move_scu(
         if command_has_dataset(&response) {
             match poll_bounded(&mut assoc, deadline, stale_watch.as_mut(), cancel, read_pdata_to_end) {
                 Ok(_) => {}
-                Err(DimseError::Cancelled) => {
-                    log_event(logger, || "cancelled by caller - releasing association".to_owned());
-                    release_and_log(assoc, logger, || "association released after cancellation".to_owned());
-                    return Ok(MoveScuResult { cancelled: true, status: 0, ..last_result });
+                Err(DimseError::Cancelled(mode)) => {
+                    return Ok(handle_move_cancelled(assoc, logger, mode, last_result));
                 }
                 Err(error) => {
                     log_event(logger, || format!("aborting association after error: {error}"));
@@ -1059,6 +1149,7 @@ pub fn move_scu(
             warning: command_u16(&response, tags::NUMBER_OF_WARNING_SUBOPERATIONS),
             remaining: command_u16(&response, tags::NUMBER_OF_REMAINING_SUBOPERATIONS),
             cancelled: false,
+            cancelled_via: None,
         };
 
         log_event(logger, || {

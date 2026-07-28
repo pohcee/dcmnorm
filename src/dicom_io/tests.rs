@@ -150,8 +150,8 @@ use super::{
     write_dicom_json, write_dicom_json_full, write_dicom_json_full_with_source,
     write_dicom_json_with_options, write_dicom_json_with_source, BoundingBox, BoxLength,
     DicomJsonBulkDataMode, DicomJsonFormat, DicomJsonKeyStyle, DicomJsonReadOptions,
-    DicomJsonWriteOptions, DimseError, DimseLogger, EchoScuOptions, FindScuOptions, Jpeg2000Backend, MoveScuOptions,
-    RenderOutputFormat, RenderPipelineOptions, ScpHandlers, ScpOptions, StoreScuOptions,
+    CancelMode, CancelSignal, DicomJsonWriteOptions, DimseError, DimseLogger, EchoScuOptions, FindScuOptions,
+    Jpeg2000Backend, MoveScuOptions, RenderOutputFormat, RenderPipelineOptions, ScpHandlers, ScpOptions, StoreScuOptions,
 };
 
 const PRIVATE_TAG: Tag = Tag(0x0013, 0x1010);
@@ -1721,11 +1721,62 @@ fn echo_scu_round_trips_success_status() {
             called_ae_title: Some("MOCK-SCP".to_owned()),
             timeout: None,
             on_log: None,
+            cancel: None,
         },
     )
     .unwrap();
 
     assert_eq!(status, 0);
+    scp_handle.join().unwrap();
+}
+
+/// `echo_scu` gained `cancel` support alongside `move_scu`'s (this file's `poll_bounded`
+/// generalizes over it) - a peer that accepts the association but never responds to the
+/// C-ECHO-RQ must not be able to hang the call once a caller signals cancellation, even with
+/// no `timeout` configured at all.
+#[test]
+fn echo_scu_returns_cancelled_error_when_signalled_mid_wait() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let scp = dicom_ul::association::server::ServerAssociationOptions::new()
+        .ae_title("MOCK-SCP")
+        .with_abstract_syntax(uids::VERIFICATION);
+
+    let scp_handle = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let mut association = scp.establish(stream).unwrap();
+        let _ = dimse_recv_command(&mut association);
+        // Silence: never sends a C-ECHO-RSP. Held open comfortably longer than one
+        // `poll_bounded` tick (see `POLL_INTERVAL`) past the cancel below, so the association
+        // being torn down here happens because the client cancelled it, not because this thread
+        // dropped the connection first.
+        std::thread::sleep(std::time::Duration::from_secs(2));
+    });
+
+    let cancel = CancelSignal::new();
+    let cancel_setter = cancel.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        cancel_setter.request(CancelMode::Release);
+    });
+
+    let started = std::time::Instant::now();
+    let result = echo_scu(
+        &addr.to_string(),
+        EchoScuOptions {
+            calling_ae_title: "TEST-SCU".to_owned(),
+            called_ae_title: Some("MOCK-SCP".to_owned()),
+            timeout: None,
+            on_log: None,
+            cancel: Some(cancel),
+        },
+    );
+
+    assert!(matches!(result, Err(DimseError::Cancelled(CancelMode::Release))), "expected Cancelled, got {result:?}");
+    // Cancel is only actually observed at the next `poll_bounded` tick (up to one `POLL_INTERVAL`
+    // after it's set, not immediately) - bounded well above that, well below the mock SCP's own
+    // 2s silence window above.
+    assert!(started.elapsed() < std::time::Duration::from_millis(900), "cancel took too long to be noticed: {:?}", started.elapsed());
     scp_handle.join().unwrap();
 }
 
@@ -1796,6 +1847,7 @@ fn store_scu_round_trips_status_per_file() {
             never_transcode: true,
             timeout: None,
             on_log: None,
+            cancel: None,
         },
     )
     .unwrap();
@@ -1846,6 +1898,7 @@ fn store_scu_streams_data_for_large_files() {
             never_transcode: true,
             timeout: None,
             on_log: None,
+            cancel: None,
         },
     )
     .unwrap();
@@ -1921,6 +1974,7 @@ fn find_scu_collects_pending_matches_until_success_status() {
             max_pdu_length: 16384,
             timeout: None,
             on_log: None,
+            cancel: None,
         },
     )
     .unwrap();
@@ -2314,7 +2368,7 @@ fn move_scu_aborts_when_stale_data_path_receives_no_new_files() {
 #[test]
 fn move_scu_returns_cancelled_result_when_signalled_mid_wait() {
     let abstract_syntax = uids::STUDY_ROOT_QUERY_RETRIEVE_INFORMATION_MODEL_MOVE;
-    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let cancel = CancelSignal::new();
     let cancel_setter = cancel.clone();
 
     let (scp_handle, addr) = spawn_mock_scp(abstract_syntax, move |association| {
@@ -2360,7 +2414,7 @@ fn move_scu_returns_cancelled_result_when_signalled_mid_wait() {
         // response) starts as soon as it's done processing the first, likely before this sleep
         // elapses, so the flag must already be true by the time that second response arrives -
         // it's caught on the client's *third* read attempt instead.
-        cancel_setter.store(true, std::sync::atomic::Ordering::SeqCst);
+        cancel_setter.request(CancelMode::Release);
         send_pending(association);
     });
 
@@ -2382,9 +2436,67 @@ fn move_scu_returns_cancelled_result_when_signalled_mid_wait() {
     .unwrap();
 
     assert!(result.cancelled, "expected a cancelled result, got {result:?}");
+    assert_eq!(result.cancelled_via, Some(CancelMode::Release));
     assert_eq!(result.status, 0);
     assert_eq!(result.remaining, 1);
     assert_eq!(result.completed, 0);
+    scp_handle.join().unwrap();
+}
+
+/// `CancelMode::Abort` sends A-ABORT immediately instead of a graceful A-RELEASE handshake -
+/// unlike the `Release` case above (which the mock SCP acks with a real `ReleaseRP`), the mock
+/// SCP here never responds to anything at all, and the assertion is that the client's call still
+/// returns promptly with `cancelled_via: Some(Abort)`, and that what actually arrived on the wire
+/// was a real `Pdu::AbortRQ` - not a `ReleaseRQ` the peer just happened to not answer.
+#[test]
+fn move_scu_hard_aborts_immediately_when_cancel_mode_is_abort() {
+    let abstract_syntax = uids::STUDY_ROOT_QUERY_RETRIEVE_INFORMATION_MODEL_MOVE;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let scp = dicom_ul::association::server::ServerAssociationOptions::new()
+        .ae_title("MOCK-SCP")
+        .with_abstract_syntax(abstract_syntax);
+
+    let scp_handle = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let mut association = scp.establish(stream).unwrap();
+        let _ = dimse_recv_command_with_data(&mut association);
+        // Never sends any C-MOVE-RSP at all - proves the abort doesn't wait on the peer for
+        // anything, unlike the graceful `Release` case.
+        let pdu = association.receive().unwrap();
+        assert!(matches!(pdu, dicom_ul::pdu::Pdu::AbortRQ { .. }), "expected AbortRQ, got {pdu:?}");
+    });
+
+    let cancel = CancelSignal::new();
+    let cancel_setter = cancel.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        cancel_setter.request(CancelMode::Abort);
+    });
+
+    let started = std::time::Instant::now();
+    let result = move_scu(
+        &addr.to_string(),
+        "GENERICAE",
+        "1.2.3.4.5",
+        MoveScuOptions {
+            calling_ae_title: "TEST-SCU".to_owned(),
+            called_ae_title: Some("MOCK-SCP".to_owned()),
+            max_pdu_length: 16384,
+            timeout: None,
+            stale_data_path: None,
+            stale_data_timeout: None,
+            on_log: None,
+            cancel: Some(cancel),
+        },
+    )
+    .unwrap();
+
+    assert!(result.cancelled, "expected a cancelled result, got {result:?}");
+    assert_eq!(result.cancelled_via, Some(CancelMode::Abort));
+    // Cancel is only actually observed at the next `poll_bounded` tick (up to one
+    // `POLL_INTERVAL` after it's set, not immediately).
+    assert!(started.elapsed() < std::time::Duration::from_millis(900), "abort took too long to be noticed: {:?}", started.elapsed());
     scp_handle.join().unwrap();
 }
 
@@ -2421,10 +2533,60 @@ fn find_scu_aborts_on_absolute_timeout_when_peer_never_responds() {
             max_pdu_length: 16384,
             timeout: Some(std::time::Duration::from_millis(200)),
             on_log: None,
+            cancel: None,
         },
     );
 
     assert!(matches!(result, Err(DimseError::AbsoluteTimeout)), "expected AbsoluteTimeout, got {result:?}");
+    scp_handle.join().unwrap();
+}
+
+/// `find_scu` gained `cancel` support alongside `move_scu`'s - a peer that accepts the
+/// association but never responds to the C-FIND-RQ must not be able to hang the call once a
+/// caller signals cancellation, even with no `timeout` configured at all.
+#[test]
+fn find_scu_returns_cancelled_error_when_signalled_mid_wait() {
+    let abstract_syntax = uids::STUDY_ROOT_QUERY_RETRIEVE_INFORMATION_MODEL_FIND;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let scp = dicom_ul::association::server::ServerAssociationOptions::new()
+        .ae_title("MOCK-SCP")
+        .with_abstract_syntax(abstract_syntax);
+
+    let scp_handle = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let mut association = scp.establish(stream).unwrap();
+        let _ = dimse_recv_command_with_data(&mut association);
+        // Silence: never sends a C-FIND-RSP. Held open comfortably longer than one
+        // `poll_bounded` tick past the cancel below (see the `echo_scu` cancel test).
+        std::thread::sleep(std::time::Duration::from_secs(2));
+    });
+
+    let cancel = CancelSignal::new();
+    let cancel_setter = cancel.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        cancel_setter.request(CancelMode::Release);
+    });
+
+    let mut query = std::collections::HashMap::new();
+    query.insert("PatientID".to_owned(), "MRN123".to_owned());
+    let started = std::time::Instant::now();
+    let result = find_scu(
+        &addr.to_string(),
+        &query,
+        FindScuOptions {
+            calling_ae_title: "TEST-SCU".to_owned(),
+            called_ae_title: Some("MOCK-SCP".to_owned()),
+            max_pdu_length: 16384,
+            timeout: None,
+            on_log: None,
+            cancel: Some(cancel),
+        },
+    );
+
+    assert!(matches!(result, Err(DimseError::Cancelled(CancelMode::Release))), "expected Cancelled, got {result:?}");
+    assert!(started.elapsed() < std::time::Duration::from_millis(900), "cancel took too long to be noticed: {:?}", started.elapsed());
     scp_handle.join().unwrap();
 }
 
@@ -2461,10 +2623,62 @@ fn store_scu_aborts_on_absolute_timeout_when_peer_never_responds() {
             never_transcode: true,
             timeout: Some(std::time::Duration::from_millis(200)),
             on_log: None,
+            cancel: None,
         },
     );
 
     assert!(matches!(result, Err(DimseError::AbsoluteTimeout)), "expected AbsoluteTimeout, got {result:?}");
+    scp_handle.join().unwrap();
+}
+
+/// `store_scu` gained `cancel` support alongside `move_scu`'s - a peer that accepts the
+/// association but never responds to the C-STORE-RQ must not be able to hang the call once a
+/// caller signals cancellation, even with no `timeout` configured at all.
+#[test]
+fn store_scu_returns_cancelled_error_when_signalled_mid_wait() {
+    let source = fixture_path("sr.dcm");
+    let object = read_dicom_file(&source).unwrap();
+    let sop_class_uid = object.meta().media_storage_sop_class_uid.trim_end_matches(['\0', ' ']).to_owned();
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let scp = dicom_ul::association::server::ServerAssociationOptions::new()
+        .ae_title("MOCK-SCP")
+        .with_abstract_syntax(sop_class_uid.clone());
+
+    let scp_handle = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let mut association = scp.establish(stream).unwrap();
+        let _ = dimse_recv_command_with_data(&mut association);
+        // Silence: never sends a C-STORE-RSP. Held open comfortably longer than one
+        // `poll_bounded` tick past the cancel below (see the `echo_scu` cancel test).
+        std::thread::sleep(std::time::Duration::from_secs(2));
+    });
+
+    let cancel = CancelSignal::new();
+    let cancel_setter = cancel.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        cancel_setter.request(CancelMode::Release);
+    });
+
+    let started = std::time::Instant::now();
+    let result = store_scu(
+        &addr.to_string(),
+        &[source],
+        StoreScuOptions {
+            calling_ae_title: "TEST-SCU".to_owned(),
+            called_ae_title: Some("MOCK-SCP".to_owned()),
+            max_pdu_length: 16384,
+            never_transcode: true,
+            timeout: None,
+            on_log: None,
+            cancel: Some(cancel),
+        },
+    );
+
+    assert!(matches!(result, Err(DimseError::Cancelled(CancelMode::Release))), "expected Cancelled, got {result:?}");
+    assert!(started.elapsed() < std::time::Duration::from_millis(900), "cancel took too long to be noticed: {:?}", started.elapsed());
     scp_handle.join().unwrap();
 }
 
@@ -2541,7 +2755,7 @@ fn scp_round_trips_echo_store_find_move_against_the_scu_functions() {
     // C-ECHO
     let status = echo_scu(
         &destination,
-        EchoScuOptions { calling_ae_title: "TEST-SCU".to_owned(), called_ae_title: None, timeout: None, on_log: None },
+        EchoScuOptions { calling_ae_title: "TEST-SCU".to_owned(), called_ae_title: None, timeout: None, on_log: None, cancel: None },
     )
     .unwrap();
     assert_eq!(status, 0);
@@ -2563,6 +2777,7 @@ fn scp_round_trips_echo_store_find_move_against_the_scu_functions() {
             never_transcode: true,
             timeout: None,
             on_log: None,
+            cancel: None,
         },
     )
     .unwrap();
@@ -2591,6 +2806,7 @@ fn scp_round_trips_echo_store_find_move_against_the_scu_functions() {
             max_pdu_length: 16384,
             timeout: None,
             on_log: None,
+            cancel: None,
         },
     )
     .unwrap();
@@ -2675,7 +2891,7 @@ fn scp_on_log_reports_association_negotiation_and_per_message_detail() {
 
     let status = echo_scu(
         &destination,
-        EchoScuOptions { calling_ae_title: "TEST-SCU".to_owned(), called_ae_title: None, timeout: None, on_log: None },
+        EchoScuOptions { calling_ae_title: "TEST-SCU".to_owned(), called_ae_title: None, timeout: None, on_log: None, cancel: None },
     )
     .unwrap();
     assert_eq!(status, 0);
@@ -2740,6 +2956,7 @@ fn scp_find_response_with_non_ascii_text_does_not_close_the_connection() {
             max_pdu_length: 16384,
             timeout: None,
             on_log: None,
+            cancel: None,
         },
     )
     .unwrap();

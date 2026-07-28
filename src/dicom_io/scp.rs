@@ -59,6 +59,12 @@ pub trait ScpHandlers: Send + Sync {
 #[derive(Clone)]
 pub struct ScpOptions {
     pub ae_title: String,
+    /// The acceptor's own advertised max PDU length (sent back in A-ASSOCIATE-AC's Maximum
+    /// Length sub-item). dicom-ul's strict-mode reader also enforces this as a hard ceiling on
+    /// every *incoming* PDU on this connection - including the initial A-ASSOCIATE-RQ itself,
+    /// before we've parsed it - so this can't be chosen per-requestor; it has to be generous
+    /// enough up front for whatever any requestor proposes (a request with many presentation
+    /// contexts can itself exceed a small ceiling well before any C-STORE payload is involved).
     pub max_pdu_length: u32,
     /// Applied as both the read and write timeout on each connection's socket - matches
     /// dcmjs-dimse's `pduTimeout` option (how long an established association may sit idle
@@ -74,7 +80,9 @@ impl Default for ScpOptions {
     fn default() -> Self {
         Self {
             ae_title: "ANY-SCP".to_owned(),
-            max_pdu_length: 16384,
+            // 256 KiB - matches dicom-ul's own internal LARGE_PDU_SIZE, so this doesn't cost any
+            // extra buffer pre-allocation over what the crate already budgets for a "large" PDU.
+            max_pdu_length: 262_144,
             idle_timeout: Duration::from_secs(300),
             on_log: None,
         }

@@ -1,8 +1,7 @@
 use std::collections::HashMap;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use napi::bindgen_prelude::*;
@@ -15,8 +14,8 @@ use dcmnorm::dicom_io::{
     read_dicom_json_with_options, read_dicom_object_for_filter, remove_attribute,
     remove_private_tags_inplace, render_dicom_frame as dcm_render_dicom_frame, set_attribute,
     start_scp as dcm_start_scp, store_scu as dcm_store_scu, transcode_dicom_file, write_dicom_file,
-    write_dicom_json_with_options, write_dicom_video as dcm_write_dicom_video,
-    DicomJsonBulkDataMode, DicomJsonFormat, DicomJsonKeyStyle, DicomJsonReadOptions,
+    write_dicom_json_with_options, write_dicom_video as dcm_write_dicom_video, CancelMode as DcmCancelMode,
+    CancelSignal, DicomJsonBulkDataMode, DicomJsonFormat, DicomJsonKeyStyle, DicomJsonReadOptions,
     DicomJsonWriteOptions, DicomScp, DimseLogger, EchoScuOptions as DcmEchoScuOptions,
     FindScuOptions as DcmFindScuOptions, MoveScuOptions as DcmMoveScuOptions,
     RenderOutputFormat as DcmRenderOutputFormat, RenderPipelineOptions as DcmRenderPipelineOptions,
@@ -437,6 +436,92 @@ fn dimse_logger(on_log: Option<ThreadsafeFunction<String>>) -> Option<Box<dyn Di
     on_log.map(|callback| Box::new(NapiDimseLogger { callback }) as Box<dyn DimseLogger>)
 }
 
+// ---------------------------------------------------------------------------------------------
+// Shared SCU call/handle machinery
+//
+// Every `echo`/`store`/`find`/`move` SCU call below is started on its own `std::thread::spawn`
+// (not napi's `AsyncTask`/libuv threadpool - that pool is small, default 4, and shared by every
+// native call in this addon; a long-running `move` call permanently occupying one of those slots
+// via `Task::compute` would leave a concurrent `abort()`/`release()` - if implemented as another
+// `AsyncTask` - queued behind unrelated threadpool work, undermining the very acknowledgement
+// guarantee this exists to provide). The corresponding `*ScuHandle` returned to JS is a thin,
+// synchronous wrapper around a `CancelSignal` (dcmnorm's low-level per-call cancel flag) and this
+// `ScuCallState<T>`, which the handle's `result()`/`release()`/`abort()` methods each poll via a
+// short-lived `AsyncTask<ScuWaitTask<T>>` - the *only* thing that touches the libuv threadpool per
+// call, and only for as long as it takes to observe the background thread's own completion.
+//
+// napi-rs requires concrete (monomorphized) types crossing the FFI boundary - there is no single
+// `dyn ScuHandle` type callable from JS. This is one implementation written once, instantiated
+// four times (`EchoScuHandle`/`StoreScuHandle`/`FindScuHandle`/`MoveScuHandle` below) - the
+// practical equivalent of a shared interface given that constraint.
+pub struct ScuCallState<T> {
+    // The error side is a `String`, not `dcmnorm::DimseError` - the latter wraps foreign
+    // non-`Clone` types (`std::io::Error`, `dicom_ul`'s association error, ...), and every waiter
+    // here needs its own owned copy of whichever outcome was recorded first.
+    result: Mutex<Option<std::result::Result<T, String>>>,
+    condvar: Condvar,
+}
+
+impl<T: Clone + Send + 'static> ScuCallState<T> {
+    // Unlike every `Task::compute()` elsewhere in this file, `work` doesn't run inside napi's own
+    // `guarded()`-wrapped call machinery (see the module doc above for why this runs on a bare
+    // `std::thread::spawn` instead) - so a panic in `work` has to be caught right here. Without
+    // this, a panic would unwind this thread before the `result`/`notify_all` lines below ever
+    // run, leaving every current and future `result()`/`release()`/`abort()` waiter blocked on
+    // the condvar forever instead of seeing a rejected Promise.
+    fn spawn(work: impl FnOnce() -> std::result::Result<T, String> + Send + 'static) -> Arc<Self> {
+        let state = Arc::new(Self { result: Mutex::new(None), condvar: Condvar::new() });
+        let state_thread = state.clone();
+        std::thread::spawn(move || {
+            let outcome = panic::catch_unwind(AssertUnwindSafe(work)).unwrap_or_else(|payload| {
+                let message = payload
+                    .downcast_ref::<&str>()
+                    .map(|s| s.to_string())
+                    .or_else(|| payload.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "dcmnorm panicked while processing this call".to_string());
+                Err(format!("dcmnorm internal error: {message}"))
+            });
+            *state_thread.result.lock().unwrap() = Some(outcome);
+            state_thread.condvar.notify_all();
+        });
+        state
+    }
+
+    /// Blocks the calling (napi worker-pool) thread - never the JS main thread - until `work`
+    /// above has finished. Idempotent: any number of waiters just observe the same result.
+    fn block_until_done(&self) -> std::result::Result<T, String> {
+        let mut guard = self.result.lock().unwrap();
+        while guard.is_none() {
+            guard = self.condvar.wait(guard).unwrap();
+        }
+        guard.clone().unwrap()
+    }
+}
+
+/// A `Task` whose `compute()` just calls `state.block_until_done()`, optionally requesting
+/// cancellation first - shared by every `*ScuHandle`'s `result()`/`release()`/`abort()` methods,
+/// differing only in what (if anything) `request_cancel` asks for.
+pub struct ScuWaitTask<T> {
+    state: Arc<ScuCallState<T>>,
+    request_cancel: Option<(Arc<CancelSignal>, DcmCancelMode)>,
+}
+
+impl<T: Clone + Send + ToNapiValue + TypeName + 'static> Task for ScuWaitTask<T> {
+    type Output = T;
+    type JsValue = T;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        if let Some((signal, mode)) = self.request_cancel.take() {
+            signal.request(mode);
+        }
+        self.state.block_until_done().map_err(Error::from_reason)
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(output)
+    }
+}
+
 #[napi(object)]
 #[derive(Default)]
 pub struct EchoScuOptions {
@@ -464,6 +549,7 @@ impl Task for EchoScuTask {
                     called_ae_title: self.options.called_ae_title.clone(),
                     timeout: self.options.timeout_ms.map(|ms| Duration::from_millis(ms as u64)),
                     on_log: dimse_logger(self.on_log.take()),
+                    cancel: None,
                 },
             )
             .map_err(to_napi_err)
@@ -489,6 +575,63 @@ pub fn echo_scu(
     AsyncTask::new(EchoScuTask { destination, options: options.unwrap_or_default(), on_log })
 }
 
+#[napi]
+pub struct EchoScuHandle {
+    cancel: Arc<CancelSignal>,
+    state: Arc<ScuCallState<u32>>,
+}
+
+#[napi]
+impl EchoScuHandle {
+    /// The eventual Status code (0 = success), without requesting cancellation.
+    #[napi(ts_return_type = "Promise<number>")]
+    pub fn result(&self) -> AsyncTask<ScuWaitTask<u32>> {
+        AsyncTask::new(ScuWaitTask { state: self.state.clone(), request_cancel: None })
+    }
+
+    /// Requests a graceful A-RELEASE and resolves once the association has genuinely closed -
+    /// real acknowledgement, not a fire-and-forget signal. Idempotent.
+    #[napi(ts_return_type = "Promise<number>")]
+    pub fn release(&self) -> AsyncTask<ScuWaitTask<u32>> {
+        AsyncTask::new(ScuWaitTask { state: self.state.clone(), request_cancel: Some((self.cancel.clone(), DcmCancelMode::Release)) })
+    }
+
+    /// Requests an immediate A-ABORT (no wait on the peer at all) and resolves once the
+    /// association has genuinely closed. Idempotent.
+    #[napi(ts_return_type = "Promise<number>")]
+    pub fn abort(&self) -> AsyncTask<ScuWaitTask<u32>> {
+        AsyncTask::new(ScuWaitTask { state: self.state.clone(), request_cancel: Some((self.cancel.clone(), DcmCancelMode::Abort)) })
+    }
+}
+
+/// Same as `echoScu`, but returns immediately with a handle instead of blocking until the
+/// C-ECHO completes - lets a caller `abort()`/`release()` it early. See `EchoScuHandle`.
+#[napi]
+pub fn start_echo_scu(
+    destination: String,
+    options: Option<EchoScuOptions>,
+    on_log: Option<ThreadsafeFunction<String>>,
+) -> EchoScuHandle {
+    let options = options.unwrap_or_default();
+    let cancel = CancelSignal::new();
+    let cancel_for_call = cancel.clone();
+    let calling_ae_title = options.calling_ae_title.unwrap_or_else(|| "GENERICAE".to_owned());
+    let called_ae_title = options.called_ae_title;
+    let timeout = options.timeout_ms.map(|ms| Duration::from_millis(ms as u64));
+    let logger = dimse_logger(on_log);
+
+    let state = ScuCallState::spawn(move || {
+        dcm_echo_scu(
+            &destination,
+            DcmEchoScuOptions { calling_ae_title, called_ae_title, timeout, on_log: logger, cancel: Some(cancel_for_call) },
+        )
+        .map(|status| status as u32)
+        .map_err(|error| error.to_string())
+    });
+
+    EchoScuHandle { cancel, state }
+}
+
 #[napi(object)]
 #[derive(Default)]
 pub struct StoreScuOptions {
@@ -501,6 +644,7 @@ pub struct StoreScuOptions {
 }
 
 #[napi(object)]
+#[derive(Clone)]
 pub struct StoreScuResult {
     pub sop_instance_uid: String,
     pub status: u32,
@@ -529,6 +673,7 @@ impl Task for StoreScuTask {
                     never_transcode: self.options.never_transcode.unwrap_or(false),
                     timeout: self.options.timeout_ms.map(|ms| Duration::from_millis(ms as u64)),
                     on_log: dimse_logger(self.on_log.take()),
+                    cancel: None,
                 },
             )
             .map_err(to_napi_err)?;
@@ -565,6 +710,82 @@ pub fn store_scu(
     })
 }
 
+#[napi]
+pub struct StoreScuHandle {
+    cancel: Arc<CancelSignal>,
+    state: Arc<ScuCallState<Vec<StoreScuResult>>>,
+}
+
+#[napi]
+impl StoreScuHandle {
+    /// The eventual per-file `{sopInstanceUid, status}` results, without requesting
+    /// cancellation.
+    #[napi(ts_return_type = "Promise<Array<StoreScuResult>>")]
+    pub fn result(&self) -> AsyncTask<ScuWaitTask<Vec<StoreScuResult>>> {
+        AsyncTask::new(ScuWaitTask { state: self.state.clone(), request_cancel: None })
+    }
+
+    /// Requests a graceful A-RELEASE and resolves once the association has genuinely closed -
+    /// real acknowledgement, not a fire-and-forget signal. Idempotent.
+    #[napi(ts_return_type = "Promise<Array<StoreScuResult>>")]
+    pub fn release(&self) -> AsyncTask<ScuWaitTask<Vec<StoreScuResult>>> {
+        AsyncTask::new(ScuWaitTask { state: self.state.clone(), request_cancel: Some((self.cancel.clone(), DcmCancelMode::Release)) })
+    }
+
+    /// Requests an immediate A-ABORT (no wait on the peer at all) and resolves once the
+    /// association has genuinely closed. Idempotent.
+    #[napi(ts_return_type = "Promise<Array<StoreScuResult>>")]
+    pub fn abort(&self) -> AsyncTask<ScuWaitTask<Vec<StoreScuResult>>> {
+        AsyncTask::new(ScuWaitTask { state: self.state.clone(), request_cancel: Some((self.cancel.clone(), DcmCancelMode::Abort)) })
+    }
+}
+
+/// Same as `storeScu`, but returns immediately with a handle instead of blocking until every
+/// file has been sent - lets a caller `abort()`/`release()` it early. See `StoreScuHandle`.
+#[napi]
+pub fn start_store_scu(
+    destination: String,
+    files: Vec<String>,
+    options: Option<StoreScuOptions>,
+    on_log: Option<ThreadsafeFunction<String>>,
+) -> StoreScuHandle {
+    let options = options.unwrap_or_default();
+    let files: Vec<PathBuf> = files.into_iter().map(PathBuf::from).collect();
+    let cancel = CancelSignal::new();
+    let cancel_for_call = cancel.clone();
+    let calling_ae_title = options.calling_ae_title.unwrap_or_else(|| "GENERICAE".to_owned());
+    let called_ae_title = options.called_ae_title;
+    let max_pdu_length = options.max_pdu_length.unwrap_or(16384);
+    let never_transcode = options.never_transcode.unwrap_or(false);
+    let timeout = options.timeout_ms.map(|ms| Duration::from_millis(ms as u64));
+    let logger = dimse_logger(on_log);
+
+    let state = ScuCallState::spawn(move || {
+        dcm_store_scu(
+            &destination,
+            &files,
+            DcmStoreScuOptions {
+                calling_ae_title,
+                called_ae_title,
+                max_pdu_length,
+                never_transcode,
+                timeout,
+                on_log: logger,
+                cancel: Some(cancel_for_call),
+            },
+        )
+        .map(|results| {
+            results
+                .into_iter()
+                .map(|result| StoreScuResult { sop_instance_uid: result.sop_instance_uid, status: result.status as u32 })
+                .collect()
+        })
+        .map_err(|error| error.to_string())
+    });
+
+    StoreScuHandle { cancel, state }
+}
+
 #[napi(object)]
 #[derive(Default)]
 pub struct FindScuOptions {
@@ -596,6 +817,7 @@ impl Task for FindScuTask {
                     max_pdu_length: self.options.max_pdu_length.unwrap_or(16384),
                     timeout: self.options.timeout_ms.map(|ms| Duration::from_millis(ms as u64)),
                     on_log: dimse_logger(self.on_log.take()),
+                    cancel: None,
                 },
             )
             .map_err(to_napi_err)
@@ -625,6 +847,66 @@ pub fn find_scu(
     AsyncTask::new(FindScuTask { destination, query, options: options.unwrap_or_default(), on_log })
 }
 
+#[napi]
+pub struct FindScuHandle {
+    cancel: Arc<CancelSignal>,
+    state: Arc<ScuCallState<Vec<String>>>,
+}
+
+#[napi]
+impl FindScuHandle {
+    /// The eventual matched Identifiers (flat/hex-keyed DICOM JSON, one per match), without
+    /// requesting cancellation.
+    #[napi(ts_return_type = "Promise<Array<string>>")]
+    pub fn result(&self) -> AsyncTask<ScuWaitTask<Vec<String>>> {
+        AsyncTask::new(ScuWaitTask { state: self.state.clone(), request_cancel: None })
+    }
+
+    /// Requests a graceful A-RELEASE and resolves once the association has genuinely closed -
+    /// real acknowledgement, not a fire-and-forget signal. Idempotent.
+    #[napi(ts_return_type = "Promise<Array<string>>")]
+    pub fn release(&self) -> AsyncTask<ScuWaitTask<Vec<String>>> {
+        AsyncTask::new(ScuWaitTask { state: self.state.clone(), request_cancel: Some((self.cancel.clone(), DcmCancelMode::Release)) })
+    }
+
+    /// Requests an immediate A-ABORT (no wait on the peer at all) and resolves once the
+    /// association has genuinely closed. Idempotent.
+    #[napi(ts_return_type = "Promise<Array<string>>")]
+    pub fn abort(&self) -> AsyncTask<ScuWaitTask<Vec<String>>> {
+        AsyncTask::new(ScuWaitTask { state: self.state.clone(), request_cancel: Some((self.cancel.clone(), DcmCancelMode::Abort)) })
+    }
+}
+
+/// Same as `findScu`, but returns immediately with a handle instead of blocking until the
+/// C-FIND completes - lets a caller `abort()`/`release()` it early. See `FindScuHandle`.
+#[napi]
+pub fn start_find_scu(
+    destination: String,
+    query: HashMap<String, String>,
+    options: Option<FindScuOptions>,
+    on_log: Option<ThreadsafeFunction<String>>,
+) -> FindScuHandle {
+    let options = options.unwrap_or_default();
+    let cancel = CancelSignal::new();
+    let cancel_for_call = cancel.clone();
+    let calling_ae_title = options.calling_ae_title.unwrap_or_else(|| "GENERICAE".to_owned());
+    let called_ae_title = options.called_ae_title;
+    let max_pdu_length = options.max_pdu_length.unwrap_or(16384);
+    let timeout = options.timeout_ms.map(|ms| Duration::from_millis(ms as u64));
+    let logger = dimse_logger(on_log);
+
+    let state = ScuCallState::spawn(move || {
+        dcm_find_scu(
+            &destination,
+            &query,
+            DcmFindScuOptions { calling_ae_title, called_ae_title, max_pdu_length, timeout, on_log: logger, cancel: Some(cancel_for_call) },
+        )
+        .map_err(|error| error.to_string())
+    });
+
+    FindScuHandle { cancel, state }
+}
+
 #[napi(object)]
 #[derive(Default)]
 pub struct MoveScuOptions {
@@ -643,6 +925,7 @@ pub struct MoveScuOptions {
 }
 
 #[napi(object)]
+#[derive(Clone)]
 pub struct MoveScuResult {
     pub status: u32,
     pub completed: u32,
@@ -650,113 +933,54 @@ pub struct MoveScuResult {
     pub warning: u32,
     pub remaining: u32,
     pub cancelled: bool,
+    /// `"release"`/`"abort"` when `cancelled` is true, indicating which teardown verb actually
+    /// produced it (see `MoveScuHandle.release`/`.abort`) - `null` for a real terminal C-MOVE-RSP.
+    pub cancelled_via: Option<String>,
 }
 
-pub struct MoveScuTask {
-    destination: String,
-    move_destination_ae: String,
-    study_instance_uid: String,
-    options: MoveScuOptions,
-    on_log: Option<ThreadsafeFunction<String>>,
-}
-
-// Maps a studyInstanceUid to the cancel flag of the `move_scu` call currently running for it on
-// this process, so `cancel_move_scu` (called from a separate, server-initiated request) can
-// signal it. Exactly one `moveScu` call is ever in flight per study per process - the edge move
-// service processes one queue task at a time - so keying on studyInstanceUid alone can't cancel
-// the wrong call.
-fn move_cancel_registry() -> &'static Mutex<HashMap<String, Arc<AtomicBool>>> {
-    static REGISTRY: OnceLock<Mutex<HashMap<String, Arc<AtomicBool>>>> = OnceLock::new();
-    REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-/// Registers `study_instance_uid`'s cancel flag in `move_cancel_registry` for the lifetime of
-/// this guard, removing it again on drop - covers every exit from `MoveScuTask::compute` (normal
-/// return, error, or a panic unwinding through `guarded`'s `catch_unwind`) so a stale entry can't
-/// outlive its call and be cancelled by a later, unrelated request for the same study.
-struct MoveCancelGuard {
-    study_instance_uid: String,
-    flag: Arc<AtomicBool>,
-}
-
-impl MoveCancelGuard {
-    fn register(study_instance_uid: String) -> Self {
-        let flag = Arc::new(AtomicBool::new(false));
-        move_cancel_registry().lock().unwrap().insert(study_instance_uid.clone(), flag.clone());
-        Self { study_instance_uid, flag }
-    }
-}
-
-impl Drop for MoveCancelGuard {
-    fn drop(&mut self) {
-        move_cancel_registry().lock().unwrap().remove(&self.study_instance_uid);
-    }
-}
-
-/// Cancels an in-flight `moveScu` call for `studyInstanceUid` on this process, if one is
-/// currently running - see `MoveScuOptions.cancel` in dcmnorm's `dimse.rs`. The call doesn't
-/// error out; it resolves with a successful, `cancelled: true` result once its next poll tick
-/// (up to a few seconds later) observes the flag. Returns whether a matching in-flight call was
-/// found - `false` most likely means it already finished or was never running here, not that
-/// anything went wrong.
 #[napi]
-pub fn cancel_move_scu(study_instance_uid: String) -> bool {
-    match move_cancel_registry().lock().unwrap().get(&study_instance_uid) {
-        Some(flag) => {
-            flag.store(true, Ordering::SeqCst);
-            true
-        }
-        None => false,
-    }
+pub struct MoveScuHandle {
+    cancel: Arc<CancelSignal>,
+    state: Arc<ScuCallState<MoveScuResult>>,
 }
 
-impl Task for MoveScuTask {
-    type Output = MoveScuResult;
-    type JsValue = MoveScuResult;
-
-    fn compute(&mut self) -> Result<Self::Output> {
-        guarded(|| {
-            let cancel_guard = MoveCancelGuard::register(self.study_instance_uid.clone());
-            let result = dcm_move_scu(
-                &self.destination,
-                &self.move_destination_ae,
-                &self.study_instance_uid,
-                DcmMoveScuOptions {
-                    calling_ae_title: self.options.calling_ae_title.clone().unwrap_or_else(|| "GENERICAE".to_owned()),
-                    called_ae_title: self.options.called_ae_title.clone(),
-                    max_pdu_length: self.options.max_pdu_length.unwrap_or(16384),
-                    timeout: self.options.timeout_ms.map(|ms| Duration::from_millis(ms as u64)),
-                    stale_data_path: self.options.watch_path.clone().map(PathBuf::from),
-                    stale_data_timeout: self.options.stale_data_timeout_ms.map(|ms| Duration::from_millis(ms as u64)),
-                    on_log: dimse_logger(self.on_log.take()),
-                    cancel: Some(cancel_guard.flag.clone()),
-                },
-            )
-            .map_err(to_napi_err)?;
-            Ok(MoveScuResult {
-                status: result.status as u32,
-                completed: result.completed as u32,
-                failed: result.failed as u32,
-                warning: result.warning as u32,
-                remaining: result.remaining as u32,
-                cancelled: result.cancelled,
-            })
-        })
+#[napi]
+impl MoveScuHandle {
+    /// The eventual terminal `MoveScuResult`, without requesting cancellation - for a caller
+    /// that just wants to await completion.
+    #[napi(ts_return_type = "Promise<MoveScuResult>")]
+    pub fn result(&self) -> AsyncTask<ScuWaitTask<MoveScuResult>> {
+        AsyncTask::new(ScuWaitTask { state: self.state.clone(), request_cancel: None })
     }
 
-    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
-        Ok(output)
+    /// Requests a graceful A-RELEASE and resolves once the association has genuinely closed -
+    /// real acknowledgement, not a fire-and-forget signal that might land seconds later (or
+    /// never, if missed). Idempotent: a second call just observes the same outcome.
+    #[napi(ts_return_type = "Promise<MoveScuResult>")]
+    pub fn release(&self) -> AsyncTask<ScuWaitTask<MoveScuResult>> {
+        AsyncTask::new(ScuWaitTask { state: self.state.clone(), request_cancel: Some((self.cancel.clone(), DcmCancelMode::Release)) })
+    }
+
+    /// Requests an immediate A-ABORT (no wait on the peer at all) and resolves once the
+    /// association has genuinely closed. Idempotent.
+    #[napi(ts_return_type = "Promise<MoveScuResult>")]
+    pub fn abort(&self) -> AsyncTask<ScuWaitTask<MoveScuResult>> {
+        AsyncTask::new(ScuWaitTask { state: self.state.clone(), request_cancel: Some((self.cancel.clone(), DcmCancelMode::Abort)) })
     }
 }
 
 /// Performs a C-MOVE (Study Root Query/Retrieve), asking `destination` ("host:port") to push
 /// `studyInstanceUid` to `moveDestinationAe` (an AE title `destination` already knows how to
-/// reach, not a socket address). Blocks until the move reaches a terminal status; resolves with
-/// that terminal status and sub-operation counts regardless of success/warning/failure - the
-/// caller decides what's retryable, this only rejects if the association itself failed. `onLog`,
-/// if given, is called (synchronously, no return value expected) with a debug line for each
-/// notable DIMSE event - association open/close, and each C-MOVE-RQ/RSP (including every pending
-/// response, so a slow multi-instance move is visible sub-operation by sub-operation).
+/// reach, not a socket address). Returns a handle immediately - the retrieve itself runs on its
+/// own background thread - rather than blocking until it reaches a terminal status; call
+/// `.result()` to await that terminal status and sub-operation counts (regardless of
+/// success/warning/failure, mirroring the old behavior), or `.release()`/`.abort()` to close it
+/// early once some other signal (e.g. the study already being confirmed fully received via a
+/// separate channel) makes further waiting pointless. See `MoveScuHandle`.
+///
+/// `onLog`, if given, is called (synchronously, no return value expected) with a debug line for
+/// each notable DIMSE event - association open/close, and each C-MOVE-RQ/RSP (including every
+/// pending response, so a slow multi-instance move is visible sub-operation by sub-operation).
 #[napi]
 pub fn move_scu(
     destination: String,
@@ -764,14 +988,50 @@ pub fn move_scu(
     study_instance_uid: String,
     options: Option<MoveScuOptions>,
     on_log: Option<ThreadsafeFunction<String>>,
-) -> AsyncTask<MoveScuTask> {
-    AsyncTask::new(MoveScuTask {
-        destination,
-        move_destination_ae,
-        study_instance_uid,
-        options: options.unwrap_or_default(),
-        on_log,
-    })
+) -> MoveScuHandle {
+    let options = options.unwrap_or_default();
+    let cancel = CancelSignal::new();
+    let cancel_for_call = cancel.clone();
+    let calling_ae_title = options.calling_ae_title.unwrap_or_else(|| "GENERICAE".to_owned());
+    let called_ae_title = options.called_ae_title;
+    let max_pdu_length = options.max_pdu_length.unwrap_or(16384);
+    let timeout = options.timeout_ms.map(|ms| Duration::from_millis(ms as u64));
+    let stale_data_path = options.watch_path.map(PathBuf::from);
+    let stale_data_timeout = options.stale_data_timeout_ms.map(|ms| Duration::from_millis(ms as u64));
+    let logger = dimse_logger(on_log);
+
+    let state = ScuCallState::spawn(move || {
+        dcm_move_scu(
+            &destination,
+            &move_destination_ae,
+            &study_instance_uid,
+            DcmMoveScuOptions {
+                calling_ae_title,
+                called_ae_title,
+                max_pdu_length,
+                timeout,
+                stale_data_path,
+                stale_data_timeout,
+                on_log: logger,
+                cancel: Some(cancel_for_call),
+            },
+        )
+        .map(|result| MoveScuResult {
+            status: result.status as u32,
+            completed: result.completed as u32,
+            failed: result.failed as u32,
+            warning: result.warning as u32,
+            remaining: result.remaining as u32,
+            cancelled: result.cancelled,
+            cancelled_via: result.cancelled_via.map(|mode| match mode {
+                DcmCancelMode::Release => "release".to_owned(),
+                DcmCancelMode::Abort => "abort".to_owned(),
+            }),
+        })
+        .map_err(|error| error.to_string())
+    });
+
+    MoveScuHandle { cancel, state }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1115,7 +1375,9 @@ pub fn start_dicom_server(
     });
     let options = DcmScpOptions {
         ae_title,
-        max_pdu_length: max_pdu_length.unwrap_or(16384),
+        // 256 KiB, matching ScpOptions::default() in dicom_io/scp.rs - see that struct's doc
+        // comment for why this ceiling has to be generous rather than per-requestor.
+        max_pdu_length: max_pdu_length.unwrap_or(262_144),
         idle_timeout: Duration::from_millis(u64::from(idle_timeout_ms.unwrap_or(300_000))),
         on_log: on_log.map(|callback| std::sync::Arc::new(NapiDimseLogger { callback }) as std::sync::Arc<dyn DimseLogger>),
     };

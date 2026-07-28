@@ -10,15 +10,75 @@ export declare class DicomServerHandle {
   close(): void
 }
 
-/**
- * Cancels an in-flight `moveScu` call for `studyInstanceUid` on this process, if one is
- * currently running - see `MoveScuOptions.cancel` in dcmnorm's `dimse.rs`. The call doesn't
- * error out; it resolves with a successful, `cancelled: true` result once its next poll tick
- * (up to a few seconds later) observes the flag. Returns whether a matching in-flight call was
- * found - `false` most likely means it already finished or was never running here, not that
- * anything went wrong.
- */
-export declare function cancelMoveScu(studyInstanceUid: string): boolean
+export declare class EchoScuHandle {
+  /** The eventual Status code (0 = success), without requesting cancellation. */
+  result(): Promise<number>
+  /**
+   * Requests a graceful A-RELEASE and resolves once the association has genuinely closed -
+   * real acknowledgement, not a fire-and-forget signal. Idempotent.
+   */
+  release(): Promise<number>
+  /**
+   * Requests an immediate A-ABORT (no wait on the peer at all) and resolves once the
+   * association has genuinely closed. Idempotent.
+   */
+  abort(): Promise<number>
+}
+
+export declare class FindScuHandle {
+  /**
+   * The eventual matched Identifiers (flat/hex-keyed DICOM JSON, one per match), without
+   * requesting cancellation.
+   */
+  result(): Promise<Array<string>>
+  /**
+   * Requests a graceful A-RELEASE and resolves once the association has genuinely closed -
+   * real acknowledgement, not a fire-and-forget signal. Idempotent.
+   */
+  release(): Promise<Array<string>>
+  /**
+   * Requests an immediate A-ABORT (no wait on the peer at all) and resolves once the
+   * association has genuinely closed. Idempotent.
+   */
+  abort(): Promise<Array<string>>
+}
+
+export declare class MoveScuHandle {
+  /**
+   * The eventual terminal `MoveScuResult`, without requesting cancellation - for a caller
+   * that just wants to await completion.
+   */
+  result(): Promise<MoveScuResult>
+  /**
+   * Requests a graceful A-RELEASE and resolves once the association has genuinely closed -
+   * real acknowledgement, not a fire-and-forget signal that might land seconds later (or
+   * never, if missed). Idempotent: a second call just observes the same outcome.
+   */
+  release(): Promise<MoveScuResult>
+  /**
+   * Requests an immediate A-ABORT (no wait on the peer at all) and resolves once the
+   * association has genuinely closed. Idempotent.
+   */
+  abort(): Promise<MoveScuResult>
+}
+
+export declare class StoreScuHandle {
+  /**
+   * The eventual per-file `{sopInstanceUid, status}` results, without requesting
+   * cancellation.
+   */
+  result(): Promise<Array<StoreScuResult>>
+  /**
+   * Requests a graceful A-RELEASE and resolves once the association has genuinely closed -
+   * real acknowledgement, not a fire-and-forget signal. Idempotent.
+   */
+  release(): Promise<Array<StoreScuResult>>
+  /**
+   * Requests an immediate A-ABORT (no wait on the peer at all) and resolves once the
+   * association has genuinely closed. Idempotent.
+   */
+  abort(): Promise<Array<StoreScuResult>>
+}
 
 /**
  * Reports whether a file looks like valid DICOM. Mirrors `dcmnorm
@@ -77,14 +137,18 @@ export interface FindScuOptions {
 /**
  * Performs a C-MOVE (Study Root Query/Retrieve), asking `destination` ("host:port") to push
  * `studyInstanceUid` to `moveDestinationAe` (an AE title `destination` already knows how to
- * reach, not a socket address). Blocks until the move reaches a terminal status; resolves with
- * that terminal status and sub-operation counts regardless of success/warning/failure - the
- * caller decides what's retryable, this only rejects if the association itself failed. `onLog`,
- * if given, is called (synchronously, no return value expected) with a debug line for each
- * notable DIMSE event - association open/close, and each C-MOVE-RQ/RSP (including every pending
- * response, so a slow multi-instance move is visible sub-operation by sub-operation).
+ * reach, not a socket address). Returns a handle immediately - the retrieve itself runs on its
+ * own background thread - rather than blocking until it reaches a terminal status; call
+ * `.result()` to await that terminal status and sub-operation counts (regardless of
+ * success/warning/failure, mirroring the old behavior), or `.release()`/`.abort()` to close it
+ * early once some other signal (e.g. the study already being confirmed fully received via a
+ * separate channel) makes further waiting pointless. See `MoveScuHandle`.
+ *
+ * `onLog`, if given, is called (synchronously, no return value expected) with a debug line for
+ * each notable DIMSE event - association open/close, and each C-MOVE-RQ/RSP (including every
+ * pending response, so a slow multi-instance move is visible sub-operation by sub-operation).
  */
-export declare function moveScu(destination: string, moveDestinationAe: string, studyInstanceUid: string, options?: MoveScuOptions | undefined | null, onLog?: (((err: Error | null, arg: string) => any)) | undefined | null): Promise<unknown>
+export declare function moveScu(destination: string, moveDestinationAe: string, studyInstanceUid: string, options?: MoveScuOptions | undefined | null, onLog?: (((err: Error | null, arg: string) => any)) | undefined | null): MoveScuHandle
 
 export interface MoveScuOptions {
   callingAeTitle?: string
@@ -112,6 +176,11 @@ export interface MoveScuResult {
   warning: number
   remaining: number
   cancelled: boolean
+  /**
+   * `"release"`/`"abort"` when `cancelled` is true, indicating which teardown verb actually
+   * produced it (see `MoveScuHandle.release`/`.abort`) - `null` for a real terminal C-MOVE-RSP.
+   */
+  cancelledVia?: string
 }
 
 /**
@@ -206,6 +275,24 @@ export interface RenderMovieOptions {
  * permissive "accept anything a real sender proposes" SCP, not a curated allow-list.
  */
 export declare function startDicomServer(port: number, cachePath: string, aeTitle: string, maxPduLength: number | undefined | null, idleTimeoutMs: number | undefined | null, onFind: JsonCallback, onMove: TwoStringCallback, onAssociationComplete: JsonCallback, onLog?: (((err: Error | null, arg: string) => any)) | undefined | null): DicomServerHandle
+
+/**
+ * Same as `echoScu`, but returns immediately with a handle instead of blocking until the
+ * C-ECHO completes - lets a caller `abort()`/`release()` it early. See `EchoScuHandle`.
+ */
+export declare function startEchoScu(destination: string, options?: EchoScuOptions | undefined | null, onLog?: (((err: Error | null, arg: string) => any)) | undefined | null): EchoScuHandle
+
+/**
+ * Same as `findScu`, but returns immediately with a handle instead of blocking until the
+ * C-FIND completes - lets a caller `abort()`/`release()` it early. See `FindScuHandle`.
+ */
+export declare function startFindScu(destination: string, query: Record<string, string>, options?: FindScuOptions | undefined | null, onLog?: (((err: Error | null, arg: string) => any)) | undefined | null): FindScuHandle
+
+/**
+ * Same as `storeScu`, but returns immediately with a handle instead of blocking until every
+ * file has been sent - lets a caller `abort()`/`release()` it early. See `StoreScuHandle`.
+ */
+export declare function startStoreScu(destination: string, files: Array<string>, options?: StoreScuOptions | undefined | null, onLog?: (((err: Error | null, arg: string) => any)) | undefined | null): StoreScuHandle
 
 /**
  * Sends each of `files` via C-STORE to `destination` ("host:port"). Resolves with one
