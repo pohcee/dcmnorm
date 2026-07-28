@@ -25,7 +25,7 @@ pub use filter::{
     FilterRequest,
 };
 pub use io::{
-    detect_jpeg2000_backend_from_search_path, jpeg2000_backend, jpeg2000_backend_name,
+    can_encode_transfer_syntax, detect_jpeg2000_backend_from_search_path, jpeg2000_backend, jpeg2000_backend_name,
     kakadu_ffi_enabled, list_transfer_syntax_support, probe_dicom_file_for_sop_class_uid,
     read_dicom_bytes, read_dicom_file, transcode_dicom_bytes, transcode_dicom_file, transcode_dicom_object,
     write_dataset_as_dicom_bytes, write_dataset_as_dicom_file, write_dicom_bytes, write_dicom_file,

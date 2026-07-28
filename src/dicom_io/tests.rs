@@ -1909,6 +1909,83 @@ fn store_scu_streams_data_for_large_files() {
     scp_handle.join().unwrap();
 }
 
+/// Regression test for a production failure: two files sharing a SOP class but with different
+/// native transfer syntaxes, one of them JPEG 2000 (which this build can decode but never
+/// encode - see `can_encode_transfer_syntax` in `io.rs`). An older version of `store_scu`
+/// proposed only one presentation context per SOP class, seeded from whichever file of that
+/// class was probed first - if that file's native transfer syntax was JPEG 2000 and a peer
+/// accepted it, any other file of that class then needed an encode into JPEG 2000 that always
+/// failed, aborting the whole association. `store_scu` now proposes one context per (SOP class,
+/// transfer syntax) pair actually present among the files being sent, so both files here land
+/// under their own native transfer syntax with no transcode at all.
+///
+/// Uses two real fixtures rather than a hand-built second object: an earlier version of this
+/// test stripped `PixelData` from a cloned/retagged object to sidestep encapsulation mismatches,
+/// but that made `transcode_dicom_object` a no-op (nothing to encode) and the test passed even
+/// against the pre-fix code. `dx.dcm`'s native pixel data has to actually survive an attempted
+/// transcode for the failure this guards against to be reachable at all.
+#[test]
+fn store_scu_avoids_transcoding_into_a_decode_only_transfer_syntax_shared_by_sop_class() {
+    let path_a = fixture_path("dx2.dcm");
+    let path_b = fixture_path("dx.dcm");
+
+    let object_a = read_dicom_file(&path_a).unwrap();
+    let object_b = read_dicom_file(&path_b).unwrap();
+    let sop_class_uid = object_a.meta().media_storage_sop_class_uid.trim_end_matches(['\0', ' ']).to_owned();
+    let sop_instance_a = object_a.meta().media_storage_sop_instance_uid.trim_end_matches(['\0', ' ']).to_owned();
+    let sop_instance_b = object_b.meta().media_storage_sop_instance_uid.trim_end_matches(['\0', ' ']).to_owned();
+    assert_eq!(
+        object_b.meta().media_storage_sop_class_uid.trim_end_matches(['\0', ' ']),
+        sop_class_uid,
+        "fixtures must share a SOP class for this test to be meaningful"
+    );
+    assert_eq!(object_a.meta().transfer_syntax.trim_end_matches(['\0', ' ']), "1.2.840.10008.1.2.4.90");
+    assert_eq!(object_b.meta().transfer_syntax.trim_end_matches(['\0', ' ']), uids::EXPLICIT_VR_LITTLE_ENDIAN);
+
+    let expected_sop_class_uid = sop_class_uid.clone();
+    let (scp_handle, addr) = spawn_mock_scp(sop_class_uid, move |association| {
+        for _ in 0..2 {
+            let (pc_id, request, dataset_bytes) = dimse_recv_command_with_data(association);
+            assert!(!dataset_bytes.is_empty());
+            assert_eq!(
+                request.element(tags::AFFECTED_SOP_CLASS_UID).unwrap().to_str().unwrap(),
+                expected_sop_class_uid,
+            );
+            let message_id = dimse_message_id(&request);
+            let response = InMemDicomObject::command_from_element_iter([
+                DataElement::new(tags::AFFECTED_SOP_CLASS_UID, VR::UI, dicom_value!(Str, expected_sop_class_uid.clone())),
+                DataElement::new(tags::COMMAND_FIELD, VR::US, dicom_value!(U16, [0x8001])),
+                DataElement::new(tags::MESSAGE_ID_BEING_RESPONDED_TO, VR::US, dicom_value!(U16, [message_id])),
+                DataElement::new(tags::COMMAND_DATA_SET_TYPE, VR::US, dicom_value!(U16, [0x0101])),
+                DataElement::new(tags::STATUS, VR::US, dicom_value!(U16, [0x0000])),
+            ]);
+            dimse_send_command(association, pc_id, &response);
+        }
+    });
+
+    let results = store_scu(
+        &addr.to_string(),
+        &[path_a.clone(), path_b.clone()],
+        StoreScuOptions {
+            calling_ae_title: "TEST-SCU".to_owned(),
+            called_ae_title: Some("MOCK-SCP".to_owned()),
+            max_pdu_length: 16384,
+            never_transcode: false,
+            timeout: None,
+            on_log: None,
+            cancel: None,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(results.len(), 2);
+    assert!(results.iter().all(|result| result.status == 0), "expected both sends to succeed: {results:?}");
+    assert_eq!(results[0].sop_instance_uid, sop_instance_a);
+    assert_eq!(results[1].sop_instance_uid, sop_instance_b);
+
+    scp_handle.join().unwrap();
+}
+
 #[test]
 fn find_scu_collects_pending_matches_until_success_status() {
     let abstract_syntax = uids::STUDY_ROOT_QUERY_RETRIEVE_INFORMATION_MODEL_FIND;

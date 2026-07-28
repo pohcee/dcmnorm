@@ -39,7 +39,7 @@ use dicom_ul::{
     ClientAssociation,
 };
 
-use super::io::{read_dicom_file, transcode_dicom_object};
+use super::io::{can_encode_transfer_syntax, read_dicom_file, transcode_dicom_object};
 use super::json::write_dataset_as_dicom_json_with_options;
 use super::types::{
     DicomJsonError, DicomJsonFormat, DicomJsonKeyStyle, DicomJsonWriteOptions, ReadError,
@@ -679,12 +679,26 @@ fn probe_store_file(path: &Path) -> Result<StoreFile, DimseError> {
     })
 }
 
-/// Sends each of `files` via C-STORE to `destination` ("host:port"). Presentation contexts
-/// propose each file's own SOP class + transfer syntax, plus (unless `never_transcode`) the same
-/// SOP class under Explicit/Implicit VR Little Endian as a transcoding fallback - mirrors the
-/// storescu CLI this replaces, except the fallback here reuses dcmnorm's own
-/// [`transcode_dicom_object`], which (via openjpeg/kakadu/jpeg-ls/ffmpeg) can transcode a
-/// strictly wider set of source transfer syntaxes than that CLI's uncompressed-only fallback did.
+/// Sends each of `files` via C-STORE to `destination` ("host:port"). Presentation contexts are
+/// built from the actual files about to be sent: one context per distinct (SOP class, transfer
+/// syntax) pair actually present among `files`, proposing only that single transfer syntax so an
+/// acceptance is an exact match requiring no transcode at all. Unless `never_transcode`, each SOP
+/// class also gets one shared fallback context offering Explicit/Implicit VR Little Endian (minus
+/// whichever of those the class's files already cover natively) - the two transfer syntaxes this
+/// build can always encode into, for peers that don't support a file's native compression.
+///
+/// Earlier versions of this function proposed each SOP class only once, seeded from whichever
+/// file of that class happened to be probed first - if that file's native transfer syntax was
+/// something this build can only decode (e.g. JPEG 2000, see [`can_encode_transfer_syntax`]), a
+/// peer could accept it as the class's one negotiated transfer syntax, and any other file of that
+/// class would then need an encode this build can't perform. Proposing one context per (class,
+/// transfer syntax) pair means a peer can only negotiate a transfer syntax this build actually
+/// has a file for - see [`select_store_presentation_context`] for how a decode-only accepted
+/// context is avoided as a transcode fallback for a *different* file's send.
+///
+/// The fallback path still reuses dcmnorm's own [`transcode_dicom_object`], which (via
+/// openjpeg/kakadu/jpeg-ls/ffmpeg) can transcode a strictly wider set of source transfer syntaxes
+/// than the storescu CLI's uncompressed-only fallback did.
 ///
 /// Returns one [`StoreScuResult`] per file that could be probed and sent; only association-level
 /// failure (can't connect, no acceptable presentation context at all) is a hard `Err` - a
@@ -704,18 +718,28 @@ pub fn store_scu(
     }
 
     let mut presentation_contexts: Vec<(String, Vec<String>)> = Vec::new();
-    let mut seen = std::collections::HashSet::new();
+    let mut seen_pairs = std::collections::HashSet::new();
+    let mut native_by_sop_class: HashMap<&str, std::collections::HashSet<&str>> = HashMap::new();
+
     for file in &probed {
-        let mut transfer_syntaxes = vec![file.transfer_syntax_uid.clone()];
-        if !options.never_transcode {
-            for fallback in default_transfer_syntaxes() {
-                if fallback != file.transfer_syntax_uid {
-                    transfer_syntaxes.push(fallback);
-                }
-            }
+        if seen_pairs.insert((file.sop_class_uid.as_str(), file.transfer_syntax_uid.as_str())) {
+            presentation_contexts.push((file.sop_class_uid.clone(), vec![file.transfer_syntax_uid.clone()]));
         }
-        if seen.insert(file.sop_class_uid.clone()) {
-            presentation_contexts.push((file.sop_class_uid.clone(), transfer_syntaxes));
+        native_by_sop_class
+            .entry(file.sop_class_uid.as_str())
+            .or_default()
+            .insert(file.transfer_syntax_uid.as_str());
+    }
+
+    if !options.never_transcode {
+        for (sop_class_uid, native_transfer_syntaxes) in &native_by_sop_class {
+            let fallback: Vec<String> = default_transfer_syntaxes()
+                .into_iter()
+                .filter(|ts| !native_transfer_syntaxes.contains(ts.as_str()))
+                .collect();
+            if !fallback.is_empty() {
+                presentation_contexts.push(((*sop_class_uid).to_owned(), fallback));
+            }
         }
     }
 
@@ -748,6 +772,12 @@ pub fn store_scu(
     Ok(results)
 }
 
+/// Picks which negotiated context to send `file` under: an exact (SOP class, transfer syntax)
+/// match needs no transcode, so it's used whenever the peer accepted it. Otherwise, among
+/// contexts negotiated for the same SOP class under a *different* transfer syntax, only one this
+/// build can actually encode into is eligible - this is what keeps a peer's acceptance of another
+/// file's decode-only native context (e.g. JPEG 2000) from being reused here as a transcode
+/// target it can't reach; see [`store_scu`]'s doc comment for the failure this avoids.
 fn select_store_presentation_context<'a>(
     file: &StoreFile,
     negotiated: &'a [PresentationContextNegotiated],
@@ -759,7 +789,10 @@ fn select_store_presentation_context<'a>(
         return Ok((pc, transfer_syntax(&pc.transfer_syntax)?));
     }
 
-    let fallback = negotiated.iter().find(|pc| pc.abstract_syntax == file.sop_class_uid);
+    let fallback = negotiated
+        .iter()
+        .filter(|pc| pc.abstract_syntax == file.sop_class_uid)
+        .find(|pc| can_encode_transfer_syntax(&pc.transfer_syntax));
     match fallback {
         Some(pc) => Ok((pc, transfer_syntax(&pc.transfer_syntax)?)),
         None => Err(DimseError::NoAcceptablePresentationContext {
