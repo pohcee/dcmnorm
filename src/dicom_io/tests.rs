@@ -2064,6 +2064,85 @@ fn move_scu_drains_failed_sop_instance_uid_list_sent_as_separate_pdu() {
     scp_handle.join().unwrap();
 }
 
+/// Regression test for a bug found while investigating why a customer's C-MOVE association
+/// failures were showing up with no log trail at all: every `*_scu` function ended with a bare
+/// `assoc.release()?`, so a peer that sends anything other than `Pdu::ReleaseRP` in response to
+/// our A-RELEASE-RQ (e.g. a stray PDU, mirroring the same "extra PDU where a clean handshake step
+/// was expected" shape as the RamSoft case above, just at release time instead of mid-response)
+/// used to fail *silently* - no "aborting association" log line, unlike every other error path in
+/// this file - AND used to turn an already-successful move into a reported failure, since the
+/// bare `?` discarded the already-known-good terminal result. Neither is right: the terminal
+/// C-MOVE-RSP already answered whether the retrieve succeeded (status Success here); a peer being
+/// sloppy about the *transport-level* teardown afterward shouldn't retroactively fail the move and
+/// send a queue-backed caller off re-driving a retrieve the source already completed. So this must
+/// still return `Ok` with the real terminal result, not an `Err` - the release failure is only
+/// ever observable via the log, which isn't asserted here (no test plumbing captures `on_log`
+/// output yet), just the return value.
+#[test]
+fn move_scu_still_returns_the_terminal_result_when_the_peer_does_not_send_release_rp() {
+    let abstract_syntax = uids::STUDY_ROOT_QUERY_RETRIEVE_INFORMATION_MODEL_MOVE;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let scp = dicom_ul::association::server::ServerAssociationOptions::new()
+        .ae_title("MOCK-SCP")
+        .with_abstract_syntax(abstract_syntax);
+
+    let scp_handle = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let mut association = scp.establish(stream).unwrap();
+        let (pc_id, request, _identifier_bytes) = dimse_recv_command_with_data(&mut association);
+        let message_id = dimse_message_id(&request);
+
+        // A normal terminal Success response, no trailing dataset - nothing unusual about the
+        // move itself, only about what happens next.
+        let final_response = InMemDicomObject::command_from_element_iter([
+            DataElement::new(tags::AFFECTED_SOP_CLASS_UID, VR::UI, dicom_value!(Str, abstract_syntax)),
+            DataElement::new(tags::COMMAND_FIELD, VR::US, dicom_value!(U16, [0x8021])),
+            DataElement::new(tags::MESSAGE_ID_BEING_RESPONDED_TO, VR::US, dicom_value!(U16, [message_id])),
+            DataElement::new(tags::COMMAND_DATA_SET_TYPE, VR::US, dicom_value!(U16, [0x0101])),
+            DataElement::new(tags::STATUS, VR::US, dicom_value!(U16, [0x0000])),
+            DataElement::new(tags::NUMBER_OF_COMPLETED_SUBOPERATIONS, VR::US, dicom_value!(U16, [1])),
+            DataElement::new(tags::NUMBER_OF_FAILED_SUBOPERATIONS, VR::US, dicom_value!(U16, [0])),
+            DataElement::new(tags::NUMBER_OF_WARNING_SUBOPERATIONS, VR::US, dicom_value!(U16, [0])),
+        ]);
+        dimse_send_command(&mut association, pc_id, &final_response);
+
+        // The client now sends A-RELEASE-RQ expecting A-RELEASE-RP back - instead, send a stray
+        // P-DATA-TF, the same "unexpected PDU where the handshake expected something specific"
+        // shape dicom-ul's release() has no tolerance for.
+        let pdu = association.receive().unwrap();
+        assert_eq!(pdu, dicom_ul::pdu::Pdu::ReleaseRQ);
+        let _ = association.send(&dicom_ul::pdu::Pdu::PData {
+            data: vec![dicom_ul::pdu::PDataValue {
+                presentation_context_id: pc_id,
+                value_type: dicom_ul::pdu::PDataValueType::Data,
+                is_last: true,
+                data: vec![0u8; 4],
+            }],
+        });
+    });
+
+    let result = move_scu(
+        &addr.to_string(),
+        "GENERICAE",
+        "1.2.3.4.5",
+        MoveScuOptions {
+            calling_ae_title: "TEST-SCU".to_owned(),
+            called_ae_title: Some("MOCK-SCP".to_owned()),
+            max_pdu_length: 16384,
+            timeout: Some(std::time::Duration::from_secs(5)),
+            stale_data_path: None,
+            stale_data_timeout: None,
+            on_log: None,
+        },
+    );
+
+    let result = result.expect("a release-phase failure must not turn an already-successful move into an Err");
+    assert_eq!(result.status, 0x0000);
+    assert_eq!(result.completed, 1);
+    scp_handle.join().unwrap();
+}
+
 /// Regression test for the bug this whole absolute-timeout mechanism exists to fix: a peer that
 /// keeps an association alive by responding with periodic pending statuses, but never actually
 /// reaches a terminal status, used to hang `move_scu` forever - each individual read had its own

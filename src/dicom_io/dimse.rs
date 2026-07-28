@@ -12,7 +12,10 @@
 //! its command dataset and response loop are built directly from PS3.7).
 //!
 //! `dicom-ul` 0.9.1's `ClientAssociation` does not release on `Drop` (older versions did) - every
-//! function here explicitly calls `.release()` on success and `.abort()` on error paths.
+//! function here explicitly releases once it has a terminal result (via `release_and_log` - see
+//! its doc comment for why a failed release is only ever logged, never turned into an `Err`, and
+//! can't fall back to `.abort()` the way every other fallible step does) and aborts on error paths
+//! otherwise.
 
 use std::collections::HashMap;
 use std::error::Error as StdError;
@@ -322,6 +325,45 @@ fn read_pdata_to_end(assoc: &mut ClientAssociation<TcpStream>) -> Result<Vec<u8>
     Ok(buffer)
 }
 
+/// Releases `assoc`, logging clearly if the release itself fails - unlike a bare
+/// `assoc.release()?`, which this replaces at every call site and which failed *silently*: no log
+/// line at all, just whatever generic error the top-level caller happened to surface, if any.
+///
+/// Deliberately does *not* return a `Result` - every call site calls this only after it already
+/// has the operation's real outcome in hand (a validated terminal DIMSE response), and per PS3.7's
+/// layering, the DIMSE operation is complete once that response is received; A-RELEASE is a
+/// separate, purely transport-level teardown courtesy, not part of the operation's own success
+/// criteria (this matches dcmtk: `movescu`'s reported exit status comes from the C-MOVE-RSP alone,
+/// never from whether the later `ASC_releaseAssociation` succeeded). A caller that let a release
+/// hiccup override an already-successful result would report the operation as failed - and for a
+/// queue-backed caller like the move service, that means an unnecessary retry, re-driving a source
+/// PACS through a whole retrieve it already completed. So this only ever logs; it can't fail the
+/// call.
+///
+/// This also can't reuse the log+abort pattern every other fallible step in these SCU functions
+/// uses, because `ClientAssociation::release`/`::abort` both take `self` by value - once
+/// `release()` has consumed and failed on `assoc`, there is no association object left to call
+/// `.abort()` on; that's a hard constraint of this dicom-ul version's API, not a choice made here.
+/// `release()` sends A-RELEASE-RQ and then expects `Pdu::ReleaseRP` back; if the peer sends
+/// anything else first (including a stray trailing `PData` - the same shape as the RamSoft "Failed
+/// SOP Instance UID List sent as its own PDU" case `move_scu` already drains for, just now on a
+/// success/terminal response instead of a failure one), `release()` returns `Err` without sending
+/// an A-ABORT PDU. The underlying TCP socket still gets closed (via `TcpStream`'s own `Drop`, once
+/// the consumed `assoc` goes out of scope here) - so the peer does see the connection go away -
+/// just as an abrupt close rather than a graceful DICOM release/abort handshake.
+fn release_and_log(assoc: ClientAssociation<TcpStream>, logger: Option<&dyn DimseLogger>, on_success: impl FnOnce() -> String) {
+    match assoc.release() {
+        Ok(()) => log_event(logger, on_success),
+        Err(error) => log_event(logger, || {
+            format!(
+                "association release failed (peer did not send a clean A-RELEASE-RP), but the \
+                 operation's own result was already determined and is not affected by this: {}",
+                DimseError::from(error)
+            )
+        }),
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // Absolute-deadline enforcement
 //
@@ -515,8 +557,7 @@ pub fn echo_scu(destination: &str, options: EchoScuOptions) -> Result<u16, Dimse
 
     let status = command_status(&response)?;
     log_event(logger, || format!("received C-ECHO-RSP: status=0x{status:04X}"));
-    assoc.release()?;
-    log_event(logger, || "association released".to_owned());
+    release_and_log(assoc, logger, || "association released".to_owned());
     Ok(status)
 }
 
@@ -625,8 +666,7 @@ pub fn store_scu(
         }
     }
 
-    assoc.release()?;
-    log_event(logger, || format!("association released ({} instance(s) sent)", results.len()));
+    release_and_log(assoc, logger, || format!("association released ({} instance(s) sent)", results.len()));
     Ok(results)
 }
 
@@ -836,8 +876,7 @@ pub fn find_scu(
         matches.push(json);
     }
 
-    assoc.release()?;
-    log_event(logger, || format!("association released ({} match(es))", matches.len()));
+    release_and_log(assoc, logger, || format!("association released ({} match(es))", matches.len()));
     Ok(matches)
 }
 
@@ -983,8 +1022,7 @@ pub fn move_scu(
             continue;
         }
 
-        assoc.release()?;
-        log_event(logger, || "association released".to_owned());
+        release_and_log(assoc, logger, || "association released".to_owned());
         return Ok(result);
     }
 }
