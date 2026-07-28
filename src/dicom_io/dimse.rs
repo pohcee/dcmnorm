@@ -23,6 +23,8 @@ use std::fmt;
 use std::io::Read;
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use dicom_core::dictionary::{DataDictionary, DataDictionaryEntry};
@@ -72,6 +74,11 @@ pub enum DimseError {
     /// alive (e.g. it keeps sending pending C-MOVE-RSPs) - a faster, more specific signal than
     /// `AbsoluteTimeout` for a retrieve that's stopped actually writing data to our own storage.
     StaleDataConnection { path: PathBuf },
+    /// An external caller (`MoveScuOptions::cancel`) asked this operation to stop waiting - not
+    /// a peer/protocol failure. `move_scu` catches this itself and turns it into a successful,
+    /// `cancelled: true` result rather than letting it propagate as an error to its caller (see
+    /// `poll_bounded` and `move_scu`).
+    Cancelled,
 }
 
 impl fmt::Display for DimseError {
@@ -100,6 +107,7 @@ impl fmt::Display for DimseError {
                 "no new data written under {} within the configured staleness window; treating the connection as stale",
                 path.display()
             ),
+            Self::Cancelled => write!(formatter, "operation was cancelled by the caller"),
         }
     }
 }
@@ -120,7 +128,8 @@ impl StdError for DimseError {
             | Self::InvalidQueryKey(_)
             | Self::Protocol(_)
             | Self::AbsoluteTimeout
-            | Self::StaleDataConnection { .. } => None,
+            | Self::StaleDataConnection { .. }
+            | Self::Cancelled => None,
         }
     }
 }
@@ -172,7 +181,11 @@ pub trait DimseLogger: Send + Sync {
 
 /// Calls `logger.log(message())` if a logger is present - `message` is only built when
 /// something is actually listening, so this costs nothing when no logger was supplied.
-fn log_event(logger: Option<&dyn DimseLogger>, message: impl FnOnce() -> String) {
+///
+/// `pub(super)` (rather than private) so `scp.rs` - the SCP/server-side counterpart of this
+/// module's SCU functions - can report the same association/presentation-context/per-message/
+/// release detail through its own `ScpOptions::on_log`.
+pub(super) fn log_event(logger: Option<&dyn DimseLogger>, message: impl FnOnce() -> String) {
     if let Some(logger) = logger {
         logger.log(message());
     }
@@ -440,15 +453,16 @@ impl StaleDataWatch {
 
 /// Runs `op` (a `receive_command`/`read_pdata_to_end`-shaped blocking read), re-issuing it with
 /// ever-shrinking read timeouts until it produces something other than a plain "nothing arrived
-/// this tick" timeout. Between ticks, checks `deadline` (`AbsoluteTimeout` once passed) and
-/// `stale_watch` (`StaleDataConnection` once its window elapses) - either aborts the wait
-/// immediately without another read attempt. A `deadline` of `None` disables the absolute
-/// ceiling entirely (ticks stay at `POLL_INTERVAL`, matching pre-existing behavior for callers
-/// that don't opt in).
+/// this tick" timeout. Between ticks, checks `deadline` (`AbsoluteTimeout` once passed),
+/// `stale_watch` (`StaleDataConnection` once its window elapses), and `cancel` (`Cancelled` once
+/// set) - any of the three aborts the wait immediately without another read attempt. A `deadline`
+/// of `None` disables the absolute ceiling entirely (ticks stay at `POLL_INTERVAL`, matching
+/// pre-existing behavior for callers that don't opt in).
 fn poll_bounded<T>(
     assoc: &mut ClientAssociation<TcpStream>,
     deadline: Option<Instant>,
     mut stale_watch: Option<&mut StaleDataWatch>,
+    cancel: Option<&AtomicBool>,
     mut op: impl FnMut(&mut ClientAssociation<TcpStream>) -> Result<T, DimseError>,
 ) -> Result<T, DimseError> {
     loop {
@@ -459,6 +473,11 @@ fn poll_bounded<T>(
         }
         if let Some(watch) = stale_watch.as_mut() {
             watch.check()?;
+        }
+        if let Some(cancel) = cancel {
+            if cancel.load(Ordering::SeqCst) {
+                return Err(DimseError::Cancelled);
+            }
         }
 
         let tick = match deadline {
@@ -729,7 +748,7 @@ fn send_and_receive_store(
 
     send_command_with_data(assoc, pc.id, &command, object_data)?;
 
-    let response = poll_bounded(assoc, deadline, None, receive_command)?;
+    let response = poll_bounded(assoc, deadline, None, None, receive_command)?;
     let status = command_status(&response)?;
     log_event(logger, || format!("received C-STORE-RSP #{message_id}: status=0x{status:04X}"));
     Ok(status)
@@ -831,7 +850,7 @@ pub fn find_scu(
 
     let mut matches = Vec::new();
     loop {
-        let response = match poll_bounded(&mut assoc, deadline, None, receive_command) {
+        let response = match poll_bounded(&mut assoc, deadline, None, None, receive_command) {
             Ok(response) => response,
             Err(error) => {
                 log_event(logger, || format!("aborting association after error: {error}"));
@@ -859,7 +878,7 @@ pub fn find_scu(
             return Err(DimseError::Protocol(format!("C-FIND-RSP failed with status {status:#06X}")));
         }
 
-        let bytes = match poll_bounded(&mut assoc, deadline, None, read_pdata_to_end) {
+        let bytes = match poll_bounded(&mut assoc, deadline, None, None, read_pdata_to_end) {
             Ok(bytes) => bytes,
             Err(error) => {
                 log_event(logger, || format!("aborting association after error: {error}"));
@@ -900,6 +919,13 @@ pub struct MoveScuOptions {
     /// considered stale and aborted - independent of, and typically much shorter than, `timeout`.
     pub stale_data_timeout: Option<Duration>,
     pub on_log: Option<Box<dyn DimseLogger>>,
+    /// Lets an external caller interrupt an in-progress retrieve once it's independently
+    /// confirmed the study already arrived (e.g. a source PACS that pushes the instances over
+    /// their own C-STORE association but never sends a terminal C-MOVE-RSP nor releases this
+    /// one) - checked each `poll_bounded` tick alongside `timeout`/`stale_data_timeout`. Setting
+    /// it produces a successful, `cancelled: true` result (see `move_scu`), not an error, since
+    /// cancellation only happens when the data is already known to be in hand.
+    pub cancel: Option<Arc<AtomicBool>>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -909,6 +935,10 @@ pub struct MoveScuResult {
     pub failed: u16,
     pub warning: u16,
     pub remaining: u16,
+    /// True when this result was produced by `options.cancel` firing rather than a terminal
+    /// C-MOVE-RSP from the peer - the sub-operation counts above reflect the last pending
+    /// response seen before cancellation, not a real terminal count.
+    pub cancelled: bool,
 }
 
 /// Performs a C-MOVE (Study Root Query/Retrieve), asking `destination` to push
@@ -928,6 +958,7 @@ pub fn move_scu(
         (Some(path), Some(stale_after)) => Some(StaleDataWatch::new(path, stale_after)),
         _ => None,
     };
+    let cancel = options.cancel.as_deref();
     let abstract_syntax = uids::STUDY_ROOT_QUERY_RETRIEVE_INFORMATION_MODEL_MOVE;
 
     let mut assoc = establish(
@@ -972,9 +1003,19 @@ pub fn move_scu(
         return Err(error);
     }
 
+    // Tracks the most recent pending C-MOVE-RSP's sub-operation counts so a cancellation (which,
+    // unlike every other exit from this loop, isn't triggered by anything the peer sent) can
+    // still report a meaningful `MoveScuResult` instead of an all-zero default.
+    let mut last_result = MoveScuResult::default();
+
     loop {
-        let response = match poll_bounded(&mut assoc, deadline, stale_watch.as_mut(), receive_command) {
+        let response = match poll_bounded(&mut assoc, deadline, stale_watch.as_mut(), cancel, receive_command) {
             Ok(response) => response,
+            Err(DimseError::Cancelled) => {
+                log_event(logger, || "cancelled by caller - releasing association".to_owned());
+                release_and_log(assoc, logger, || "association released after cancellation".to_owned());
+                return Ok(MoveScuResult { cancelled: true, status: 0, ..last_result });
+            }
             Err(error) => {
                 log_event(logger, || format!("aborting association after error: {error}"));
                 let _ = assoc.abort();
@@ -996,10 +1037,18 @@ pub fn move_scu(
         // don't drain it here it's still sitting on the wire when `release()` next calls
         // `receive()` expecting A-RELEASE-RP, which dicom-ul then rejects as an unexpected PDU.
         if command_has_dataset(&response) {
-            if let Err(error) = poll_bounded(&mut assoc, deadline, stale_watch.as_mut(), read_pdata_to_end) {
-                log_event(logger, || format!("aborting association after error: {error}"));
-                let _ = assoc.abort();
-                return Err(error);
+            match poll_bounded(&mut assoc, deadline, stale_watch.as_mut(), cancel, read_pdata_to_end) {
+                Ok(_) => {}
+                Err(DimseError::Cancelled) => {
+                    log_event(logger, || "cancelled by caller - releasing association".to_owned());
+                    release_and_log(assoc, logger, || "association released after cancellation".to_owned());
+                    return Ok(MoveScuResult { cancelled: true, status: 0, ..last_result });
+                }
+                Err(error) => {
+                    log_event(logger, || format!("aborting association after error: {error}"));
+                    let _ = assoc.abort();
+                    return Err(error);
+                }
             }
         }
 
@@ -1009,6 +1058,7 @@ pub fn move_scu(
             failed: command_u16(&response, tags::NUMBER_OF_FAILED_SUBOPERATIONS),
             warning: command_u16(&response, tags::NUMBER_OF_WARNING_SUBOPERATIONS),
             remaining: command_u16(&response, tags::NUMBER_OF_REMAINING_SUBOPERATIONS),
+            cancelled: false,
         };
 
         log_event(logger, || {
@@ -1017,6 +1067,8 @@ pub fn move_scu(
                 result.completed, result.failed, result.warning, result.remaining
             )
         });
+
+        last_result = result.clone();
 
         if is_pending_status(status) {
             continue;

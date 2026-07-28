@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use napi::bindgen_prelude::*;
@@ -647,6 +649,7 @@ pub struct MoveScuResult {
     pub failed: u32,
     pub warning: u32,
     pub remaining: u32,
+    pub cancelled: bool,
 }
 
 pub struct MoveScuTask {
@@ -657,12 +660,63 @@ pub struct MoveScuTask {
     on_log: Option<ThreadsafeFunction<String>>,
 }
 
+// Maps a studyInstanceUid to the cancel flag of the `move_scu` call currently running for it on
+// this process, so `cancel_move_scu` (called from a separate, server-initiated request) can
+// signal it. Exactly one `moveScu` call is ever in flight per study per process - the edge move
+// service processes one queue task at a time - so keying on studyInstanceUid alone can't cancel
+// the wrong call.
+fn move_cancel_registry() -> &'static Mutex<HashMap<String, Arc<AtomicBool>>> {
+    static REGISTRY: OnceLock<Mutex<HashMap<String, Arc<AtomicBool>>>> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Registers `study_instance_uid`'s cancel flag in `move_cancel_registry` for the lifetime of
+/// this guard, removing it again on drop - covers every exit from `MoveScuTask::compute` (normal
+/// return, error, or a panic unwinding through `guarded`'s `catch_unwind`) so a stale entry can't
+/// outlive its call and be cancelled by a later, unrelated request for the same study.
+struct MoveCancelGuard {
+    study_instance_uid: String,
+    flag: Arc<AtomicBool>,
+}
+
+impl MoveCancelGuard {
+    fn register(study_instance_uid: String) -> Self {
+        let flag = Arc::new(AtomicBool::new(false));
+        move_cancel_registry().lock().unwrap().insert(study_instance_uid.clone(), flag.clone());
+        Self { study_instance_uid, flag }
+    }
+}
+
+impl Drop for MoveCancelGuard {
+    fn drop(&mut self) {
+        move_cancel_registry().lock().unwrap().remove(&self.study_instance_uid);
+    }
+}
+
+/// Cancels an in-flight `moveScu` call for `studyInstanceUid` on this process, if one is
+/// currently running - see `MoveScuOptions.cancel` in dcmnorm's `dimse.rs`. The call doesn't
+/// error out; it resolves with a successful, `cancelled: true` result once its next poll tick
+/// (up to a few seconds later) observes the flag. Returns whether a matching in-flight call was
+/// found - `false` most likely means it already finished or was never running here, not that
+/// anything went wrong.
+#[napi]
+pub fn cancel_move_scu(study_instance_uid: String) -> bool {
+    match move_cancel_registry().lock().unwrap().get(&study_instance_uid) {
+        Some(flag) => {
+            flag.store(true, Ordering::SeqCst);
+            true
+        }
+        None => false,
+    }
+}
+
 impl Task for MoveScuTask {
     type Output = MoveScuResult;
     type JsValue = MoveScuResult;
 
     fn compute(&mut self) -> Result<Self::Output> {
         guarded(|| {
+            let cancel_guard = MoveCancelGuard::register(self.study_instance_uid.clone());
             let result = dcm_move_scu(
                 &self.destination,
                 &self.move_destination_ae,
@@ -675,6 +729,7 @@ impl Task for MoveScuTask {
                     stale_data_path: self.options.watch_path.clone().map(PathBuf::from),
                     stale_data_timeout: self.options.stale_data_timeout_ms.map(|ms| Duration::from_millis(ms as u64)),
                     on_log: dimse_logger(self.on_log.take()),
+                    cancel: Some(cancel_guard.flag.clone()),
                 },
             )
             .map_err(to_napi_err)?;
@@ -684,6 +739,7 @@ impl Task for MoveScuTask {
                 failed: result.failed as u32,
                 warning: result.warning as u32,
                 remaining: result.remaining as u32,
+                cancelled: result.cancelled,
             })
         })
     }
@@ -1033,6 +1089,11 @@ impl DicomServerHandle {
 ///   each StudyInstanceUID to the on-disk paths of every instance C-STORE'd for it during that
 ///   association. Return value is ignored.
 ///
+/// `onLog`, if given, is called (fire-and-forget, from whichever connection thread is handling
+/// the association at the time) with a debug-detail line per association accept/negotiation,
+/// each request/response, and release/abort - the SCP-side counterpart of `onLog` on
+/// `echoScu`/`storeScu`/`findScu`/`moveScu`.
+///
 /// Accepts every proposed presentation context regardless of abstract syntax - this is a
 /// permissive "accept anything a real sender proposes" SCP, not a curated allow-list.
 #[napi]
@@ -1045,6 +1106,7 @@ pub fn start_dicom_server(
     on_find: JsonCallback,
     on_move: TwoStringCallback,
     on_association_complete: JsonCallback,
+    on_log: Option<ThreadsafeFunction<String>>,
 ) -> Result<DicomServerHandle> {
     let handlers: std::sync::Arc<dyn DcmScpHandlers> = std::sync::Arc::new(NapiScpHandlers {
         on_find,
@@ -1055,6 +1117,7 @@ pub fn start_dicom_server(
         ae_title,
         max_pdu_length: max_pdu_length.unwrap_or(16384),
         idle_timeout: Duration::from_millis(u64::from(idle_timeout_ms.unwrap_or(300_000))),
+        on_log: on_log.map(|callback| std::sync::Arc::new(NapiDimseLogger { callback }) as std::sync::Arc<dyn DimseLogger>),
     };
 
     let scp = dcm_start_scp(port as u16, PathBuf::from(cache_path), handlers, options).map_err(to_napi_err)?;

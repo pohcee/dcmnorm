@@ -152,6 +152,47 @@ fn is_jpeg2000_transfer_syntax(uid: &str) -> bool {
     )
 }
 
+/// Determines whether the JPEG 2000 codestream for the given frame uses the
+/// Multiple Component Transformation (MCT).
+///
+/// Per DICOM PS3.5, YBR_RCT/YBR_ICT require the codestream to apply MCT, in
+/// which case a conformant decoder (openjpeg, Kakadu) reverses it internally
+/// as part of standard decompression and hands back genuine RGB samples -
+/// re-applying a manual YCbCr/RCT->RGB conversion on that output corrupts the
+/// colors. Some non-conformant encoders (seen from certain WSI/pathology
+/// scanners) store raw, un-transformed YCbCr component samples without
+/// setting the codestream's MCT flag, relying on the DICOM attribute alone;
+/// those genuinely need the manual conversion downstream. Returns `None` when
+/// the flag can't be determined (falls back to the spec-conformant
+/// assumption that MCT was used).
+pub(super) fn jpeg2000_frame_uses_mct(object: &DefaultDicomObject, frame_index: usize) -> Option<bool> {
+    let fragments = object.element(tags::PIXEL_DATA).ok()?.fragments()?;
+    let number_of_frames = object
+        .get(tags::NUMBER_OF_FRAMES)
+        .and_then(|element| element.to_str().ok())
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(1);
+
+    let bytes = if fragments.len() == number_of_frames {
+        fragments.get(frame_index)?
+    } else {
+        fragments.first()?
+    };
+
+    codestream_uses_mct(bytes)
+}
+
+/// Scans a raw JPEG 2000 codestream's main header for the COD marker segment
+/// and reads its Multiple Component Transformation flag. Marker layout
+/// (ITU-T T.800): FF52 (2) + Lcod (2) + Scod (1) + progression order (1) +
+/// number of layers (2) + MCT (1) - i.e. the MCT byte sits 8 bytes after the
+/// start of the FF52 marker.
+fn codestream_uses_mct(codestream: &[u8]) -> Option<bool> {
+    let window = &codestream[..codestream.len().min(4096)];
+    let marker_start = window.windows(2).position(|pair| pair == [0xFF, 0x52])?;
+    window.get(marker_start + 8).map(|&byte| byte != 0)
+}
+
 fn is_mpeg_transfer_syntax(uid: &str) -> bool {
     let normalized = normalize_transfer_syntax_uid(uid);
     matches!(
@@ -864,6 +905,9 @@ fn decode_pixel_data(
 ) -> Result<(), TranscodeError> {
     let _scope = perf::scope("transcode.decode_pixel_data");
     let codec_preference = jpeg2000_codec_preference();
+    let jpeg2000_uses_mct = is_jpeg2000_transfer_syntax(source_ts.uid())
+        .then(|| jpeg2000_frame_uses_mct(object, 0))
+        .flatten();
 
     if is_jpeg2000_transfer_syntax(source_ts.uid()) {
         let backend = jpeg2000_backend();
@@ -893,7 +937,7 @@ fn decode_pixel_data(
             Ok(decoded) => {
                 jpeg2000_debug_log(format!("Kakadu decode succeeded ({} decoded bytes)", decoded.len()));
                 replace_with_native_pixel_data(object, decoded)?;
-                normalize_decoded_pixel_data_attributes(object, source_ts.uid());
+                normalize_decoded_pixel_data_attributes(object, source_ts.uid(), jpeg2000_uses_mct);
                 object.meta_mut().set_transfer_syntax(
                     TransferSyntaxRegistry
                         .get(uids::EXPLICIT_VR_LITTLE_ENDIAN)
@@ -926,7 +970,7 @@ fn decode_pixel_data(
         match mpeg::decode_mpeg_pixel_data(object) {
             Ok(decoded) => {
                 replace_with_native_pixel_data(object, decoded)?;
-                normalize_decoded_pixel_data_attributes(object, source_ts.uid());
+                normalize_decoded_pixel_data_attributes(object, source_ts.uid(), jpeg2000_uses_mct);
                 object.meta_mut().set_transfer_syntax(
                     TransferSyntaxRegistry
                         .get(uids::EXPLICIT_VR_LITTLE_ENDIAN)
@@ -949,7 +993,7 @@ fn decode_pixel_data(
         match jpeg_ls::decode_jpeg_ls_pixel_data(object) {
             Ok(decoded) => {
                 replace_with_native_pixel_data(object, decoded)?;
-                normalize_decoded_pixel_data_attributes(object, source_ts.uid());
+                normalize_decoded_pixel_data_attributes(object, source_ts.uid(), jpeg2000_uses_mct);
                 object.meta_mut().set_transfer_syntax(
                     TransferSyntaxRegistry
                         .get(uids::EXPLICIT_VR_LITTLE_ENDIAN)
@@ -1036,7 +1080,7 @@ fn decode_pixel_data(
     }
 
     replace_with_native_pixel_data(object, decoded)?;
-    normalize_decoded_pixel_data_attributes(object, source_ts.uid());
+    normalize_decoded_pixel_data_attributes(object, source_ts.uid(), jpeg2000_uses_mct);
     object.meta_mut().set_transfer_syntax(
         TransferSyntaxRegistry
             .get(uids::EXPLICIT_VR_LITTLE_ENDIAN)
@@ -1292,7 +1336,11 @@ fn native_pixel_vr(bits_allocated: u16) -> VR {
     }
 }
 
-fn normalize_decoded_pixel_data_attributes(object: &mut DefaultDicomObject, source_ts_uid: &str) {
+fn normalize_decoded_pixel_data_attributes(
+    object: &mut DefaultDicomObject,
+    source_ts_uid: &str,
+    jpeg2000_uses_mct: Option<bool>,
+) {
     let samples_per_pixel = object
         .get(tags::SAMPLES_PER_PIXEL)
         .and_then(|element| element.uint16().ok())
@@ -1305,9 +1353,14 @@ fn normalize_decoded_pixel_data_attributes(object: &mut DefaultDicomObject, sour
             .map(|value| value.trim().to_owned())
             .unwrap_or_default();
         let is_rle = normalize_transfer_syntax_uid(source_ts_uid) == uids::RLE_LOSSLESS;
-        let is_ybr = current_photometric.starts_with("YBR_FULL")
-            || current_photometric == "YBR_PARTIAL_422";
-        let target_photometric = if is_rle && is_ybr {
+        // Only RLE Lossless, and JPEG 2000 codestreams that did not apply the
+        // Multiple Component Transformation, hand back raw un-converted YBR
+        // component samples. See jpeg2000_frame_uses_mct for why JPEG 2000
+        // otherwise already produces RGB after standard decompression.
+        let preserves_ybr_on_decode =
+            is_rle || (is_jpeg2000_transfer_syntax(source_ts_uid) && jpeg2000_uses_mct == Some(false));
+        let is_ybr = current_photometric.starts_with("YBR_");
+        let target_photometric = if preserves_ybr_on_decode && is_ybr {
             current_photometric
         } else {
             "RGB".to_owned()

@@ -11,6 +11,16 @@ export declare class DicomServerHandle {
 }
 
 /**
+ * Cancels an in-flight `moveScu` call for `studyInstanceUid` on this process, if one is
+ * currently running - see `MoveScuOptions.cancel` in dcmnorm's `dimse.rs`. The call doesn't
+ * error out; it resolves with a successful, `cancelled: true` result once its next poll tick
+ * (up to a few seconds later) observes the flag. Returns whether a matching in-flight call was
+ * found - `false` most likely means it already finished or was never running here, not that
+ * anything went wrong.
+ */
+export declare function cancelMoveScu(studyInstanceUid: string): boolean
+
+/**
  * Reports whether a file looks like valid DICOM. Mirrors `dcmnorm
  * --check-dicom`.
  */
@@ -101,6 +111,7 @@ export interface MoveScuResult {
   failed: number
   warning: number
   remaining: number
+  cancelled: boolean
 }
 
 /**
@@ -186,10 +197,15 @@ export interface RenderMovieOptions {
  *   each StudyInstanceUID to the on-disk paths of every instance C-STORE'd for it during that
  *   association. Return value is ignored.
  *
+ * `onLog`, if given, is called (fire-and-forget, from whichever connection thread is handling
+ * the association at the time) with a debug-detail line per association accept/negotiation,
+ * each request/response, and release/abort - the SCP-side counterpart of `onLog` on
+ * `echoScu`/`storeScu`/`findScu`/`moveScu`.
+ *
  * Accepts every proposed presentation context regardless of abstract syntax - this is a
  * permissive "accept anything a real sender proposes" SCP, not a curated allow-list.
  */
-export declare function startDicomServer(port: number, cachePath: string, aeTitle: string, maxPduLength: number | undefined | null, idleTimeoutMs: number | undefined | null, onFind: JsonCallback, onMove: TwoStringCallback, onAssociationComplete: JsonCallback): DicomServerHandle
+export declare function startDicomServer(port: number, cachePath: string, aeTitle: string, maxPduLength: number | undefined | null, idleTimeoutMs: number | undefined | null, onFind: JsonCallback, onMove: TwoStringCallback, onAssociationComplete: JsonCallback, onLog?: (((err: Error | null, arg: string) => any)) | undefined | null): DicomServerHandle
 
 /**
  * Sends each of `files` via C-STORE to `destination` ("host:port"). Resolves with one

@@ -150,7 +150,7 @@ use super::{
     write_dicom_json, write_dicom_json_full, write_dicom_json_full_with_source,
     write_dicom_json_with_options, write_dicom_json_with_source, BoundingBox, BoxLength,
     DicomJsonBulkDataMode, DicomJsonFormat, DicomJsonKeyStyle, DicomJsonReadOptions,
-    DicomJsonWriteOptions, DimseError, EchoScuOptions, FindScuOptions, Jpeg2000Backend, MoveScuOptions,
+    DicomJsonWriteOptions, DimseError, DimseLogger, EchoScuOptions, FindScuOptions, Jpeg2000Backend, MoveScuOptions,
     RenderOutputFormat, RenderPipelineOptions, ScpHandlers, ScpOptions, StoreScuOptions,
 };
 
@@ -1982,6 +1982,7 @@ fn move_scu_collects_suboperation_progress_until_terminal_status() {
             stale_data_path: None,
             stale_data_timeout: None,
             on_log: None,
+            cancel: None,
         },
     )
     .unwrap();
@@ -2055,6 +2056,7 @@ fn move_scu_drains_failed_sop_instance_uid_list_sent_as_separate_pdu() {
             stale_data_path: None,
             stale_data_timeout: None,
             on_log: None,
+            cancel: None,
         },
     )
     .unwrap();
@@ -2134,6 +2136,7 @@ fn move_scu_still_returns_the_terminal_result_when_the_peer_does_not_send_releas
             stale_data_path: None,
             stale_data_timeout: None,
             on_log: None,
+            cancel: None,
         },
     );
 
@@ -2210,6 +2213,7 @@ fn move_scu_aborts_on_absolute_timeout_despite_continued_pending_responses() {
             stale_data_path: None,
             stale_data_timeout: None,
             on_log: None,
+            cancel: None,
         },
     );
 
@@ -2287,6 +2291,7 @@ fn move_scu_aborts_when_stale_data_path_receives_no_new_files() {
             stale_data_path: Some(watch_dir.clone()),
             stale_data_timeout: Some(std::time::Duration::from_millis(200)),
             on_log: None,
+            cancel: None,
         },
     );
 
@@ -2296,6 +2301,91 @@ fn move_scu_aborts_when_stale_data_path_receives_no_new_files() {
     }
     scp_handle.join().unwrap();
     fs::remove_dir_all(&watch_dir).ok();
+}
+
+/// A source PACS (e.g. EXA) that pushes the study over its own separate C-STORE association but
+/// never sends a terminal C-MOVE-RSP nor releases this one used to only ever end via
+/// `options.timeout` - correct, but slow, and it reports the move as failed even though the
+/// study had already fully arrived. `MoveScuOptions::cancel` lets an external caller (the API's
+/// chain-rules "cancel-move" RPC, once the matching insert task confirms the study landed) end
+/// the wait itself; asserts this produces a successful, `cancelled: true` result carrying the
+/// last pending response's sub-operation counts, not an error - and that it doesn't depend on
+/// `options.timeout` elapsing at all (`timeout: None` here).
+#[test]
+fn move_scu_returns_cancelled_result_when_signalled_mid_wait() {
+    let abstract_syntax = uids::STUDY_ROOT_QUERY_RETRIEVE_INFORMATION_MODEL_MOVE;
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let cancel_setter = cancel.clone();
+
+    let (scp_handle, addr) = spawn_mock_scp(abstract_syntax, move |association| {
+        let (pc_id, request, _identifier_bytes) = dimse_recv_command_with_data(association);
+        let message_id = dimse_message_id(&request);
+
+        let send_pending = |association: &mut dicom_ul::ServerAssociation<std::net::TcpStream>| {
+            let pending = InMemDicomObject::command_from_element_iter([
+                DataElement::new(tags::AFFECTED_SOP_CLASS_UID, VR::UI, dicom_value!(Str, abstract_syntax)),
+                DataElement::new(tags::COMMAND_FIELD, VR::US, dicom_value!(U16, [0x8021])),
+                DataElement::new(tags::MESSAGE_ID_BEING_RESPONDED_TO, VR::US, dicom_value!(U16, [message_id])),
+                DataElement::new(tags::COMMAND_DATA_SET_TYPE, VR::US, dicom_value!(U16, [0x0101])),
+                DataElement::new(tags::STATUS, VR::US, dicom_value!(U16, [0xFF00])),
+                DataElement::new(tags::NUMBER_OF_REMAINING_SUBOPERATIONS, VR::US, dicom_value!(U16, [1])),
+                DataElement::new(tags::NUMBER_OF_COMPLETED_SUBOPERATIONS, VR::US, dicom_value!(U16, [0])),
+                DataElement::new(tags::NUMBER_OF_FAILED_SUBOPERATIONS, VR::US, dicom_value!(U16, [0])),
+                DataElement::new(tags::NUMBER_OF_WARNING_SUBOPERATIONS, VR::US, dicom_value!(U16, [0])),
+            ]);
+            association
+                .send(&dicom_ul::pdu::Pdu::PData {
+                    data: vec![dicom_ul::pdu::PDataValue {
+                        presentation_context_id: pc_id,
+                        value_type: dicom_ul::pdu::PDataValueType::Command,
+                        is_last: true,
+                        data: {
+                            let mut buf = Vec::new();
+                            pending.write_dataset_with_ts(&mut buf, dimse_implicit_vr_le()).unwrap();
+                            buf
+                        },
+                    }],
+                })
+                .unwrap();
+        };
+
+        // Sends exactly two pending responses, then stops (never reaches, or releases at, a
+        // terminal one) - only `cancel`, set once the client is known to have already seen the
+        // first response, ends this. Stopping here (rather than looping indefinitely) matters:
+        // any further sends racing the client's own release handshake below would corrupt it
+        // with an unexpected PDU.
+        send_pending(association);
+        std::thread::sleep(std::time::Duration::from_millis(40));
+        // Set before the second send (not after): the client's second read attempt (for this
+        // response) starts as soon as it's done processing the first, likely before this sleep
+        // elapses, so the flag must already be true by the time that second response arrives -
+        // it's caught on the client's *third* read attempt instead.
+        cancel_setter.store(true, std::sync::atomic::Ordering::SeqCst);
+        send_pending(association);
+    });
+
+    let result = move_scu(
+        &addr.to_string(),
+        "GENERICAE",
+        "1.2.3.4.5",
+        MoveScuOptions {
+            calling_ae_title: "TEST-SCU".to_owned(),
+            called_ae_title: Some("MOCK-SCP".to_owned()),
+            max_pdu_length: 16384,
+            timeout: None,
+            stale_data_path: None,
+            stale_data_timeout: None,
+            on_log: None,
+            cancel: Some(cancel),
+        },
+    )
+    .unwrap();
+
+    assert!(result.cancelled, "expected a cancelled result, got {result:?}");
+    assert_eq!(result.status, 0);
+    assert_eq!(result.remaining, 1);
+    assert_eq!(result.completed, 0);
+    scp_handle.join().unwrap();
 }
 
 /// `find_scu` shares `move_scu`'s absolute-timeout mechanism (`poll_bounded`) - a peer that
@@ -2523,6 +2613,7 @@ fn scp_round_trips_echo_store_find_move_against_the_scu_functions() {
             stale_data_path: None,
             stale_data_timeout: None,
             on_log: None,
+            cancel: None,
         },
     )
     .unwrap();
@@ -2537,6 +2628,70 @@ fn scp_round_trips_echo_store_find_move_against_the_scu_functions() {
 
     scp.stop();
     fs::remove_dir_all(&cache_dir).ok();
+}
+
+struct MockLogger {
+    lines: std::sync::Mutex<Vec<String>>,
+}
+
+impl DimseLogger for MockLogger {
+    fn log(&self, message: String) {
+        self.lines.lock().unwrap().push(message);
+    }
+}
+
+/// The SCP side of this DIMSE stack used to have no `on_log` plumbing at all - association
+/// accept/negotiation, per-message request/response, and release were only ever observable via
+/// `*_scu`'s own logging on the SCU/client side (`establish()`/`release_and_log()` and friends).
+/// Asserts `ScpOptions::on_log` now reports the same shape of detail for an inbound association,
+/// mirroring the SCU side's wording closely enough that the two read as one consistent log
+/// stream at `logLevel: "debug"`.
+#[test]
+fn scp_on_log_reports_association_negotiation_and_per_message_detail() {
+    let cache_dir = std::env::temp_dir().join(format!(
+        "dcmnorm-scp-onlog-test-{}",
+        SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+    ));
+    fs::create_dir_all(&cache_dir).unwrap();
+
+    let handlers = std::sync::Arc::new(TestScpHandlers {
+        find_query: std::sync::Mutex::new(None),
+        find_response: Vec::new(),
+        move_calls: std::sync::Mutex::new(Vec::new()),
+        move_result: true,
+        association_complete: std::sync::Mutex::new(None),
+    });
+
+    let logger = std::sync::Arc::new(MockLogger { lines: std::sync::Mutex::new(Vec::new()) });
+
+    let scp = start_scp(
+        0,
+        cache_dir.clone(),
+        handlers,
+        ScpOptions { ae_title: "TEST-SCP".to_owned(), on_log: Some(logger.clone()), ..Default::default() },
+    )
+    .unwrap();
+    let destination = format!("127.0.0.1:{}", scp.local_port());
+
+    let status = echo_scu(
+        &destination,
+        EchoScuOptions { calling_ae_title: "TEST-SCU".to_owned(), called_ae_title: None, timeout: None, on_log: None },
+    )
+    .unwrap();
+    assert_eq!(status, 0);
+
+    scp.stop();
+    fs::remove_dir_all(&cache_dir).ok();
+
+    let joined = logger.lines.lock().unwrap().join("\n");
+    assert!(joined.contains("accepting association from"), "missing association-accept log, got: {joined}");
+    assert!(
+        joined.contains("established; negotiated presentation context(s)"),
+        "missing presentation-context negotiation log, got: {joined}"
+    );
+    assert!(joined.contains("received C-ECHO-RQ"), "missing per-message request log, got: {joined}");
+    assert!(joined.contains("sending C-ECHO-RSP: status=0x0000"), "missing per-message response log, got: {joined}");
+    assert!(joined.contains("released"), "missing association-release log, got: {joined}");
 }
 
 /// Regression test for a production incident: a C-FIND match whose text contained a non-ASCII

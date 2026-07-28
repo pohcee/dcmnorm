@@ -14,7 +14,7 @@ use image::{ColorType, GrayImage, ImageEncoder, RgbImage};
 use lcms2::{Intent, PixelFormat, Profile, Transform};
 use rayon::prelude::*;
 
-use super::io::{kakadu_ffi_enabled, transcode_dicom_object, JPEG2000_DEBUG_ENV_FLAG};
+use super::io::{jpeg2000_frame_uses_mct, kakadu_ffi_enabled, transcode_dicom_object, JPEG2000_DEBUG_ENV_FLAG};
 use super::types::RenderError;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1792,7 +1792,7 @@ mod tests {
     }
 
     #[test]
-    fn normalize_decoded_attributes_keeps_ybr_ict() {
+    fn normalize_decoded_attributes_keeps_ybr_ict_without_mct() {
         let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("test")
             .join("files")
@@ -1809,7 +1809,9 @@ mod tests {
             PrimitiveValue::from("YBR_ICT"),
         ));
 
-        normalize_decoded_render_attributes(&mut object, "1.2.840.10008.1.2.4.91");
+        // A codestream that did not apply MCT still needs the manual
+        // YBR_ICT->RGB conversion downstream, so the label must be kept.
+        normalize_decoded_render_attributes(&mut object, "1.2.840.10008.1.2.4.91", Some(false));
 
         let photometric = object
             .get(tags::PHOTOMETRIC_INTERPRETATION)
@@ -1822,6 +1824,39 @@ mod tests {
             .and_then(|element| element.uint16().ok())
             .unwrap_or(u16::MAX);
         assert_eq!(planar, 0);
+    }
+
+    #[test]
+    fn normalize_decoded_attributes_relabels_ybr_rct_to_rgb_when_mct_used() {
+        // Regression test: a conformant JPEG 2000 encoder signals MCT in the
+        // codestream, and the decoder reverses it internally, so the decoded
+        // bytes are already RGB. Keeping the YBR_RCT label in that case made
+        // render_rgb_frame apply a second, incorrect color conversion -
+        // corrupting colors (e.g. a solid green cast) for ordinary
+        // JPEG2000-compressed secondary captures/ultrasound images.
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("test")
+            .join("files")
+            .join("dx.dcm");
+        let mut object = read_dicom_file(&fixture).expect("fixture should be readable");
+        object.put(DataElement::new(
+            tags::SAMPLES_PER_PIXEL,
+            VR::US,
+            PrimitiveValue::from(3u16),
+        ));
+        object.put(DataElement::new(
+            tags::PHOTOMETRIC_INTERPRETATION,
+            VR::CS,
+            PrimitiveValue::from("YBR_RCT"),
+        ));
+
+        normalize_decoded_render_attributes(&mut object, "1.2.840.10008.1.2.4.90", Some(true));
+
+        let photometric = object
+            .get(tags::PHOTOMETRIC_INTERPRETATION)
+            .and_then(|element| element.to_str().ok())
+            .unwrap_or_default();
+        assert_eq!(photometric, "RGB");
     }
 
     #[test]
@@ -2134,37 +2169,8 @@ fn ensure_native_render_object<'a>(
     }
 
     let _scope = perf::scope("render.transcode_to_explicit_vr_le");
-    let mut transcoded = transcode_dicom_object(object, uids::EXPLICIT_VR_LITTLE_ENDIAN)?;
-    preserve_source_jpeg2000_ybr_photometric(object, &mut transcoded, source_uid);
+    let transcoded = transcode_dicom_object(object, uids::EXPLICIT_VR_LITTLE_ENDIAN)?;
     Ok(Cow::Owned(transcoded))
-}
-
-fn preserve_source_jpeg2000_ybr_photometric(
-    source: &DefaultDicomObject,
-    target: &mut DefaultDicomObject,
-    source_ts_uid: &str,
-) {
-    if !is_jpeg2000_transfer_syntax(source_ts_uid) {
-        return;
-    }
-
-    let Some(source_photometric) = source
-        .get(tags::PHOTOMETRIC_INTERPRETATION)
-        .and_then(|element| element.to_str().ok())
-        .map(|value| value.trim().to_owned())
-    else {
-        return;
-    };
-
-    if !source_photometric.starts_with("YBR_") {
-        return;
-    }
-
-    target.put(DataElement::new(
-        tags::PHOTOMETRIC_INTERPRETATION,
-        VR::CS,
-        PrimitiveValue::from(source_photometric),
-    ));
 }
 
 fn try_decode_single_frame_object(
@@ -2222,9 +2228,13 @@ fn try_decode_single_frame_object(
         ));
     }
 
+    let jpeg2000_uses_mct = is_jpeg2000_transfer_syntax(source_uid)
+        .then(|| jpeg2000_frame_uses_mct(object, frame_index))
+        .flatten();
+
     let mut working = object.clone();
     replace_with_native_frame_pixel_data(&mut working, decoded)?;
-    normalize_decoded_render_attributes(&mut working, source_uid);
+    normalize_decoded_render_attributes(&mut working, source_uid, jpeg2000_uses_mct);
     working.remove_element(tags::NUMBER_OF_FRAMES);
     working.meta_mut().set_transfer_syntax(
         TransferSyntaxRegistry
@@ -2270,7 +2280,11 @@ fn replace_with_native_frame_pixel_data(
     Ok(())
 }
 
-fn normalize_decoded_render_attributes(object: &mut DefaultDicomObject, source_ts_uid: &str) {
+fn normalize_decoded_render_attributes(
+    object: &mut DefaultDicomObject,
+    source_ts_uid: &str,
+    jpeg2000_uses_mct: Option<bool>,
+) {
     let samples_per_pixel = object
         .get(tags::SAMPLES_PER_PIXEL)
         .and_then(|element| element.uint16().ok())
@@ -2282,13 +2296,18 @@ fn normalize_decoded_render_attributes(object: &mut DefaultDicomObject, source_t
             .and_then(|element| element.to_str().ok())
             .map(|value| value.trim().to_owned())
             .unwrap_or_default();
-        // Only RLE Lossless and JPEG2000 decoders hand back raw, un-converted
-        // YBR component samples; JPEG (baseline/extended) already returns RGB,
-        // so keeping a YBR_* label for those would cause render_rgb_frame to
-        // apply a second, incorrect YCbCr->RGB conversion. Mirrors the
-        // equivalent check in normalize_decoded_pixel_data_attributes (io.rs).
+        // Only RLE Lossless, and JPEG 2000 codestreams that did not apply the
+        // Multiple Component Transformation, hand back raw un-converted YBR
+        // component samples. JPEG (baseline/extended) and MCT-using JPEG 2000
+        // both perform the YCbCr/RCT/ICT->RGB color transform internally as
+        // part of standard decompression, so keeping a YBR_* label after
+        // decoding those would cause render_rgb_frame to apply a second,
+        // incorrect color conversion on top of already-RGB bytes. See
+        // jpeg2000_frame_uses_mct (io.rs) for why JPEG 2000 needs a per-file
+        // check rather than a blanket assumption, and mirrors the equivalent
+        // check in normalize_decoded_pixel_data_attributes (io.rs).
         let preserves_ybr_on_decode = normalize_transfer_syntax_uid(source_ts_uid) == uids::RLE_LOSSLESS
-            || is_jpeg2000_transfer_syntax(source_ts_uid);
+            || (is_jpeg2000_transfer_syntax(source_ts_uid) && jpeg2000_uses_mct == Some(false));
         let is_ybr = current_photometric.starts_with("YBR_");
         let target_photometric = if preserves_ybr_on_decode && is_ybr {
             current_photometric

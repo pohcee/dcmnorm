@@ -29,7 +29,7 @@ use dicom_ul::{
     ServerAssociation,
 };
 
-use super::dimse::{implicit_vr_le, transfer_syntax};
+use super::dimse::{implicit_vr_le, log_event, transfer_syntax, DimseLogger};
 use super::io::write_dicom_file;
 
 /// Business logic an embedding application supplies for the DIMSE operations that need it - the
@@ -56,7 +56,7 @@ pub trait ScpHandlers: Send + Sync {
     fn on_association_complete(&self, stored_instances_by_study: &HashMap<String, Vec<String>>);
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ScpOptions {
     pub ae_title: String,
     pub max_pdu_length: u32,
@@ -64,6 +64,10 @@ pub struct ScpOptions {
     /// dcmjs-dimse's `pduTimeout` option (how long an established association may sit idle
     /// between PDUs before being dropped).
     pub idle_timeout: Duration,
+    /// Optional sink for the same association-negotiation/per-message/release debug detail
+    /// `*ScuOptions::on_log` reports on the SCU side (see `DimseLogger`'s doc comment) - `Arc`
+    /// rather than `Box` since `ScpOptions` is cloned once per accepted connection.
+    pub on_log: Option<Arc<dyn DimseLogger>>,
 }
 
 impl Default for ScpOptions {
@@ -72,6 +76,7 @@ impl Default for ScpOptions {
             ae_title: "ANY-SCP".to_owned(),
             max_pdu_length: 16384,
             idle_timeout: Duration::from_secs(300),
+            on_log: None,
         }
     }
 }
@@ -173,6 +178,13 @@ pub fn start_scp(
 }
 
 fn handle_association(stream: TcpStream, cache_path: &Path, handlers: &dyn ScpHandlers, options: &ScpOptions) {
+    let logger = options.on_log.as_deref();
+    let peer = stream.peer_addr().map(|addr| addr.to_string()).unwrap_or_else(|_| "<unknown>".to_owned());
+
+    log_event(logger, || {
+        format!("accepting association from {peer} (AE title {:?}, max PDU {})", options.ae_title, options.max_pdu_length)
+    });
+
     let association_options = ServerAssociationOptions::new()
         .ae_title(options.ae_title.clone())
         .promiscuous(true)
@@ -180,8 +192,23 @@ fn handle_association(stream: TcpStream, cache_path: &Path, handlers: &dyn ScpHa
         .read_timeout(options.idle_timeout)
         .write_timeout(options.idle_timeout);
 
-    let Ok(mut association) = association_options.establish(stream) else {
-        return;
+    let mut association = match association_options.establish(stream) {
+        Ok(association) => {
+            log_event(logger, || {
+                let negotiated = association
+                    .presentation_contexts()
+                    .iter()
+                    .map(|pc| format!("#{} {} / {}", pc.id, pc.abstract_syntax, pc.transfer_syntax))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("association with {peer} established; negotiated presentation context(s): [{negotiated}]")
+            });
+            association
+        }
+        Err(error) => {
+            log_event(logger, || format!("association with {peer} rejected: {error}"));
+            return;
+        }
     };
 
     let mut stored_instances_by_study: HashMap<String, Vec<String>> = HashMap::new();
@@ -189,31 +216,47 @@ fn handle_association(stream: TcpStream, cache_path: &Path, handlers: &dyn ScpHa
     loop {
         let pdu = match association.receive() {
             Ok(pdu) => pdu,
-            Err(_) => break,
+            Err(error) => {
+                log_event(logger, || format!("association with {peer} closed: {error}"));
+                break;
+            }
         };
 
         match pdu {
             Pdu::ReleaseRQ => {
+                // Logged before the reply is sent (matching every other log/act pairing in this
+                // file) rather than after: `assoc.release()` on the SCU side returns as soon as
+                // it reads A-RELEASE-RP off the wire, which races this thread's next instruction
+                // otherwise - logging first guarantees a caller that just observed `*_scu` return
+                // has also already observed this line.
+                log_event(logger, || format!("association with {peer} released"));
                 let _ = association.send(&Pdu::ReleaseRP);
                 break;
             }
-            Pdu::AbortRQ { .. } => break,
+            Pdu::AbortRQ { .. } => {
+                log_event(logger, || format!("association with {peer} aborted by peer"));
+                break;
+            }
             Pdu::PData { data } => {
                 let Some(command_pdv) = data.first() else {
+                    log_event(logger, || format!("association with {peer} closed: empty P-DATA-TF (no command PDV)"));
                     break;
                 };
                 let pc_id = command_pdv.presentation_context_id;
                 let Ok(command) =
                     InMemDicomObject::read_dataset_with_ts(command_pdv.data.as_slice(), implicit_vr_le())
                 else {
+                    log_event(logger, || format!("association with {peer} closed: failed to parse DIMSE command"));
                     break;
                 };
                 let Some(negotiated_ts) = negotiated_transfer_syntax(&association, pc_id) else {
+                    log_event(logger, || format!("association with {peer} closed: no negotiated presentation context #{pc_id}"));
                     break;
                 };
 
-                let outcome = match command_u16(&command, tags::COMMAND_FIELD) {
-                    0x0030 => handle_echo(&mut association, pc_id, &command),
+                let command_field = command_u16(&command, tags::COMMAND_FIELD);
+                let outcome = match command_field {
+                    0x0030 => handle_echo(&mut association, pc_id, &command, logger),
                     0x0001 => handle_store(
                         &mut association,
                         pc_id,
@@ -222,16 +265,23 @@ fn handle_association(stream: TcpStream, cache_path: &Path, handlers: &dyn ScpHa
                         negotiated_ts,
                         cache_path,
                         &mut stored_instances_by_study,
+                        logger,
                     ),
-                    0x0020 => handle_find(&mut association, pc_id, &command, &data, negotiated_ts, handlers),
-                    0x0021 => handle_move(&mut association, pc_id, &command, &data, negotiated_ts, handlers),
+                    0x0020 => handle_find(&mut association, pc_id, &command, &data, negotiated_ts, handlers, logger),
+                    0x0021 => handle_move(&mut association, pc_id, &command, &data, negotiated_ts, handlers, logger),
                     _ => Err(()),
                 };
                 if outcome.is_err() {
+                    log_event(logger, || {
+                        format!("association with {peer} closed: error handling command field 0x{command_field:04X}")
+                    });
                     break;
                 }
             }
-            _ => break,
+            _ => {
+                log_event(logger, || format!("association with {peer} closed: unexpected PDU"));
+                break;
+            }
         }
     }
 
@@ -301,8 +351,15 @@ fn resolve_data(association: &mut ServerAssociation<TcpStream>, initial_pdata: &
     }
 }
 
-fn handle_echo(association: &mut ServerAssociation<TcpStream>, pc_id: u8, command: &InMemDicomObject) -> Result<(), ()> {
+fn handle_echo(
+    association: &mut ServerAssociation<TcpStream>,
+    pc_id: u8,
+    command: &InMemDicomObject,
+    logger: Option<&dyn DimseLogger>,
+) -> Result<(), ()> {
     let message_id = command_u16(command, tags::MESSAGE_ID);
+    log_event(logger, || format!("received C-ECHO-RQ (message id {message_id})"));
+
     let response = InMemDicomObject::command_from_element_iter([
         DataElement::new(tags::AFFECTED_SOP_CLASS_UID, VR::UI, dicom_value!(Str, uids::VERIFICATION)),
         DataElement::new(tags::COMMAND_FIELD, VR::US, dicom_value!(U16, [0x8030])),
@@ -310,6 +367,7 @@ fn handle_echo(association: &mut ServerAssociation<TcpStream>, pc_id: u8, comman
         DataElement::new(tags::COMMAND_DATA_SET_TYPE, VR::US, dicom_value!(U16, [0x0101])),
         DataElement::new(tags::STATUS, VR::US, dicom_value!(U16, [0x0000])),
     ]);
+    log_event(logger, || "sending C-ECHO-RSP: status=0x0000".to_owned());
     send_command(association, pc_id, &response)
 }
 
@@ -321,10 +379,13 @@ fn handle_store(
     negotiated_ts: &TransferSyntax,
     cache_path: &Path,
     stored_instances_by_study: &mut HashMap<String, Vec<String>>,
+    logger: Option<&dyn DimseLogger>,
 ) -> Result<(), ()> {
     let message_id = command_u16(command, tags::MESSAGE_ID);
     let affected_sop_class_uid = command_str(command, tags::AFFECTED_SOP_CLASS_UID).unwrap_or_default();
     let affected_sop_instance_uid = command_str(command, tags::AFFECTED_SOP_INSTANCE_UID).unwrap_or_default();
+
+    log_event(logger, || format!("received C-STORE-RQ: SOP instance {affected_sop_instance_uid}"));
 
     let dataset_bytes = resolve_data(association, initial_pdata)?;
     let status = store_received_dataset(
@@ -338,6 +399,8 @@ fn handle_store(
     // 0xC000: "Processing failure" (PS3.7 Annex C, generic non-specific failure) - matches the
     // Status this SCP's predecessor (dcmjs-dimse) used for any C-STORE write failure.
     .unwrap_or(0xC000);
+
+    log_event(logger, || format!("sending C-STORE-RSP: status=0x{status:04X}"));
 
     let response = InMemDicomObject::command_from_element_iter([
         DataElement::new(tags::AFFECTED_SOP_CLASS_UID, VR::UI, dicom_value!(Str, affected_sop_class_uid)),
@@ -409,6 +472,7 @@ fn handle_find(
     initial_pdata: &[PDataValue],
     negotiated_ts: &TransferSyntax,
     handlers: &dyn ScpHandlers,
+    logger: Option<&dyn DimseLogger>,
 ) -> Result<(), ()> {
     let message_id = command_u16(command, tags::MESSAGE_ID);
     let affected_sop_class_uid = command_str(command, tags::AFFECTED_SOP_CLASS_UID).unwrap_or_default();
@@ -425,8 +489,19 @@ fn handle_find(
         }
     }
 
+    // Logs query key names only, not values - an Identifier commonly carries PHI (PatientName,
+    // PatientID) that a debug log shouldn't echo even at the debug tier. Mirrors `find_scu`'s own
+    // logging of the same request shape on the SCU side.
+    log_event(logger, || {
+        let mut keys: Vec<&str> = filter.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        format!("received C-FIND-RQ (message id {message_id}); query key(s): [{}]", keys.join(", "))
+    });
+
+    let mut match_count = 0usize;
     let final_status = match handlers.on_find(&filter) {
         Ok(studies) => {
+            match_count = studies.len();
             for study in &studies {
                 // SpecificCharacterSet is declared unconditionally (not just when a value
                 // actually needs it) - PS3.5 6.1.2.3's default repertoire (used when this is
@@ -472,6 +547,8 @@ fn handle_find(
         }
     };
 
+    log_event(logger, || format!("sending C-FIND-RSP: {match_count} match(es), final status=0x{final_status:04X}"));
+
     let final_response = InMemDicomObject::command_from_element_iter([
         DataElement::new(tags::AFFECTED_SOP_CLASS_UID, VR::UI, dicom_value!(Str, affected_sop_class_uid)),
         DataElement::new(tags::COMMAND_FIELD, VR::US, dicom_value!(U16, [0x8020])),
@@ -489,6 +566,7 @@ fn handle_move(
     initial_pdata: &[PDataValue],
     negotiated_ts: &TransferSyntax,
     handlers: &dyn ScpHandlers,
+    logger: Option<&dyn DimseLogger>,
 ) -> Result<(), ()> {
     let message_id = command_u16(command, tags::MESSAGE_ID);
     let affected_sop_class_uid = command_str(command, tags::AFFECTED_SOP_CLASS_UID).unwrap_or_default();
@@ -497,6 +575,10 @@ fn handle_move(
     let identifier_bytes = resolve_data(association, initial_pdata)?;
     let identifier = InMemDicomObject::read_dataset_with_ts(identifier_bytes.as_slice(), negotiated_ts).map_err(|_| ())?;
     let study_instance_uid = element_str(&identifier, tags::STUDY_INSTANCE_UID).unwrap_or_default();
+
+    log_event(logger, || {
+        format!("received C-MOVE-RQ (message id {message_id}): study {study_instance_uid} -> move destination AE {move_destination}")
+    });
 
     let status: u16 = if study_instance_uid.is_empty() {
         // 0x0120: "Missing Attribute" (PS3.7 Annex C, general status - no StudyInstanceUID given).
@@ -517,6 +599,8 @@ fn handle_move(
             }
         }
     };
+
+    log_event(logger, || format!("sending C-MOVE-RSP: status=0x{status:04X}"));
 
     let response = InMemDicomObject::command_from_element_iter([
         DataElement::new(tags::AFFECTED_SOP_CLASS_UID, VR::UI, dicom_value!(Str, affected_sop_class_uid)),
