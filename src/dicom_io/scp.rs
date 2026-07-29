@@ -1,7 +1,7 @@
 //! Native DICOM Upper Layer / DIMSE service class **provider** (SCP): a listener accepting
 //! inbound associations and answering C-ECHO, C-STORE, C-FIND, and C-MOVE requests. Handles
 //! association negotiation and C-ECHO/C-STORE entirely in Rust; C-FIND and C-MOVE (which need
-//! to query/queue against GENERICAE's own HTTP API) and "association complete" (which needs to
+//! to query/queue against the host application's own HTTP API) and "association complete" (which needs to
 //! POST the studies just stored) are delegated to a caller-supplied [`ScpHandlers`]
 //! implementation, kept deliberately free of any napi/JS awareness here - the node bindings
 //! crate is what adapts a JS callback into this trait.

@@ -63,7 +63,7 @@ print_usage() {
     cat << EOF
 Usage: $0 [VERSION]
 
-Downloads and installs dcmnorm from GitHub releases into ./bin.
+Downloads and installs dcmnorm and dcmtalk from GitHub releases into ./bin.
 
 Arguments:
     VERSION       Version to install (default: latest GitHub release)
@@ -96,66 +96,73 @@ if [ "$VERSION" != "latest" ] && version_lt "$VERSION" "$MIN_SUPPORTED_VERSION";
 fi
 
 if [ "$VERSION" = "latest" ]; then
-    echo "Installing latest dcmnorm for $PLATFORM to $INSTALL_DIR"
+    echo "Installing latest dcmnorm and dcmtalk for $PLATFORM to $INSTALL_DIR"
 else
-    echo "Installing dcmnorm v$VERSION for $PLATFORM to $INSTALL_DIR"
+    echo "Installing dcmnorm and dcmtalk v$VERSION for $PLATFORM to $INSTALL_DIR"
 fi
 
 # Create installation directory
 mkdir -p "$INSTALL_DIR"
 
-# Create temporary directory
-TEMP_DIR=$(mktemp -d)
-trap "rm -rf $TEMP_DIR" EXIT
+BINARIES="dcmnorm dcmtalk"
 
-# Construct download URL
-if [ "$VERSION" = "latest" ]; then
-    DOWNLOAD_URL="https://github.com/${GITHUB_REPO}/releases/latest/download/dcmnorm-${PLATFORM}.tar.gz"
-else
-    DOWNLOAD_URL="https://github.com/${GITHUB_REPO}/releases/download/v${VERSION}/dcmnorm-${PLATFORM}.tar.gz"
-fi
+for BINARY_NAME in $BINARIES; do
+    # Create temporary directory
+    TEMP_DIR=$(mktemp -d)
+    trap "rm -rf $TEMP_DIR" EXIT
 
-echo "Downloading from: $DOWNLOAD_URL"
-
-# Download the release
-if ! curl -fsSL -o "$TEMP_DIR/dcmnorm.tar.gz" "$DOWNLOAD_URL"; then
+    # Construct download URL
     if [ "$VERSION" = "latest" ]; then
-        echo "Error: Failed to download latest dcmnorm for $PLATFORM" >&2
+        DOWNLOAD_URL="https://github.com/${GITHUB_REPO}/releases/latest/download/${BINARY_NAME}-${PLATFORM}.tar.gz"
     else
-        echo "Error: Failed to download dcmnorm v$VERSION for $PLATFORM" >&2
+        DOWNLOAD_URL="https://github.com/${GITHUB_REPO}/releases/download/v${VERSION}/${BINARY_NAME}-${PLATFORM}.tar.gz"
     fi
-    echo "Check that the version and platform are correct." >&2
-    echo "Available releases: https://github.com/$GITHUB_REPO/releases" >&2
-    exit 1
-fi
 
-# Extract to temporary directory
-cd "$TEMP_DIR"
-tar -xzf dcmnorm.tar.gz
+    echo "Downloading from: $DOWNLOAD_URL"
 
-# Find the binary (dcmnorm projects typically extract to a single binary or dcmnorm/ directory)
-if [ -f "dcmnorm" ]; then
-    # Single binary file
-    cp dcmnorm "$INSTALL_DIR/"
-    chmod 755 "$INSTALL_DIR/dcmnorm"
-    echo "✓ dcmnorm installed to $INSTALL_DIR/dcmnorm"
-elif [ -d "dcmnorm" ]; then
-    # Directory structure
-    cp -r dcmnorm/* "$INSTALL_DIR/"
-    chmod 755 "$INSTALL_DIR/dcmnorm" 2>/dev/null || true
-    echo "✓ dcmnorm installed to $INSTALL_DIR/"
-else
-    echo "Error: Could not find dcmnorm binary in extracted archive" >&2
-    echo "Archive contents:" >&2
-    tar -tzf "$TEMP_DIR/dcmnorm.tar.gz" | head -20
-    exit 1
-fi
+    # Download the release
+    if ! curl -fsSL -o "$TEMP_DIR/${BINARY_NAME}.tar.gz" "$DOWNLOAD_URL"; then
+        if [ "$VERSION" = "latest" ]; then
+            echo "Error: Failed to download latest ${BINARY_NAME} for $PLATFORM" >&2
+        else
+            echo "Error: Failed to download ${BINARY_NAME} v$VERSION for $PLATFORM" >&2
+        fi
+        echo "Check that the version and platform are correct." >&2
+        echo "Available releases: https://github.com/$GITHUB_REPO/releases" >&2
+        exit 1
+    fi
+
+    # Extract to temporary directory
+    (cd "$TEMP_DIR" && tar -xzf "${BINARY_NAME}.tar.gz")
+
+    # Find the binary (dcmnorm/dcmtalk archives extract to a single binary or a same-named directory)
+    if [ -f "$TEMP_DIR/${BINARY_NAME}" ]; then
+        # Single binary file
+        cp "$TEMP_DIR/${BINARY_NAME}" "$INSTALL_DIR/"
+        chmod 755 "$INSTALL_DIR/${BINARY_NAME}"
+        echo "✓ ${BINARY_NAME} installed to $INSTALL_DIR/${BINARY_NAME}"
+    elif [ -d "$TEMP_DIR/${BINARY_NAME}" ]; then
+        # Directory structure
+        cp -r "$TEMP_DIR/${BINARY_NAME}"/* "$INSTALL_DIR/"
+        chmod 755 "$INSTALL_DIR/${BINARY_NAME}" 2>/dev/null || true
+        echo "✓ ${BINARY_NAME} installed to $INSTALL_DIR/"
+    else
+        echo "Error: Could not find ${BINARY_NAME} binary in extracted archive" >&2
+        echo "Archive contents:" >&2
+        tar -tzf "$TEMP_DIR/${BINARY_NAME}.tar.gz" | head -20
+        exit 1
+    fi
+
+    rm -rf "$TEMP_DIR"
+done
 
 # Verify installation
-if ! dcmnorm --help >/dev/null 2>&1; then
-    echo "Warning: Could not verify installation. Ensure $INSTALL_DIR is in your PATH." >&2
-    echo "  export PATH=\"$INSTALL_DIR:\$PATH\"" >&2
-fi
+for BINARY_NAME in $BINARIES; do
+    if ! "$BINARY_NAME" --help >/dev/null 2>&1; then
+        echo "Warning: Could not verify ${BINARY_NAME} installation. Ensure $INSTALL_DIR is in your PATH." >&2
+        echo "  export PATH=\"$INSTALL_DIR:\$PATH\"" >&2
+    fi
+done
 
 echo ""
 echo "Installation complete!"

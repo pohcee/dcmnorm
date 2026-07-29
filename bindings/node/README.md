@@ -46,35 +46,29 @@ down unless it's caught at the FFI boundary.
 
 ## Packaging
 
-This is consumed entirely within the parent monorepo via `file:` references
-(`shared-client` depends on `file:../dcmnorm/bindings/node`, the same pattern
-edge services use for `shared-client` itself) — not published to any npm
-registry, and not set up with the cross-platform prebuild + `optionalDependencies`
-scheme napi-rs projects typically use for standalone/public distribution
-(sharp, esbuild, swc). There's no need for that machinery here: every consumer
-lives in the same repo at a fixed relative path, exactly like every other local
-`file:` dependency in this project.
+This isn't published to any npm registry, and isn't set up with the
+cross-platform prebuild + `optionalDependencies` scheme napi-rs projects
+typically use for standalone/public distribution (sharp, esbuild, swc).
+Consumers are expected to pull it in via a `file:` reference to this
+directory (e.g. a submodule checked out at a fixed relative path) rather than
+installing from a registry.
 
-**Any service that needs this transitively through `shared-client` (i.e. via
-`shared-client/dicom`) must also list `@pohcee/dcmnorm-node` as its own direct
-`file:` dependency** (see edge/insert or edge/find-dicom's package.json) — this
-looks redundant with shared-client's own dependency on it, but it isn't: the
-edge services' Docker builder stage installs with `npm install --install-links`
-(see Docker.tmpl) so the final image doesn't need symlinks back into the
-source tree, and `--install-links` does not correctly re-resolve a `file:`
-dependency's *own* relative `file:` dependency after hard-copying it — it was
-observed trying to read `node_modules/dcmnorm/bindings/node/package.json`
-(relative to the copy's new location) instead of the real path. A plain
-(non-`--install-links`) `npm install`, like every local dev/test flow in this
-repo uses, resolves the nested reference fine via symlinks - the bug is
-specific to `--install-links`. Verified end-to-end against the actual
-Docker.tmpl builder stage; if a future npm version fixes this, the direct
-dependency becomes harmless-but-unnecessary duplication rather than something
-required for correctness.
+**Watch out for `npm install --install-links`:** it hard-copies `file:`
+dependencies instead of symlinking them, and it does not correctly re-resolve
+a `file:` dependency's *own* relative `file:` dependency after hard-copying
+it — it can end up trying to read this package's `package.json` relative to
+the copy's new location instead of the real path. A plain (non-`--install-links`)
+`npm install` resolves a nested `file:` reference fine via symlinks - the bug
+is specific to `--install-links`. If a consumer's install uses that flag and
+only depends on this package transitively (through another local package),
+list it as a direct `file:` dependency too so npm resolves it directly
+instead of transitively; if a future npm version fixes the underlying bug,
+the direct dependency becomes harmless-but-unnecessary duplication rather
+than something required for correctness.
 
 The compiled `dcmnorm-node.linux-x64-gnu.node` binary **is committed** to this
-repo (see `.gitignore`) rather than built at Docker-image time, since the
-service Dockerfiles' builder stage is plain `node:22-slim` with no Rust
+repo (see `.gitignore`) rather than built at Docker-image time, since a
+consumer's Docker builder stage may be plain `node:22-slim` with no Rust
 toolchain. `npm run build:docker` (`build-in-docker.sh`) builds it inside a
 `node:22-slim` container rather than on the host, specifically to match that
 image's glibc — building on an arbitrary host risks a `GLIBC_X.XX not found`

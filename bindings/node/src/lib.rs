@@ -545,7 +545,7 @@ impl Task for EchoScuTask {
             dcm_echo_scu(
                 &self.destination,
                 DcmEchoScuOptions {
-                    calling_ae_title: self.options.calling_ae_title.clone().unwrap_or_else(|| "GENERICAE".to_owned()),
+                    calling_ae_title: self.options.calling_ae_title.clone().unwrap_or_else(|| "DCMNORM".to_owned()),
                     called_ae_title: self.options.called_ae_title.clone(),
                     timeout: self.options.timeout_ms.map(|ms| Duration::from_millis(ms as u64)),
                     on_log: dimse_logger(self.on_log.take()),
@@ -615,7 +615,7 @@ pub fn start_echo_scu(
     let options = options.unwrap_or_default();
     let cancel = CancelSignal::new();
     let cancel_for_call = cancel.clone();
-    let calling_ae_title = options.calling_ae_title.unwrap_or_else(|| "GENERICAE".to_owned());
+    let calling_ae_title = options.calling_ae_title.unwrap_or_else(|| "DCMNORM".to_owned());
     let called_ae_title = options.called_ae_title;
     let timeout = options.timeout_ms.map(|ms| Duration::from_millis(ms as u64));
     let logger = dimse_logger(on_log);
@@ -667,7 +667,7 @@ impl Task for StoreScuTask {
                 &self.destination,
                 &self.files,
                 DcmStoreScuOptions {
-                    calling_ae_title: self.options.calling_ae_title.clone().unwrap_or_else(|| "GENERICAE".to_owned()),
+                    calling_ae_title: self.options.calling_ae_title.clone().unwrap_or_else(|| "DCMNORM".to_owned()),
                     called_ae_title: self.options.called_ae_title.clone(),
                     max_pdu_length: self.options.max_pdu_length.unwrap_or(16384),
                     never_transcode: self.options.never_transcode.unwrap_or(false),
@@ -753,7 +753,7 @@ pub fn start_store_scu(
     let files: Vec<PathBuf> = files.into_iter().map(PathBuf::from).collect();
     let cancel = CancelSignal::new();
     let cancel_for_call = cancel.clone();
-    let calling_ae_title = options.calling_ae_title.unwrap_or_else(|| "GENERICAE".to_owned());
+    let calling_ae_title = options.calling_ae_title.unwrap_or_else(|| "DCMNORM".to_owned());
     let called_ae_title = options.called_ae_title;
     let max_pdu_length = options.max_pdu_length.unwrap_or(16384);
     let never_transcode = options.never_transcode.unwrap_or(false);
@@ -812,7 +812,7 @@ impl Task for FindScuTask {
                 &self.destination,
                 &self.query,
                 DcmFindScuOptions {
-                    calling_ae_title: self.options.calling_ae_title.clone().unwrap_or_else(|| "GENERICAE".to_owned()),
+                    calling_ae_title: self.options.calling_ae_title.clone().unwrap_or_else(|| "DCMNORM".to_owned()),
                     called_ae_title: self.options.called_ae_title.clone(),
                     max_pdu_length: self.options.max_pdu_length.unwrap_or(16384),
                     timeout: self.options.timeout_ms.map(|ms| Duration::from_millis(ms as u64)),
@@ -889,7 +889,7 @@ pub fn start_find_scu(
     let options = options.unwrap_or_default();
     let cancel = CancelSignal::new();
     let cancel_for_call = cancel.clone();
-    let calling_ae_title = options.calling_ae_title.unwrap_or_else(|| "GENERICAE".to_owned());
+    let calling_ae_title = options.calling_ae_title.unwrap_or_else(|| "DCMNORM".to_owned());
     let called_ae_title = options.called_ae_title;
     let max_pdu_length = options.max_pdu_length.unwrap_or(16384);
     let timeout = options.timeout_ms.map(|ms| Duration::from_millis(ms as u64));
@@ -992,7 +992,7 @@ pub fn move_scu(
     let options = options.unwrap_or_default();
     let cancel = CancelSignal::new();
     let cancel_for_call = cancel.clone();
-    let calling_ae_title = options.calling_ae_title.unwrap_or_else(|| "GENERICAE".to_owned());
+    let calling_ae_title = options.calling_ae_title.unwrap_or_else(|| "DCMNORM".to_owned());
     let called_ae_title = options.called_ae_title;
     let max_pdu_length = options.max_pdu_length.unwrap_or(16384);
     let timeout = options.timeout_ms.map(|ms| Duration::from_millis(ms as u64));

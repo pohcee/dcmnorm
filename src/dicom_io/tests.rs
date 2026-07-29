@@ -2071,7 +2071,7 @@ fn move_scu_collects_suboperation_progress_until_terminal_status() {
         let message_id = dimse_message_id(&request);
         assert_eq!(
             request.element(tags::MOVE_DESTINATION).unwrap().to_str().unwrap(),
-            "GENERICAE",
+            "MOVE-DEST",
         );
 
         let pending = InMemDicomObject::command_from_element_iter([
@@ -2103,7 +2103,7 @@ fn move_scu_collects_suboperation_progress_until_terminal_status() {
 
     let result = move_scu(
         &addr.to_string(),
-        "GENERICAE",
+        "MOVE-DEST",
         "1.2.3.4.5",
         MoveScuOptions {
             calling_ae_title: "TEST-SCU".to_owned(),
@@ -2177,7 +2177,7 @@ fn move_scu_drains_failed_sop_instance_uid_list_sent_as_separate_pdu() {
 
     let result = move_scu(
         &addr.to_string(),
-        "GENERICAE",
+        "MOVE-DEST",
         "1.2.3.4.5",
         MoveScuOptions {
             calling_ae_title: "TEST-SCU".to_owned(),
@@ -2257,7 +2257,7 @@ fn move_scu_still_returns_the_terminal_result_when_the_peer_does_not_send_releas
 
     let result = move_scu(
         &addr.to_string(),
-        "GENERICAE",
+        "MOVE-DEST",
         "1.2.3.4.5",
         MoveScuOptions {
             calling_ae_title: "TEST-SCU".to_owned(),
@@ -2334,7 +2334,7 @@ fn move_scu_aborts_on_absolute_timeout_despite_continued_pending_responses() {
 
     let result = move_scu(
         &addr.to_string(),
-        "GENERICAE",
+        "MOVE-DEST",
         "1.2.3.4.5",
         MoveScuOptions {
             calling_ae_title: "TEST-SCU".to_owned(),
@@ -2412,7 +2412,7 @@ fn move_scu_aborts_when_stale_data_path_receives_no_new_files() {
 
     let result = move_scu(
         &addr.to_string(),
-        "GENERICAE",
+        "MOVE-DEST",
         "1.2.3.4.5",
         MoveScuOptions {
             calling_ae_title: "TEST-SCU".to_owned(),
@@ -2497,7 +2497,7 @@ fn move_scu_returns_cancelled_result_when_signalled_mid_wait() {
 
     let result = move_scu(
         &addr.to_string(),
-        "GENERICAE",
+        "MOVE-DEST",
         "1.2.3.4.5",
         MoveScuOptions {
             calling_ae_title: "TEST-SCU".to_owned(),
@@ -2554,7 +2554,7 @@ fn move_scu_hard_aborts_immediately_when_cancel_mode_is_abort() {
     let started = std::time::Instant::now();
     let result = move_scu(
         &addr.to_string(),
-        "GENERICAE",
+        "MOVE-DEST",
         "1.2.3.4.5",
         MoveScuOptions {
             calling_ae_title: "TEST-SCU".to_owned(),
@@ -2896,7 +2896,7 @@ fn scp_round_trips_echo_store_find_move_against_the_scu_functions() {
     // C-MOVE
     let move_result = move_scu(
         &destination,
-        "GENERICAE",
+        "MOVE-DEST",
         "1.2.3.4.5",
         MoveScuOptions {
             calling_ae_title: "TEST-SCU".to_owned(),
@@ -2912,7 +2912,7 @@ fn scp_round_trips_echo_store_find_move_against_the_scu_functions() {
     .unwrap();
     assert_eq!(move_result.status, 0);
     let move_calls = handlers.move_calls.lock().unwrap().clone();
-    assert_eq!(move_calls, vec![("1.2.3.4.5".to_owned(), "GENERICAE".to_owned())]);
+    assert_eq!(move_calls, vec![("1.2.3.4.5".to_owned(), "MOVE-DEST".to_owned())]);
 
     // Association-complete fires after the C-STORE association's release completes, which can
     // race this test observing it - poll rather than assume synchronous completion.
@@ -2987,9 +2987,9 @@ fn scp_on_log_reports_association_negotiation_and_per_message_detail() {
     assert!(joined.contains("released"), "missing association-release log, got: {joined}");
 }
 
-/// Regression coverage for a production incident (2026-07-28, customer sb-st98vv4a-1): a source
-/// PACS reported an in-progress C-MOVE and, separately, claimed (via its own UI) to have stored an
-/// instance - but This project's own insert queue showed no evidence any instance was ever received.
+/// Regression coverage for a production incident: a source PACS reported an in-progress C-MOVE
+/// and, separately, claimed (via its own UI) to have stored an instance - but the receiving
+/// application's own insert queue showed no evidence any instance was ever received.
 /// Diagnosing it required correlating dimse's C-STORE-RQ logging (a StudyInstanceUID, once known)
 /// against separately-visible association accept/negotiate/release lines by hand, across several
 /// interleaved associations from the same peer. Asserts the StudyInstanceUID is logged as soon as
