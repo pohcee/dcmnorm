@@ -189,13 +189,39 @@ else
     echo "Kakadu headers/libs not detected; installing exec crates with default codec features only"
 fi
 
+get_existing_version() {
+    local bin="$1"
+    local install_dir="$2"
+    if [[ -x "$install_dir/$bin" ]]; then
+        "$install_dir/$bin" --version 2>/dev/null || true
+    elif [[ -x "${HOME}/.cargo/bin/$bin" ]]; then
+        "${HOME}/.cargo/bin/$bin" --version 2>/dev/null || true
+    elif command -v "$bin" >/dev/null 2>&1; then
+        "$(command -v "$bin")" --version 2>/dev/null || true
+    fi
+}
+
 found_any=0
 
 while IFS= read -r manifest; do
     found_any=1
     package_dir="$(dirname "$manifest")"
+    bin_name="$(basename "$package_dir")"
+    old_version="$(get_existing_version "$bin_name" "$INSTALL_ROOT/bin")"
+
     echo "Installing crate from $package_dir into $INSTALL_ROOT/bin"
     cargo install --path "$package_dir" --root "$INSTALL_ROOT" "${install_args[@]}"
+
+    new_version=""
+    if [[ -x "$INSTALL_ROOT/bin/$bin_name" ]]; then
+        new_version="$("$INSTALL_ROOT/bin/$bin_name" --version 2>/dev/null || true)"
+    fi
+
+    if [[ -n "$old_version" ]]; then
+        echo "✓ $bin_name installed to $INSTALL_ROOT/bin (previous: ${old_version}, new: ${new_version:-new build})"
+    else
+        echo "✓ $bin_name installed to $INSTALL_ROOT/bin (version: ${new_version:-new build})"
+    fi
 done < <(find "$repo_root/exec" -mindepth 2 -maxdepth 2 -name Cargo.toml | sort)
 
 if [[ "$found_any" -eq 0 ]]; then

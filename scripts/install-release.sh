@@ -107,7 +107,21 @@ mkdir -p "$INSTALL_DIR"
 
 BINARIES="dcmnorm dcmtalk"
 
+get_existing_version() {
+    target_bin="$1"
+    target_dir="$2"
+    if [ -x "$target_dir/$target_bin" ]; then
+        "$target_dir/$target_bin" --version 2>/dev/null || true
+    elif [ -x "${HOME}/.cargo/bin/$target_bin" ]; then
+        "${HOME}/.cargo/bin/$target_bin" --version 2>/dev/null || true
+    elif command -v "$target_bin" >/dev/null 2>&1; then
+        "$(command -v "$target_bin")" --version 2>/dev/null || true
+    fi
+}
+
 for BINARY_NAME in $BINARIES; do
+    OLD_VERSION="$(get_existing_version "$BINARY_NAME" "$INSTALL_DIR")"
+
     # Create temporary directory
     TEMP_DIR=$(mktemp -d)
     trap "rm -rf $TEMP_DIR" EXIT
@@ -141,17 +155,26 @@ for BINARY_NAME in $BINARIES; do
         # Single binary file
         cp "$TEMP_DIR/${BINARY_NAME}" "$INSTALL_DIR/"
         chmod 755 "$INSTALL_DIR/${BINARY_NAME}"
-        echo "✓ ${BINARY_NAME} installed to $INSTALL_DIR/${BINARY_NAME}"
     elif [ -d "$TEMP_DIR/${BINARY_NAME}" ]; then
         # Directory structure
         cp -r "$TEMP_DIR/${BINARY_NAME}"/* "$INSTALL_DIR/"
         chmod 755 "$INSTALL_DIR/${BINARY_NAME}" 2>/dev/null || true
-        echo "✓ ${BINARY_NAME} installed to $INSTALL_DIR/"
     else
         echo "Error: Could not find ${BINARY_NAME} binary in extracted archive" >&2
         echo "Archive contents:" >&2
         tar -tzf "$TEMP_DIR/${BINARY_NAME}.tar.gz" | head -20
         exit 1
+    fi
+
+    NEW_VERSION=""
+    if [ -x "$INSTALL_DIR/$BINARY_NAME" ]; then
+        NEW_VERSION="$("$INSTALL_DIR/$BINARY_NAME" --version 2>/dev/null || true)"
+    fi
+
+    if [ -n "$OLD_VERSION" ]; then
+        echo "✓ ${BINARY_NAME} installed to $INSTALL_DIR (previous: ${OLD_VERSION}, new: ${NEW_VERSION:-v$VERSION})"
+    else
+        echo "✓ ${BINARY_NAME} installed to $INSTALL_DIR (version: ${NEW_VERSION:-v$VERSION})"
     fi
 
     rm -rf "$TEMP_DIR"
