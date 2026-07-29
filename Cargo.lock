@@ -416,6 +416,7 @@ version = "0.1.36"
 dependencies = [
  "clap",
  "dcmnorm",
+ "sha2",
 ]
 
 [[package]]

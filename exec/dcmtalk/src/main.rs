@@ -4,12 +4,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use clap::{ArgAction, Args, Parser, Subcommand};
+use clap::{ArgAction, Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 use dcmnorm::dicom_io::{
     echo_scu, find_scu, move_scu, start_scp, store_scu, DimseLogger, EchoScuOptions,
     FindScuOptions, MoveScuOptions, MoveScuResult, ScpHandlers, ScpOptions, StoreScuOptions,
     StoreScuResult,
 };
+use sha2::{Digest, Sha256};
 
 /// Classic DICOM default proposed/accepted PDU length, matching dcmtk's SCU tools' own default.
 const DEFAULT_SCU_MAX_PDU: u32 = 16_384;
@@ -20,7 +21,6 @@ const DEFAULT_AE_TITLE: &str = "DCMTALK";
 
 #[derive(Parser)]
 #[command(name = "dcmtalk")]
-#[command(version)]
 #[command(about = "DICOM network (DIMSE) client/server: verify, send, query, retrieve, and receive")]
 #[command(long_about = "A DIMSE command-line tool covering the same ground as dcmtk's echoscu/storescu/findscu/movescu/storescp, built on dcmnorm's native (non-dcmtk) DICOM Upper Layer implementation. Every subcommand accepts --verbose to log association negotiation, presentation contexts, and each DIMSE command/response exchanged.")]
 struct Cli {
@@ -170,11 +170,40 @@ fn logger_arc(verbose: bool) -> Option<Arc<dyn DimseLogger>> {
 }
 
 fn main() {
-    let cli = Cli::parse();
+    let version_with_hash = cli_version_with_binary_hash();
+    let version_static: &'static str = Box::leak(version_with_hash.into_boxed_str());
+    let matches = Cli::command().version(version_static).get_matches();
+    let cli = Cli::from_arg_matches(&matches).expect("clap generated invalid matches");
+
     if let Err(error) = run(cli.command) {
         eprintln!("dcmtalk: {error}");
         std::process::exit(1);
     }
+}
+
+fn cli_version_with_binary_hash() -> String {
+    let base_version = env!("CARGO_PKG_VERSION");
+    match running_binary_sha256_prefix(12) {
+        Some(hash_prefix) => format!("{base_version}-{hash_prefix}"),
+        None => base_version.to_string(),
+    }
+}
+
+fn running_binary_sha256_prefix(prefix_len: usize) -> Option<String> {
+    let exe_path = std::env::current_exe().ok()?;
+    let exe_bytes = std::fs::read(exe_path).ok()?;
+
+    let mut hasher = Sha256::new();
+    hasher.update(&exe_bytes);
+    let digest = hasher.finalize();
+
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write as _;
+        write!(&mut hex, "{byte:02x}").ok()?;
+    }
+
+    Some(hex.chars().take(prefix_len).collect())
 }
 
 fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
