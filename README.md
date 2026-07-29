@@ -6,7 +6,7 @@ This repository contains:
 
 - `dcmnorm`: a library crate with DICOM file, memory, JSON conversion, and DIMSE network helpers
 - `exec/dcmnorm`: a CLI for converting between DICOM, transcoded DICOM, JSON, and rendered images/raw frames
-- `exec/dcmtalk`: a DIMSE network CLI (C-ECHO/C-STORE/C-FIND/C-MOVE SCU plus a storage SCP), covering the same ground as dcmtk's `echoscu`/`storescu`/`findscu`/`movescu`/`storescp`
+- `exec/dcmtalk`: a DIMSE network CLI (C-ECHO/C-STORE/C-FIND/C-MOVE SCU plus a storage SCP), covering the same ground as [dcmtk](https://dcmtk.org/)'s `echoscu`/`storescu`/`findscu`/`movescu`/`storescp`
 
 ## Workspace Layout
 
@@ -637,9 +637,9 @@ If Kakadu FFI is not enabled or Kakadu is unavailable, the OpenJPEG-based path r
 
 ## dcmtalk CLI Usage
 
-`dcmtalk` is a DIMSE (DICOM network) client/server covering the same ground as dcmtk's
+`dcmtalk` is a DIMSE (DICOM network) client/server covering the same ground as [dcmtk](https://dcmtk.org/)'s
 `echoscu`/`storescu`/`findscu`/`movescu`/`storescp`, built on this repository's own DICOM
-Upper Layer implementation (no dcmtk dependency).
+Upper Layer implementation (no [dcmtk](https://dcmtk.org/) dependency).
 
 Get the full option reference from either help form, for the tool itself or any subcommand:
 
@@ -728,3 +728,15 @@ For JSON to DICOM, `dcmnorm` defaults to:
 
 - flattened JSON input
 - optional `--bulk-data-source` when resolving `BulkDataURI`
+
+## Thanks
+
+This workspace is built on the [DICOM-rs](https://github.com/Enet4/dicom-rs) project's Rust
+DICOM crates (`dicom-core`, `dicom-object`, `dicom-ul`, and others) for DICOM parsing, encoding,
+and the Upper Layer/association protocol.
+
+`exec/dcmtalk`'s subcommands (`echoscu`/`storescu`/`findscu`/`movescu`/`storescp`) follow the
+naming and behavior established by [DCMTK](https://dcmtk.org/), the long-standing reference
+DICOM toolkit.
+
+Thanks to both projects and their maintainers.
