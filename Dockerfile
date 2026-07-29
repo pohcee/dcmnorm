@@ -24,8 +24,8 @@ WORKDIR /usr/src/dcmnorm
 
 COPY . .
 
-RUN cargo build -p dcmnorm-cli --release \
-    && strip target/release/dcmnorm
+RUN cargo build -p dcmnorm-cli -p dcmtalk --release \
+    && strip target/release/dcmnorm target/release/dcmtalk
 
 FROM debian:bookworm-slim
 
@@ -39,5 +39,8 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /usr/src/dcmnorm/target/release/dcmnorm /usr/local/bin/dcmnorm
+COPY --from=builder /usr/src/dcmnorm/target/release/dcmtalk /usr/local/bin/dcmtalk
 
+# dcmnorm remains the default entrypoint for backward compatibility; run dcmtalk (echoscu/
+# storescu/findscu/movescu/storescp) with `docker run --rm --entrypoint dcmtalk <image> ...`.
 ENTRYPOINT ["dcmnorm"]

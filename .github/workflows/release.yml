@@ -1,4 +1,4 @@
-name: Build and Release CLI
+name: Build and Release CLIs
 
 on:
   push:
@@ -13,9 +13,6 @@ jobs:
   release:
     name: Build and publish release
     runs-on: ubuntu-latest
-    env:
-      BINARY_NAME: dcmnorm
-      PACKAGE_NAME: dcmnorm-cli
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -41,11 +38,11 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Build release binary
+      - name: Build release binaries
         shell: bash
         run: |
           set -euo pipefail
-          cargo build --package "$PACKAGE_NAME" --release
+          cargo build --package dcmnorm-cli --package dcmtalk --release
 
       - name: Package release artifacts
         id: package
@@ -53,33 +50,36 @@ jobs:
         run: |
           set -euo pipefail
           TAG="${GITHUB_REF_NAME}"
-          ARCHIVE="${BINARY_NAME}-${TAG}-linux-x86_64.tar.gz"
-          CHECKSUM="${ARCHIVE}.sha256"
-          LATEST_ARCHIVE="${BINARY_NAME}-linux-x86_64.tar.gz"
-          LATEST_CHECKSUM="${LATEST_ARCHIVE}.sha256"
-
           mkdir -p dist
-          cp "target/release/${BINARY_NAME}" dist/
-          cp README.md dist/
-          cp LICENSE dist/
 
-          tar -C dist -czf "$ARCHIVE" "${BINARY_NAME}" README.md LICENSE
-          sha256sum "$ARCHIVE" > "$CHECKSUM"
+          FILES=()
+          for BINARY_NAME in dcmnorm dcmtalk; do
+            ARCHIVE="${BINARY_NAME}-${TAG}-linux-x86_64.tar.gz"
+            CHECKSUM="${ARCHIVE}.sha256"
+            LATEST_ARCHIVE="${BINARY_NAME}-linux-x86_64.tar.gz"
+            LATEST_CHECKSUM="${LATEST_ARCHIVE}.sha256"
 
-          cp "$ARCHIVE" "$LATEST_ARCHIVE"
-          sha256sum "$LATEST_ARCHIVE" > "$LATEST_CHECKSUM"
+            cp "target/release/${BINARY_NAME}" dist/
+            cp README.md dist/
+            cp LICENSE dist/
 
-          echo "archive=${ARCHIVE}" >> "$GITHUB_OUTPUT"
-          echo "checksum=${CHECKSUM}" >> "$GITHUB_OUTPUT"
-          echo "latest_archive=${LATEST_ARCHIVE}" >> "$GITHUB_OUTPUT"
-          echo "latest_checksum=${LATEST_CHECKSUM}" >> "$GITHUB_OUTPUT"
+            tar -C dist -czf "$ARCHIVE" "${BINARY_NAME}" README.md LICENSE
+            sha256sum "$ARCHIVE" > "$CHECKSUM"
+
+            cp "$ARCHIVE" "$LATEST_ARCHIVE"
+            sha256sum "$LATEST_ARCHIVE" > "$LATEST_CHECKSUM"
+
+            FILES+=("$ARCHIVE" "$CHECKSUM" "$LATEST_ARCHIVE" "$LATEST_CHECKSUM")
+          done
+
+          {
+            echo "files<<FILES_EOF"
+            printf '%s\n' "${FILES[@]}"
+            echo "FILES_EOF"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
-          files: |
-            ${{ steps.package.outputs.archive }}
-            ${{ steps.package.outputs.checksum }}
-            ${{ steps.package.outputs.latest_archive }}
-            ${{ steps.package.outputs.latest_checksum }}
+          files: ${{ steps.package.outputs.files }}
