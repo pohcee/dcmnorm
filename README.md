@@ -116,12 +116,12 @@ The install script also verifies the default codec toolchain before invoking Car
 For the default build this means `pkg-config`, `clang`, standard C headers, and the
 FFmpeg development packages listed above must already be installed.
 
-This installs the binaries into `/usr/local/bin`.
+This installs the binaries into Cargo's bin directory, usually `~/.cargo/bin`.
 
-If `/usr/local/bin` is not already on your `PATH`, add this to your shell profile:
+If `~/.cargo/bin` is not already on your `PATH`, add this to your shell profile:
 
 ```bash
-export PATH="/usr/local/bin:$PATH"
+export PATH="$HOME/.cargo/bin:$PATH"
 ```
 
 If you prefer not to use `cargo install`, you can still build and copy the release binaries manually.

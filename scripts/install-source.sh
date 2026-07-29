@@ -2,8 +2,6 @@
 
 set -euo pipefail
 
-INSTALL_ROOT="${INSTALL_ROOT:-/usr/local}"
-
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 
 if [[ ! -d "$repo_root/exec" ]]; then
@@ -202,39 +200,30 @@ get_existing_version() {
 }
 
 found_any=0
+bin_dir="${HOME}/.cargo/bin"
 
 while IFS= read -r manifest; do
     found_any=1
     package_dir="$(dirname "$manifest")"
     bin_name="$(basename "$package_dir")"
-    old_version="$(get_existing_version "$bin_name" "$INSTALL_ROOT/bin")"
+    old_version="$(get_existing_version "$bin_name" "$bin_dir")"
 
-    echo "Installing crate from $package_dir into $INSTALL_ROOT/bin"
-    cargo install --path "$package_dir" --root "$INSTALL_ROOT" "${install_args[@]}"
+    echo "Installing crate from $package_dir"
+    cargo install --path "$package_dir" "${install_args[@]}"
 
     new_version=""
-    if [[ -x "$INSTALL_ROOT/bin/$bin_name" ]]; then
-        new_version="$("$INSTALL_ROOT/bin/$bin_name" --version 2>/dev/null || true)"
+    if [[ -x "$bin_dir/$bin_name" ]]; then
+        new_version="$("$bin_dir/$bin_name" --version 2>/dev/null || true)"
     fi
 
     if [[ -n "$old_version" ]]; then
-        echo "✓ $bin_name installed to $INSTALL_ROOT/bin (previous: ${old_version}, new: ${new_version:-new build})"
+        echo "✓ $bin_name installed to $bin_dir (previous: ${old_version}, new: ${new_version:-new build})"
     else
-        echo "✓ $bin_name installed to $INSTALL_ROOT/bin (version: ${new_version:-new build})"
+        echo "✓ $bin_name installed to $bin_dir (version: ${new_version:-new build})"
     fi
 done < <(find "$repo_root/exec" -mindepth 2 -maxdepth 2 -name Cargo.toml | sort)
 
 if [[ "$found_any" -eq 0 ]]; then
     echo "No installable crates found under $repo_root/exec" >&2
     exit 1
-fi
-
-# Clean up legacy binaries in ~/.cargo/bin if installing elsewhere to prevent PATH shadowing
-if [[ "$INSTALL_ROOT/bin" != "${HOME}/.cargo/bin" ]]; then
-    for bin in dcmnorm dcmtalk; do
-        if [[ -f "${HOME}/.cargo/bin/${bin}" ]]; then
-            rm -f "${HOME}/.cargo/bin/${bin}"
-            echo "Removed legacy binary: ${HOME}/.cargo/bin/${bin}"
-        fi
-    done
 fi
