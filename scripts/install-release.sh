@@ -1,4 +1,5 @@
-set -euo pipefail
+#!/bin/sh
+set -eu
 
 INSTALL_DIR="${HOME}/.cargo/bin"
 DEFAULT_VERSION="latest"
@@ -44,8 +45,18 @@ detect_platform() {
 }
 
 version_lt() {
-    # Returns 0 if $1 < $2, otherwise 1
-    [[ "$(printf '%s\n' "$1" "$2" | sort -V | head -n 1)" != "$2" ]]
+    # Returns 0 (true) if $1 < $2, otherwise 1. Pure POSIX; avoids GNU-only `sort -V`.
+    awk -v a="$1" -v b="$2" '
+        BEGIN {
+            n = split(a, A, ".")
+            split(b, B, ".")
+            for (i = 1; i <= n; i++) {
+                if ((A[i]+0) < (B[i]+0)) exit 0
+                if ((A[i]+0) > (B[i]+0)) exit 1
+            }
+            exit 1
+        }
+    '
 }
 
 print_usage() {
@@ -69,7 +80,7 @@ EOF
 }
 
 # Show help if requested
-if [[ "${1:-}" == "-h" ]] || [[ "${1:-}" == "--help" ]]; then
+if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
     print_usage
     exit 0
 fi
@@ -78,13 +89,13 @@ fi
 PLATFORM="${DCMNORM_PLATFORM:-$(detect_platform)}"
 
 # Validate explicitly requested versions
-if [[ "$VERSION" != "latest" ]] && version_lt "$VERSION" "$MIN_SUPPORTED_VERSION"; then
+if [ "$VERSION" != "latest" ] && version_lt "$VERSION" "$MIN_SUPPORTED_VERSION"; then
     echo "Error: Minimum supported explicit version is ${MIN_SUPPORTED_VERSION}." >&2
     echo "Use 'latest' or specify a version >= ${MIN_SUPPORTED_VERSION}." >&2
     exit 1
 fi
 
-if [[ "$VERSION" == "latest" ]]; then
+if [ "$VERSION" = "latest" ]; then
     echo "Installing latest dcmnorm for $PLATFORM to $INSTALL_DIR"
 else
     echo "Installing dcmnorm v$VERSION for $PLATFORM to $INSTALL_DIR"
@@ -98,7 +109,7 @@ TEMP_DIR=$(mktemp -d)
 trap "rm -rf $TEMP_DIR" EXIT
 
 # Construct download URL
-if [[ "$VERSION" == "latest" ]]; then
+if [ "$VERSION" = "latest" ]; then
     DOWNLOAD_URL="https://github.com/${GITHUB_REPO}/releases/latest/download/dcmnorm-${PLATFORM}.tar.gz"
 else
     DOWNLOAD_URL="https://github.com/${GITHUB_REPO}/releases/download/v${VERSION}/dcmnorm-${PLATFORM}.tar.gz"
@@ -108,7 +119,7 @@ echo "Downloading from: $DOWNLOAD_URL"
 
 # Download the release
 if ! curl -fsSL -o "$TEMP_DIR/dcmnorm.tar.gz" "$DOWNLOAD_URL"; then
-    if [[ "$VERSION" == "latest" ]]; then
+    if [ "$VERSION" = "latest" ]; then
         echo "Error: Failed to download latest dcmnorm for $PLATFORM" >&2
     else
         echo "Error: Failed to download dcmnorm v$VERSION for $PLATFORM" >&2
