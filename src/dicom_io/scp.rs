@@ -293,7 +293,21 @@ fn handle_association(stream: TcpStream, cache_path: &Path, handlers: &dyn ScpHa
         }
     }
 
-    if !stored_instances_by_study.is_empty() {
+    if stored_instances_by_study.is_empty() {
+        // Deliberately explicit rather than just an absence of "received C-STORE-RQ" lines - an
+        // association that connects, negotiates presentation contexts, and releases/aborts
+        // without ever sending a C-STORE is easy to miss when scanning logs by eye, and looks
+        // identical to a real C-STORE whose own logging got lost - this line rules that out.
+        log_event(logger, || format!("association with {peer} ended with no C-STORE received"));
+    } else {
+        log_event(logger, || {
+            let total_instances: usize = stored_instances_by_study.values().map(Vec::len).sum();
+            let study_count = stored_instances_by_study.len();
+            format!(
+                "association with {peer} stored {total_instances} instance(s) across {study_count} stud{} before ending",
+                if study_count == 1 { "y" } else { "ies" }
+            )
+        });
         handlers.on_association_complete(&stored_instances_by_study);
     }
 }
@@ -340,10 +354,13 @@ fn send_data(association: &mut ServerAssociation<TcpStream>, pc_id: u8, data: Ve
         .map_err(|_| ())
 }
 
-fn receive_data(association: &mut ServerAssociation<TcpStream>) -> Result<Vec<u8>, ()> {
+fn receive_data(association: &mut ServerAssociation<TcpStream>, logger: Option<&dyn DimseLogger>) -> Result<Vec<u8>, ()> {
     let mut reader = association.receive_pdata();
     let mut buffer = Vec::new();
-    reader.read_to_end(&mut buffer).map_err(|_| ())?;
+    if let Err(error) = reader.read_to_end(&mut buffer) {
+        log_event(logger, || format!("failed to receive C-STORE dataset PDU(s): {error}"));
+        return Err(());
+    }
     Ok(buffer)
 }
 
@@ -352,10 +369,14 @@ fn receive_data(association: &mut ServerAssociation<TcpStream>) -> Result<Vec<u8
 /// both PDataValues into one PDU - see `store_scu`'s combined-PDU path), or sent as its own
 /// separate PDU(s) afterward (read here via `receive_pdata()`, which transparently reassembles
 /// a data set split across multiple PDU fragments).
-fn resolve_data(association: &mut ServerAssociation<TcpStream>, initial_pdata: &[PDataValue]) -> Result<Vec<u8>, ()> {
+fn resolve_data(
+    association: &mut ServerAssociation<TcpStream>,
+    initial_pdata: &[PDataValue],
+    logger: Option<&dyn DimseLogger>,
+) -> Result<Vec<u8>, ()> {
     match initial_pdata.get(1) {
         Some(data_pdv) => Ok(data_pdv.data.clone()),
-        None => receive_data(association),
+        None => receive_data(association, logger),
     }
 }
 
@@ -395,18 +416,30 @@ fn handle_store(
 
     log_event(logger, || format!("received C-STORE-RQ: SOP instance {affected_sop_instance_uid}"));
 
-    let dataset_bytes = resolve_data(association, initial_pdata)?;
-    let status = store_received_dataset(
+    let dataset_bytes = resolve_data(association, initial_pdata, logger)?;
+    let status = match store_received_dataset(
         &dataset_bytes,
         negotiated_ts,
         &affected_sop_class_uid,
         &affected_sop_instance_uid,
         cache_path,
         stored_instances_by_study,
-    )
-    // 0xC000: "Processing failure" (PS3.7 Annex C, generic non-specific failure) - matches the
-    // Status this SCP's predecessor (dcmjs-dimse) used for any C-STORE write failure.
-    .unwrap_or(0xC000);
+        logger,
+    ) {
+        Ok(status) => status,
+        // Previously silently discarded via `.unwrap_or(0xC000)` - this is the actual answer to
+        // "why did this instance fail" (a bad transfer syntax, a file write/permission error, a
+        // missing/malformed StudyInstanceUID, etc.), not just the generic 0xC000 status sent back
+        // to the peer.
+        Err(error) => {
+            log_event(logger, || {
+                format!("failed to store C-STORE dataset for SOP instance {affected_sop_instance_uid}: {error}")
+            });
+            // 0xC000: "Processing failure" (PS3.7 Annex C, generic non-specific failure) - matches
+            // the Status this SCP's predecessor (dcmjs-dimse) used for any C-STORE write failure.
+            0xC000
+        }
+    };
 
     log_event(logger, || format!("sending C-STORE-RSP: status=0x{status:04X}"));
 
@@ -428,10 +461,17 @@ fn store_received_dataset(
     affected_sop_instance_uid: &str,
     cache_path: &Path,
     stored_instances_by_study: &mut HashMap<String, Vec<String>>,
+    logger: Option<&dyn DimseLogger>,
 ) -> Result<u16, Box<dyn std::error::Error>> {
     let dataset = InMemDicomObject::read_dataset_with_ts(dataset_bytes, negotiated_ts)?;
     let study_instance_uid = element_str(&dataset, tags::STUDY_INSTANCE_UID).unwrap_or_default();
     let modality = element_str(&dataset, tags::MODALITY).unwrap_or_else(|| "UN".to_owned());
+    // Logged as soon as the dataset is parsed (not at C-STORE-RQ command time, above in
+    // handle_store - the StudyInstanceUID lives in the dataset itself, not the command set, so
+    // it isn't known until here) - lets an association's accept/negotiate/release lines (logged
+    // regardless of whether any C-STORE ever actually arrived) be correlated with which
+    // study/instance a given association actually carried.
+    log_event(logger, || format!("received C-STORE-RQ dataset: study {study_instance_uid}, SOP instance {affected_sop_instance_uid}"));
 
     let meta = FileMetaTableBuilder::new()
         .transfer_syntax(negotiated_ts.uid())
@@ -485,7 +525,7 @@ fn handle_find(
     let message_id = command_u16(command, tags::MESSAGE_ID);
     let affected_sop_class_uid = command_str(command, tags::AFFECTED_SOP_CLASS_UID).unwrap_or_default();
 
-    let identifier_bytes = resolve_data(association, initial_pdata)?;
+    let identifier_bytes = resolve_data(association, initial_pdata, logger)?;
     let identifier = InMemDicomObject::read_dataset_with_ts(identifier_bytes.as_slice(), negotiated_ts).map_err(|_| ())?;
 
     let mut filter = HashMap::new();
@@ -580,7 +620,7 @@ fn handle_move(
     let affected_sop_class_uid = command_str(command, tags::AFFECTED_SOP_CLASS_UID).unwrap_or_default();
     let move_destination = command_str(command, tags::MOVE_DESTINATION).unwrap_or_default();
 
-    let identifier_bytes = resolve_data(association, initial_pdata)?;
+    let identifier_bytes = resolve_data(association, initial_pdata, logger)?;
     let identifier = InMemDicomObject::read_dataset_with_ts(identifier_bytes.as_slice(), negotiated_ts).map_err(|_| ())?;
     let study_instance_uid = element_str(&identifier, tags::STUDY_INSTANCE_UID).unwrap_or_default();
 

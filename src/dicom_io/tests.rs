@@ -2987,6 +2987,127 @@ fn scp_on_log_reports_association_negotiation_and_per_message_detail() {
     assert!(joined.contains("released"), "missing association-release log, got: {joined}");
 }
 
+/// Regression coverage for a production incident (2026-07-28, customer sb-st98vv4a-1): a source
+/// PACS reported an in-progress C-MOVE and, separately, claimed (via its own UI) to have stored an
+/// instance - but This project's own insert queue showed no evidence any instance was ever received.
+/// Diagnosing it required correlating dimse's C-STORE-RQ logging (a StudyInstanceUID, once known)
+/// against separately-visible association accept/negotiate/release lines by hand, across several
+/// interleaved associations from the same peer. Asserts the StudyInstanceUID is logged as soon as
+/// the dataset is parsed, and that a completed association logs a one-line summary of what it
+/// actually stored - both meant to make that kind of correlation immediate instead of manual.
+#[test]
+fn scp_on_log_reports_study_uid_and_a_completion_summary_for_a_stored_instance() {
+    let cache_dir = std::env::temp_dir().join(format!(
+        "dcmnorm-scp-storelog-test-{}",
+        SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+    ));
+    fs::create_dir_all(&cache_dir).unwrap();
+
+    let handlers = std::sync::Arc::new(TestScpHandlers {
+        find_query: std::sync::Mutex::new(None),
+        find_response: Vec::new(),
+        move_calls: std::sync::Mutex::new(Vec::new()),
+        move_result: true,
+        association_complete: std::sync::Mutex::new(None),
+    });
+
+    let logger = std::sync::Arc::new(MockLogger { lines: std::sync::Mutex::new(Vec::new()) });
+
+    let scp = start_scp(
+        0,
+        cache_dir.clone(),
+        handlers,
+        ScpOptions { ae_title: "TEST-SCP".to_owned(), on_log: Some(logger.clone()), ..Default::default() },
+    )
+    .unwrap();
+    let destination = format!("127.0.0.1:{}", scp.local_port());
+
+    let source = fixture_path("sr.dcm");
+    let object = read_dicom_file(&source).unwrap();
+    let sop_instance_uid = object.meta().media_storage_sop_instance_uid.trim_end_matches(['\0', ' ']).to_owned();
+    let study_instance_uid = object.element(tags::STUDY_INSTANCE_UID).unwrap().to_str().unwrap().trim().to_owned();
+
+    let results = store_scu(
+        &destination,
+        &[source],
+        StoreScuOptions {
+            calling_ae_title: "TEST-SCU".to_owned(),
+            called_ae_title: None,
+            max_pdu_length: 16384,
+            never_transcode: true,
+            timeout: None,
+            on_log: None,
+            cancel: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(results[0].status, 0);
+
+    scp.stop();
+    fs::remove_dir_all(&cache_dir).ok();
+
+    let joined = logger.lines.lock().unwrap().join("\n");
+    assert!(
+        joined.contains(&format!("received C-STORE-RQ dataset: study {study_instance_uid}, SOP instance {sop_instance_uid}")),
+        "missing per-dataset study/SOP UID log, got: {joined}"
+    );
+    assert!(
+        joined.contains("stored 1 instance(s) across 1 study before ending"),
+        "missing association-completion summary log, got: {joined}"
+    );
+}
+
+/// Companion to the test above, for the other half of the same production incident: an
+/// association that connects, negotiates presentation contexts, and releases without ever
+/// sending a C-STORE looks - at a glance, scanning logs - identical to one whose C-STORE logging
+/// simply went missing. Asserts this case gets its own explicit line instead of relying on a
+/// reader to notice the *absence* of a "received C-STORE-RQ" line.
+#[test]
+fn scp_on_log_reports_when_an_association_ends_with_no_c_store() {
+    let cache_dir = std::env::temp_dir().join(format!(
+        "dcmnorm-scp-nostore-test-{}",
+        SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+    ));
+    fs::create_dir_all(&cache_dir).unwrap();
+
+    let handlers = std::sync::Arc::new(TestScpHandlers {
+        find_query: std::sync::Mutex::new(None),
+        find_response: Vec::new(),
+        move_calls: std::sync::Mutex::new(Vec::new()),
+        move_result: true,
+        association_complete: std::sync::Mutex::new(None),
+    });
+
+    let logger = std::sync::Arc::new(MockLogger { lines: std::sync::Mutex::new(Vec::new()) });
+
+    let scp = start_scp(
+        0,
+        cache_dir.clone(),
+        handlers,
+        ScpOptions { ae_title: "TEST-SCP".to_owned(), on_log: Some(logger.clone()), ..Default::default() },
+    )
+    .unwrap();
+    let destination = format!("127.0.0.1:{}", scp.local_port());
+
+    // A C-ECHO association never calls handle_store at all - exactly the "association with
+    // nothing stored" shape observed in production.
+    let status = echo_scu(
+        &destination,
+        EchoScuOptions { calling_ae_title: "TEST-SCU".to_owned(), called_ae_title: None, timeout: None, on_log: None, cancel: None },
+    )
+    .unwrap();
+    assert_eq!(status, 0);
+
+    scp.stop();
+    fs::remove_dir_all(&cache_dir).ok();
+
+    let joined = logger.lines.lock().unwrap().join("\n");
+    assert!(
+        joined.contains("ended with no C-STORE received"),
+        "missing no-C-STORE association summary log, got: {joined}"
+    );
+}
+
 /// Regression test for a production incident: a C-FIND match whose text contained a non-ASCII
 /// character (an en dash, "–") made `handle_find` fail to encode that one match's dataset -
 /// aborting the whole C-FIND response and, since that error propagated out of the association's
