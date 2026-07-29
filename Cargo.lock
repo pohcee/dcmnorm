@@ -411,6 +411,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "dcmtalk"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "dcmnorm",
+]
+
+[[package]]
 name = "dicom-core"
 version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

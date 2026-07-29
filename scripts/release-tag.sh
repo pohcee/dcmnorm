@@ -222,6 +222,7 @@ fi
 
 update_manifest_version "Cargo.toml" "$next_version"
 update_manifest_version "exec/dcmnorm/Cargo.toml" "$next_version"
+update_manifest_version "exec/dcmtalk/Cargo.toml" "$next_version"
 
 cargo generate-lockfile --quiet
 

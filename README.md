@@ -4,8 +4,9 @@ Rust workspace for reading, writing, transcoding, and converting DICOM data.
 
 This repository contains:
 
-- `dcmnorm`: a library crate with DICOM file, memory, and JSON conversion helpers
+- `dcmnorm`: a library crate with DICOM file, memory, JSON conversion, and DIMSE network helpers
 - `exec/dcmnorm`: a CLI for converting between DICOM, transcoded DICOM, JSON, and rendered images/raw frames
+- `exec/dcmtalk`: a DIMSE network CLI (C-ECHO/C-STORE/C-FIND/C-MOVE SCU plus a storage SCP), covering the same ground as dcmtk's `echoscu`/`storescu`/`findscu`/`movescu`/`storescp`
 
 ## Workspace Layout
 
@@ -15,7 +16,8 @@ This repository contains:
 ├── src/
 │   └── dicom_io.rs
 ├── exec/
-│   └── dcmnorm/
+│   ├── dcmnorm/
+│   └── dcmtalk/
 └── test/
     └── files/
 ```
@@ -133,12 +135,13 @@ cargo build --workspace --release
 The executables will be available at:
 
 - `target/release/dcmnorm`
+- `target/release/dcmtalk`
 
 To install them for the current user, copy them into a directory on your `PATH`, for example `~/.local/bin`:
 
 ```bash
 mkdir -p ~/.local/bin
-cp target/release/dcmnorm ~/.local/bin/
+cp target/release/dcmnorm target/release/dcmtalk ~/.local/bin/
 ```
 
 If `~/.local/bin` is not already on your `PATH`, add this to your shell profile:
@@ -164,9 +167,10 @@ Release flow:
 
 1. Run the **SemVer Tag** workflow from the Actions tab and choose `patch`, `minor`, or `major`.
 2. The workflow pushes a new version tag (for example `v0.1.1`).
-3. The **Build and Release CLI** workflow is triggered by that tag and publishes:
-    - `dcmnorm-<tag>-linux-x86_64.tar.gz`
-    - `dcmnorm-<tag>-linux-x86_64.tar.gz.sha256`
+3. The **Build and Release CLIs** workflow is triggered by that tag and publishes, for each of `dcmnorm` and `dcmtalk`:
+    - `<name>-<tag>-linux-x86_64.tar.gz`
+    - `<name>-<tag>-linux-x86_64.tar.gz.sha256`
+    - `<name>-linux-x86_64.tar.gz` / `.sha256` (rolling "latest" alias, overwritten each release)
 
 Prereleases are supported in the SemVer tag workflow via the `prerelease` input.
 
@@ -192,6 +196,7 @@ The script updates versions in:
 
 - `Cargo.toml`
 - `exec/dcmnorm/Cargo.toml`
+- `exec/dcmtalk/Cargo.toml`
 
 Then it creates a release commit, pushes that commit to `origin`, and pushes the version tag.
 The pushed tag triggers `.github/workflows/release.yml` automatically.
@@ -206,16 +211,23 @@ Build only `dcmnorm`:
 cargo build -p dcmnorm-cli
 ```
 
-Build the CLI in release mode:
+Build only `dcmtalk`:
 
 ```bash
-cargo build -p dcmnorm-cli --release
+cargo build -p dcmtalk
+```
+
+Build both CLIs in release mode:
+
+```bash
+cargo build -p dcmnorm-cli -p dcmtalk --release
 ```
 
 ## Docker
 
-This repository includes a multi-stage Dockerfile that builds `dcmnorm` in a
-toolchain stage and copies only the release binary into a slim runtime stage.
+This repository includes a multi-stage Dockerfile that builds `dcmnorm` and
+`dcmtalk` in a toolchain stage and copies only the release binaries into a
+slim runtime stage.
 
 Build the image:
 
@@ -223,7 +235,7 @@ Build the image:
 docker build -t dcmnorm .
 ```
 
-Run the CLI:
+Run the CLI (the image's default entrypoint is `dcmnorm`):
 
 ```bash
 docker run --rm dcmnorm
@@ -237,6 +249,17 @@ docker run --rm \
     -w /work \
     dcmnorm \
     test/files/dx.dcm
+```
+
+Run `dcmtalk` instead by overriding the entrypoint:
+
+```bash
+docker run --rm --entrypoint dcmtalk dcmnorm echoscu somepacs.example.com:11112
+
+# storescp needs its listening port published
+docker run --rm --entrypoint dcmtalk -p 11112:11112 \
+    -v "$PWD/received":/data \
+    dcmnorm storescp 11112 --cache-path /data
 ```
 
 The final runtime image installs these native packages:
@@ -611,6 +634,85 @@ If your headers are installed in a non-standard location, you can still point th
 `KAKADU_INCLUDE_DIR`.
 
 If Kakadu FFI is not enabled or Kakadu is unavailable, the OpenJPEG-based path remains in use.
+
+## dcmtalk CLI Usage
+
+`dcmtalk` is a DIMSE (DICOM network) client/server covering the same ground as dcmtk's
+`echoscu`/`storescu`/`findscu`/`movescu`/`storescp`, built on this repository's own DICOM
+Upper Layer implementation (no dcmtk dependency).
+
+Get the full option reference from either help form, for the tool itself or any subcommand:
+
+```bash
+dcmtalk -h
+dcmtalk --help
+dcmtalk echoscu --help
+```
+
+`dcmtalk` command shape:
+
+```text
+dcmtalk <SUBCOMMAND> [OPTIONS] <ARGS>
+```
+
+Every SCU subcommand (`echoscu`/`storescu`/`findscu`/`movescu`) shares:
+
+- `<DESTINATION>`: peer address as `HOST:PORT`
+- `-a`, `--calling-aet <AE>`: our AE title (default `DCMTALK`)
+- `-c`, `--called-aet <AE>`: the peer's AE title, if it requires one to match
+- `--timeout <SECONDS>`: absolute timeout for the whole operation (connect through release)
+- `-v`, `--verbose`: log association negotiation, presentation contexts, and each DIMSE command/response to stderr
+
+### C-ECHO: verify connectivity
+
+```bash
+dcmtalk echoscu somepacs.example.com:11112
+dcmtalk echoscu --verbose somepacs.example.com:11112
+```
+
+### C-STORE: send files
+
+Sends one or more DICOM files; directories are scanned recursively. Files are sent under
+their native transfer syntax when the peer accepts it, transcoded to Explicit/Implicit VR
+Little Endian otherwise (unless `--never-transcode`):
+
+```bash
+dcmtalk storescu somepacs.example.com:11112 test/files/dx.dcm
+dcmtalk storescu somepacs.example.com:11112 test/files/ --max-pdu 65536
+```
+
+### C-FIND: query studies
+
+Query keys are DICOM keywords as `KEY=VALUE` (match) or bare `KEY` (return key, universal
+match), repeatable. Matches print as one DICOM JSON line per study to stdout:
+
+```bash
+dcmtalk findscu somepacs.example.com:11112 -k PatientID=12345 -k StudyDate
+```
+
+### C-MOVE: retrieve a study
+
+Asks the peer to push a study to another AE title it already knows how to reach:
+
+```bash
+dcmtalk movescu somepacs.example.com:11112 MY_STORE_AE 1.2.840.113619.2.55.3.604688119.971.1600000000.123
+```
+
+### storescp: receive files
+
+Listens for inbound associations and writes C-STORE'd instances under `--cache-path` as
+`S_<StudyInstanceUID>/<Modality>_<SOPInstanceUID>.dcm`. C-FIND/C-MOVE requests are answered
+"unable to process" — this is a receive-only SCP, not a full PACS:
+
+```bash
+dcmtalk storescp 11112 --ae-title MY_STORE_AE --cache-path ./received
+```
+
+Use port `0` to bind an ephemeral port (useful for tests):
+
+```bash
+dcmtalk storescp 0 --verbose
+```
 
 ## JSON Defaults
 
