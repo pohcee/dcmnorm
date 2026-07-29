@@ -1,11 +1,13 @@
 ---
 name: dcmnorm
-description: Read, inspect, edit, anonymize, convert, transcode, and render DICOM medical imaging files using the dcmnorm CLI. Use this skill whenever the user mentions DICOM, .dcm files, medical images (CT/MR/US/DX/SR), DICOM tags/metadata (PatientName, StudyInstanceUID, transfer syntax, SOP class), DICOM JSON, de-identifying/redacting medical images, or wants to view/export DICOM pixel data as PNG/JPEG/MP4 — even if they don't name the dcmnorm tool. Also use it to check whether files are valid DICOM or to batch-process directories of medical images.
+description: Read, inspect, edit, anonymize, convert, transcode, and render DICOM medical imaging files using the dcmnorm CLI, and send/receive/query them over a DICOM network using the dcmtalk CLI. Use this skill whenever the user mentions DICOM, .dcm files, medical images (CT/MR/US/DX/SR), DICOM tags/metadata (PatientName, StudyInstanceUID, transfer syntax, SOP class), DICOM JSON, de-identifying/redacting medical images, wants to view/export DICOM pixel data as PNG/JPEG/MP4, or wants to talk to a PACS/DICOM node — connectivity checks (C-ECHO), sending files (C-STORE), querying (C-FIND), retrieving (C-MOVE), or receiving files (a storage SCP) — even if they don't name the dcmnorm or dcmtalk tools. Also use it to check whether files are valid DICOM or to batch-process directories of medical images.
 ---
 
 # dcmnorm — DICOM read / edit / write / render CLI
 
 `dcmnorm` is an installed CLI that converts between DICOM and JSON, edits DICOM elements, transcodes transfer syntaxes, validates files, and renders pixel data to PNG/JPEG/raw/MPEG4. Verify it's available with `dcmnorm --version`; run `dcmnorm --help` for the full option list.
+
+For talking to a DICOM network peer (PACS, modality, another node) instead of local files, use the companion `dcmtalk` CLI — see [Network operations with `dcmtalk`](#network-operations-with-dcmtalk) below.
 
 The core invocation is:
 
@@ -154,3 +156,42 @@ dcmnorm --redact-box 10,10,200,40 --redact-box -110,-60,100,50 \
 - CT images often need explicit windowing to be readable: brain ≈ C40/W80, soft tissue ≈ C40/W400, lung ≈ C-600/W1500, bone ≈ C300/W1500.
 - `--verbose` prints conversion/rendering diagnostics when a command fails or produces unexpected output.
 - Detection handles files missing the standard preamble/meta group; for files with wrong or missing extensions, force it with `--input-type dicom`.
+
+## Network operations with `dcmtalk`
+
+`dcmtalk` is an installed CLI for DICOM network (DIMSE) operations — the same ground as dcmtk's `echoscu`/`storescu`/`findscu`/`movescu`/`storescp`. Verify it's available with `dcmtalk --version`; run `dcmtalk --help` or `dcmtalk <subcommand> --help` for the full option list. Every subcommand takes a peer address as `HOST:PORT` and accepts `-v`/`--verbose` to log association negotiation, presentation contexts, and each DIMSE command/response to stderr — reach for `--verbose` first whenever a connection to a real PACS behaves unexpectedly.
+
+Check connectivity to a peer (C-ECHO):
+
+```bash
+dcmtalk echoscu pacs.example.com:11112
+```
+
+Send DICOM file(s) or a whole directory (recursive) to a peer (C-STORE):
+
+```bash
+dcmtalk storescu pacs.example.com:11112 study.dcm
+dcmtalk storescu pacs.example.com:11112 ./study_dir/
+```
+
+Query a peer's studies (C-FIND) — keys are DICOM keywords, `KEY=VALUE` to match or bare `KEY` as a return key; matches print as one DICOM JSON line per study:
+
+```bash
+dcmtalk findscu pacs.example.com:11112 -k PatientID=12345 -k StudyDate
+```
+
+Ask a peer to push a study to another AE title it already knows (C-MOVE):
+
+```bash
+dcmtalk movescu pacs.example.com:11112 MY_STORE_AE 1.2.840.113619.2.55.3.604688119.971.1600000000.123
+```
+
+Run a temporary receiver to capture what a peer sends (a storescp), e.g. to inspect what a modality/PACS is actually transmitting — instances land under `--cache-path` as `S_<StudyInstanceUID>/<Modality>_<SOPInstanceUID>.dcm`, ready for `dcmnorm` to inspect:
+
+```bash
+dcmtalk storescp 11112 --ae-title MY_STORE_AE --cache-path ./received --verbose
+```
+
+`dcmtalk storescp` is receive-only: it answers C-FIND/C-MOVE requests with "unable to process" rather than serving a real query index or retrieve queue.
+
+Most `dcmtalk` peers require the calling/called AE titles to match what they've been configured to accept — set them with `-a`/`--calling-aet` and `-c`/`--called-aet` if the default calling AE title (`DCMTALK`) or an unset called AE title gets an association rejected.

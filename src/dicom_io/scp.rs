@@ -25,7 +25,7 @@ use dicom_object::mem::InMemDicomObject;
 use dicom_object::FileMetaTableBuilder;
 use dicom_ul::{
     association::server::ServerAssociationOptions,
-    pdu::{PDataValue, PDataValueType, Pdu},
+    pdu::{PDataValue, PDataValueType, Pdu, PresentationContextResultReason},
     ServerAssociation,
 };
 
@@ -203,13 +203,29 @@ fn handle_association(stream: TcpStream, cache_path: &Path, handlers: &dyn ScpHa
     let mut association = match association_options.establish(stream) {
         Ok(association) => {
             log_event(logger, || {
-                let negotiated = association
-                    .presentation_contexts()
+                let contexts = association.presentation_contexts();
+                // `promiscuous(true)` only bypasses the *abstract syntax* check - dicom-ul still
+                // negotiates a transfer syntax per context against its own registry's supported
+                // set, and a context whose only proposed transfer syntax isn't supported (e.g. a
+                // JPEG variant this build's registry can't decode) comes back here with `reason
+                // != Acceptance` and a bogus placeholder transfer_syntax - not actually usable by
+                // the peer for that context, even though it's still present in this list. Every
+                // context is logged with its real outcome so that's visible up front, instead of
+                // silently matching production incident 2026-07-28 (sb-st98vv4a-1): a peer
+                // proposing several presentation contexts, releasing without ever sending a
+                // C-STORE, and this line alone giving no hint that most of them may have actually
+                // been rejected.
+                let accepted_count = contexts.iter().filter(|pc| pc.reason == PresentationContextResultReason::Acceptance).count();
+                let negotiated = contexts
                     .iter()
-                    .map(|pc| format!("#{} {} / {}", pc.id, pc.abstract_syntax, pc.transfer_syntax))
+                    .map(|pc| format!("#{} {} / {} ({:?})", pc.id, pc.abstract_syntax, pc.transfer_syntax, pc.reason))
                     .collect::<Vec<_>>()
                     .join(", ");
-                format!("association with {peer} established; negotiated presentation context(s): [{negotiated}]")
+                format!(
+                    "association with {peer} established; negotiated presentation context(s) \
+                     ({accepted_count}/{} accepted): [{negotiated}]",
+                    contexts.len()
+                )
             });
             association
         }
