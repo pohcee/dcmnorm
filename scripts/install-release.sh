@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-INSTALL_DIR="${HOME}/.cargo/bin"
+INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
 DEFAULT_VERSION="latest"
 MIN_SUPPORTED_VERSION="0.1.3"
 GITHUB_REPO="pohcee/dcmnorm"
@@ -63,18 +63,19 @@ print_usage() {
     cat << EOF
 Usage: $0 [VERSION]
 
-Downloads and installs dcmnorm and dcmtalk from GitHub releases into ./bin.
+Downloads and installs dcmnorm and dcmtalk from GitHub releases into $INSTALL_DIR.
 
 Arguments:
     VERSION       Version to install (default: latest GitHub release)
                                 If specified, must be >= $MIN_SUPPORTED_VERSION
 
 Examples:
-    $0                        # Install latest release to ./bin
-    $0 $MIN_SUPPORTED_VERSION # Install a specific supported version to ./bin
+    $0                        # Install latest release to $INSTALL_DIR
+    $0 $MIN_SUPPORTED_VERSION # Install a specific supported version to $INSTALL_DIR
 
 Environment variables:
   DCMNORM_PLATFORM  Override platform detection (e.g., linux-x86_64, macos-aarch64)
+  INSTALL_DIR       Override installation directory (default: /usr/local/bin)
 
 EOF
 }
@@ -155,6 +156,16 @@ for BINARY_NAME in $BINARIES; do
 
     rm -rf "$TEMP_DIR"
 done
+
+# Clean up legacy binaries in ~/.cargo/bin if installing elsewhere to prevent PATH shadowing
+if [ "$INSTALL_DIR" != "${HOME}/.cargo/bin" ]; then
+    for bin in dcmnorm dcmtalk; do
+        if [ -f "${HOME}/.cargo/bin/${bin}" ]; then
+            rm -f "${HOME}/.cargo/bin/${bin}"
+            echo "Removed legacy binary: ${HOME}/.cargo/bin/${bin}"
+        fi
+    done
+fi
 
 # Verify installation
 for BINARY_NAME in $BINARIES; do

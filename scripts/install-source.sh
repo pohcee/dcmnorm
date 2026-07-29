@@ -2,6 +2,8 @@
 
 set -euo pipefail
 
+INSTALL_ROOT="${INSTALL_ROOT:-/usr/local}"
+
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 
 if [[ ! -d "$repo_root/exec" ]]; then
@@ -192,11 +194,21 @@ found_any=0
 while IFS= read -r manifest; do
     found_any=1
     package_dir="$(dirname "$manifest")"
-    echo "Installing crate from $package_dir"
-    cargo install --path "$package_dir" "${install_args[@]}"
+    echo "Installing crate from $package_dir into $INSTALL_ROOT/bin"
+    cargo install --path "$package_dir" --root "$INSTALL_ROOT" "${install_args[@]}"
 done < <(find "$repo_root/exec" -mindepth 2 -maxdepth 2 -name Cargo.toml | sort)
 
 if [[ "$found_any" -eq 0 ]]; then
     echo "No installable crates found under $repo_root/exec" >&2
     exit 1
+fi
+
+# Clean up legacy binaries in ~/.cargo/bin if installing elsewhere to prevent PATH shadowing
+if [[ "$INSTALL_ROOT/bin" != "${HOME}/.cargo/bin" ]]; then
+    for bin in dcmnorm dcmtalk; do
+        if [[ -f "${HOME}/.cargo/bin/${bin}" ]]; then
+            rm -f "${HOME}/.cargo/bin/${bin}"
+            echo "Removed legacy binary: ${HOME}/.cargo/bin/${bin}"
+        fi
+    done
 fi

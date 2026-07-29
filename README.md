@@ -116,12 +116,12 @@ The install script also verifies the default codec toolchain before invoking Car
 For the default build this means `pkg-config`, `clang`, standard C headers, and the
 FFmpeg development packages listed above must already be installed.
 
-This installs the binaries into Cargo's bin directory, usually `~/.cargo/bin`.
+This installs the binaries into `/usr/local/bin`.
 
-If `~/.cargo/bin` is not already on your `PATH`, add this to your shell profile:
+If `/usr/local/bin` is not already on your `PATH`, add this to your shell profile:
 
 ```bash
-export PATH="$HOME/.cargo/bin:$PATH"
+export PATH="/usr/local/bin:$PATH"
 ```
 
 If you prefer not to use `cargo install`, you can still build and copy the release binaries manually.
@@ -156,6 +156,12 @@ To install the latest published release binary from GitHub (or a specific versio
 
 ```bash
 ./scripts/install-release.sh
+```
+
+Alternatively, the latest version of these binaries can generally be installed via:
+
+```bash
+curl -sSL pohcee.com/dcmnorm | sh
 ```
 
 This repository includes two GitHub Actions workflows for SemVer-based CLI releases:
