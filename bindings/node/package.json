@@ -1,6 +1,6 @@
 {
   "name": "@pohcee/dcmnorm-node",
-  "version": "0.1.18",
+  "version": "0.1.19",
   "private": true,
   "description": "Native Node.js bindings for dcmnorm (in-process, no CLI subprocess)",
   "main": "index.js",
