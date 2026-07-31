@@ -142,17 +142,87 @@ use serde_json::Value as JsonValue;
 
 use super::{
     detect_jpeg2000_backend_from_search_path, echo_scu, find_scu, kakadu_ffi_enabled,
-    list_transfer_syntax_support, move_scu, probe_dicom_file_for_sop_class_uid, read_dicom_bytes,
+    list_transfer_syntax_support, move_scu, parse_attribute_override,
+    probe_dicom_file_for_sop_class_uid, read_dicom_bytes,
     read_dicom_file, read_dicom_json, read_dicom_json_full, read_dicom_json_full_with_source,
     read_dicom_json_with_options, read_dicom_json_with_source,
     redact_dicom_pixels_to_transfer_syntax, render_all_dicom_video_frames, render_dicom_frame,
-    start_scp, store_scu, transcode_dicom_object, write_dicom_bytes, write_dicom_file,
+    set_attribute, start_scp, store_scu, transcode_dicom_object, write_dicom_bytes, write_dicom_file,
     write_dicom_json, write_dicom_json_full, write_dicom_json_full_with_source,
     write_dicom_json_with_options, write_dicom_json_with_source, BoundingBox, BoxLength,
     DicomJsonBulkDataMode, DicomJsonFormat, DicomJsonKeyStyle, DicomJsonReadOptions,
     CancelMode, CancelSignal, DicomJsonWriteOptions, DimseError, DimseLogger, EchoScuOptions, FindScuOptions,
     Jpeg2000Backend, MoveScuOptions, RenderOutputFormat, RenderPipelineOptions, ScpHandlers, ScpOptions, StoreScuOptions,
 };
+
+#[test]
+fn set_attribute_writes_media_storage_sop_class_uid_to_meta_not_dataset() {
+    let source = fixture_bytes(fixture_path("dx.dcm"));
+    let mut object = read_dicom_bytes(&source).unwrap();
+
+    let (tag, vr, value) =
+        parse_attribute_override("MediaStorageSOPClassUID=1.2.840.10008.5.1.4.1.1.7").unwrap();
+    set_attribute(&mut object, tag, vr, value).unwrap();
+
+    assert_eq!(
+        object.meta().media_storage_sop_class_uid,
+        "1.2.840.10008.5.1.4.1.1.7",
+        "set_attribute should update the real File Meta Information group"
+    );
+    assert!(
+        object.element(tags::MEDIA_STORAGE_SOP_CLASS_UID).is_err(),
+        "MediaStorageSOPClassUID must not also leak into the dataset"
+    );
+}
+
+#[test]
+fn set_attribute_writes_media_storage_sop_instance_uid_to_meta() {
+    let source = fixture_bytes(fixture_path("dx.dcm"));
+    let mut object = read_dicom_bytes(&source).unwrap();
+
+    let (tag, vr, value) = parse_attribute_override(
+        "MediaStorageSOPInstanceUID=1.2.840.10008.114051.1.2.3.4.5",
+    )
+    .unwrap();
+    set_attribute(&mut object, tag, vr, value).unwrap();
+
+    assert_eq!(
+        object.meta().media_storage_sop_instance_uid,
+        "1.2.840.10008.114051.1.2.3.4.5"
+    );
+    assert!(object.element(tags::MEDIA_STORAGE_SOP_INSTANCE_UID).is_err());
+}
+
+#[test]
+fn set_attribute_rejects_unsettable_meta_elements() {
+    let source = fixture_bytes(fixture_path("dx.dcm"));
+    let mut object = read_dicom_bytes(&source).unwrap();
+    let original_transfer_syntax = object.meta().transfer_syntax.clone();
+
+    // TransferSyntaxUID is deliberately not settable through this path: doing
+    // so would desync the meta value from the dataset's actual pixel
+    // encoding, since set_attribute never transcodes pixel data.
+    let (tag, vr, value) =
+        parse_attribute_override("TransferSyntaxUID=1.2.840.10008.1.2.1").unwrap();
+    let result = set_attribute(&mut object, tag, vr, value);
+
+    assert!(result.is_err());
+    assert_eq!(object.meta().transfer_syntax, original_transfer_syntax);
+}
+
+#[test]
+fn set_attribute_still_writes_dataset_elements() {
+    let source = fixture_bytes(fixture_path("dx.dcm"));
+    let mut object = read_dicom_bytes(&source).unwrap();
+
+    let (tag, vr, value) = parse_attribute_override("PatientName=DOE^JOHN").unwrap();
+    set_attribute(&mut object, tag, vr, value).unwrap();
+
+    assert_eq!(
+        object.element(tags::PATIENT_NAME).unwrap().to_str().unwrap(),
+        "DOE^JOHN"
+    );
+}
 
 const PRIVATE_TAG: Tag = Tag(0x0013, 0x1010);
 const EXPLICIT_VR_BIG_ENDIAN_UID: &str = "1.2.840.10008.1.2.2";

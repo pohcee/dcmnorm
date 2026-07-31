@@ -3,8 +3,8 @@ use std::io::{self, ErrorKind};
 use dicom_core::dictionary::{DataDictionary, DataDictionaryEntry};
 use dicom_core::header::Header;
 use dicom_core::{Tag, VR};
-use dicom_dictionary_std::StandardDataDictionary;
-use dicom_object::DefaultDicomObject;
+use dicom_dictionary_std::{tags, StandardDataDictionary};
+use dicom_object::{DefaultDicomObject, FileMetaTable};
 
 /// Remove all private tags from a DICOM object in-place
 pub fn remove_private_tags_inplace(obj: &mut DefaultDicomObject) {
@@ -99,8 +99,48 @@ pub fn parse_attribute_override(assignment: &str) -> Result<(Tag, VR, String), i
 }
 
 /// Sets (inserting or overwriting) a single non-sequence attribute.
-pub fn set_attribute(object: &mut DefaultDicomObject, tag: Tag, vr: VR, value: String) {
-    object.put_str(tag, vr, value);
+///
+/// File Meta Information (group 0002) elements live in the object's separate
+/// meta table rather than its dataset, so they're routed to
+/// [`set_meta_attribute`] instead of being written into the dataset.
+pub fn set_attribute(
+    object: &mut DefaultDicomObject,
+    tag: Tag,
+    vr: VR,
+    value: String,
+) -> Result<(), io::Error> {
+    if tag.group() == 0x0002 {
+        set_meta_attribute(object.meta_mut(), tag, value)
+    } else {
+        object.put_str(tag, vr, value);
+        Ok(())
+    }
+}
+
+/// Sets a single File Meta Information (group 0002) element directly on the
+/// meta table. Covers the same elements `common::apply_meta_element` supports
+/// when building a table from JSON, minus Transfer Syntax UID: changing the
+/// on-disk meta transfer syntax here would desync it from the dataset's
+/// actual pixel encoding, since this path never transcodes pixel data - use
+/// the dedicated transcode operation for that instead.
+fn set_meta_attribute(meta: &mut FileMetaTable, tag: Tag, value: String) -> Result<(), io::Error> {
+    match tag {
+        tags::MEDIA_STORAGE_SOP_CLASS_UID => meta.media_storage_sop_class_uid = value,
+        tags::MEDIA_STORAGE_SOP_INSTANCE_UID => meta.media_storage_sop_instance_uid = value,
+        tags::IMPLEMENTATION_CLASS_UID => meta.implementation_class_uid = value,
+        tags::IMPLEMENTATION_VERSION_NAME => meta.implementation_version_name = Some(value),
+        tags::SOURCE_APPLICATION_ENTITY_TITLE => meta.source_application_entity_title = Some(value),
+        tags::SENDING_APPLICATION_ENTITY_TITLE => meta.sending_application_entity_title = Some(value),
+        tags::RECEIVING_APPLICATION_ENTITY_TITLE => meta.receiving_application_entity_title = Some(value),
+        tags::PRIVATE_INFORMATION_CREATOR_UID => meta.private_information_creator_uid = Some(value),
+        _ => {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                format!("tag {tag} is not a settable File Meta Information element"),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Removes a single attribute; returns whether it was present.

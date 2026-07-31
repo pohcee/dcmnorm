@@ -9,7 +9,7 @@ use dcmnorm::dicom_io::{
     parse_attribute_override, parse_filter_requests, parse_tag_key, read_dicom_bytes,
     read_dicom_json_with_options, read_dicom_object_for_filter,
     redact_dicom_pixels_to_transfer_syntax, render_all_dicom_frames,
-    render_dicom_frame, transcode_dicom_object, write_dicom_file,
+    render_dicom_frame, set_attribute, transcode_dicom_object, write_dicom_file,
     write_dicom_json_with_options, write_dicom_video, BoundingBox, BoxLength, DicomJsonBulkDataMode, DicomJsonFormat,
     DicomJsonKeyStyle, DicomJsonReadOptions, DicomJsonWriteOptions,
     RenderOutputFormat, RenderPipelineOptions, JPEG2000_CODEC_ENV_FLAG, JPEG2000_DEBUG_ENV_FLAG,
@@ -1394,7 +1394,7 @@ fn apply_attribute_overrides(
 ) -> Result<(), Box<dyn std::error::Error>> {
     for assignment in &cli.set {
         let (tag, vr, value) = parse_attribute_override(assignment)?;
-        object.put_str(tag, vr, value);
+        set_attribute(object, tag, vr, value)?;
         verbose_log(
             cli,
             format!(

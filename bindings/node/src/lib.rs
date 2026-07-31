@@ -313,7 +313,7 @@ impl Task for EditTagsTask {
             for (key, value) in &self.sets {
                 let assignment = format!("{key}={value}");
                 let (tag, vr, value) = parse_attribute_override(&assignment).map_err(to_napi_err)?;
-                set_attribute(&mut object, tag, vr, value);
+                set_attribute(&mut object, tag, vr, value).map_err(to_napi_err)?;
             }
 
             for key in &self.removes {
