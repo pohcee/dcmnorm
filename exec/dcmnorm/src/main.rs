@@ -8,7 +8,7 @@ use dcmnorm::dicom_io::{
     apply_filter_to_object, jpeg2000_backend_name, kakadu_ffi_enabled, list_transfer_syntax_support,
     parse_attribute_override, parse_filter_requests, parse_tag_key, read_dicom_bytes,
     read_dicom_json_with_options, read_dicom_object_for_filter,
-    redact_dicom_pixels_to_transfer_syntax, render_all_dicom_frames,
+    redact_dicom_pixels_to_transfer_syntax, remove_attribute, render_all_dicom_frames,
     render_dicom_frame, set_attribute, transcode_dicom_object, write_dicom_file,
     write_dicom_json_with_options, write_dicom_video, BoundingBox, BoxLength, DicomJsonBulkDataMode, DicomJsonFormat,
     DicomJsonKeyStyle, DicomJsonReadOptions, DicomJsonWriteOptions,
@@ -1412,7 +1412,7 @@ fn apply_attribute_overrides(
 
     for key in &cli.remove {
         let tag = parse_tag_key(key)?;
-        let was_present = object.remove_element(tag);
+        let was_present = remove_attribute(object, tag);
         verbose_log(
             cli,
             format!(

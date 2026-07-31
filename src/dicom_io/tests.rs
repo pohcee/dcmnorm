@@ -146,7 +146,7 @@ use super::{
     probe_dicom_file_for_sop_class_uid, read_dicom_bytes,
     read_dicom_file, read_dicom_json, read_dicom_json_full, read_dicom_json_full_with_source,
     read_dicom_json_with_options, read_dicom_json_with_source,
-    redact_dicom_pixels_to_transfer_syntax, render_all_dicom_video_frames, render_dicom_frame,
+    redact_dicom_pixels_to_transfer_syntax, remove_attribute, render_all_dicom_video_frames, render_dicom_frame,
     set_attribute, start_scp, store_scu, transcode_dicom_object, write_dicom_bytes, write_dicom_file,
     write_dicom_json, write_dicom_json_full, write_dicom_json_full_with_source,
     write_dicom_json_with_options, write_dicom_json_with_source, BoundingBox, BoxLength,
@@ -222,6 +222,44 @@ fn set_attribute_still_writes_dataset_elements() {
         object.element(tags::PATIENT_NAME).unwrap().to_str().unwrap(),
         "DOE^JOHN"
     );
+}
+
+#[test]
+fn remove_attribute_clears_media_storage_sop_instance_uid() {
+    let source = fixture_bytes(fixture_path("dx.dcm"));
+    let mut object = read_dicom_bytes(&source).unwrap();
+    assert!(!object.meta().media_storage_sop_instance_uid.is_empty());
+
+    let was_present = remove_attribute(&mut object, tags::MEDIA_STORAGE_SOP_INSTANCE_UID);
+
+    assert!(was_present, "the tag was present before removal");
+    assert!(
+        object.meta().media_storage_sop_instance_uid.is_empty(),
+        "remove_attribute should clear the real File Meta Information field"
+    );
+}
+
+#[test]
+fn remove_attribute_on_absent_meta_field_reports_not_present() {
+    let source = fixture_bytes(fixture_path("dx.dcm"));
+    let mut object = read_dicom_bytes(&source).unwrap();
+    remove_attribute(&mut object, tags::MEDIA_STORAGE_SOP_INSTANCE_UID);
+
+    let was_present_second_time = remove_attribute(&mut object, tags::MEDIA_STORAGE_SOP_INSTANCE_UID);
+
+    assert!(!was_present_second_time);
+}
+
+#[test]
+fn remove_attribute_still_removes_dataset_elements() {
+    let source = fixture_bytes(fixture_path("dx.dcm"));
+    let mut object = read_dicom_bytes(&source).unwrap();
+    assert!(object.element(tags::PATIENT_NAME).is_ok());
+
+    let was_present = remove_attribute(&mut object, tags::PATIENT_NAME);
+
+    assert!(was_present);
+    assert!(object.element(tags::PATIENT_NAME).is_err());
 }
 
 const PRIVATE_TAG: Tag = Tag(0x0013, 0x1010);

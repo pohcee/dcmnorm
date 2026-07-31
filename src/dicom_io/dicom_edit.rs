@@ -144,6 +144,46 @@ fn set_meta_attribute(meta: &mut FileMetaTable, tag: Tag, value: String) -> Resu
 }
 
 /// Removes a single attribute; returns whether it was present.
+///
+/// File Meta Information (group 0002) elements live in the object's separate
+/// meta table rather than its dataset, so they're routed to
+/// [`remove_meta_attribute`] instead of `remove_element`, which is a no-op
+/// for group-0002 tags (they were never in the dataset to begin with).
 pub fn remove_attribute(object: &mut DefaultDicomObject, tag: Tag) -> bool {
-    object.remove_element(tag)
+    if tag.group() == 0x0002 {
+        remove_meta_attribute(object.meta_mut(), tag)
+    } else {
+        object.remove_element(tag)
+    }
+}
+
+/// Clears a single File Meta Information (group 0002) element on the meta
+/// table, returning whether it was previously present. Mandatory String
+/// fields (Media Storage SOP Class/Instance UID, Implementation Class UID)
+/// have no "absent" representation, so removing them clears to an empty
+/// string rather than deleting the field outright.
+fn remove_meta_attribute(meta: &mut FileMetaTable, tag: Tag) -> bool {
+    match tag {
+        tags::MEDIA_STORAGE_SOP_CLASS_UID => {
+            let was_present = !meta.media_storage_sop_class_uid.is_empty();
+            meta.media_storage_sop_class_uid = String::new();
+            was_present
+        }
+        tags::MEDIA_STORAGE_SOP_INSTANCE_UID => {
+            let was_present = !meta.media_storage_sop_instance_uid.is_empty();
+            meta.media_storage_sop_instance_uid = String::new();
+            was_present
+        }
+        tags::IMPLEMENTATION_CLASS_UID => {
+            let was_present = !meta.implementation_class_uid.is_empty();
+            meta.implementation_class_uid = String::new();
+            was_present
+        }
+        tags::IMPLEMENTATION_VERSION_NAME => meta.implementation_version_name.take().is_some(),
+        tags::SOURCE_APPLICATION_ENTITY_TITLE => meta.source_application_entity_title.take().is_some(),
+        tags::SENDING_APPLICATION_ENTITY_TITLE => meta.sending_application_entity_title.take().is_some(),
+        tags::RECEIVING_APPLICATION_ENTITY_TITLE => meta.receiving_application_entity_title.take().is_some(),
+        tags::PRIVATE_INFORMATION_CREATOR_UID => meta.private_information_creator_uid.take().is_some(),
+        _ => false,
+    }
 }
