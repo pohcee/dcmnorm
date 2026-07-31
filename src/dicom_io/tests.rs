@@ -1986,6 +1986,81 @@ fn store_scu_avoids_transcoding_into_a_decode_only_transfer_syntax_shared_by_sop
     scp_handle.join().unwrap();
 }
 
+/// Regression test for a production failure: a peer that rejects a file's native (compressed)
+/// transfer syntax but accepts `store_scu`'s own Explicit/Implicit VR Little Endian fallback
+/// context. `select_store_presentation_context`'s fallback branch used to call
+/// `can_encode_pixel_data` (via `can_encode_transfer_syntax`) to decide whether a negotiated
+/// context was usable as a transcode target - but that check only looks at pixel-data *codec*
+/// availability, which is unconditionally `false` for a non-encapsulated transfer syntax like
+/// Explicit/Implicit VR Little Endian (there's no codec involved in writing a native dataset at
+/// all). So even though the peer had just accepted the fallback context, it was never picked as
+/// eligible, and the send failed with `NoAcceptablePresentationContext` - see `can_encode_transfer_syntax`
+/// in `io.rs`.
+#[test]
+fn store_scu_transcodes_into_fallback_context_when_peer_rejects_native_transfer_syntax() {
+    let source = fixture_path("dx2.dcm");
+    let object = read_dicom_file(&source).unwrap();
+    let sop_class_uid = object.meta().media_storage_sop_class_uid.trim_end_matches(['\0', ' ']).to_owned();
+    let sop_instance_uid = object.meta().media_storage_sop_instance_uid.trim_end_matches(['\0', ' ']).to_owned();
+    assert_eq!(object.meta().transfer_syntax.trim_end_matches(['\0', ' ']), "1.2.840.10008.1.2.4.90");
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let expected_sop_class_uid = sop_class_uid.clone();
+    let scp_handle = std::thread::spawn(move || {
+        // Only the two fallback transfer syntaxes store_scu can always write - never the file's
+        // own native (compressed) one - simulating a peer that can't handle JPEG 2000.
+        let scp = dicom_ul::association::server::ServerAssociationOptions::new()
+            .ae_title("MOCK-SCP")
+            .with_abstract_syntax(expected_sop_class_uid.clone())
+            .with_transfer_syntax(uids::EXPLICIT_VR_LITTLE_ENDIAN)
+            .with_transfer_syntax(uids::IMPLICIT_VR_LITTLE_ENDIAN);
+        let (stream, _) = listener.accept().unwrap();
+        let mut association = scp.establish(stream).unwrap();
+
+        let (pc_id, request, dataset_bytes) = dimse_recv_command_with_data(&mut association);
+        assert!(!dataset_bytes.is_empty());
+        assert_eq!(
+            request.element(tags::AFFECTED_SOP_CLASS_UID).unwrap().to_str().unwrap(),
+            expected_sop_class_uid,
+        );
+        let message_id = dimse_message_id(&request);
+
+        let response = InMemDicomObject::command_from_element_iter([
+            DataElement::new(tags::AFFECTED_SOP_CLASS_UID, VR::UI, dicom_value!(Str, expected_sop_class_uid.clone())),
+            DataElement::new(tags::COMMAND_FIELD, VR::US, dicom_value!(U16, [0x8001])),
+            DataElement::new(tags::MESSAGE_ID_BEING_RESPONDED_TO, VR::US, dicom_value!(U16, [message_id])),
+            DataElement::new(tags::COMMAND_DATA_SET_TYPE, VR::US, dicom_value!(U16, [0x0101])),
+            DataElement::new(tags::STATUS, VR::US, dicom_value!(U16, [0x0000])),
+        ]);
+        dimse_send_command(&mut association, pc_id, &response);
+
+        let pdu = association.receive().unwrap();
+        assert_eq!(pdu, dicom_ul::pdu::Pdu::ReleaseRQ);
+        association.send(&dicom_ul::pdu::Pdu::ReleaseRP).unwrap();
+    });
+
+    let results = store_scu(
+        &addr.to_string(),
+        &[source],
+        StoreScuOptions {
+            calling_ae_title: "TEST-SCU".to_owned(),
+            called_ae_title: Some("MOCK-SCP".to_owned()),
+            max_pdu_length: 16384,
+            never_transcode: false,
+            timeout: None,
+            on_log: None,
+            cancel: None,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].status, 0);
+    assert_eq!(results[0].sop_instance_uid, sop_instance_uid);
+    scp_handle.join().unwrap();
+}
+
 #[test]
 fn find_scu_collects_pending_matches_until_success_status() {
     let abstract_syntax = uids::STUDY_ROOT_QUERY_RETRIEVE_INFORMATION_MODEL_FIND;

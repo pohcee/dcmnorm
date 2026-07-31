@@ -710,18 +710,24 @@ pub fn list_transfer_syntax_support() -> Vec<TransferSyntaxSupport> {
     syntaxes
 }
 
-/// Whether this build can encode pixel data into `uid` (e.g. for presentation-context
+/// Whether this build can write dataset content out under `uid` (e.g. for presentation-context
 /// negotiation, where offering a transfer syntax we can only decode risks the peer accepting it
-/// as the single transfer syntax for a context, then requiring an encode we can't perform).
+/// as the single transfer syntax for a context, then requiring an encode we can't perform). For a
+/// non-encapsulated (native) transfer syntax like Explicit/Implicit VR Little Endian there's no
+/// pixel data codec involved at all, so `can_encode_pixel_data` alone would always say `false`
+/// here - mirrors `TransferSyntaxSupport::can_transcode_to`'s condition rather than reusing
+/// `can_encode_pixel_data` directly.
 pub fn can_encode_transfer_syntax(uid: &str) -> bool {
     let Some(ts) = TransferSyntaxRegistry.get(uid) else {
         return false;
     };
-    can_encode_pixel_data(
-        ts,
-        kakadu_ffi_available_from_backend(&jpeg2000_backend()),
-        ffmpeg_available(),
-    )
+    can_write_dataset(ts)
+        && (!is_encapsulated_transfer_syntax(ts)
+            || can_encode_pixel_data(
+                ts,
+                kakadu_ffi_available_from_backend(&jpeg2000_backend()),
+                ffmpeg_available(),
+            ))
 }
 
 pub fn transcode_dicom_object(
