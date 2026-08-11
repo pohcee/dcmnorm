@@ -42,7 +42,7 @@ pub use render::{
     redact_dicom_pixels_to_transfer_syntax, render_all_dicom_frames,
     render_all_dicom_video_frames, render_dicom_frame, render_dicom_frames,
     render_dicom_to_recompressed_object, write_dicom_video, BoundingBox, BoxLength,
-    RenderFrameOutput, RenderOutputFormat, RenderPipelineOptions,
+    OverlaySummary, RenderFrameOutput, RenderOutputFormat, RenderPipelineOptions,
 };
 pub use types::{
     DicomIoError, DicomJsonBulkDataMode, DicomJsonError, DicomJsonFormat, DicomJsonKeyStyle,

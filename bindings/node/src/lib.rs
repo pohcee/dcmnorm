@@ -18,8 +18,9 @@ use dcmnorm::dicom_io::{
     CancelSignal, DicomJsonBulkDataMode, DicomJsonFormat, DicomJsonKeyStyle, DicomJsonReadOptions,
     DicomJsonWriteOptions, DicomScp, DimseLogger, EchoScuOptions as DcmEchoScuOptions,
     FindScuOptions as DcmFindScuOptions, MoveScuOptions as DcmMoveScuOptions,
-    RenderOutputFormat as DcmRenderOutputFormat, RenderPipelineOptions as DcmRenderPipelineOptions,
-    ScpHandlers as DcmScpHandlers, ScpOptions as DcmScpOptions, StoreScuOptions as DcmStoreScuOptions,
+    OverlaySummary as DcmOverlaySummary, RenderOutputFormat as DcmRenderOutputFormat,
+    RenderPipelineOptions as DcmRenderPipelineOptions, ScpHandlers as DcmScpHandlers,
+    ScpOptions as DcmScpOptions, StoreScuOptions as DcmStoreScuOptions,
 };
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 
@@ -1064,6 +1065,38 @@ pub struct RenderFrameOptions {
     pub window_width: Option<f64>,
     pub frame_index: Option<u32>,
     pub jpeg_quality: Option<u32>,
+    /// Whether to composite an overlay plane, when the instance has one. Defaults to `true` -
+    /// the first available overlay renders by default.
+    pub show_overlays: Option<bool>,
+    /// Which overlay to render, by its 0-based `OverlaySummary.index`. Defaults to the first
+    /// available overlay. Ignored when `showOverlays` is `false`.
+    pub overlay_index: Option<u32>,
+    /// Fill color for rendered overlay pixels, as `"#RRGGBB"` or `"R,G,B"`. Defaults to green.
+    pub overlay_color: Option<String>,
+}
+
+/// Mirrors `dcmnorm::dicom_io::OverlaySummary` for the JS side.
+#[napi(object)]
+pub struct OverlaySummary {
+    pub index: u32,
+    pub group: u32,
+    pub rows: u32,
+    pub columns: u32,
+    pub overlay_type: Option<String>,
+    pub label: Option<String>,
+}
+
+impl From<DcmOverlaySummary> for OverlaySummary {
+    fn from(value: DcmOverlaySummary) -> Self {
+        OverlaySummary {
+            index: value.index as u32,
+            group: value.group as u32,
+            rows: value.rows as u32,
+            columns: value.columns as u32,
+            overlay_type: value.overlay_type,
+            label: value.label,
+        }
+    }
 }
 
 #[napi(object)]
@@ -1072,6 +1105,11 @@ pub struct RenderedFrame {
     pub width: u32,
     pub height: u32,
     pub data: Buffer,
+    /// All overlay planes present on the source instance, regardless of whether one was
+    /// rendered into `data`.
+    pub overlays: Vec<OverlaySummary>,
+    /// Which overlay (by `OverlaySummary.index`) was actually composited into `data`, if any.
+    pub selected_overlay_index: Option<u32>,
 }
 
 fn parse_render_output_format(value: Option<&str>) -> Result<(DcmRenderOutputFormat, &'static str)> {
@@ -1082,6 +1120,55 @@ fn parse_render_output_format(value: Option<&str>) -> Result<(DcmRenderOutputFor
             "invalid format '{other}'; expected 'jpeg' or 'png'"
         ))),
     }
+}
+
+/// Parses `"#RRGGBB"` or `"R,G,B"` into an `[R, G, B]` byte triple. A standalone parser (not
+/// shared with the CLI's `parse_redact_color` in `exec/dcmnorm`) since this crate doesn't depend
+/// on the CLI crate.
+fn parse_render_color(value: &str) -> Result<[u8; 3]> {
+    let trimmed = value.trim();
+
+    if let Some(hex) = trimmed.strip_prefix('#') {
+        if hex.len() != 6 {
+            return Err(Error::from_reason(format!(
+                "invalid color '{value}'; hex color must be #RRGGBB"
+            )));
+        }
+        let channel = |range: std::ops::Range<usize>| {
+            u8::from_str_radix(&hex[range], 16)
+                .map_err(|_| Error::from_reason(format!("invalid color '{value}'; not a valid hex color")))
+        };
+        return Ok([channel(0..2)?, channel(2..4)?, channel(4..6)?]);
+    }
+
+    let parts: Vec<&str> = trimmed.split(',').collect();
+    if parts.len() != 3 {
+        return Err(Error::from_reason(format!(
+            "invalid color '{value}'; expected R,G,B (0-255 each) or #RRGGBB"
+        )));
+    }
+    let mut channels = [0u8; 3];
+    for (index, part) in parts.iter().enumerate() {
+        channels[index] = part.trim().parse::<u8>().map_err(|_| {
+            Error::from_reason(format!(
+                "invalid color '{value}'; expected R,G,B (0-255 each) or #RRGGBB"
+            ))
+        })?;
+    }
+    Ok(channels)
+}
+
+fn overlay_pipeline_fields(
+    show_overlays: Option<bool>,
+    overlay_index: Option<u32>,
+    overlay_color: Option<&str>,
+) -> Result<(bool, Option<usize>, [u8; 3])> {
+    let color = overlay_color.map(parse_render_color).transpose()?.unwrap_or([0, 255, 0]);
+    Ok((
+        show_overlays.unwrap_or(true),
+        overlay_index.map(|value| value as usize),
+        color,
+    ))
 }
 
 pub struct RenderFrameTask {
@@ -1096,6 +1183,11 @@ impl Task for RenderFrameTask {
     fn compute(&mut self) -> Result<Self::Output> {
         guarded(|| {
             let (format, mime_type) = parse_render_output_format(self.options.format.as_deref())?;
+            let (show_overlays, overlay_index, overlay_color) = overlay_pipeline_fields(
+                self.options.show_overlays,
+                self.options.overlay_index,
+                self.options.overlay_color.as_deref(),
+            )?;
             let object = read_dicom_file(&self.file_path).map_err(to_napi_err)?;
             let pipeline_options = DcmRenderPipelineOptions {
                 frame_index: self.options.frame_index.unwrap_or(0) as usize,
@@ -1104,6 +1196,9 @@ impl Task for RenderFrameTask {
                 output_width: self.options.output_width,
                 output_height: self.options.output_height,
                 jpeg_quality: self.options.jpeg_quality.unwrap_or(90) as u8,
+                show_overlays,
+                overlay_index,
+                overlay_color,
                 ..Default::default()
             };
             let rendered = dcm_render_dicom_frame(&object, format, &pipeline_options).map_err(to_napi_err)?;
@@ -1112,6 +1207,8 @@ impl Task for RenderFrameTask {
                 width: rendered.width as u32,
                 height: rendered.height as u32,
                 data: rendered.bytes.into(),
+                overlays: rendered.overlays.into_iter().map(OverlaySummary::from).collect(),
+                selected_overlay_index: rendered.selected_overlay_index.map(|value| value as u32),
             })
         })
     }

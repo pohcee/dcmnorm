@@ -51,6 +51,23 @@ pub struct BoundingBox {
     pub height: BoxLength,
 }
 
+/// Summary of a DICOM overlay plane (group `60xx`) discovered on an instance, independent of
+/// whether it was actually rendered - see `RenderPipelineOptions::show_overlays`/`overlay_index`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OverlaySummary {
+    /// 0-based ordinal among the overlay groups present on this instance, ascending by group.
+    /// This is the value `RenderPipelineOptions::overlay_index` selects by.
+    pub index: usize,
+    /// The raw DICOM overlay group, e.g. `0x6000`, `0x6002`, ... `0x601E`.
+    pub group: u16,
+    pub rows: u16,
+    pub columns: u16,
+    /// `OverlayType` (60xx,0040): `"G"` (graphics) or `"R"` (ROI), when present.
+    pub overlay_type: Option<String>,
+    /// `OverlayLabel` (60xx,1500), falling back to `OverlayDescription` (60xx,0022).
+    pub label: Option<String>,
+}
+
 #[derive(Clone, Debug)]
 pub struct RenderPipelineOptions {
     pub frame_index: usize,
@@ -78,6 +95,15 @@ pub struct RenderPipelineOptions {
     pub pad: bool,
     /// Pad color for the square canvas as `[R, G, B]`. Defaults to `[0, 0, 0]` (black).
     pub pad_color: [u8; 3],
+    /// Whether to composite an overlay plane onto the rendered image, when the instance has one.
+    /// Defaults to `true` - the first available overlay renders by default.
+    pub show_overlays: bool,
+    /// Which overlay to render, by its `OverlaySummary::index` (0-based, ascending by DICOM
+    /// group). `None` selects the first available overlay (index 0). Ignored when
+    /// `show_overlays` is `false`.
+    pub overlay_index: Option<usize>,
+    /// Fill color for composited overlay pixels as `[R, G, B]`. Defaults to `[0, 255, 0]` (green).
+    pub overlay_color: [u8; 3],
 }
 
 impl Default for RenderPipelineOptions {
@@ -97,6 +123,9 @@ impl Default for RenderPipelineOptions {
             bounding_box_color: [0, 0, 0],
             pad: false,
             pad_color: [0, 0, 0],
+            show_overlays: true,
+            overlay_index: None,
+            overlay_color: [0, 255, 0],
         }
     }
 }
@@ -109,6 +138,10 @@ pub struct RenderFrameOutput {
     pub bits_allocated: u16,
     pub format: RenderOutputFormat,
     pub bytes: Vec<u8>,
+    /// All overlay planes present on the source instance, regardless of whether one was rendered.
+    pub overlays: Vec<OverlaySummary>,
+    /// Which overlay (by `OverlaySummary::index`) was actually composited into `bytes`, if any.
+    pub selected_overlay_index: Option<usize>,
 }
 
 #[derive(Clone, Debug)]
@@ -161,6 +194,8 @@ pub fn render_dicom_frames(
         let metadata = read_render_metadata(&frame_object)?;
         let mut frame_options = options.clone();
         frame_options.frame_index = 0;
+        let overlays = discover_overlays(&frame_object);
+        validate_overlay_index(options, &overlays)?;
 
         if output_format == RenderOutputFormat::Raw {
             let _raw_scope = perf::scope("render.raw_frame_extract");
@@ -172,19 +207,37 @@ pub fn render_dicom_frames(
                 bits_allocated: metadata.bits_allocated,
                 format: RenderOutputFormat::Raw,
                 bytes,
+                overlays,
+                selected_overlay_index: None,
             }]);
         }
 
-        let frame = render_single_frame(&frame_object, &metadata, &frame_options)?;
+        let selected_overlay = resolve_selected_overlay(options, &overlays);
+        let mut frame = render_single_frame(&frame_object, &metadata, &frame_options)?;
+        if let Some(index) = selected_overlay {
+            composite_overlay(
+                &mut frame,
+                &frame_object,
+                &metadata,
+                0,
+                options.frame_index,
+                &overlays[index],
+                options.overlay_color,
+            )?;
+        }
         let mut frame = maybe_resize_frame(frame, &frame_options);
         draw_bounding_boxes(&mut frame, &frame_options);
         let frame = maybe_pad_frame(frame, &frame_options);
-        let encoded = encode_rendered_frame(&frame, output_format, frame_options.jpeg_quality)?;
+        let mut encoded = encode_rendered_frame(&frame, output_format, frame_options.jpeg_quality)?;
+        encoded.overlays = overlays;
+        encoded.selected_overlay_index = selected_overlay;
         return Ok(vec![encoded]);
     }
 
     let working = ensure_native_render_object(object)?;
     let metadata = read_render_metadata(working.as_ref())?;
+    let overlays = discover_overlays(working.as_ref());
+    validate_overlay_index(options, &overlays)?;
 
     if output_format == RenderOutputFormat::Raw {
         let _raw_scope = perf::scope("render.raw_frame_extract");
@@ -196,14 +249,30 @@ pub fn render_dicom_frames(
             bits_allocated: metadata.bits_allocated,
             format: RenderOutputFormat::Raw,
             bytes,
+            overlays,
+            selected_overlay_index: None,
         }]);
     }
 
-    let frame = render_single_frame(working.as_ref(), &metadata, options)?;
+    let selected_overlay = resolve_selected_overlay(options, &overlays);
+    let mut frame = render_single_frame(working.as_ref(), &metadata, options)?;
+    if let Some(index) = selected_overlay {
+        composite_overlay(
+            &mut frame,
+            working.as_ref(),
+            &metadata,
+            options.frame_index,
+            options.frame_index,
+            &overlays[index],
+            options.overlay_color,
+        )?;
+    }
     let mut frame = maybe_resize_frame(frame, options);
     draw_bounding_boxes(&mut frame, options);
     let frame = maybe_pad_frame(frame, options);
-    let encoded = encode_rendered_frame(&frame, output_format, options.jpeg_quality)?;
+    let mut encoded = encode_rendered_frame(&frame, output_format, options.jpeg_quality)?;
+    encoded.overlays = overlays;
+    encoded.selected_overlay_index = selected_overlay;
     Ok(vec![encoded])
 }
 
@@ -216,6 +285,9 @@ pub fn render_all_dicom_frames(
     validate_user_window_overrides(options)?;
     let working = ensure_native_render_object(object)?;
     let metadata = read_render_metadata(working.as_ref())?;
+    let overlays = discover_overlays(working.as_ref());
+    validate_overlay_index(options, &overlays)?;
+    let selected_overlay = resolve_selected_overlay(options, &overlays);
 
     if output_format == RenderOutputFormat::Raw {
         let mut frames = Vec::with_capacity(metadata.number_of_frames);
@@ -228,6 +300,8 @@ pub fn render_all_dicom_frames(
                 bits_allocated: metadata.bits_allocated,
                 format: RenderOutputFormat::Raw,
                 bytes,
+                overlays: overlays.clone(),
+                selected_overlay_index: None,
             });
         }
         return Ok(frames);
@@ -237,11 +311,26 @@ pub fn render_all_dicom_frames(
     let _post_scope = perf::scope("render.render_all_postprocess_parallel");
     let results = rendered
         .into_par_iter()
-        .map(|frame| {
+        .enumerate()
+        .map(|(frame_index, mut frame)| {
+            if let Some(index) = selected_overlay {
+                composite_overlay(
+                    &mut frame,
+                    working.as_ref(),
+                    &metadata,
+                    frame_index,
+                    frame_index,
+                    &overlays[index],
+                    options.overlay_color,
+                )?;
+            }
             let mut resized = maybe_resize_frame(frame, options);
             draw_bounding_boxes(&mut resized, options);
             let final_frame = maybe_pad_frame(resized, options);
-            encode_rendered_frame(&final_frame, output_format, options.jpeg_quality)
+            let mut encoded = encode_rendered_frame(&final_frame, output_format, options.jpeg_quality)?;
+            encoded.overlays = overlays.clone();
+            encoded.selected_overlay_index = selected_overlay;
+            Ok(encoded)
         })
         .collect::<Vec<_>>();
 
@@ -256,14 +345,31 @@ pub fn render_all_dicom_video_frames(
     validate_user_window_overrides(options)?;
     let working = ensure_native_render_object(object)?;
     let metadata = read_render_metadata(working.as_ref())?;
+    let overlays = discover_overlays(working.as_ref());
+    validate_overlay_index(options, &overlays)?;
+    let selected_overlay = resolve_selected_overlay(options, &overlays);
     let rendered = render_all_frames(working.as_ref(), &metadata, options)?;
     let _post_scope = perf::scope("render.render_all_video_postprocess_parallel");
     let results = rendered
         .into_par_iter()
-        .map(|frame| {
+        .enumerate()
+        .map(|(frame_index, mut frame)| {
+            if let Some(index) = selected_overlay {
+                composite_overlay(
+                    &mut frame,
+                    working.as_ref(),
+                    &metadata,
+                    frame_index,
+                    frame_index,
+                    &overlays[index],
+                    options.overlay_color,
+                )?;
+            }
             let mut resized = maybe_resize_frame(frame, options);
             draw_bounding_boxes(&mut resized, options);
             let final_frame = maybe_pad_frame(resized, options);
+            // These frames are piped straight to ffmpeg and discarded (see write_dicom_video) -
+            // overlay metadata isn't consumed downstream, only the composited pixels matter here.
             Ok(RenderFrameOutput {
                 width: final_frame.width,
                 height: final_frame.height,
@@ -271,6 +377,8 @@ pub fn render_all_dicom_video_frames(
                 bits_allocated: 8,
                 format: RenderOutputFormat::Raw,
                 bytes: final_frame.bytes,
+                overlays: Vec::new(),
+                selected_overlay_index: None,
             })
         })
         .collect::<Vec<Result<RenderFrameOutput, RenderError>>>();
@@ -1682,6 +1790,292 @@ fn draw_bounding_boxes(frame: &mut RenderedFramePixels, options: &RenderPipeline
     }
 }
 
+/// Overlay tag offsets within a `60xx` group.
+const OVERLAY_ROWS_OFFSET: u16 = 0x0010;
+const OVERLAY_COLUMNS_OFFSET: u16 = 0x0011;
+const OVERLAY_TYPE_OFFSET: u16 = 0x0040;
+const OVERLAY_ORIGIN_OFFSET: u16 = 0x0050;
+const IMAGE_FRAME_ORIGIN_OFFSET: u16 = 0x0051;
+const OVERLAY_BITS_ALLOCATED_OFFSET: u16 = 0x0100;
+const OVERLAY_BIT_POSITION_OFFSET: u16 = 0x0102;
+const NUMBER_OF_FRAMES_IN_OVERLAY_OFFSET: u16 = 0x0015;
+const OVERLAY_DESCRIPTION_OFFSET: u16 = 0x0022;
+const OVERLAY_DATA_OFFSET: u16 = 0x3000;
+const OVERLAY_LABEL_OFFSET: u16 = 0x1500;
+
+/// Discovers every overlay plane present on `object`, in ascending group order (`0x6000` ..
+/// `0x601E`, even groups only - up to 16 overlays per DICOM PS3.3 C.9.2). Cheap: tag lookups
+/// only, no pixel decoding.
+fn discover_overlays(object: &DefaultDicomObject) -> Vec<OverlaySummary> {
+    let mut overlays = Vec::new();
+
+    for group in (0x6000u16..=0x601Eu16).step_by(2) {
+        let Some(rows) = object
+            .get(Tag(group, OVERLAY_ROWS_OFFSET))
+            .and_then(|element| element.uint16().ok())
+        else {
+            continue;
+        };
+        let Some(columns) = object
+            .get(Tag(group, OVERLAY_COLUMNS_OFFSET))
+            .and_then(|element| element.uint16().ok())
+        else {
+            continue;
+        };
+
+        let overlay_type = trimmed_str(object, Tag(group, OVERLAY_TYPE_OFFSET));
+        let label = trimmed_str(object, Tag(group, OVERLAY_LABEL_OFFSET))
+            .or_else(|| trimmed_str(object, Tag(group, OVERLAY_DESCRIPTION_OFFSET)));
+
+        overlays.push(OverlaySummary {
+            index: overlays.len(),
+            group,
+            rows,
+            columns,
+            overlay_type,
+            label,
+        });
+    }
+
+    overlays
+}
+
+fn trimmed_str(object: &DefaultDicomObject, tag: Tag) -> Option<String> {
+    object
+        .get(tag)
+        .and_then(|element| element.to_str().ok())
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
+/// Errors early (mirrors `validate_user_window_overrides`) if `options.overlay_index` names an
+/// overlay that doesn't exist, regardless of whether `show_overlays` would actually use it.
+fn validate_overlay_index(
+    options: &RenderPipelineOptions,
+    overlays: &[OverlaySummary],
+) -> Result<(), RenderError> {
+    if let Some(index) = options.overlay_index {
+        if index >= overlays.len() {
+            return Err(RenderError::InvalidOverlayIndex {
+                requested: index,
+                available: overlays.len(),
+            });
+        }
+    }
+
+    Ok(())
+}
+
+/// Resolves which overlay (by `OverlaySummary::index`) should be composited, or `None` if
+/// overlays are disabled or absent. `options.overlay_index` must already have been validated via
+/// `validate_overlay_index`.
+fn resolve_selected_overlay(
+    options: &RenderPipelineOptions,
+    overlays: &[OverlaySummary],
+) -> Option<usize> {
+    if !options.show_overlays || overlays.is_empty() {
+        return None;
+    }
+
+    let index = options.overlay_index.unwrap_or(0);
+    (index < overlays.len()).then_some(index)
+}
+
+/// Composites `overlay` onto `frame` (still at native/pre-resize resolution) in `color`.
+///
+/// `local_frame_index` is the frame index within `object`'s own pixel data (used for the
+/// embedded-in-pixel-data style, via the same raw-byte extraction `get_frame_bytes` already
+/// provides for display rendering). `original_frame_index` is the frame index within the source
+/// instance's original frame numbering (used to resolve which sub-frame of a multi-frame
+/// `OverlayData` blob applies, per `NumberOfFramesInOverlay`/`ImageFrameOrigin`) - the two differ
+/// when `object` is a single already-decoded frame extracted from a larger multi-frame instance.
+fn composite_overlay(
+    frame: &mut RenderedFramePixels,
+    object: &DefaultDicomObject,
+    metadata: &RenderMetadata,
+    local_frame_index: usize,
+    original_frame_index: usize,
+    overlay: &OverlaySummary,
+    color: [u8; 3],
+) -> Result<(), RenderError> {
+    let rows = usize::from(overlay.rows);
+    let columns = usize::from(overlay.columns);
+    if rows == 0 || columns == 0 {
+        return Ok(());
+    }
+
+    let overlay_bits_allocated = object
+        .get(Tag(overlay.group, OVERLAY_BITS_ALLOCATED_OFFSET))
+        .and_then(|element| element.uint16().ok())
+        .unwrap_or(1);
+
+    let bitmap = if overlay_bits_allocated > 1 && overlay_bits_allocated == metadata.bits_allocated
+    {
+        let bit_position = object
+            .get(Tag(overlay.group, OVERLAY_BIT_POSITION_OFFSET))
+            .and_then(|element| element.uint16().ok())
+            .unwrap_or(0);
+        decode_embedded_overlay_bits(object, metadata, local_frame_index, rows, columns, bit_position)?
+    } else {
+        match decode_overlay_data_bits(object, overlay, rows, columns, original_frame_index)? {
+            Some(bitmap) => bitmap,
+            None => return Ok(()),
+        }
+    };
+
+    let origin = object
+        .get(Tag(overlay.group, OVERLAY_ORIGIN_OFFSET))
+        .and_then(|element| element.to_multi_int::<i32>().ok())
+        .filter(|values| values.len() == 2)
+        .map(|values| (values[0], values[1]))
+        .unwrap_or((1, 1));
+
+    paint_overlay_bitmap(frame, &bitmap, rows, columns, origin, color);
+    Ok(())
+}
+
+fn paint_overlay_bitmap(
+    frame: &mut RenderedFramePixels,
+    bitmap: &[bool],
+    rows: usize,
+    columns: usize,
+    origin: (i32, i32),
+    color: [u8; 3],
+) {
+    let (origin_row, origin_col) = origin;
+    let image_width = i64::from(frame.width);
+    let image_height = i64::from(frame.height);
+    let luma = rgb_to_luma(color);
+
+    for overlay_row in 0..rows {
+        let image_row = i64::from(origin_row) - 1 + overlay_row as i64;
+        if image_row < 0 || image_row >= image_height {
+            continue;
+        }
+
+        for overlay_col in 0..columns {
+            let bit_index = overlay_row * columns + overlay_col;
+            if !bitmap.get(bit_index).copied().unwrap_or(false) {
+                continue;
+            }
+
+            let image_col = i64::from(origin_col) - 1 + overlay_col as i64;
+            if image_col < 0 || image_col >= image_width {
+                continue;
+            }
+
+            let pixel_index = image_row as usize * frame.width as usize + image_col as usize;
+            match frame.samples_per_pixel {
+                1 => frame.bytes[pixel_index] = luma,
+                3 => {
+                    let base = pixel_index * 3;
+                    frame.bytes[base] = color[0];
+                    frame.bytes[base + 1] = color[1];
+                    frame.bytes[base + 2] = color[2];
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Legacy overlay encoding: the overlay bit lives at `bit_position` of each raw pixel-data
+/// sample. Uses `get_frame_bytes`, which returns raw *unmasked* words - `decode_grayscale_values`
+/// masks these same bits away via `bits_stored` before display, so this must read the raw bytes
+/// directly rather than reuse the display-decode path.
+fn decode_embedded_overlay_bits(
+    object: &DefaultDicomObject,
+    metadata: &RenderMetadata,
+    frame_index: usize,
+    rows: usize,
+    columns: usize,
+    bit_position: u16,
+) -> Result<Vec<bool>, RenderError> {
+    let frame_bytes = get_frame_bytes(object, metadata, frame_index)?;
+    let pixel_count = rows * columns;
+    let expected = pixel_count * 2;
+    if frame_bytes.len() < expected {
+        return Err(RenderError::InvalidPixelDataLength {
+            expected,
+            actual: frame_bytes.len(),
+        });
+    }
+
+    let mut bits = Vec::with_capacity(pixel_count);
+    for chunk in frame_bytes[..expected].chunks_exact(2) {
+        let raw = u16::from_le_bytes([chunk[0], chunk[1]]);
+        bits.push(((raw >> bit_position) & 1) != 0);
+    }
+    Ok(bits)
+}
+
+/// Current-standard overlay encoding: a distinct `OverlayData` element, 1 bit per pixel, packed
+/// **LSB-first** (pixel `p` is byte `p/8`, bit `p%8`) - confirmed empirically against
+/// `overlay.dcm`'s bundled dose-report text overlay (LSB-first decodes to legible text; the
+/// MSB-first order this crate's *pixel data* 1-bpp path uses elsewhere produces garbled output).
+///
+/// Returns `Ok(None)` when there's no `OverlayData` element, or when a multi-frame overlay
+/// (`NumberOfFramesInOverlay` > 1) doesn't cover `original_frame_index`.
+fn decode_overlay_data_bits(
+    object: &DefaultDicomObject,
+    overlay: &OverlaySummary,
+    rows: usize,
+    columns: usize,
+    original_frame_index: usize,
+) -> Result<Option<Vec<bool>>, RenderError> {
+    let Ok(element) = object.element(Tag(overlay.group, OVERLAY_DATA_OFFSET)) else {
+        return Ok(None);
+    };
+    let Ok(data) = element.to_bytes() else {
+        return Ok(None);
+    };
+
+    let pixel_count = rows * columns;
+    let plane_len = pixel_count.div_ceil(8);
+
+    let number_of_frames_in_overlay = object
+        .get(Tag(overlay.group, NUMBER_OF_FRAMES_IN_OVERLAY_OFFSET))
+        .and_then(|element| element.to_str().ok())
+        .and_then(|text| {
+            text.split('\\')
+                .next()
+                .and_then(|value| value.trim().parse::<usize>().ok())
+        })
+        .unwrap_or(1);
+
+    let sub_frame = if number_of_frames_in_overlay > 1 {
+        let image_frame_origin = object
+            .get(Tag(overlay.group, IMAGE_FRAME_ORIGIN_OFFSET))
+            .and_then(|element| element.uint16().ok())
+            .unwrap_or(1);
+        let start = usize::from(image_frame_origin).saturating_sub(1);
+        if original_frame_index < start || original_frame_index >= start + number_of_frames_in_overlay
+        {
+            return Ok(None);
+        }
+        original_frame_index - start
+    } else {
+        0
+    };
+
+    let offset = sub_frame * plane_len;
+    if data.len() < offset + plane_len {
+        return Err(RenderError::InvalidPixelDataLength {
+            expected: offset + plane_len,
+            actual: data.len(),
+        });
+    }
+
+    let plane_bytes = &data[offset..offset + plane_len];
+    let mut bits = Vec::with_capacity(pixel_count);
+    for pixel_index in 0..pixel_count {
+        let byte = plane_bytes[pixel_index / 8];
+        let bit = pixel_index % 8;
+        bits.push(((byte >> bit) & 1) != 0);
+    }
+    Ok(Some(bits))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -2064,6 +2458,9 @@ fn encode_rendered_frame(
         bits_allocated: 8,
         format: output_format,
         bytes,
+        // Callers attach the real overlay discovery/selection results after calling this.
+        overlays: Vec::new(),
+        selected_overlay_index: None,
     })
 }
 

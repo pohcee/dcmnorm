@@ -349,6 +349,9 @@ Rendering:
 - `--redact-color <R,G,B|#RRGGBB>`
 - `--pad`
 - `--pad-color <R,G,B|#RRGGBB>`
+- `--no-overlays`
+- `--overlay-index <N>`
+- `--overlay-color <R,G,B|#RRGGBB>`
 
 ### JSON conversion defaults
 
@@ -539,6 +542,47 @@ Photometric interpretations supported by rendering:
 - `RGB`
 
 Both planar configurations are supported for RGB rendering (`PlanarConfiguration` 0 and 1).
+
+#### Overlay planes
+
+DICOM overlay planes (group `60xx`, up to 16 per instance: `6000,eeee` .. `601E,eeee`) are
+composited onto the rendered image. Both encodings defined by the standard are supported:
+
+- **Distinct `OverlayData`** (`60xx,3000`, current standard): `OverlayBitsAllocated`=1, a
+  separately-stored 1-bit-per-pixel bitmap, packed LSB-first.
+- **Embedded in `PixelData`** (legacy CR/DX): `OverlayBitsAllocated` equals the image's own
+  `BitsAllocated`, and `OverlayBitPosition` names a specific high bit unused by `BitsStored`.
+
+If an instance has one or more overlays, the first available overlay (ascending by DICOM group)
+renders by default:
+
+```bash
+cargo run -p dcmnorm-cli -- test/files/overlay.dcm out.png
+```
+
+Select a different overlay by its 0-based index (ordinal among the overlays present, not the raw
+DICOM group), or disable overlay rendering entirely:
+
+```bash
+cargo run -p dcmnorm-cli -- test/files/overlay_multi.dcm out.png --overlay-index 1
+cargo run -p dcmnorm-cli -- test/files/overlay.dcm out.png --no-overlays
+```
+
+Overlay pixels render in a fill color, `R,G,B` (0-255 each) or `#RRGGBB` hex, defaulting to
+green (`0,255,0`):
+
+```bash
+cargo run -p dcmnorm-cli -- test/files/overlay.dcm out.png --overlay-color 255,0,0
+```
+
+`--overlay-index`/`--overlay-color` require overlays to be enabled (they conflict with
+`--no-overlays`), and an `--overlay-index` beyond the number of overlays present is an error
+rather than being silently clamped.
+
+Three small synthetic (no PHI, not derived from any real study) fixtures exercise overlay
+rendering: `test/files/overlay.dcm` (one overlay, distinct `OverlayData`), `test/files/
+overlay_multi.dcm` (two overlays, distinct `OverlayData`), and `test/files/overlay_embedded.dcm`
+(one overlay, legacy embedded-in-`PixelData` encoding).
 
 Use `--verbose` to print render/conversion diagnostics — without it, external tool output
 such as `ffmpeg` is suppressed unless an error occurs. For stage-by-stage performance timing,

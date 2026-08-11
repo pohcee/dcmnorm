@@ -6,6 +6,9 @@ const { execFileSync } = require("child_process");
 const binding = require("../index.js");
 
 const fixture = path.join(__dirname, "..", "..", "..", "test", "files", "us.dcm");
+const overlayFixture = path.join(__dirname, "..", "..", "..", "test", "files", "overlay.dcm");
+const overlayMultiFixture = path.join(__dirname, "..", "..", "..", "test", "files", "overlay_multi.dcm");
+const overlayEmbeddedFixture = path.join(__dirname, "..", "..", "..", "test", "files", "overlay_embedded.dcm");
 
 // The addon must run on the oldest glibc among its consumers' runtime images - node:22-slim
 // (edge services), Debian bookworm, GLIBC 2.36 - even though render-server's node:24-trixie-slim
@@ -101,6 +104,46 @@ const tagsJson = await binding.readTags(fixture, ["StudyInstanceUID", "SOPInstan
     assert.ok(error.message.includes("invalid --filter key"), `unexpected error message: ${error.message}`);
   }
   assert.ok(panicked, "readTags with an invalid tag keyword should reject, not throw synchronously or crash");
+
+  const withOverlay = await binding.renderFrame(overlayFixture, { format: "png" });
+  assert.strictEqual(withOverlay.overlays.length, 1, "overlay.dcm should report exactly one overlay plane");
+  assert.strictEqual(withOverlay.selectedOverlayIndex, 0, "the first overlay should render by default");
+
+  const withoutOverlay = await binding.renderFrame(overlayFixture, { format: "png", showOverlays: false });
+  assert.strictEqual(withoutOverlay.selectedOverlayIndex, undefined, "showOverlays: false should render no overlay");
+  assert.ok(
+    !withOverlay.data.equals(withoutOverlay.data),
+    "rendering with and without the overlay should produce different image bytes",
+  );
+
+  const redOverlay = await binding.renderFrame(overlayFixture, { format: "png", overlayColor: "255,0,0" });
+  assert.ok(
+    !withOverlay.data.equals(redOverlay.data),
+    "a different overlayColor should change the rendered bytes",
+  );
+
+  let overlayIndexRejected = false;
+  try {
+    await binding.renderFrame(overlayFixture, { format: "png", overlayIndex: 5 });
+  } catch (error) {
+    overlayIndexRejected = true;
+    assert.ok(error.message.includes("overlay index"), `unexpected error message: ${error.message}`);
+  }
+  assert.ok(overlayIndexRejected, "an out-of-range overlayIndex should reject");
+
+  const multiOverlayFirst = await binding.renderFrame(overlayMultiFixture, { format: "png" });
+  assert.strictEqual(multiOverlayFirst.overlays.length, 2, "overlay_multi.dcm should report two overlay planes");
+  assert.strictEqual(multiOverlayFirst.selectedOverlayIndex, 0);
+  const multiOverlaySecond = await binding.renderFrame(overlayMultiFixture, { format: "png", overlayIndex: 1 });
+  assert.strictEqual(multiOverlaySecond.selectedOverlayIndex, 1);
+  assert.ok(
+    !multiOverlayFirst.data.equals(multiOverlaySecond.data),
+    "selecting a different overlay index should change the rendered bytes",
+  );
+
+  const embeddedOverlay = await binding.renderFrame(overlayEmbeddedFixture, { format: "png" });
+  assert.strictEqual(embeddedOverlay.overlays.length, 1, "overlay_embedded.dcm should report one overlay plane");
+  assert.strictEqual(embeddedOverlay.selectedOverlayIndex, 0);
 
   fs.rmSync(tmpDir, { recursive: true, force: true });
   console.log("smoke test passed");

@@ -152,7 +152,8 @@ use super::{
     write_dicom_json_with_options, write_dicom_json_with_source, BoundingBox, BoxLength,
     DicomJsonBulkDataMode, DicomJsonFormat, DicomJsonKeyStyle, DicomJsonReadOptions,
     CancelMode, CancelSignal, DicomJsonWriteOptions, DimseError, DimseLogger, EchoScuOptions, FindScuOptions,
-    Jpeg2000Backend, MoveScuOptions, RenderOutputFormat, RenderPipelineOptions, ScpHandlers, ScpOptions, StoreScuOptions,
+    Jpeg2000Backend, MoveScuOptions, RenderError, RenderOutputFormat, RenderPipelineOptions,
+    ScpHandlers, ScpOptions, StoreScuOptions,
 };
 
 #[test]
@@ -1266,6 +1267,165 @@ fn renders_dx_frame_to_jpeg() {
 
     assert_eq!(&rendered.bytes[..2], b"\xFF\xD8");
     assert!(rendered.bytes.len() > 100);
+}
+
+// test/files/overlay.dcm is a purpose-built synthetic fixture (see
+// `generate_overlay_fixture_scratch` in this file's git history for how it was produced) - not
+// derived from any real study, so it carries no PHI. It's a tiny 8x8 MONOCHROME2 image (all
+// pixels black) with one overlay plane (group 0x6000, distinct `OverlayData`): a diagonal line,
+// pixel (r, r) set for r in 0..8, packed LSB-first per DICOM PS3.5 (byte[r] = 1 << r).
+#[test]
+fn renders_first_overlay_by_default() {
+    let object = read_dicom_file(fixture_path("overlay.dcm")).unwrap();
+    let rendered = render_dicom_frame(
+        &object,
+        RenderOutputFormat::Png,
+        &RenderPipelineOptions::default(),
+    )
+    .unwrap();
+
+    assert_eq!(rendered.overlays.len(), 1);
+    assert_eq!(rendered.overlays[0].index, 0);
+    assert_eq!(rendered.overlays[0].group, 0x6000);
+    assert_eq!(rendered.selected_overlay_index, Some(0));
+
+    let image = image::load_from_memory(&rendered.bytes).unwrap().to_luma8();
+    // (0, 0) is on the overlay's diagonal (set); default overlay color is green ([0, 255, 0]),
+    // which luma-converts to 182 via the same rgb_to_luma formula draw_bounding_boxes/
+    // maybe_pad_frame already use elsewhere in this file.
+    assert_eq!(image.get_pixel(0, 0).0[0], 182);
+    // (1, 0) is off the diagonal (clear), and the underlying image is black there.
+    assert_eq!(image.get_pixel(1, 0).0[0], 0);
+}
+
+#[test]
+fn overlay_can_be_disabled() {
+    let object = read_dicom_file(fixture_path("overlay.dcm")).unwrap();
+    let options = RenderPipelineOptions {
+        show_overlays: false,
+        ..RenderPipelineOptions::default()
+    };
+    let rendered = render_dicom_frame(&object, RenderOutputFormat::Png, &options).unwrap();
+
+    assert_eq!(
+        rendered.overlays.len(),
+        1,
+        "overlays should still be reported even when not rendered, so a client can offer to enable them"
+    );
+    assert_eq!(rendered.selected_overlay_index, None);
+
+    let image = image::load_from_memory(&rendered.bytes).unwrap().to_luma8();
+    assert_eq!(image.get_pixel(0, 0).0[0], 0, "overlay pixel should be untouched when disabled");
+}
+
+#[test]
+fn overlay_color_is_configurable() {
+    let object = read_dicom_file(fixture_path("overlay.dcm")).unwrap();
+    let options = RenderPipelineOptions {
+        overlay_color: [255, 0, 0],
+        ..RenderPipelineOptions::default()
+    };
+    let rendered = render_dicom_frame(&object, RenderOutputFormat::Png, &options).unwrap();
+
+    let image = image::load_from_memory(&rendered.bytes).unwrap().to_luma8();
+    // Red ([255, 0, 0]) luma-converts to 54.
+    assert_eq!(image.get_pixel(0, 0).0[0], 54);
+}
+
+#[test]
+fn out_of_range_overlay_index_is_rejected() {
+    let object = read_dicom_file(fixture_path("overlay.dcm")).unwrap();
+    let options = RenderPipelineOptions {
+        overlay_index: Some(5),
+        ..RenderPipelineOptions::default()
+    };
+    let error = render_dicom_frame(&object, RenderOutputFormat::Png, &options).unwrap_err();
+
+    assert!(matches!(
+        error,
+        RenderError::InvalidOverlayIndex {
+            requested: 5,
+            available: 1
+        }
+    ));
+}
+
+// test/files/overlay_multi.dcm is another purpose-built synthetic fixture (no PHI, not derived
+// from a real study): an 8x8 MONOCHROME2 image with two overlay planes, both distinct
+// `OverlayData` - group 0x6000 "Diagonal" (pixel (r, r) set) and group 0x6002 "Anti-diagonal"
+// (pixel (r, 7-r) set), so the two are trivially distinguishable by pixel content.
+#[test]
+fn selects_among_multiple_overlays_by_index() {
+    let object = read_dicom_file(fixture_path("overlay_multi.dcm")).unwrap();
+
+    let default_rendered = render_dicom_frame(
+        &object,
+        RenderOutputFormat::Png,
+        &RenderPipelineOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(default_rendered.overlays.len(), 2);
+    assert_eq!(default_rendered.overlays[0].group, 0x6000);
+    assert_eq!(default_rendered.overlays[0].label.as_deref(), Some("Diagonal"));
+    assert_eq!(default_rendered.overlays[1].group, 0x6002);
+    assert_eq!(default_rendered.overlays[1].label.as_deref(), Some("Anti-diagonal"));
+    assert_eq!(default_rendered.selected_overlay_index, Some(0));
+
+    let second_options = RenderPipelineOptions {
+        overlay_index: Some(1),
+        ..RenderPipelineOptions::default()
+    };
+    let second_rendered = render_dicom_frame(&object, RenderOutputFormat::Png, &second_options).unwrap();
+    assert_eq!(second_rendered.selected_overlay_index, Some(1));
+
+    let default_image = image::load_from_memory(&default_rendered.bytes).unwrap().to_luma8();
+    let second_image = image::load_from_memory(&second_rendered.bytes).unwrap().to_luma8();
+
+    // Row 0: the diagonal overlay sets column 0, the anti-diagonal overlay sets column 7.
+    assert_eq!(default_image.get_pixel(0, 0).0[0], 182);
+    assert_eq!(default_image.get_pixel(7, 0).0[0], 0);
+    assert_eq!(second_image.get_pixel(0, 0).0[0], 0);
+    assert_eq!(second_image.get_pixel(7, 0).0[0], 182);
+}
+
+// test/files/overlay_embedded.dcm is a third purpose-built synthetic fixture: an 8x8, 16-bit
+// (BitsStored=14/HighBit=13, matching the headroom convention real DX/CR images use) image with
+// the same diagonal pattern, but encoded the legacy way - embedded in the unused high bit 15 of
+// PixelData itself (OverlayBitsAllocated == image BitsAllocated, OverlayBitPosition=15) rather
+// than a distinct OverlayData element.
+#[test]
+fn renders_overlay_embedded_in_pixel_data_high_bit() {
+    let object = read_dicom_file(fixture_path("overlay_embedded.dcm")).unwrap();
+
+    let rendered = render_dicom_frame(
+        &object,
+        RenderOutputFormat::Png,
+        &RenderPipelineOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(rendered.overlays.len(), 1);
+    assert_eq!(rendered.selected_overlay_index, Some(0));
+
+    let baseline = render_dicom_frame(
+        &object,
+        RenderOutputFormat::Png,
+        &RenderPipelineOptions {
+            show_overlays: false,
+            ..RenderPipelineOptions::default()
+        },
+    )
+    .unwrap();
+
+    let with_overlay = image::load_from_memory(&rendered.bytes).unwrap().to_luma8();
+    let without_overlay = image::load_from_memory(&baseline.bytes).unwrap().to_luma8();
+
+    assert_eq!(with_overlay.get_pixel(0, 0).0[0], 182);
+    assert_eq!(with_overlay.get_pixel(1, 0).0[0], 0);
+    assert_ne!(
+        without_overlay.get_pixel(0, 0).0[0],
+        182,
+        "baseline pixel should not already be overlay-colored"
+    );
 }
 
 #[test]
@@ -3348,3 +3508,4 @@ fn scp_find_response_with_non_ascii_text_does_not_close_the_connection() {
     scp.stop();
     fs::remove_dir_all(&cache_dir).ok();
 }
+

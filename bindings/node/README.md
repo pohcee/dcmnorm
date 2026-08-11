@@ -33,6 +33,18 @@ npm test             # runs test/smoke.js against the fixtures in ../../test/fil
   — set/remove attributes; writes back in place unless `outputPath` is given.
 - `transcode(filePath, outputPath, transferSyntaxUid): Promise<void>`.
 - `checkDicom(filePath): Promise<boolean>`.
+- `renderFrame(filePath, options?: { format?: 'jpeg'|'png', outputWidth?, outputHeight?, windowCenter?, windowWidth?, frameIndex?, jpegQuality?, showOverlays?: boolean, overlayIndex?: number, overlayColor?: string }): Promise<{ mimeType, width, height, data: Buffer, overlays: OverlaySummary[], selectedOverlayIndex?: number }>`
+  — renders a single frame to JPEG or PNG. If the instance has one or more DICOM overlay planes
+  (group `60xx`), the first available overlay composites onto the image by default; `overlayIndex`
+  selects a different one (0-based, by `OverlaySummary.index`, matching the CLI's
+  `--overlay-index`), `showOverlays: false` disables overlay rendering, and `overlayColor` (`"R,G,B"`
+  or `"#RRGGBB"`, default green) sets the fill color. `overlays` in the result always lists every
+  overlay present on the instance (even when none was rendered), so a caller can offer overlay
+  selection without a separate metadata call; `selectedOverlayIndex` says which one (if any) is
+  actually in `data`. `OverlaySummary` is `{ index, group, rows, columns, overlayType?, label? }`.
+- `renderMovie(filePath, options?: { outputWidth?, outputHeight?, windowCenter?, windowWidth?, fps? }): Promise<{ mimeType, data: Buffer }>`
+  — renders every frame of a multiframe instance to an MP4 (requires `ffmpeg` on `PATH`). Does not
+  currently support the overlay options `renderFrame` does.
 
 All return values that carry data are JSON strings — parse them JS-side. This
 sidesteps a napi-rs constraint (`Task::JsValue` requires `TypeName`, which

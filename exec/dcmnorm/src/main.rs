@@ -351,6 +351,33 @@ struct Cli {
         display_order = 46
     )]
     pad_color: Option<String>,
+
+    #[arg(
+        long,
+        action = ArgAction::SetTrue,
+        help = "Do not render DICOM overlay planes, even if present",
+        help_heading = "Rendering",
+        display_order = 47
+    )]
+    no_overlays: bool,
+
+    #[arg(
+        long,
+        value_name = "N",
+        help = "Zero-based index of the overlay plane to render, when multiple are present. Defaults to the first available overlay",
+        help_heading = "Rendering",
+        display_order = 48
+    )]
+    overlay_index: Option<usize>,
+
+    #[arg(
+        long,
+        value_name = "COLOR",
+        help = "Fill color for rendered overlay pixels as R,G,B (0-255 each) or #RRGGBB hex. Defaults to 0,255,0 (green)",
+        help_heading = "Rendering",
+        display_order = 49
+    )]
+    overlay_color: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -1164,14 +1191,16 @@ fn run_dicom_to_render_with_object(
     verbose_log(
         cli,
         format!(
-            "Rendering DICOM to {:?} (output={}, frame={}, all_frames={}, modality_lut={}, voi_lut={}, jpeg_quality={})",
+            "Rendering DICOM to {:?} (output={}, frame={}, all_frames={}, modality_lut={}, voi_lut={}, jpeg_quality={}, show_overlays={}, overlay_index={:?})",
             format,
             output_path.display(),
             cli.render_frame,
             cli.render_all_frames || format == RenderFormat::Mpeg4,
             !cli.no_modality_lut,
             !cli.no_voi_lut,
-            cli.jpeg_quality
+            cli.jpeg_quality,
+            !cli.no_overlays,
+            cli.overlay_index
         ),
     );
     let bounding_boxes = cli
@@ -1233,6 +1262,29 @@ fn run_dicom_to_render_with_object(
         return Err(io::Error::new(ErrorKind::InvalidInput, "--pad-color requires --pad").into());
     }
 
+    if cli.overlay_index.is_some() && cli.no_overlays {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "--overlay-index cannot be combined with --no-overlays",
+        )
+        .into());
+    }
+
+    if cli.overlay_color.is_some() && cli.no_overlays {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "--overlay-color cannot be combined with --no-overlays",
+        )
+        .into());
+    }
+
+    let overlay_color = cli
+        .overlay_color
+        .as_deref()
+        .map(parse_redact_color)
+        .transpose()?
+        .unwrap_or([0, 255, 0]);
+
     let options = RenderPipelineOptions {
         frame_index: cli.render_frame,
         apply_modality_lut: !cli.no_modality_lut,
@@ -1248,6 +1300,9 @@ fn run_dicom_to_render_with_object(
         bounding_box_color,
         pad: cli.pad,
         pad_color,
+        show_overlays: !cli.no_overlays,
+        overlay_index: cli.overlay_index,
+        overlay_color,
     };
 
     if format == RenderFormat::Mpeg4 {
@@ -1720,6 +1775,9 @@ fn validate_no_render_or_redaction_flags(cli: &Cli) -> Result<(), Box<dyn std::e
         || cli.redact_color.is_some()
         || cli.pad
         || cli.pad_color.is_some()
+        || cli.no_overlays
+        || cli.overlay_index.is_some()
+        || cli.overlay_color.is_some()
     {
         return Err(io::Error::new(
             ErrorKind::InvalidInput,
@@ -1760,6 +1818,9 @@ fn validate_check_dicom_flags(cli: &Cli) -> Result<(), Box<dyn std::error::Error
         || cli.redact_color.is_some()
         || cli.pad
         || cli.pad_color.is_some()
+        || cli.no_overlays
+        || cli.overlay_index.is_some()
+        || cli.overlay_color.is_some()
         || !cli.filter.is_empty()
     {
         return Err(io::Error::new(
@@ -1790,6 +1851,9 @@ fn validate_non_dicom_to_dicom_render_flags(cli: &Cli) -> Result<(), Box<dyn std
         || cli.scale_max_size.is_some()
         || cli.pad
         || cli.pad_color.is_some()
+        || cli.no_overlays
+        || cli.overlay_index.is_some()
+        || cli.overlay_color.is_some()
     {
         return Err(io::Error::new(
             ErrorKind::InvalidInput,
@@ -2075,6 +2139,9 @@ mod tests {
             redact_color: None,
             pad: false,
             pad_color: None,
+            no_overlays: false,
+            overlay_index: None,
+            overlay_color: None,
             list_transfer_syntaxes: false,
             verbose: false,
             remove_private_tags: false,
@@ -2090,6 +2157,55 @@ mod tests {
 
         assert!(cli.check_dicom);
         assert_eq!(cli.input, Some(PathBuf::from("in.dcm")));
+    }
+
+    #[test]
+    fn parses_overlay_rendering_flags() {
+        let matches = Cli::command()
+            .try_get_matches_from([
+                "dcmnorm",
+                "--overlay-index",
+                "1",
+                "--overlay-color",
+                "255,0,0",
+                "in.dcm",
+                "out.png",
+            ])
+            .unwrap();
+        let cli = Cli::from_arg_matches(&matches).unwrap();
+
+        assert!(!cli.no_overlays);
+        assert_eq!(cli.overlay_index, Some(1));
+        assert_eq!(cli.overlay_color, Some("255,0,0".to_string()));
+    }
+
+    #[test]
+    fn parses_no_overlays_flag() {
+        let matches = Cli::command()
+            .try_get_matches_from(["dcmnorm", "--no-overlays", "in.dcm", "out.png"])
+            .unwrap();
+        let cli = Cli::from_arg_matches(&matches).unwrap();
+
+        assert!(cli.no_overlays);
+        assert_eq!(cli.overlay_index, None);
+    }
+
+    #[test]
+    fn no_render_or_redaction_flags_rejects_overlay_flags_outside_render_output() {
+        let mut cli = base_cli();
+        cli.no_overlays = true;
+
+        let error = super::validate_no_render_or_redaction_flags(&cli).unwrap_err();
+        assert!(error.to_string().contains("render options are only valid"));
+    }
+
+    #[test]
+    fn non_dicom_to_dicom_render_flags_rejects_overlay_index_outside_render_output() {
+        let mut cli = base_cli();
+        cli.overlay_index = Some(2);
+
+        let error = super::validate_non_dicom_to_dicom_render_flags(&cli).unwrap_err();
+        assert!(error.to_string().contains("render options are only valid"));
     }
 
     #[test]

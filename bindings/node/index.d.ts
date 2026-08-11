@@ -183,6 +183,16 @@ export interface MoveScuResult {
   cancelledVia?: string
 }
 
+/** Mirrors `dcmnorm::dicom_io::OverlaySummary` for the JS side. */
+export interface OverlaySummary {
+  index: number
+  group: number
+  rows: number
+  columns: number
+  overlayType?: string
+  label?: string
+}
+
 /**
  * Reads the full DICOM dataset as JSON. Mirrors plain `dcmnorm file.dcm`
  * (flat/name keys, bulk data as a URI reference, by default) or
@@ -208,6 +218,13 @@ export interface RenderedFrame {
   width: number
   height: number
   data: Buffer
+  /**
+   * All overlay planes present on the source instance, regardless of whether one was
+   * rendered into `data`.
+   */
+  overlays: Array<OverlaySummary>
+  /** Which overlay (by `OverlaySummary.index`) was actually composited into `data`, if any. */
+  selectedOverlayIndex?: number
 }
 
 export interface RenderedMovie {
@@ -230,6 +247,18 @@ export interface RenderFrameOptions {
   windowWidth?: number
   frameIndex?: number
   jpegQuality?: number
+  /**
+   * Whether to composite an overlay plane, when the instance has one. Defaults to `true` -
+   * the first available overlay renders by default.
+   */
+  showOverlays?: boolean
+  /**
+   * Which overlay to render, by its 0-based `OverlaySummary.index`. Defaults to the first
+   * available overlay. Ignored when `showOverlays` is `false`.
+   */
+  overlayIndex?: number
+  /** Fill color for rendered overlay pixels, as `"#RRGGBB"` or `"R,G,B"`. Defaults to green. */
+  overlayColor?: string
 }
 
 /**

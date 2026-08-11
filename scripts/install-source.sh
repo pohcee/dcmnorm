@@ -161,8 +161,13 @@ find_kakadu_lib_dir() {
     return 1
 }
 
+manifest_has_feature() {
+    local manifest="$1"
+    local feature="$2"
+    grep -Eq "^[[:space:]]*${feature}[[:space:]]*=" "$manifest"
+}
+
 use_kakadu_ffi=0
-install_args=()
 
 check_apt_build_deps_for_all_features
 require_command cargo "Install Rust and Cargo before running this script."
@@ -179,10 +184,9 @@ if kakadu_include_dir="$(find_kakadu_include_dir)" && kakadu_lib_dir="$(find_kak
     use_kakadu_ffi=1
     export KAKADU_INCLUDE_DIR="$kakadu_include_dir"
     export KAKADU_LIB_DIR="$kakadu_lib_dir"
-    install_args+=(--features kakadu-ffi)
     echo "Detected Kakadu headers at $KAKADU_INCLUDE_DIR"
     echo "Detected Kakadu libraries at $KAKADU_LIB_DIR"
-    echo "Installing exec crates with default codec features plus: kakadu-ffi"
+    echo "Installing exec crates with default codec features plus kakadu-ffi, for crates that declare it"
 else
     echo "Kakadu headers/libs not detected; installing exec crates with default codec features only"
 fi
@@ -208,8 +212,13 @@ while IFS= read -r manifest; do
     bin_name="$(basename "$package_dir")"
     old_version="$(get_existing_version "$bin_name" "$bin_dir")"
 
+    package_install_args=()
+    if [[ "$use_kakadu_ffi" -eq 1 ]] && manifest_has_feature "$manifest" "kakadu-ffi"; then
+        package_install_args+=(--features kakadu-ffi)
+    fi
+
     echo "Installing crate from $package_dir"
-    cargo install --path "$package_dir" "${install_args[@]}"
+    cargo install --path "$package_dir" --force "${package_install_args[@]}"
 
     new_version=""
     if [[ -x "$bin_dir/$bin_name" ]]; then
