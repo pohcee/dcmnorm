@@ -154,6 +154,7 @@ use super::{
     CancelMode, CancelSignal, DicomJsonWriteOptions, DimseError, DimseLogger, EchoScuOptions, FindScuOptions,
     Jpeg2000Backend, MoveScuOptions, RenderError, RenderOutputFormat, RenderPipelineOptions,
     ScpHandlers, ScpOptions, StoreScuOptions,
+    build_volume, reformat_plane, Interpolation, PlaneParams, SlabProjection, VolumeError,
 };
 
 #[test]
@@ -3507,5 +3508,94 @@ fn scp_find_response_with_non_ascii_text_does_not_close_the_connection() {
 
     scp.stop();
     fs::remove_dir_all(&cache_dir).ok();
+}
+
+/// Writes `count` synthetic slice files derived from `test/files/ct.dcm`, sharing that fixture's
+/// own orientation/pixel spacing but with `ImagePositionPatient`'s Z (head-foot, third component,
+/// matching the fixture's axial `ImageOrientationPatient` of `1\0\0\0\1\0`) advanced by
+/// `spacing_mm` per slice - a minimal, real-decode-pipeline stand-in for an actual multi-slice CT
+/// series. Files are written in REVERSE spatial order on purpose, so a passing `build_volume`
+/// test actually exercises its own spatial re-sort rather than trusting list order.
+fn write_synthetic_ct_series(count: usize, spacing_mm: f64) -> Vec<PathBuf> {
+    let base = read_dicom_file(fixture_path("ct.dcm")).unwrap();
+    let base_z = 1115.0;
+    let mut paths = Vec::with_capacity(count);
+    for index in (0..count).rev() {
+        let mut object = base.clone();
+        let z = base_z + (index as f64) * spacing_mm;
+        object.put(DataElement::new(
+            tags::IMAGE_POSITION_PATIENT,
+            VR::DS,
+            PrimitiveValue::from(format!("-151.493508\\-36.6564417\\{z}")),
+        ));
+        let path = temp_file_path(&format!("mpr-volume-slice-{index}"));
+        write_dicom_file(&mut object, &path).unwrap();
+        paths.push(path);
+    }
+    paths
+}
+
+#[test]
+fn build_volume_sorts_slices_spatially_and_reformats_the_native_axial_plane() {
+    let paths = write_synthetic_ct_series(5, 1.0);
+
+    let volume = build_volume(&paths).unwrap();
+    assert_eq!(volume.rows, 512);
+    assert_eq!(volume.cols, 512);
+    assert_eq!(volume.num_slices, 5);
+    assert_eq!(volume.slice_zs.len(), 5);
+    for window in volume.slice_zs.windows(2) {
+        assert!(window[1] > window[0], "slice_zs must be spatially sorted ascending: {:?}", volume.slice_zs);
+    }
+    // Nominal 1.0mm spacing (matching the fixture's own SliceThickness) should round-trip.
+    let observed_spacing = (volume.slice_zs[4] - volume.slice_zs[0]) / 4.0;
+    assert!((observed_spacing - 1.0).abs() < 1e-6, "observed spacing {observed_spacing}");
+
+    let params = PlaneParams {
+        origin: volume.center(),
+        row_dir: volume.row_vector,
+        col_dir: volume.col_vector,
+        output_width: 64,
+        output_height: 64,
+        spacing_mm: volume.min_spacing_mm(),
+        window_center: None,
+        window_width: None,
+        interpolation: Interpolation::Trilinear,
+        slab_thickness_mm: 0.0,
+        slab_projection: SlabProjection::MaximumIntensity,
+    };
+    let output = reformat_plane(&volume, &params, RenderOutputFormat::Png, 90).unwrap();
+    assert_eq!(output.width, 64);
+    assert_eq!(output.height, 64);
+    assert!(!output.bytes.is_empty());
+
+    for path in &paths {
+        fs::remove_file(path).ok();
+    }
+}
+
+#[test]
+fn build_volume_rejects_a_non_parallel_orientation_in_the_stack() {
+    let paths = write_synthetic_ct_series(4, 1.0);
+
+    // Corrupt one slice's ImageOrientationPatient so it no longer shares the stack's plane -
+    // e.g. simulating a gantry-tilt-inconsistent or accidentally-mixed-series file set.
+    let mut tilted = read_dicom_file(&paths[1]).unwrap();
+    tilted.put(DataElement::new(
+        tags::IMAGE_ORIENTATION_PATIENT,
+        VR::DS,
+        PrimitiveValue::from("1\\0\\0\\0\\0.7071\\0.7071"),
+    ));
+    write_dicom_file(&mut tilted, &paths[1]).unwrap();
+
+    let result = build_volume(&paths);
+    assert!(
+        matches!(result, Err(VolumeError::InconsistentGeometry(_))),
+        "expected InconsistentGeometry, got {result:?}"
+    );
+
+    for path in &paths {
+        fs::remove_file(path).ok();
+    }
 }
 

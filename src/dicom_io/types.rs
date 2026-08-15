@@ -335,6 +335,28 @@ pub struct DicomJsonWriteOptions<'a> {
     /// `file:///absolute/path/to/input.dcm` URI or an `https://` URL, letting
     /// consumers resolve bulk data without a separate source argument.
     pub bulk_data_uri_base: Option<&'a str>,
+    /// Set once (by the caller, per file/conversion) to `true` the first time
+    /// `bulk_data::locate_element_value`'s hand-rolled byte scan fails to find an
+    /// element for THIS `bulk_data_source` - every later bulk-eligible element in the
+    /// same write pass then skips straight to inline-embedding instead of re-attempting
+    /// an equally doomed scan. Without this, a single early element the scanner can't
+    /// parse (e.g. a private sequence using a construct it doesn't model) means every
+    /// later bulk element - including PixelData - pays the same expensive failed scan
+    /// independently; for a file with many bulk-eligible elements this turned one
+    /// fast(ish) failure into a multi-second stall. `None` (the default) means "always
+    /// retry", which every caller that doesn't explicitly opt in still gets.
+    pub bulk_scan_failed: Option<&'a std::cell::Cell<bool>>,
+    /// Shared "resume from here" hint (byte offset into `bulk_data_source`) for
+    /// `bulk_data::locate_element_value`'s scan, updated after each successful lookup to the end
+    /// of the value just found. Elements are visited in ascending tag order, which for a
+    /// conformant dataset is also ascending file-offset order, so each lookup can hand the next
+    /// one a head start instead of rescanning from byte 0 - this matters most for a tag that
+    /// repeats across many sibling sequence items (e.g. a private per-item block), where without
+    /// it every occurrence pays the cost of walking past all earlier ones again. Purely a speed
+    /// hint: if the hinted scan doesn't find the tag, `locate_element_value` retries once from
+    /// the true start, so this can never cause a lookup to wrongly miss an element that exists.
+    /// `None` (the default) means "always scan from the start", same as before this existed.
+    pub bulk_scan_cursor: Option<&'a std::cell::Cell<usize>>,
 }
 
 impl Default for DicomJsonWriteOptions<'_> {
@@ -345,6 +367,8 @@ impl Default for DicomJsonWriteOptions<'_> {
             key_style: DicomJsonKeyStyle::Name,
             bulk_data_source: None,
             bulk_data_uri_base: None,
+            bulk_scan_failed: None,
+            bulk_scan_cursor: None,
         }
     }
 }

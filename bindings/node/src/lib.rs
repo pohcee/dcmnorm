@@ -8,19 +8,22 @@ use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
 use dcmnorm::dicom_io::{
-    apply_filter_to_object, echo_scu as dcm_echo_scu, find_scu as dcm_find_scu,
-    move_scu as dcm_move_scu, parse_attribute_override, parse_filter_requests, parse_tag_key,
-    probe_dicom_file_for_sop_class_uid, read_dicom_bytes, read_dicom_file,
-    read_dicom_json_with_options, read_dicom_object_for_filter, remove_attribute,
-    remove_private_tags_inplace, render_dicom_frame as dcm_render_dicom_frame, set_attribute,
-    start_scp as dcm_start_scp, store_scu as dcm_store_scu, transcode_dicom_file, write_dicom_file,
+    apply_filter_to_object, build_volume as dcm_build_volume, echo_scu as dcm_echo_scu,
+    find_scu as dcm_find_scu, move_scu as dcm_move_scu, parse_attribute_override,
+    parse_filter_requests, parse_tag_key, probe_dicom_file_for_sop_class_uid, read_dicom_bytes,
+    read_dicom_file, read_dicom_json_with_options, read_dicom_object_for_filter,
+    reformat_plane as dcm_reformat_plane, remove_attribute, remove_private_tags_inplace,
+    render_dicom_frame as dcm_render_dicom_frame, set_attribute, start_scp as dcm_start_scp,
+    store_scu as dcm_store_scu, transcode_dicom_file, write_dicom_file,
     write_dicom_json_with_options, write_dicom_video as dcm_write_dicom_video, CancelMode as DcmCancelMode,
     CancelSignal, DicomJsonBulkDataMode, DicomJsonFormat, DicomJsonKeyStyle, DicomJsonReadOptions,
     DicomJsonWriteOptions, DicomScp, DimseLogger, EchoScuOptions as DcmEchoScuOptions,
-    FindScuOptions as DcmFindScuOptions, MoveScuOptions as DcmMoveScuOptions,
-    OverlaySummary as DcmOverlaySummary, RenderOutputFormat as DcmRenderOutputFormat,
+    FindScuOptions as DcmFindScuOptions, Interpolation as DcmInterpolation,
+    MoveScuOptions as DcmMoveScuOptions, OverlaySummary as DcmOverlaySummary,
+    PlaneParams as DcmPlaneParams, RenderOutputFormat as DcmRenderOutputFormat,
     RenderPipelineOptions as DcmRenderPipelineOptions, ScpHandlers as DcmScpHandlers,
-    ScpOptions as DcmScpOptions, StoreScuOptions as DcmStoreScuOptions,
+    ScpOptions as DcmScpOptions, SlabProjection as DcmSlabProjection,
+    StoreScuOptions as DcmStoreScuOptions, Volume as DcmVolume,
 };
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 
@@ -176,6 +179,13 @@ impl Task for ReadJsonTask {
             } else {
                 (read_dicom_file(&self.file_path).map_err(to_napi_err)?, None)
             };
+            // Shared across every bulk-eligible element of THIS file's write pass - see
+            // DicomJsonWriteOptions::bulk_scan_failed's own doc comment for why this matters
+            // (without it, one element the hand-rolled offset scanner can't parse means every
+            // later one, including PixelData, independently pays the same doomed multi-second
+            // scan instead of just the first).
+            let bulk_scan_failed = std::cell::Cell::new(false);
+            let bulk_scan_cursor = std::cell::Cell::new(0usize);
             write_dicom_json_with_options(
                 &object,
                 DicomJsonWriteOptions {
@@ -183,6 +193,8 @@ impl Task for ReadJsonTask {
                     key_style: self.key_style,
                     bulk_data_mode: self.bulk_data_mode,
                     bulk_data_source: file_bytes.as_deref(),
+                    bulk_scan_failed: Some(&bulk_scan_failed),
+                    bulk_scan_cursor: Some(&bulk_scan_cursor),
                     ..Default::default()
                 },
             )
@@ -1295,6 +1307,202 @@ pub fn render_movie(file_path: String, options: Option<RenderMovieOptions>) -> A
         file_path: PathBuf::from(file_path),
         options: options.unwrap_or_default(),
     })
+}
+
+// ---------------------------------------------------------------------------------------------
+// MPR (Multiplanar Reformation): buildVolume / DicomVolumeHandle.reformat
+// ---------------------------------------------------------------------------------------------
+//
+// buildVolume is the expensive step (reads + decodes every slice in a series), so it's exposed as
+// its own async call returning an opaque, reusable `DicomVolumeHandle` - the caller (render-server)
+// builds a volume once per series and keeps the handle resident (see its own volume cache) so every
+// subsequent `reformat()` call for a rotate/scroll/window-level change is cheap. `DicomVolumeHandle`
+// wraps an `Arc<DcmVolume>`, which is read-only after `build_volume` returns, so concurrent
+// `reformat()` calls need no locking - mirrors this file's existing stateful-handle convention
+// (`EchoScuHandle`, `MoveScuHandle`, etc.) rather than inventing a new one.
+
+pub struct BuildVolumeTask {
+    file_paths: Vec<PathBuf>,
+}
+
+impl Task for BuildVolumeTask {
+    type Output = DcmVolume;
+    type JsValue = DicomVolumeHandle;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        guarded(|| dcm_build_volume(&self.file_paths).map_err(to_napi_err))
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(DicomVolumeHandle { volume: Arc::new(output) })
+    }
+}
+
+/// Builds a 3D volume from a parallel stack of DICOM slice files (e.g. every image instance in
+/// one CT/MR/PT series) sharing consistent `ImageOrientationPatient`. Slices are spatially
+/// re-sorted internally by `ImagePositionPatient`, regardless of `filePaths`' own order. Returns a
+/// `DicomVolumeHandle` for repeated `reformat()` calls. Rejects (rather than silently
+/// mis-rendering) fewer than 2 files, mismatched Rows/Columns, or a non-parallel/gantry-tilt-
+/// inconsistent stack.
+#[napi]
+pub fn build_volume(file_paths: Vec<String>) -> AsyncTask<BuildVolumeTask> {
+    AsyncTask::new(BuildVolumeTask {
+        file_paths: file_paths.into_iter().map(PathBuf::from).collect(),
+    })
+}
+
+#[napi(object)]
+#[derive(Default)]
+pub struct ReformatPlaneOptions {
+    /// World-space (mm, patient/LPS) point at the CENTER of the reformatted output image.
+    pub origin: Vec<f64>,
+    /// Unit vector: direction of travel across the output image as the column index increases.
+    pub row_dir: Vec<f64>,
+    /// Unit vector: direction of travel down the output image as the row index increases.
+    pub col_dir: Vec<f64>,
+    pub output_width: u32,
+    pub output_height: u32,
+    /// Physical size of one output pixel, in mm - the same in both output axes.
+    pub spacing_mm: f64,
+    pub window_center: Option<f64>,
+    pub window_width: Option<f64>,
+    /// 'jpeg' (default) or 'png'.
+    pub format: Option<String>,
+    pub jpeg_quality: Option<u32>,
+    /// 'trilinear' (default) or 'nearest' - nearest is faster and intended for a live-drag
+    /// preview frame, trilinear for the settled/idle frame.
+    pub interpolation: Option<String>,
+    /// Total slab thickness in mm, centered on `origin` along the plane's own normal. Omitted or
+    /// 0 reformats an infinitely-thin plane (the original single-voxel-thick MPR behavior).
+    pub slab_thickness_mm: Option<f64>,
+    /// How the slab's samples combine when `slabThicknessMm > 0`: 'mip' (default, maximum
+    /// intensity projection), 'minip' (minimum intensity projection), or 'average'.
+    pub slab_projection: Option<String>,
+}
+
+fn parse_vec3(values: &[f64], field_name: &'static str) -> Result<[f64; 3]> {
+    if values.len() != 3 {
+        return Err(Error::from_reason(format!("{field_name} must have exactly 3 values (x, y, z)")));
+    }
+    Ok([values[0], values[1], values[2]])
+}
+
+fn parse_interpolation(value: Option<&str>) -> Result<DcmInterpolation> {
+    match value {
+        None | Some("trilinear") => Ok(DcmInterpolation::Trilinear),
+        Some("nearest") => Ok(DcmInterpolation::Nearest),
+        Some(other) => Err(Error::from_reason(format!(
+            "invalid interpolation '{other}'; expected 'trilinear' or 'nearest'"
+        ))),
+    }
+}
+
+fn parse_slab_projection(value: Option<&str>) -> Result<DcmSlabProjection> {
+    match value {
+        None | Some("mip") => Ok(DcmSlabProjection::MaximumIntensity),
+        Some("minip") => Ok(DcmSlabProjection::MinimumIntensity),
+        Some("average") => Ok(DcmSlabProjection::Average),
+        Some(other) => Err(Error::from_reason(format!(
+            "invalid slabProjection '{other}'; expected 'mip', 'minip', or 'average'"
+        ))),
+    }
+}
+
+pub struct ReformatPlaneTask {
+    volume: Arc<DcmVolume>,
+    options: ReformatPlaneOptions,
+}
+
+impl Task for ReformatPlaneTask {
+    type Output = RenderedFrame;
+    type JsValue = RenderedFrame;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        guarded(|| {
+            let (format, mime_type) = parse_render_output_format(self.options.format.as_deref())?;
+            let params = DcmPlaneParams {
+                origin: parse_vec3(&self.options.origin, "origin")?,
+                row_dir: parse_vec3(&self.options.row_dir, "rowDir")?,
+                col_dir: parse_vec3(&self.options.col_dir, "colDir")?,
+                output_width: self.options.output_width,
+                output_height: self.options.output_height,
+                spacing_mm: self.options.spacing_mm,
+                window_center: self.options.window_center,
+                window_width: self.options.window_width,
+                interpolation: parse_interpolation(self.options.interpolation.as_deref())?,
+                slab_thickness_mm: self.options.slab_thickness_mm.unwrap_or(0.0),
+                slab_projection: parse_slab_projection(self.options.slab_projection.as_deref())?,
+            };
+            let jpeg_quality = self.options.jpeg_quality.unwrap_or(90) as u8;
+            let rendered = dcm_reformat_plane(&self.volume, &params, format, jpeg_quality).map_err(to_napi_err)?;
+            Ok(RenderedFrame {
+                mime_type: mime_type.to_owned(),
+                width: u32::from(rendered.width),
+                height: u32::from(rendered.height),
+                data: rendered.bytes.into(),
+                overlays: Vec::new(),
+                selected_overlay_index: None,
+            })
+        })
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(output)
+    }
+}
+
+#[napi]
+pub struct DicomVolumeHandle {
+    volume: Arc<DcmVolume>,
+}
+
+#[napi]
+impl DicomVolumeHandle {
+    /// Rows in the source slices (image height).
+    #[napi(getter, js_name = "rows")]
+    pub fn rows(&self) -> u32 {
+        self.volume.rows
+    }
+    /// Columns in the source slices (image width).
+    #[napi(getter, js_name = "cols")]
+    pub fn cols(&self) -> u32 {
+        self.volume.cols
+    }
+    /// Number of slices in the built volume.
+    #[napi(getter, js_name = "numSlices")]
+    pub fn num_slices(&self) -> u32 {
+        self.volume.num_slices
+    }
+
+    /// The volume's own acquisition-native orientation, for seeding an "axial" reformat -
+    /// `[rowDir(3), colDir(3)]`.
+    #[napi(getter, js_name = "nativeBasis")]
+    pub fn native_basis(&self) -> Vec<f64> {
+        let mut basis = Vec::with_capacity(6);
+        basis.extend_from_slice(&self.volume.row_vector);
+        basis.extend_from_slice(&self.volume.col_vector);
+        basis
+    }
+
+    /// The volume's own physical center, in patient/LPS mm - a reasonable default reformat origin.
+    #[napi(getter, js_name = "center")]
+    pub fn center(&self) -> Vec<f64> {
+        self.volume.center().to_vec()
+    }
+
+    /// The volume's own smallest voxel dimension, in mm - a reasonable default output spacing.
+    #[napi(getter, js_name = "minSpacingMm")]
+    pub fn min_spacing_mm(&self) -> f64 {
+        self.volume.min_spacing_mm()
+    }
+
+    /// Resamples one plane through this volume and encodes it exactly like a normal 2D render
+    /// (same `RenderedFrame` shape `renderFrame` returns), so callers can reuse their existing
+    /// image-display code path unchanged.
+    #[napi]
+    pub fn reformat(&self, options: ReformatPlaneOptions) -> AsyncTask<ReformatPlaneTask> {
+        AsyncTask::new(ReformatPlaneTask { volume: self.volume.clone(), options })
+    }
 }
 
 // ---------------------------------------------------------------------------------------------

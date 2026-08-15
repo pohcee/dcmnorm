@@ -283,7 +283,7 @@ dcmnorm --help
 Command shape:
 
 ```text
-dcmnorm [OPTIONS] [INPUT] [OUTPUT]
+dcmnorm [OPTIONS] [INPUT]... [OUTPUT]
 ```
 
 `dcmnorm` infers the conversion direction from the input and output file types:
@@ -295,10 +295,16 @@ dcmnorm [OPTIONS] [INPUT] [OUTPUT]
 
 ### Options reference
 
-Positional arguments:
+Positional arguments - a single trailing list, split by convention rather than as two separate
+flags (shell globs work as usual, since the shell expands them before `dcmnorm` ever sees them):
 
-- `[INPUT]`: input DICOM or JSON file
-- `[OUTPUT]`: output DICOM, JSON, or rendered file
+- 0 or 1 path: `[INPUT]`, with OUTPUT defaulting to stdout JSON - e.g. `dcmnorm in.dcm`
+- 2 paths: `[INPUT] [OUTPUT]` - e.g. `dcmnorm in.dcm out.png`
+- 3+ paths, no `--mpr`: every path is an independent `[INPUT]`, each processed on its own (same
+  as piping via `-I`/`--stdin-paths` - see [Batch mode](#batch-mode-with--i---stdin-paths-or-a-file-list) below) -
+  e.g. `dcmnorm *.dcm --set SOPClassUID=... --overwrite`
+- 2+ paths with `--mpr`: every path but the last is an `[INPUT]` slice combined into one volume,
+  the last is `[OUTPUT]` - see [Render a Multiplanar Reformation (MPR)](#render-a-multiplanar-reformation-mpr)
 
 General:
 
@@ -352,6 +358,15 @@ Rendering:
 - `--no-overlays`
 - `--overlay-index <N>`
 - `--overlay-color <R,G,B|#RRGGBB>`
+
+MPR (Multiplanar Reformation):
+
+- `--mpr <axial|coronal|sagittal|YAW,PITCH,ROLL>`
+- `--mpr-origin <X,Y,Z>`
+- `--mpr-depth <MM>`
+- `--mpr-spacing <MM>`
+- `--mpr-thickness <MM>`
+- `--mpr-projection <mip|minip|average>`
 
 ### JSON conversion defaults
 
@@ -543,6 +558,164 @@ Photometric interpretations supported by rendering:
 
 Both planar configurations are supported for RGB rendering (`PlanarConfiguration` 0 and 1).
 
+### Render a Multiplanar Reformation (MPR)
+
+MPR builds one 3D volume from multiple DICOM slice files (sharing a parallel stack - e.g. one
+CT/MR series) and reformats it into either one 2D plane or a STACK of slices, honoring each
+slice's real `ImagePositionPatient`/`ImageOrientationPatient`/`PixelSpacing`/`SliceThickness`
+rather than just stacking images. Depending on `OUTPUT`'s extension, the result is a rendered
+2D image (or a numbered series of them), a proper multi-instance DICOM series, or a single
+whole-volume NIfTI/NRRD file - see [Reformatting a STACK of
+slices](#reformatting-a-stack-of-slices---mpr-depth-ranges) below. This is the same
+`dicom_io::volume` code the Node bindings use for the interactive viewer, exposed directly for
+scripting/testing. The whole file set is always read and combined within this single `dcmnorm`
+process - one `build_volume` call sees every slice given - so a series can never end up silently
+split across separate volumes.
+
+`--mpr` supplies its input files the same way as any other multi-file operation (see
+[Batch mode](#batch-mode-with--i---stdin-paths-or-a-file-list) above) - directly as positional
+arguments (shell globs work as usual) or piped via `-I`/`--stdin-paths`. Either way, `--mpr` is
+what says "combine these into one volume, with the last path as OUTPUT" instead of the default
+"process each independently" - its value is either a canonical view or an oblique rotation, not
+both combined:
+
+```bash
+dcmnorm --mpr axial series_dir/*.dcm out.png
+find series_dir -name "*.dcm" | dcmnorm -I --mpr axial out.png
+```
+
+The three canonical, patient-anatomy-aligned views:
+
+```bash
+dcmnorm --mpr coronal series_dir/*.dcm coronal.png
+dcmnorm --mpr sagittal series_dir/*.dcm sagittal.png
+```
+
+An arbitrary oblique camera angle - `YAW,PITCH,ROLL` (degrees, about the patient's Z/X/Y axes
+respectively), applied to the volume's own native acquisition basis:
+
+```bash
+dcmnorm --mpr 15,30,0 series_dir/*.dcm oblique.png
+```
+
+`--mpr-origin X,Y,Z` (patient/LPS millimeters) recenters the reformat; it defaults to the volume's
+own physical center. For the common case of stepping along the CURRENT view's own depth axis,
+`--mpr-depth MM` is more convenient than recomputing a 3D point - it offsets `--mpr-origin` (or
+the default center) along the resolved plane's own normal:
+
+```bash
+dcmnorm --mpr coronal --mpr-depth -15 series_dir/*.dcm coronal-anterior.png
+```
+
+By default MPR reformats an infinitely-thin plane (one voxel thick). `--mpr-thickness MM`
+reformats a thick slab instead - multiple depths spanning that many millimeters, centered on the
+plane, combined per `--mpr-projection` (`mip`, the default - maximum intensity projection, the
+radiology-standard way to make a thin vessel or bright structure visible across a slab even if it
+only crosses the exact center plane at one point; `minip` - minimum intensity projection; or
+`average`):
+
+```bash
+dcmnorm --mpr coronal --mpr-thickness 20 --mpr-projection mip series_dir/*.dcm coronal-mip.png
+```
+
+`--mpr-spacing MM` sets the physical size of one output pixel (the same in both axes, so the
+reformat is never distorted even when slice spacing differs from in-plane pixel spacing); it
+defaults to the volume's own smallest voxel dimension. `--output-width`/`--output-height` (shared
+with normal rendering) size the output image, defaulting to the volume's own row/column count.
+`--window-center`/`--window-width` apply VOI windowing exactly as they do for a normal 2D render
+(for `.png`/`.jpg`/`.dcm` output - see below, VOI windowing never applies to `.nii`/`.nii.gz`/
+`.nrrd`, which always carry true rescaled values).
+
+`--mpr-origin`/`--mpr-depth`/`--mpr-spacing`/`--mpr-thickness`/`--mpr-projection` all require
+`--mpr` itself (they carry no "which plane" information on their own, so using them without it is
+a clear error rather than a silently-ignored flag); `--mpr-projection` additionally requires a
+positive `--mpr-thickness`. MPR mode is incompatible with `--filter`/`--transfer-syntax`/`--set`/
+`--remove`/`--render-all-frames`/`--render-fps`/`--scale-max-size`, and fails with a clear error
+(rather than a silently wrong reformat) if the given files don't share a consistent
+`ImageOrientationPatient` - e.g. a genuinely gantry-tilt-inconsistent stack or an accidentally
+mixed set of series.
+
+#### Reformatting a STACK of slices - `--mpr-depth` ranges
+
+A bare `--mpr-depth MM` (or omitting it, default `0`) offsets a single plane, as above - exactly
+one output slice. `--mpr-depth` also accepts a RANGE, which switches the whole `--mpr` invocation
+from "one reformatted plane" to "a stack of slices spanning that depth range":
+
+```bash
+--mpr-depth START:END          # e.g. -20:20
+--mpr-depth START:END:STEP     # explicit step, e.g. -20:20:2
+--mpr-depth all                # the volume's own full extent along the plane's normal
+--mpr-depth all:STEP           # full extent, explicit step
+```
+
+The step defaults to `--mpr-thickness` (contiguous, non-overlapping slabs - the natural default
+when you're already asking for a thick reformat) if it's set, else `--mpr-spacing`. `all` computes
+the volume's own physical extent along the resolved plane's normal by projecting its bounding box
+onto that normal - correct even for an oblique (rotated) plane whose normal isn't the volume's own
+acquisition axis.
+
+What a multi-slice stack produces depends entirely on `OUTPUT`'s extension:
+
+- **`.png`/`.jpg`/`.jpeg`**: one numbered file per slice - `OUTPUT_000001.png`,
+  `OUTPUT_000002.png`, ... (the same `{stem}_{NNNNNN}.{ext}` convention `--render-all-frames`
+  already uses) - each one an independent, VOI-windowed, 8-bit render exactly like a single-plane
+  `--mpr` output.
+- **`.dcm`/`.dicom`**: one numbered, spatially-valid DICOM file per slice (see below) sharing a
+  single `SeriesInstanceUID`, so any PACS/viewer groups them as one loadable series.
+- **`.nii`/`.nii.gz`/`.nrrd`**: the entire stack as ONE whole-volume file (see below).
+
+A single depth (the default, or an explicit non-range `--mpr-depth MM`) still writes exactly one
+file at `OUTPUT` for every extension, including `.dcm`/`.nii`/`.nrrd`.
+
+```bash
+# 41 coronal slices, 2mm apart, as a numbered PNG stack:
+dcmnorm --mpr coronal --mpr-depth -40:40:2 series_dir/*.dcm coronal.png
+
+# The same slices as a proper multi-instance DICOM series:
+dcmnorm --mpr coronal --mpr-depth -40:40:2 series_dir/*.dcm coronal.dcm
+
+# The whole volume, reformatted to a 1mm-isotropic coronal-oriented NIfTI:
+dcmnorm --mpr coronal --mpr-depth all --mpr-spacing 1 series_dir/*.dcm coronal.nii.gz
+```
+
+`--output-type` is not valid with `.nii`/`.nii.gz`/`.nrrd`/`.dcm` output - the format is
+determined entirely by `OUTPUT`'s extension for these.
+
+#### Whole-volume export - NIfTI and NRRD
+
+`.nii`/`.nii.gz` (gzip-compressed) and `.nrrd` write the ENTIRE reformatted stack as a single
+volumetric file - float32 voxels carrying true rescaled values (e.g. Hounsfield units for CT),
+never VOI-windowed or 8-bit-encoded, so the export is suitable for real volumetric analysis (3D
+Slicer, ITK-SNAP, FSL, etc.), not just visual inspection. Neither format is available via an
+existing well-maintained Rust crate, so both are written directly by `dcmnorm`:
+
+- **NIfTI-1** (`.nii`/`.nii.gz`) uses `sform` for orientation. NIfTI's coordinate convention is
+  RAS+ (Right/Anterior/Superior), while DICOM (and `dcmnorm`'s own geometry) is LPS+
+  (Left/Posterior/Superior) - every direction vector and the origin get their X/Y components
+  negated on export, the same convention `dcm2niix`/`nibabel` use for DICOM-derived NIfTI files.
+- **NRRD** (`.nrrd`) names its space directly (`space: left-posterior-superior`), so no axis flip
+  is needed - arguably the more direct/less error-prone choice for a DICOM-derived export.
+
+#### Multi-file DICOM series output
+
+`.dcm`/`.dicom` output wraps each reformatted slice in a standalone, spatially-valid DICOM object
+using **Multi-frame Grayscale Word Secondary Capture Image Storage**
+(`1.2.840.10008.5.1.4.1.1.7.3`, `NumberOfFrames=1` per file) - not plain "Secondary Capture Image
+Storage", which is 8-bit-only per its IOD and can't carry signed 16-bit rescaled values. Each
+slice's `ImagePositionPatient`/`ImageOrientationPatient`/`PixelSpacing`/`SliceThickness` reflect
+its actual reformatted geometry (not copied from the source series), so the output is a genuinely
+reconstructable spatial series, not just a flat picture with DICOM headers bolted on. `PixelData`
+is stored as signed 16-bit with `RescaleSlope=1`/`RescaleIntercept=0` - the stored value IS the
+physical value - so any DICOM viewer can window it however it likes, rather than getting a
+pre-baked 8-bit render. Patient/study-identifying attributes (`PatientName`, `PatientID`,
+`StudyInstanceUID`, `Modality`, etc.) are copied best-effort from the first input file, so the
+derived series stays associated with its source study; `SeriesDescription` is fixed to
+`"MPR Reformat"` and `SeriesNumber` to `9901`, deliberately unlikely to collide with a real
+acquired series. `SeriesInstanceUID` is generated once per `--mpr` invocation and shared across
+every file in the output stack; `SOPInstanceUID`/`StudyInstanceUID` (when not copied from the
+source) use the UUID-derived DICOM UID scheme (PS3.5 Annex B, `2.25.<uuid>`), needing no
+registered organization root.
+
 #### Overlay planes
 
 DICOM overlay planes (group `60xx`, up to 16 per instance: `6000,eeee` .. `601E,eeee`) are
@@ -595,24 +768,41 @@ DCMNORM_PERF=1 dcmnorm test/files/mr.dcm out.jpg --output-width 920 --output-hei
 DCMNORM_PERF=1 dcmnorm test/files/mr.dcm output.img --output-type jpeg --output-width 920 --output-height 758
 ```
 
-### Piped / batch mode with `-I` / `--stdin-paths`
+### Batch mode with `-I` / `--stdin-paths` or a file list
 
-Pipe input paths from stdin, one path per line. The same options apply to every path; errors
-for individual files are printed to stderr with the filename, and `dcmnorm` exits non-zero if
-any file fails:
+`dcmnorm` has two interchangeable ways to run the same options across multiple input files
+instead of just one - pick whichever fits how the file list is produced. Both apply the same
+options to every path; errors for individual files are printed to stderr with the filename, and
+`dcmnorm` exits non-zero if any file fails. (`--mpr` repurposes the same file list to mean
+something different - combine every file into one volume instead of processing each
+independently - see [Render a Multiplanar Reformation (MPR)](#render-a-multiplanar-reformation-mpr).)
+
+Give 3 or more files directly as positional arguments - no special flag needed, shell globs work
+as usual since the shell expands them into separate arguments before `dcmnorm` ever sees them:
+
+```bash
+dcmnorm *.dcm
+```
+
+(2 or fewer positional arguments are always `[INPUT] [OUTPUT]`, per the single-file convention
+above - batch mode only kicks in at 3+, since that shape was otherwise always a "too many
+arguments" error.)
+
+Or pipe input paths from stdin, one path per line, via `-I`/`--stdin-paths` - best for a file list
+produced by another command (`find`, a database query, ...) or too large for a shell command line:
 
 ```bash
 find . -name "*.dcm" | dcmnorm -I
 ```
 
-`--set` also applies in piped mode, and combines with `--overwrite` to update each file in place:
+`--set` also applies in batch mode, and combines with `--overwrite` to update each file in place:
 
 ```bash
 find . -name "*.dcm" | dcmnorm -I --set SOPClassUID=1.2.840.10008.5.1.4.1.1.2
 find . -name "*.dcm" | dcmnorm -I --set SOPClassUID=1.2.840.10008.5.1.4.1.1.2 --overwrite
 ```
 
-To emit `file://` `BulkDataURI` values in piped mode, also pass `--bulk-data-source` without a value:
+To emit `file://` `BulkDataURI` values in batch mode, also pass `--bulk-data-source` without a value:
 
 ```bash
 find . -name "*.dcm" | dcmnorm -I --bulk-data uri --bulk-data-source

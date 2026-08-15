@@ -144,25 +144,28 @@ pub struct RenderFrameOutput {
     pub selected_overlay_index: Option<usize>,
 }
 
+// pub(crate): shared with dicom_io::volume, which decodes/reformats a series' frames into a 3D
+// volume via the same per-file metadata/pixel-decode primitives this module already uses for 2D
+// rendering (see `decode_frame_grayscale_values` below), rather than duplicating them.
 #[derive(Clone, Debug)]
-struct RenderMetadata {
-    rows: u16,
-    cols: u16,
-    samples_per_pixel: u16,
-    bits_allocated: u16,
-    bits_stored: u16,
-    pixel_representation: u16,
-    planar_configuration: u16,
-    number_of_frames: usize,
-    photometric_interpretation: String,
+pub(crate) struct RenderMetadata {
+    pub(crate) rows: u16,
+    pub(crate) cols: u16,
+    pub(crate) samples_per_pixel: u16,
+    pub(crate) bits_allocated: u16,
+    pub(crate) bits_stored: u16,
+    pub(crate) pixel_representation: u16,
+    pub(crate) planar_configuration: u16,
+    pub(crate) number_of_frames: usize,
+    pub(crate) photometric_interpretation: String,
 }
 
 #[derive(Clone, Debug)]
-struct RenderedFramePixels {
-    width: u16,
-    height: u16,
-    samples_per_pixel: u16,
-    bytes: Vec<u8>,
+pub(crate) struct RenderedFramePixels {
+    pub(crate) width: u16,
+    pub(crate) height: u16,
+    pub(crate) samples_per_pixel: u16,
+    pub(crate) bytes: Vec<u8>,
 }
 
 pub fn render_dicom_frame(
@@ -1563,6 +1566,34 @@ fn sign_or_unsigned(raw: u16, bits_stored: u16, pixel_representation: u16) -> f6
     f64::from(value)
 }
 
+/// Decodes one frame to modality-LUT-applied grayscale values (e.g. Hounsfield units for CT with
+/// a rescale slope/intercept) plus its `RenderMetadata` - the single reusable primitive
+/// `dicom_io::volume` needs per source slice. Mirrors exactly what `render_dicom_frames`'s
+/// `RenderOutputFormat::Raw` branch already does to reach raw pixel bytes (the single-frame fast
+/// path when the transfer syntax allows per-frame codec decode, else a full native-object
+/// transcode), plus `render_grayscale_frame`'s `decode_grayscale_values` + `apply_modality_lut`
+/// steps - so compressed transfer syntaxes (JPEG/JPEG-LS/JPEG2000/RLE) are handled identically to
+/// 2D rendering rather than needing a second decode path.
+pub(crate) fn decode_frame_grayscale_values(
+    object: &DefaultDicomObject,
+    frame_index: usize,
+) -> Result<(RenderMetadata, Vec<f64>), RenderError> {
+    if let Some(frame_object) = try_decode_single_frame_object(object, frame_index)? {
+        let metadata = read_render_metadata(&frame_object)?;
+        let bytes = get_frame_bytes(&frame_object, &metadata, 0)?;
+        let mut values = decode_grayscale_values(&bytes, &metadata)?;
+        apply_modality_lut(&frame_object, &mut values);
+        return Ok((metadata, values));
+    }
+
+    let working = ensure_native_render_object(object)?;
+    let metadata = read_render_metadata(working.as_ref())?;
+    let bytes = get_frame_bytes(working.as_ref(), &metadata, frame_index)?;
+    let mut values = decode_grayscale_values(&bytes, &metadata)?;
+    apply_modality_lut(working.as_ref(), &mut values);
+    Ok((metadata, values))
+}
+
 fn apply_modality_lut(object: &DefaultDicomObject, values: &mut [f64]) {
     let slope = object
         .get(tags::RESCALE_SLOPE)
@@ -1647,7 +1678,8 @@ fn resolve_window(
     Ok((center, width))
 }
 
-fn apply_voi_window(values: &[f64], center: Option<f64>, width: Option<f64>) -> Vec<u8> {
+// pub(crate): also used by dicom_io::volume to window a reformatted plane's interpolated values.
+pub(crate) fn apply_voi_window(values: &[f64], center: Option<f64>, width: Option<f64>) -> Vec<u8> {
     let (Some(center), Some(width)) = (center, width) else {
         return normalize_to_u8(values);
     };
@@ -2439,7 +2471,8 @@ fn resize_filter(
     }
 }
 
-fn encode_rendered_frame(
+// pub(crate): also used by dicom_io::volume to encode a reformatted plane's grayscale pixels.
+pub(crate) fn encode_rendered_frame(
     frame: &RenderedFramePixels,
     output_format: RenderOutputFormat,
     jpeg_quality: u8,

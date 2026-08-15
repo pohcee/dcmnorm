@@ -13,7 +13,10 @@ mod scp;
 mod standard_json;
 #[cfg(test)]
 mod tests;
+mod secondary_capture;
 mod types;
+mod volume;
+mod volume_export;
 
 pub use dimse::{
     echo_scu, find_scu, move_scu, store_scu, CancelMode, CancelSignal, DimseError, DimseLogger,
@@ -49,6 +52,12 @@ pub use types::{
     DicomJsonReadOptions, DicomJsonWriteOptions, ReadError, RenderError, TranscodeError,
     TransferSyntaxSupport, WithMetaError, WriteError,
 };
+pub use volume::{
+    build_volume, canonical_view_basis, reformat_plane, reformat_plane_values, rotate_basis,
+    Interpolation, PlaneParams, SlabProjection, Volume, VolumeError,
+};
+pub use volume_export::{generate_uid, write_nifti, write_nrrd, VolumeExportError, VolumeGeometry};
+pub use secondary_capture::{write_reformatted_dicom_slice, SecondaryCaptureError, SliceGeometry};
 pub mod dicom_edit;
 pub use dicom_edit::{
     parse_attribute_override, parse_tag_key, remove_attribute, remove_private_tags_inplace,

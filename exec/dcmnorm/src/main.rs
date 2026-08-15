@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use clap::{ArgAction, CommandFactory, FromArgMatches, Parser, ValueEnum};
 use dcmnorm::dicom_io::{
     apply_filter_to_object, jpeg2000_backend_name, kakadu_ffi_enabled, list_transfer_syntax_support,
-    parse_attribute_override, parse_filter_requests, parse_tag_key, read_dicom_bytes,
+    parse_attribute_override, parse_filter_requests, parse_tag_key, read_dicom_bytes, read_dicom_file,
     read_dicom_json_with_options, read_dicom_object_for_filter,
     redact_dicom_pixels_to_transfer_syntax, remove_attribute, render_all_dicom_frames,
     render_dicom_frame, set_attribute, transcode_dicom_object, write_dicom_file,
@@ -14,6 +14,9 @@ use dcmnorm::dicom_io::{
     DicomJsonKeyStyle, DicomJsonReadOptions, DicomJsonWriteOptions,
     RenderOutputFormat, RenderPipelineOptions, JPEG2000_CODEC_ENV_FLAG, JPEG2000_DEBUG_ENV_FLAG,
     probe_dicom_file_for_sop_class_uid,
+    build_volume, canonical_view_basis, generate_uid, reformat_plane, reformat_plane_values, rotate_basis,
+    write_nifti, write_nrrd, write_reformatted_dicom_slice,
+    Interpolation, PlaneParams, SlabProjection, SliceGeometry, Volume, VolumeGeometry,
 };
 use dcmnorm::remove_private_tags_inplace;
 use dcmnorm::perf;
@@ -36,8 +39,32 @@ use serde_json::Value as JsonValue;
 )]
 #[command(arg_required_else_help = true)]
 struct Cli {
-    #[arg(value_name = "INPUT", help = "Input DICOM or JSON file", help_heading = "General", display_order = 1)]
+    // A single variadic positional, not two separate INPUT/OUTPUT fields - clap requires a
+    // trailing positional after a variadic one to be `required`, which would break the
+    // single-file "no OUTPUT means print JSON to stdout" convenience every command relies on.
+    // Splitting INPUT(s) vs OUTPUT out of this list happens in application code instead (see
+    // Cli::finalize, and run()'s own dispatch for the 3+/--mpr cases) - the same approach
+    // `cp SOURCE... DEST`-style tools use, adapted to also allow 0 or 1 paths (unlike `cp`, which
+    // always requires a destination).
+    #[arg(
+        value_name = "INPUT... [OUTPUT]",
+        num_args = 0..,
+        help = "One INPUT file (OUTPUT optional, defaults to stdout JSON), INPUT and OUTPUT (2 paths), or - for batch/--mpr - multiple files: 3+ paths alone batch-process each independently; with --mpr, all but the last combine into one volume and the last is OUTPUT. Shell globs work as usual",
+        help_heading = "General",
+        display_order = 1
+    )]
+    paths: Vec<PathBuf>,
+
+    // Derived from `paths` by Cli::finalize() right after parsing - matches the original
+    // single-file INPUT/OUTPUT positional fields exactly for 0-2 paths, so every existing
+    // single-file call site below (the vast majority of this file) keeps working unchanged.
+    // Multi-input dispatch (3+ paths, or --mpr) is handled separately in run(), reading `paths`
+    // directly instead.
+    #[arg(skip)]
     input: Option<PathBuf>,
+    #[arg(skip)]
+    output: Option<PathBuf>,
+
     #[arg(
         long,
         action = ArgAction::SetTrue,
@@ -46,9 +73,6 @@ struct Cli {
         display_order = 23
     )]
     remove_private_tags: bool,
-
-    #[arg(value_name = "OUTPUT", help = "Output DICOM, JSON, or rendered file", help_heading = "General", display_order = 2)]
-    output: Option<PathBuf>,
 
     #[arg(
         long,
@@ -378,6 +402,86 @@ struct Cli {
         display_order = 49
     )]
     overlay_color: Option<String>,
+
+    #[arg(
+        long,
+        value_name = "axial|coronal|sagittal|YAW,PITCH,ROLL",
+        allow_hyphen_values = true,
+        help = "Render a Multiplanar Reformation: combine multiple DICOM slice files (positional args, or piped via -I/--stdin-paths) into one volume and render a single reformatted OUTPUT, instead of the default behavior of processing each path independently. Value is either a canonical patient-anatomy-aligned view (axial reuses the volume's own acquisition orientation; coronal/sagittal are fixed planes) or an arbitrary oblique rotation in degrees (YAW,PITCH,ROLL, about the patient's Z/X/Y axes respectively) applied to the native axial basis - not both combined",
+        help_heading = "MPR (Multiplanar Reformation)",
+        display_order = 50
+    )]
+    mpr: Option<String>,
+
+    #[arg(
+        long,
+        value_name = "X,Y,Z",
+        allow_hyphen_values = true,
+        help = "Reformat plane center, in patient/LPS millimeters. Defaults to the built volume's own physical center. For most uses, --mpr-depth (a single offset along the plane's own normal) is more convenient than specifying an absolute point here",
+        help_heading = "MPR (Multiplanar Reformation)",
+        display_order = 54
+    )]
+    mpr_origin: Option<String>,
+
+    #[arg(
+        long,
+        value_name = "MM|START:END[:STEP]|all[:STEP]",
+        allow_hyphen_values = true,
+        help = "Move the reformat plane along its own normal from --mpr-origin (or the volume's center). A single MM offset (default 0) reformats one plane, exactly as before. A START:END range (optionally with an explicit :STEP) instead produces a STACK of slices spanning that depth range - written as multiple numbered output files (.png/.jpg/.dcm) or as one whole-volume file (.nii/.nii.gz/.nrrd). 'all' spans the volume's own full extent along the plane's normal. The step defaults to --mpr-thickness (contiguous, non-overlapping slabs) if set, else --mpr-spacing",
+        help_heading = "MPR (Multiplanar Reformation)",
+        display_order = 55
+    )]
+    mpr_depth: Option<String>,
+
+    #[arg(
+        long,
+        value_name = "MM",
+        help = "Physical size of one output pixel, in mm (the same in both output axes, so the reformat is never distorted). Defaults to the volume's own smallest voxel dimension",
+        help_heading = "MPR (Multiplanar Reformation)",
+        display_order = 56
+    )]
+    mpr_spacing: Option<f64>,
+
+    #[arg(
+        long,
+        value_name = "MM",
+        help = "Reformat a thick slab instead of an infinitely-thin plane: samples multiple depths spanning this many millimeters (centered on the plane) and combines them per --mpr-projection. Defaults to 0 (thin plane, the original single-voxel-thick MPR behavior)",
+        help_heading = "MPR (Multiplanar Reformation)",
+        display_order = 57
+    )]
+    mpr_thickness: Option<f64>,
+
+    #[arg(
+        long,
+        value_name = "mip|minip|average",
+        help = "How --mpr-thickness's slab samples combine into one pixel: mip (maximum intensity projection - the radiology default, makes bright structures like vessels visible across the slab), minip (minimum intensity projection), or average. Requires --mpr-thickness. Defaults to mip",
+        help_heading = "MPR (Multiplanar Reformation)",
+        display_order = 58
+    )]
+    mpr_projection: Option<String>,
+}
+
+impl Cli {
+    /// Derives the legacy single-file `input`/`output` fields from `paths`, matching the
+    /// original two-positional behavior exactly for 0-2 paths (every single-file call site below
+    /// keeps reading `cli.input`/`cli.output` and needs no changes). 3+ paths, and --mpr's own
+    /// 2+-path convention, are deliberately NOT handled here - those are multi-input cases with
+    /// no single "the" output the way a single-file command has, so run() reads `cli.paths`
+    /// directly for them instead of going through this derivation.
+    fn finalize(mut self) -> Self {
+        self.input = self.paths.first().cloned();
+        self.output = if self.paths.len() == 2 { self.paths.get(1).cloned() } else { None };
+        self
+    }
+
+    /// Whether MPR mode is in effect - `--mpr <axial|coronal|sagittal|YAW,PITCH,ROLL>` is the
+    /// sole trigger now that view/rotation are folded into it. `--mpr-origin`/`--mpr-spacing`
+    /// remain separate (they're numeric refinements, not "which plane" choices), but only mean
+    /// anything alongside `--mpr` - see the validation in run() that rejects them without it,
+    /// rather than silently ignoring them.
+    fn mpr_requested(&self) -> bool {
+        self.mpr.is_some()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -460,7 +564,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let version_with_hash = cli_version_with_binary_hash();
     let version_static: &'static str = Box::leak(version_with_hash.into_boxed_str());
     let matches = Cli::command().version(version_static).get_matches();
-    let cli = Cli::from_arg_matches(&matches).expect("clap generated invalid matches");
+    let cli = Cli::from_arg_matches(&matches).expect("clap generated invalid matches").finalize();
 
     if cli.jpeg2000_codec == Jpeg2000Codec::Kakadu && !kakadu_ffi_enabled() {
         return Err(io::Error::new(
@@ -491,25 +595,84 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         return run_check_dicom(&cli);
     }
 
+    if !cli.mpr_requested()
+        && (cli.mpr_origin.is_some()
+            || cli.mpr_depth.is_some()
+            || cli.mpr_spacing.is_some()
+            || cli.mpr_thickness.is_some()
+            || cli.mpr_projection.is_some())
+    {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "--mpr-origin/--mpr-depth/--mpr-spacing/--mpr-thickness/--mpr-projection require --mpr <axial|coronal|sagittal|YAW,PITCH,ROLL>",
+        )
+        .into());
+    }
+
+    if cli.mpr_projection.is_some() && cli.mpr_thickness.is_none() {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "--mpr-projection requires --mpr-thickness",
+        )
+        .into());
+    }
+
+    // Multiple inputs come from two interchangeable places - the trailing positional PATHS
+    // (shell-glob-friendly, e.g. `dcmnorm a.dcm b.dcm c.dcm out.png`) or piped one-per-line via
+    // -I/--stdin-paths (better suited to a huge/programmatically-generated list, e.g. `find`).
+    // Both read/collect the ENTIRE file set, sequentially, inside this one process before doing
+    // anything with it - nothing here spawns a second dcmnorm process or hands paths off
+    // elsewhere, so a series can never get silently split across separate volumes this way. (The
+    // one way to actually cause that would be piping through `xargs` instead of straight into
+    // `-I` - xargs batches long argument lists across multiple subprocess invocations, each
+    // seeing only a slice of the files and running as its own independent `dcmnorm` process with
+    // its own empty stdin, so it would fail loudly with a "requires ..." error rather than
+    // silently building a partial/wrong volume - but that's a caller misuse, not something -I
+    // itself does.)
+    //
+    // With -I, stdin supplies every INPUT - at most one trailing positional is allowed, and (only
+    // meaningful with --mpr, which is the only multi-input mode with a combined OUTPUT) it's
+    // OUTPUT, not another input.
     if cli.stdin_paths {
-        let stdin = io::stdin();
-        let mut any_error = false;
-        for line in stdin.lock().lines() {
-            let line = line?;
-            let line = line.trim().to_string();
-            if line.is_empty() {
-                continue;
-            }
-            let input_path = PathBuf::from(&line);
-            if let Err(e) = process_one(&cli, &input_path) {
-                eprintln!("{}: {e}", input_path.display());
-                any_error = true;
-            }
+        if cli.paths.len() > 1 {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                "with -I/--stdin-paths, at most one extra positional (OUTPUT, for --mpr) is allowed - every INPUT comes from stdin",
+            )
+            .into());
         }
-        if any_error {
-            return Err(io::Error::new(ErrorKind::Other, "one or more inputs failed").into());
+        let inputs = read_stdin_paths()?;
+        if cli.mpr_requested() {
+            let output_path = cli.paths.first().ok_or_else(|| {
+                io::Error::new(
+                    ErrorKind::InvalidInput,
+                    "--mpr requires an output path, e.g. find series_dir -name '*.dcm' | dcmnorm -I --mpr out.png",
+                )
+            })?;
+            return run_mpr(&cli, &inputs, output_path);
         }
-        return Ok(());
+        return run_batch(&cli, &inputs);
+    }
+
+    // Without -I, the trailing positional PATHS are split by application-level convention (see
+    // Cli::finalize's own doc comment for the 0-2 case, handled below via cli.input/cli.output):
+    // --mpr treats all but the last as INPUTs and the last as the combined OUTPUT (requires 2+);
+    // otherwise, 3+ paths batch-process each independently (no shared output, same as -I without
+    // --mpr); 0-2 paths keep the exact original single-file input/[output] behavior.
+    if cli.mpr_requested() {
+        if cli.paths.len() < 2 {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                "--mpr requires multiple slice files and an output path, e.g. dcmnorm --mpr series_dir/*.dcm out.png",
+            )
+            .into());
+        }
+        let (inputs, output_path) = cli.paths.split_at(cli.paths.len() - 1);
+        return run_mpr(&cli, inputs, &output_path[0]);
+    }
+
+    if cli.paths.len() >= 3 {
+        return run_batch(&cli, &cli.paths);
     }
 
     let input_path = cli.input.as_ref().ok_or_else(|| {
@@ -520,6 +683,37 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     })?;
 
     process_one(&cli, input_path)
+}
+
+fn read_stdin_paths() -> io::Result<Vec<PathBuf>> {
+    let stdin = io::stdin();
+    let mut paths = Vec::new();
+    for line in stdin.lock().lines() {
+        let line = line?;
+        let line = line.trim().to_string();
+        if line.is_empty() {
+            continue;
+        }
+        paths.push(PathBuf::from(line));
+    }
+    Ok(paths)
+}
+
+// Processes every path independently (JSON/DICOM/render, whichever `cli`'s other flags select) -
+// shared by both ways of supplying multiple non-MPR inputs (3+ positional paths and
+// -I/--stdin-paths).
+fn run_batch(cli: &Cli, paths: &[PathBuf]) -> Result<(), Box<dyn std::error::Error>> {
+    let mut any_error = false;
+    for input_path in paths {
+        if let Err(e) = process_one(cli, input_path) {
+            eprintln!("{}: {e}", input_path.display());
+            any_error = true;
+        }
+    }
+    if any_error {
+        return Err(io::Error::new(ErrorKind::Other, "one or more inputs failed").into());
+    }
+    Ok(())
 }
 
 fn run_check_dicom(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
@@ -906,6 +1100,13 @@ fn run_dicom_to_json_with_object(
         None
     };
 
+    // Shared across every bulk-eligible element of this file's write pass - see
+    // DicomJsonWriteOptions::bulk_scan_failed's own doc comment for why this matters (without
+    // it, one element the hand-rolled offset scanner can't parse means every later one,
+    // including PixelData, independently pays the same doomed multi-second scan instead of just
+    // the first).
+    let bulk_scan_failed = std::cell::Cell::new(false);
+    let bulk_scan_cursor = std::cell::Cell::new(0usize);
     let mut output = {
         let _json_scope = perf::scope("cli.dicom_to_json.write_dicom_json_with_options");
         write_dicom_json_with_options(
@@ -922,6 +1123,8 @@ fn run_dicom_to_json_with_object(
             },
             bulk_data_source: if bulk_data_mode == DicomJsonBulkDataMode::Uri { input_bytes } else { None },
             bulk_data_uri_base: uri_base_owned.as_deref(),
+            bulk_scan_failed: Some(&bulk_scan_failed),
+            bulk_scan_cursor: Some(&bulk_scan_cursor),
         },
     )?
     };
@@ -1368,6 +1571,450 @@ fn run_dicom_to_render_with_object(
     );
     fs::write(output_path, rendered.bytes)?;
     Ok(())
+}
+
+/// `--mpr` entry point: builds one volume from `inputs`, resolves the requested cut plane
+/// (`--mpr`'s own view-or-rotation value, plus `--mpr-origin`/`--mpr-spacing`, each defaulting to
+/// a sane volume-derived value), and writes a single reformatted image to `output_path` - the same
+/// `dicom_io::volume` functions the Node bindings call, so this is both a standalone tool and the
+/// fastest way to exercise `volume.rs` without a render-server round trip.
+fn run_mpr(cli: &Cli, inputs: &[PathBuf], output_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let _scope = perf::scope("cli.run_mpr");
+    let paths = inputs;
+
+    if paths.is_empty() {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "--mpr requires at least one DICOM slice file as input",
+        )
+        .into());
+    }
+
+    for (flag, present) in [
+        ("--filter", !cli.filter.is_empty()),
+        ("--transfer-syntax", cli.transfer_syntax.is_some()),
+        ("--set", !cli.set.is_empty()),
+        ("--remove", !cli.remove.is_empty()),
+        ("--render-all-frames", cli.render_all_frames),
+        ("--render-fps", cli.render_fps.is_some()),
+        ("--scale-max-size", cli.scale_max_size.is_some()),
+    ] {
+        if present {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                format!("{flag} is not valid with --mpr"),
+            )
+            .into());
+        }
+    }
+
+    verbose_log(cli, format!("Building MPR volume from {} file(s)", paths.len()));
+    let volume = build_volume(paths).map_err(|error| io::Error::new(ErrorKind::InvalidInput, error.to_string()))?;
+    verbose_log(
+        cli,
+        format!(
+            "Volume: {}x{}x{} voxels, row spacing {:.4}mm, col spacing {:.4}mm, ~{:.4}mm min spacing",
+            volume.cols,
+            volume.rows,
+            volume.num_slices,
+            volume.row_spacing_mm,
+            volume.col_spacing_mm,
+            volume.min_spacing_mm()
+        ),
+    );
+
+    // --mpr's value is either a canonical view keyword or a YAW,PITCH,ROLL rotation triplet
+    // applied to the volume's own native axial basis - not both combined (see the flag's own
+    // help text). cli.mpr is guaranteed Some here: run() only reaches run_mpr() once
+    // mpr_requested() (== cli.mpr.is_some()) is true.
+    let mpr_value = cli.mpr.as_deref().expect("run_mpr is only called once cli.mpr_requested()");
+    let (row_dir, col_dir) = if matches!(mpr_value, "axial" | "coronal" | "sagittal") {
+        canonical_view_basis(mpr_value, &volume).map_err(|error| io::Error::new(ErrorKind::InvalidInput, error.to_string()))?
+    } else {
+        let (yaw, pitch, roll) = parse_triplet(mpr_value, "--mpr").map_err(|_| {
+            io::Error::new(
+                ErrorKind::InvalidInput,
+                format!(
+                    "invalid --mpr value '{mpr_value}': expected 'axial', 'coronal', 'sagittal', or a YAW,PITCH,ROLL rotation triplet"
+                ),
+            )
+        })?;
+        rotate_basis(volume.row_vector, volume.col_vector, yaw, pitch, roll)
+    };
+
+    let base_origin = match cli.mpr_origin.as_deref() {
+        Some(value) => {
+            let (x, y, z) = parse_triplet(value, "--mpr-origin")?;
+            [x, y, z]
+        }
+        None => volume.center(),
+    };
+
+    // The reformat plane's own normal (cross(row_dir, col_dir)) - --mpr-depth moves along this,
+    // and it's also the "k" (slice/depth) axis for whole-volume/DICOM-series export.
+    let normal_raw = [
+        row_dir[1] * col_dir[2] - row_dir[2] * col_dir[1],
+        row_dir[2] * col_dir[0] - row_dir[0] * col_dir[2],
+        row_dir[0] * col_dir[1] - row_dir[1] * col_dir[0],
+    ];
+    let normal_len = (normal_raw[0].powi(2) + normal_raw[1].powi(2) + normal_raw[2].powi(2)).sqrt().max(1e-9);
+    let normal = [normal_raw[0] / normal_len, normal_raw[1] / normal_len, normal_raw[2] / normal_len];
+
+    let slab_thickness_mm = cli.mpr_thickness.unwrap_or(0.0);
+    let slab_projection = match cli.mpr_projection.as_deref() {
+        None | Some("mip") => SlabProjection::MaximumIntensity,
+        Some("minip") => SlabProjection::MinimumIntensity,
+        Some("average") => SlabProjection::Average,
+        Some(other) => {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                format!("invalid --mpr-projection value '{other}': expected 'mip', 'minip', or 'average'"),
+            )
+            .into())
+        }
+    };
+
+    let spacing_mm = cli.mpr_spacing.unwrap_or_else(|| volume.min_spacing_mm());
+    if !(spacing_mm > 0.0) {
+        return Err(io::Error::new(ErrorKind::InvalidInput, "--mpr-spacing must be greater than zero").into());
+    }
+
+    let depth_spec = match cli.mpr_depth.as_deref() {
+        Some(value) => parse_depth_spec(value)?,
+        None => DepthSpec::Single(0.0),
+    };
+    let default_depth_step = if slab_thickness_mm > 0.0 { slab_thickness_mm } else { spacing_mm };
+    let depths = resolve_depths(depth_spec, &volume, row_dir, col_dir, base_origin, default_depth_step);
+    if depths.is_empty() {
+        return Err(io::Error::new(ErrorKind::InvalidInput, "--mpr-depth resolved to zero slices").into());
+    }
+
+    let output_kind = resolve_mpr_output_kind(cli, output_path)?;
+    if cli.output_type.is_some() && !matches!(output_kind, MprOutputKind::Rendered(_)) {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "--output-type is not valid with .nii/.nii.gz/.nrrd/.dcm --mpr output - format is determined by the output extension",
+        )
+        .into());
+    }
+
+    let output_width = cli.output_width.unwrap_or(volume.cols);
+    let output_height = cli.output_height.unwrap_or(volume.rows);
+    if output_width > 65535 || output_height > 65535 {
+        return Err(io::Error::new(ErrorKind::InvalidInput, "--output-width/--output-height cannot exceed 65535").into());
+    }
+
+    verbose_log(
+        cli,
+        format!(
+            "Reformatting {} slice(s): row_dir={row_dir:?} col_dir={col_dir:?} spacing={spacing_mm:.4}mm output={output_width}x{output_height}",
+            depths.len()
+        ),
+    );
+
+    let plane_params_at = |depth_mm: f64| PlaneParams {
+        origin: [
+            base_origin[0] + normal[0] * depth_mm,
+            base_origin[1] + normal[1] * depth_mm,
+            base_origin[2] + normal[2] * depth_mm,
+        ],
+        row_dir,
+        col_dir,
+        output_width,
+        output_height,
+        spacing_mm,
+        window_center: cli.window_center,
+        window_width: cli.window_width,
+        interpolation: Interpolation::Trilinear,
+        slab_thickness_mm,
+        slab_projection,
+    };
+
+    // The world-space CENTER of voxel (col=0, row=0) of the plane at `depth_mm` - the same
+    // "center of the first voxel" convention DICOM's own ImagePositionPatient uses, matching
+    // exactly how reformat_plane_values indexes its output (see its own half_width/half_height
+    // offset math).
+    let first_voxel_center_at = |depth_mm: f64| {
+        let params = plane_params_at(depth_mm);
+        let half_width = output_width as f64 / 2.0;
+        let half_height = output_height as f64 / 2.0;
+        [
+            params.origin[0] + row_dir[0] * (-half_width) * spacing_mm + col_dir[0] * (-half_height) * spacing_mm,
+            params.origin[1] + row_dir[1] * (-half_width) * spacing_mm + col_dir[1] * (-half_height) * spacing_mm,
+            params.origin[2] + row_dir[2] * (-half_width) * spacing_mm + col_dir[2] * (-half_height) * spacing_mm,
+        ]
+    };
+
+    match output_kind {
+        MprOutputKind::Rendered(format) => {
+            if format == RenderFormat::Mpeg4 {
+                return Err(io::Error::new(ErrorKind::InvalidInput, "--mpr does not support MPEG4 output").into());
+            }
+            if depths.len() == 1 {
+                let params = plane_params_at(depths[0]);
+                let rendered = reformat_plane(&volume, &params, to_render_output_format(format), cli.jpeg_quality)
+                    .map_err(|error| io::Error::new(ErrorKind::InvalidInput, error.to_string()))?;
+                fs::write(output_path, rendered.bytes)?;
+            } else {
+                let mut frames = Vec::with_capacity(depths.len());
+                for depth_mm in &depths {
+                    let params = plane_params_at(*depth_mm);
+                    frames.push(
+                        reformat_plane(&volume, &params, to_render_output_format(format), cli.jpeg_quality)
+                            .map_err(|error| io::Error::new(ErrorKind::InvalidInput, error.to_string()))?,
+                    );
+                }
+                write_multi_frame_outputs(output_path, format, frames)?;
+            }
+        }
+        MprOutputKind::DicomSeries => {
+            let source_object = read_dicom_file(&paths[0])?;
+            let series_instance_uid = generate_uid();
+            let slice_thickness_mm = if slab_thickness_mm > 0.0 { slab_thickness_mm } else { default_depth_step };
+
+            if depths.len() == 1 {
+                write_reformatted_dicom_slice(
+                    &source_object,
+                    &reformat_plane_values(&volume, &plane_params_at(depths[0]))
+                        .map_err(|error| io::Error::new(ErrorKind::InvalidInput, error.to_string()))?,
+                    output_height,
+                    output_width,
+                    &series_instance_uid,
+                    1,
+                    &SliceGeometry {
+                        position: first_voxel_center_at(depths[0]),
+                        row_dir,
+                        col_dir,
+                        row_spacing_mm: spacing_mm,
+                        col_spacing_mm: spacing_mm,
+                        slice_thickness_mm,
+                    },
+                    cli.window_center,
+                    cli.window_width,
+                    output_path,
+                )?;
+            } else {
+                for (index, depth_mm) in depths.iter().enumerate() {
+                    let path = frame_output_path(output_path, index + 1)?;
+                    let values = reformat_plane_values(&volume, &plane_params_at(*depth_mm))
+                        .map_err(|error| io::Error::new(ErrorKind::InvalidInput, error.to_string()))?;
+                    write_reformatted_dicom_slice(
+                        &source_object,
+                        &values,
+                        output_height,
+                        output_width,
+                        &series_instance_uid,
+                        (index + 1) as u32,
+                        &SliceGeometry {
+                            position: first_voxel_center_at(*depth_mm),
+                            row_dir,
+                            col_dir,
+                            row_spacing_mm: spacing_mm,
+                            col_spacing_mm: spacing_mm,
+                            slice_thickness_mm,
+                        },
+                        cli.window_center,
+                        cli.window_width,
+                        &path,
+                    )?;
+                }
+            }
+        }
+        MprOutputKind::Volume(volume_format) => {
+            let mut samples = Vec::with_capacity(output_width as usize * output_height as usize * depths.len());
+            for depth_mm in &depths {
+                let values = reformat_plane_values(&volume, &plane_params_at(*depth_mm))
+                    .map_err(|error| io::Error::new(ErrorKind::InvalidInput, error.to_string()))?;
+                samples.extend(values);
+            }
+            let step_mm = if depths.len() > 1 { depths[1] - depths[0] } else { default_depth_step };
+            let geometry = VolumeGeometry {
+                row_dir,
+                col_dir,
+                normal_dir: normal,
+                col_spacing_mm: spacing_mm,
+                row_spacing_mm: spacing_mm,
+                step_mm,
+                origin: first_voxel_center_at(depths[0]),
+            };
+            let dims = (output_width, output_height, depths.len() as u32);
+            match volume_format {
+                VolumeFormat::Nifti => write_nifti(&samples, dims, &geometry, output_path, false)
+                    .map_err(|error| io::Error::new(ErrorKind::InvalidInput, error.to_string()))?,
+                VolumeFormat::NiftiGz => write_nifti(&samples, dims, &geometry, output_path, true)
+                    .map_err(|error| io::Error::new(ErrorKind::InvalidInput, error.to_string()))?,
+                VolumeFormat::Nrrd => write_nrrd(&samples, dims, &geometry, output_path)
+                    .map_err(|error| io::Error::new(ErrorKind::InvalidInput, error.to_string()))?,
+            }
+        }
+    }
+
+    verbose_log(cli, format!("Wrote {} reformatted slice(s)", depths.len()));
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum VolumeFormat {
+    Nifti,
+    NiftiGz,
+    Nrrd,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum MprOutputKind {
+    Volume(VolumeFormat),
+    DicomSeries,
+    Rendered(RenderFormat),
+}
+
+/// Determines what kind of output `--mpr` should produce from `output_path`'s extension -
+/// checked BEFORE `resolve_render_format` (whose "unknown extension" error doesn't know about
+/// `.nii`/`.nii.gz`/`.nrrd`/`.dcm`).
+fn resolve_mpr_output_kind(cli: &Cli, output_path: &Path) -> Result<MprOutputKind, Box<dyn std::error::Error>> {
+    let file_name = output_path.file_name().and_then(|value| value.to_str()).unwrap_or("").to_ascii_lowercase();
+    if file_name.ends_with(".nii.gz") {
+        return Ok(MprOutputKind::Volume(VolumeFormat::NiftiGz));
+    }
+    if file_name.ends_with(".nii") {
+        return Ok(MprOutputKind::Volume(VolumeFormat::Nifti));
+    }
+    if file_name.ends_with(".nrrd") {
+        return Ok(MprOutputKind::Volume(VolumeFormat::Nrrd));
+    }
+    if file_name.ends_with(".dcm") || file_name.ends_with(".dicom") {
+        return Ok(MprOutputKind::DicomSeries);
+    }
+    Ok(MprOutputKind::Rendered(resolve_render_format(cli, output_path)?))
+}
+
+fn parse_triplet(value: &str, flag_name: &str) -> Result<(f64, f64, f64), io::Error> {
+    let parts: Vec<&str> = value.split(',').collect();
+    if parts.len() != 3 {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            format!("{flag_name} expects three comma-separated numbers (e.g. 1.0,2.0,3.0)"),
+        ));
+    }
+    let parse_one = |raw: &str| -> Result<f64, io::Error> {
+        raw.trim()
+            .parse::<f64>()
+            .map_err(|_| io::Error::new(ErrorKind::InvalidInput, format!("{flag_name} contains an invalid number: '{raw}'")))
+    };
+    Ok((parse_one(parts[0])?, parse_one(parts[1])?, parse_one(parts[2])?))
+}
+
+/// A parsed `--mpr-depth` value - see that flag's own help text for the exact syntax. `Single`
+/// preserves the original "one offset, one plane" behavior exactly; `Range`/`All` describe a
+/// STACK of slices (for multi-file .png/.jpg/.dcm output, or a single whole-volume .nii/.nrrd).
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum DepthSpec {
+    Single(f64),
+    Range { start: f64, end: f64, step: Option<f64> },
+    All { step: Option<f64> },
+}
+
+fn invalid_mpr_depth_error(value: &str) -> io::Error {
+    io::Error::new(
+        ErrorKind::InvalidInput,
+        format!(
+            "invalid --mpr-depth value '{value}': expected a single MM offset, START:END, START:END:STEP, 'all', or 'all:STEP'"
+        ),
+    )
+}
+
+fn parse_depth_spec(value: &str) -> Result<DepthSpec, io::Error> {
+    let trimmed = value.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    if lower == "all" {
+        return Ok(DepthSpec::All { step: None });
+    }
+    if let Some(rest) = lower.strip_prefix("all:") {
+        let step: f64 = rest.trim().parse().map_err(|_| invalid_mpr_depth_error(value))?;
+        if !(step > 0.0) {
+            return Err(invalid_mpr_depth_error(value));
+        }
+        return Ok(DepthSpec::All { step: Some(step) });
+    }
+
+    let parts: Vec<&str> = trimmed.split(':').collect();
+    match parts.as_slice() {
+        [single] => single.trim().parse().map(DepthSpec::Single).map_err(|_| invalid_mpr_depth_error(value)),
+        [start, end] => {
+            let start: f64 = start.trim().parse().map_err(|_| invalid_mpr_depth_error(value))?;
+            let end: f64 = end.trim().parse().map_err(|_| invalid_mpr_depth_error(value))?;
+            Ok(DepthSpec::Range { start, end, step: None })
+        }
+        [start, end, step] => {
+            let start: f64 = start.trim().parse().map_err(|_| invalid_mpr_depth_error(value))?;
+            let end: f64 = end.trim().parse().map_err(|_| invalid_mpr_depth_error(value))?;
+            let step: f64 = step.trim().parse().map_err(|_| invalid_mpr_depth_error(value))?;
+            if !(step > 0.0) {
+                return Err(invalid_mpr_depth_error(value));
+            }
+            Ok(DepthSpec::Range { start, end, step: Some(step) })
+        }
+        _ => Err(invalid_mpr_depth_error(value)),
+    }
+}
+
+/// Every depth offset from `lo` to `hi` (inclusive of `lo`; `hi` is included only if it lands
+/// exactly on a step) at `step` millimeters apart. Always yields at least one depth.
+fn depth_steps(start: f64, end: f64, step: f64) -> Vec<f64> {
+    let (lo, hi) = if start <= end { (start, end) } else { (end, start) };
+    let span = hi - lo;
+    let count = ((span / step).floor() as i64 + 1).max(1) as usize;
+    (0..count).map(|index| lo + step * index as f64).collect()
+}
+
+/// The volume's own full extent along the reformat plane's normal, as a depth RANGE relative to
+/// `base_origin` (i.e. directly usable as `depth_steps`' start/end) - computed by projecting all
+/// 8 corners of the volume's physical bounding box onto the normal, which is correct even for an
+/// oblique plane whose normal differs from the volume's own `slice_normal`.
+fn volume_depth_extent(volume: &Volume, row_dir: [f64; 3], col_dir: [f64; 3], base_origin: [f64; 3]) -> (f64, f64) {
+    let normal_raw = [
+        row_dir[1] * col_dir[2] - row_dir[2] * col_dir[1],
+        row_dir[2] * col_dir[0] - row_dir[0] * col_dir[2],
+        row_dir[0] * col_dir[1] - row_dir[1] * col_dir[0],
+    ];
+    let norm_len = (normal_raw[0].powi(2) + normal_raw[1].powi(2) + normal_raw[2].powi(2)).sqrt().max(1e-9);
+    let normal = [normal_raw[0] / norm_len, normal_raw[1] / norm_len, normal_raw[2] / norm_len];
+
+    let last_col = volume.cols.saturating_sub(1) as f64 * volume.col_spacing_mm;
+    let last_row = volume.rows.saturating_sub(1) as f64 * volume.row_spacing_mm;
+    let z_first = volume.slice_zs.first().copied().unwrap_or(0.0);
+    let z_last = volume.slice_zs.last().copied().unwrap_or(0.0);
+    let base_proj = base_origin[0] * normal[0] + base_origin[1] * normal[1] + base_origin[2] * normal[2];
+
+    let mut min_rel = f64::INFINITY;
+    let mut max_rel = f64::NEG_INFINITY;
+    for &c in &[0.0, last_col] {
+        for &r in &[0.0, last_row] {
+            for &z in &[z_first, z_last] {
+                let world = [
+                    volume.origin[0] + volume.row_vector[0] * c + volume.col_vector[0] * r + volume.slice_normal[0] * (z - z_first),
+                    volume.origin[1] + volume.row_vector[1] * c + volume.col_vector[1] * r + volume.slice_normal[1] * (z - z_first),
+                    volume.origin[2] + volume.row_vector[2] * c + volume.col_vector[2] * r + volume.slice_normal[2] * (z - z_first),
+                ];
+                let proj = world[0] * normal[0] + world[1] * normal[1] + world[2] * normal[2] - base_proj;
+                min_rel = min_rel.min(proj);
+                max_rel = max_rel.max(proj);
+            }
+        }
+    }
+    (min_rel, max_rel)
+}
+
+/// Resolves a `DepthSpec` into the concrete list of depth offsets `run_mpr` reformats - always at
+/// least one. `default_step` is used whenever a `Range`/`All` doesn't specify its own `:STEP`.
+fn resolve_depths(spec: DepthSpec, volume: &Volume, row_dir: [f64; 3], col_dir: [f64; 3], base_origin: [f64; 3], default_step: f64) -> Vec<f64> {
+    match spec {
+        DepthSpec::Single(value) => vec![value],
+        DepthSpec::Range { start, end, step } => depth_steps(start, end, step.unwrap_or(default_step)),
+        DepthSpec::All { step } => {
+            let (start, end) = volume_depth_extent(volume, row_dir, col_dir, base_origin);
+            depth_steps(start, end, step.unwrap_or(default_step))
+        }
+    }
 }
 
 fn run_json_to_dicom(cli: &Cli, input_bytes: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
@@ -2072,16 +2719,18 @@ fn looks_like_dicom(input_bytes: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_filter_to_object, detect_output_kind, infer_direction, parse_attribute_override,
-        parse_filter_requests, parse_redact_box, run_dicom_to_json_with_object,
-        resolve_render_format, Cli, Direction, FileKind, RenderFormat,
+        apply_filter_to_object, build_volume, canonical_view_basis, depth_steps, detect_output_kind,
+        frame_output_path, infer_direction, parse_attribute_override, parse_depth_spec,
+        parse_filter_requests, parse_redact_box, resolve_depths, resolve_mpr_output_kind,
+        run_dicom_to_json_with_object, run_mpr, resolve_render_format, Cli, DepthSpec, Direction,
+        FileKind, MprOutputKind, OutputType, RenderFormat, VolumeFormat,
     };
     use clap::{CommandFactory, FromArgMatches};
     use dicom_dictionary_std::tags;
-    use dcmnorm::dicom_io::{next_tag, read_dicom_file};
+    use dcmnorm::dicom_io::{next_tag, read_dicom_file, write_dicom_file};
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
-    use dicom_core::Tag;
+    use dicom_core::{DataElement, PrimitiveValue, Tag, VR};
     use std::path::{Path, PathBuf};
 
     fn repo_root() -> PathBuf {
@@ -2107,6 +2756,7 @@ mod tests {
 
     fn base_cli() -> Cli {
         Cli {
+            paths: Vec::new(),
             input: None,
             output: None,
             input_type: None,
@@ -2145,6 +2795,12 @@ mod tests {
             list_transfer_syntaxes: false,
             verbose: false,
             remove_private_tags: false,
+            mpr: None,
+            mpr_origin: None,
+            mpr_depth: None,
+            mpr_spacing: None,
+            mpr_thickness: None,
+            mpr_projection: None,
         }
     }
 
@@ -2153,7 +2809,7 @@ mod tests {
         let matches = Cli::command()
             .try_get_matches_from(["dcmnorm", "--check-dicom", "in.dcm"])
             .unwrap();
-        let cli = Cli::from_arg_matches(&matches).unwrap();
+        let cli = Cli::from_arg_matches(&matches).unwrap().finalize();
 
         assert!(cli.check_dicom);
         assert_eq!(cli.input, Some(PathBuf::from("in.dcm")));
@@ -2172,7 +2828,7 @@ mod tests {
                 "out.png",
             ])
             .unwrap();
-        let cli = Cli::from_arg_matches(&matches).unwrap();
+        let cli = Cli::from_arg_matches(&matches).unwrap().finalize();
 
         assert!(!cli.no_overlays);
         assert_eq!(cli.overlay_index, Some(1));
@@ -2184,7 +2840,7 @@ mod tests {
         let matches = Cli::command()
             .try_get_matches_from(["dcmnorm", "--no-overlays", "in.dcm", "out.png"])
             .unwrap();
-        let cli = Cli::from_arg_matches(&matches).unwrap();
+        let cli = Cli::from_arg_matches(&matches).unwrap().finalize();
 
         assert!(cli.no_overlays);
         assert_eq!(cli.overlay_index, None);
@@ -2213,7 +2869,7 @@ mod tests {
         let matches = Cli::command()
             .try_get_matches_from(["dcmnorm", "--filter", "StudyInstanceUID", "in.dcm"])
             .unwrap();
-        let cli = Cli::from_arg_matches(&matches).unwrap();
+        let cli = Cli::from_arg_matches(&matches).unwrap().finalize();
 
         assert_eq!(cli.filter, vec!["StudyInstanceUID".to_string()]);
     }
@@ -2228,7 +2884,7 @@ mod tests {
                 "in.dcm",
             ])
             .unwrap();
-        let cli = Cli::from_arg_matches(&matches).unwrap();
+        let cli = Cli::from_arg_matches(&matches).unwrap().finalize();
 
         assert_eq!(
             cli.filter,
@@ -2288,6 +2944,528 @@ mod tests {
         assert!(!json.contains("\"Modality\""));
         assert!(!json.contains("\"FileMetaInformationVersion\""));
         assert!(!json.contains("\"TransferSyntaxUID\""));
+    }
+
+    #[test]
+    fn parses_mpr_flag_with_a_canonical_view_value() {
+        let matches = Cli::command()
+            .try_get_matches_from([
+                "dcmnorm", "-I", "--mpr", "coronal", "--mpr-origin", "1,2,3", "--mpr-spacing", "0.5", "out.png",
+            ])
+            .unwrap();
+        let cli = Cli::from_arg_matches(&matches).unwrap().finalize();
+
+        assert!(cli.stdin_paths);
+        assert_eq!(cli.mpr.as_deref(), Some("coronal"));
+        assert_eq!(cli.mpr_origin.as_deref(), Some("1,2,3"));
+        assert_eq!(cli.mpr_spacing, Some(0.5));
+        assert!(cli.mpr_requested());
+        // With no OUTPUT positional given, the lone positional lands in `input` -
+        // `run_mpr` is responsible for accepting it as the output path (see its own doc comment).
+        assert_eq!(cli.input, Some(PathBuf::from("out.png")));
+        assert_eq!(cli.output, None);
+    }
+
+    #[test]
+    fn parses_mpr_flag_with_a_rotation_triplet_value() {
+        let matches = Cli::command()
+            .try_get_matches_from(["dcmnorm", "--mpr", "15,30,0", "a.dcm", "b.dcm", "out.png"])
+            .unwrap();
+        let cli = Cli::from_arg_matches(&matches).unwrap().finalize();
+
+        assert_eq!(cli.mpr.as_deref(), Some("15,30,0"));
+        assert!(cli.mpr_requested());
+    }
+
+    #[test]
+    fn mpr_origin_without_mpr_is_not_requested() {
+        // --mpr-origin/--mpr-spacing alone don't imply MPR mode (unlike --mpr itself, they carry
+        // no "which plane" information) - run() explicitly rejects this combination rather than
+        // silently ignoring them; mpr_requested() reflects that they don't self-trigger MPR.
+        let cli = Cli { mpr_origin: Some("1,2,3".to_string()), ..base_cli() };
+        assert!(!cli.mpr_requested());
+    }
+
+    #[test]
+    fn parses_mpr_depth_thickness_and_projection_flags() {
+        let matches = Cli::command()
+            .try_get_matches_from([
+                "dcmnorm", "--mpr", "coronal", "--mpr-depth", "-15.5", "--mpr-thickness", "20",
+                "--mpr-projection", "minip", "series_dir/a.dcm", "series_dir/b.dcm", "out.png",
+            ])
+            .unwrap();
+        let cli = Cli::from_arg_matches(&matches).unwrap();
+
+        assert_eq!(cli.mpr_depth.as_deref(), Some("-15.5"));
+        assert_eq!(cli.mpr_thickness, Some(20.0));
+        assert_eq!(cli.mpr_projection.as_deref(), Some("minip"));
+    }
+
+    #[test]
+    fn run_mpr_depth_offsets_the_plane_along_its_own_normal() {
+        // Each slice has distinct absolute values (see the helper's own doc comment) and a fixed
+        // (not auto-normalized) window, so a depth-driven slice change is actually visible in the
+        // output bytes rather than hidden by robust min-max normalization or fixture slices that
+        // all share the same underlying pixel content.
+        let paths = write_synthetic_ct_series_with_varying_intercept_for_cli(6, 1.0);
+
+        let mut centered_cli = base_cli();
+        centered_cli.mpr = Some("axial".to_string());
+        centered_cli.output_type = Some(OutputType::Raw);
+        centered_cli.window_center = Some(500.0);
+        centered_cli.window_width = Some(4000.0);
+        let centered_output = temp_output_path("mpr-depth-centered").with_extension("raw");
+        run_mpr(&centered_cli, &paths, &centered_output).unwrap();
+        let centered_bytes = fs::read(&centered_output).unwrap();
+
+        let mut deep_cli = base_cli();
+        deep_cli.mpr = Some("axial".to_string());
+        deep_cli.mpr_depth = Some("2.0".to_string());
+        deep_cli.output_type = Some(OutputType::Raw);
+        deep_cli.window_center = Some(500.0);
+        deep_cli.window_width = Some(4000.0);
+        let deep_output = temp_output_path("mpr-depth-offset").with_extension("raw");
+        run_mpr(&deep_cli, &paths, &deep_output).unwrap();
+        let deep_bytes = fs::read(&deep_output).unwrap();
+
+        assert_ne!(centered_bytes, deep_bytes, "--mpr-depth should move the reformatted plane to a different slice");
+
+        fs::remove_file(&centered_output).ok();
+        fs::remove_file(&deep_output).ok();
+        for path in &paths {
+            fs::remove_file(path).ok();
+        }
+    }
+
+    #[test]
+    fn run_mpr_writes_a_thick_mip_slab() {
+        let paths = write_synthetic_ct_series_for_cli(6, 1.0);
+        let output_path = temp_output_path("mpr-thick-slab").with_extension("png");
+
+        let mut cli = base_cli();
+        cli.mpr = Some("axial".to_string());
+        cli.mpr_thickness = Some(4.0);
+        cli.mpr_projection = Some("mip".to_string());
+
+        run_mpr(&cli, &paths, &output_path).unwrap();
+
+        let metadata = fs::metadata(&output_path).unwrap();
+        assert!(metadata.len() > 0);
+
+        fs::remove_file(&output_path).ok();
+        for path in &paths {
+            fs::remove_file(path).ok();
+        }
+    }
+
+    #[test]
+    fn parse_depth_spec_parses_every_syntax_variant() {
+        assert_eq!(parse_depth_spec("5").unwrap(), DepthSpec::Single(5.0));
+        assert_eq!(parse_depth_spec("-15.5").unwrap(), DepthSpec::Single(-15.5));
+        assert_eq!(parse_depth_spec("-10:10").unwrap(), DepthSpec::Range { start: -10.0, end: 10.0, step: None });
+        assert_eq!(
+            parse_depth_spec("-10:10:2.5").unwrap(),
+            DepthSpec::Range { start: -10.0, end: 10.0, step: Some(2.5) }
+        );
+        assert_eq!(parse_depth_spec("all").unwrap(), DepthSpec::All { step: None });
+        assert_eq!(parse_depth_spec("ALL").unwrap(), DepthSpec::All { step: None });
+        assert_eq!(parse_depth_spec("all:3").unwrap(), DepthSpec::All { step: Some(3.0) });
+    }
+
+    #[test]
+    fn parse_depth_spec_rejects_garbage_and_non_positive_steps() {
+        assert!(parse_depth_spec("not-a-number").is_err());
+        assert!(parse_depth_spec("1:2:3:4").is_err());
+        assert!(parse_depth_spec("1:2:0").is_err());
+        assert!(parse_depth_spec("1:2:-1").is_err());
+        assert!(parse_depth_spec("all:0").is_err());
+        assert!(parse_depth_spec("all:-5").is_err());
+    }
+
+    #[test]
+    fn depth_steps_always_includes_the_start_and_yields_at_least_one_value() {
+        assert_eq!(depth_steps(0.0, 10.0, 5.0), vec![0.0, 5.0, 10.0]);
+        assert_eq!(depth_steps(-10.0, 0.0, 4.0), vec![-10.0, -6.0, -2.0]);
+        // A single point (start == end) still yields exactly one depth, not zero.
+        assert_eq!(depth_steps(3.0, 3.0, 5.0), vec![3.0]);
+        // start > end is tolerated - normalized to (min, max) rather than an empty/negative range.
+        assert_eq!(depth_steps(10.0, 0.0, 5.0), vec![0.0, 5.0, 10.0]);
+    }
+
+    #[test]
+    fn resolve_depths_single_always_yields_exactly_one_depth_regardless_of_default_step() {
+        let paths = write_synthetic_ct_series_for_cli(4, 1.0);
+        let volume = build_volume(&paths).unwrap();
+        let depths = resolve_depths(DepthSpec::Single(-7.0), &volume, [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], volume.center(), 2.0);
+        assert_eq!(depths, vec![-7.0]);
+        for path in &paths {
+            fs::remove_file(path).ok();
+        }
+    }
+
+    #[test]
+    fn resolve_depths_all_spans_the_volumes_own_extent_along_the_normal() {
+        let paths = write_synthetic_ct_series_for_cli(6, 2.0);
+        let volume = build_volume(&paths).unwrap();
+        // Coronal: row_dir=[1,0,0], col_dir=[0,0,-1], normal=[0,1,0] - depth spans the volume's
+        // own row-direction (AP) extent, i.e. rows * row_spacing_mm.
+        let (row_dir, col_dir) = canonical_view_basis("coronal", &volume).unwrap();
+        let depths = resolve_depths(DepthSpec::All { step: Some(10.0) }, &volume, row_dir, col_dir, volume.center(), 10.0);
+        assert!(depths.len() >= 2, "expected multiple depths spanning the volume, got {depths:?}");
+        let span = depths.last().unwrap() - depths.first().unwrap();
+        let expected_span = (volume.rows.saturating_sub(1)) as f64 * volume.row_spacing_mm;
+        assert!((span - expected_span).abs() < 15.0, "span {span} should approximate the volume's own extent {expected_span}");
+        for path in &paths {
+            fs::remove_file(path).ok();
+        }
+    }
+
+    #[test]
+    fn resolve_mpr_output_kind_dispatches_on_extension() {
+        let cli = base_cli();
+        assert_eq!(resolve_mpr_output_kind(&cli, Path::new("out.nii")).unwrap(), MprOutputKind::Volume(VolumeFormat::Nifti));
+        assert_eq!(resolve_mpr_output_kind(&cli, Path::new("out.nii.gz")).unwrap(), MprOutputKind::Volume(VolumeFormat::NiftiGz));
+        assert_eq!(resolve_mpr_output_kind(&cli, Path::new("OUT.NRRD")).unwrap(), MprOutputKind::Volume(VolumeFormat::Nrrd));
+        assert_eq!(resolve_mpr_output_kind(&cli, Path::new("out.dcm")).unwrap(), MprOutputKind::DicomSeries);
+        assert_eq!(resolve_mpr_output_kind(&cli, Path::new("out.dicom")).unwrap(), MprOutputKind::DicomSeries);
+        assert_eq!(resolve_mpr_output_kind(&cli, Path::new("out.png")).unwrap(), MprOutputKind::Rendered(RenderFormat::Png));
+    }
+
+    #[test]
+    fn run_mpr_single_depth_output_is_unchanged_from_the_original_single_plane_behavior() {
+        // The exact same invocation as run_mpr_writes_a_reformatted_image_for_a_synthetic_series
+        // (no --mpr-depth at all) must still take the depths.len() == 1 path byte-for-byte.
+        let paths = write_synthetic_ct_series_for_cli(4, 1.0);
+        let output_path = temp_output_path("mpr-depth-default-single").with_extension("png");
+
+        let mut cli = base_cli();
+        cli.mpr = Some("axial".to_string());
+        run_mpr(&cli, &paths, &output_path).unwrap();
+
+        let metadata = fs::metadata(&output_path).unwrap();
+        assert!(metadata.len() > 0);
+
+        fs::remove_file(&output_path).ok();
+        for path in &paths {
+            fs::remove_file(path).ok();
+        }
+    }
+
+    #[test]
+    fn run_mpr_depth_range_writes_multiple_numbered_png_files() {
+        let paths = write_synthetic_ct_series_with_varying_intercept_for_cli(6, 1.0);
+        let output_path = temp_output_path("mpr-depth-range").with_extension("png");
+
+        let mut cli = base_cli();
+        cli.mpr = Some("axial".to_string());
+        cli.mpr_depth = Some("-2:2:1".to_string());
+        // A fixed (not auto-normalized) window - otherwise robust per-image min-max
+        // normalization can cancel out the fixture's uniform per-slice intercept shift, hiding
+        // the very difference this test exists to check for.
+        cli.window_center = Some(500.0);
+        cli.window_width = Some(4000.0);
+        run_mpr(&cli, &paths, &output_path).unwrap();
+
+        let mut written_bytes = Vec::new();
+        for index in 1..=5 {
+            let frame_path = frame_output_path(&output_path, index).unwrap();
+            let bytes = fs::read(&frame_path).expect("numbered frame should exist");
+            assert!(!bytes.is_empty());
+            written_bytes.push(bytes);
+            fs::remove_file(&frame_path).ok();
+        }
+        // Every slice has genuinely distinct pixel content (varying RescaleIntercept fixture).
+        for a in 0..written_bytes.len() {
+            for b in (a + 1)..written_bytes.len() {
+                assert_ne!(written_bytes[a], written_bytes[b], "frames {a} and {b} should differ");
+            }
+        }
+        assert!(!output_path.exists(), "the base (non-numbered) path should not be written for a multi-slice stack");
+
+        for path in &paths {
+            fs::remove_file(path).ok();
+        }
+    }
+
+    #[test]
+    fn run_mpr_writes_a_single_valid_nifti_volume_for_a_depth_range() {
+        let paths = write_synthetic_ct_series_for_cli(6, 1.0);
+        let output_path = temp_output_path("mpr-volume").with_extension("nii");
+
+        let mut cli = base_cli();
+        cli.mpr = Some("axial".to_string());
+        cli.mpr_depth = Some("-2:2:1".to_string());
+        run_mpr(&cli, &paths, &output_path).unwrap();
+
+        let bytes = fs::read(&output_path).unwrap();
+        assert_eq!(&bytes[344..348], b"n+1\0");
+        let dim2 = i16::from_le_bytes(bytes[46..48].try_into().unwrap());
+        assert_eq!(dim2, 5, "5 depths (-2,-1,0,1,2 step 1) should become dim[3] = 5");
+
+        fs::remove_file(&output_path).ok();
+        for path in &paths {
+            fs::remove_file(path).ok();
+        }
+    }
+
+    #[test]
+    fn run_mpr_writes_a_valid_nrrd_volume() {
+        let paths = write_synthetic_ct_series_for_cli(6, 1.0);
+        let output_path = temp_output_path("mpr-volume").with_extension("nrrd");
+
+        let mut cli = base_cli();
+        cli.mpr = Some("coronal".to_string());
+        cli.mpr_depth = Some("all:5".to_string());
+        run_mpr(&cli, &paths, &output_path).unwrap();
+
+        let bytes = fs::read(&output_path).unwrap();
+        let header_end = bytes.windows(2).position(|w| w == b"\n\n").unwrap() + 2;
+        let header_text = std::str::from_utf8(&bytes[..header_end]).unwrap();
+        assert!(header_text.starts_with("NRRD0004\n"));
+        assert!(header_text.contains("space: left-posterior-superior\n"));
+
+        fs::remove_file(&output_path).ok();
+        for path in &paths {
+            fs::remove_file(path).ok();
+        }
+    }
+
+    #[test]
+    fn run_mpr_writes_a_single_spatially_valid_dicom_file_for_a_single_depth() {
+        let paths = write_synthetic_ct_series_for_cli(6, 1.0);
+        let output_path = temp_output_path("mpr-single-dicom").with_extension("dcm");
+
+        let mut cli = base_cli();
+        cli.mpr = Some("axial".to_string());
+        run_mpr(&cli, &paths, &output_path).unwrap();
+
+        let object = read_dicom_file(&output_path).unwrap();
+        // Multi-frame Grayscale Word Secondary Capture Image Storage - see secondary_capture.rs.
+        assert_eq!(object.meta().media_storage_sop_class_uid(), "1.2.840.10008.5.1.4.1.1.7.3");
+        assert_eq!(object.element(tags::ROWS).unwrap().uint16().unwrap(), 512);
+
+        fs::remove_file(&output_path).ok();
+        for path in &paths {
+            fs::remove_file(path).ok();
+        }
+    }
+
+    #[test]
+    fn run_mpr_dicom_series_output_shares_one_series_instance_uid_across_numbered_files() {
+        let paths = write_synthetic_ct_series_for_cli(6, 1.0);
+        let output_path = temp_output_path("mpr-dicom-series").with_extension("dcm");
+
+        let mut cli = base_cli();
+        cli.mpr = Some("axial".to_string());
+        cli.mpr_depth = Some("-1:1:1".to_string());
+        run_mpr(&cli, &paths, &output_path).unwrap();
+
+        let mut series_uids = Vec::new();
+        let mut instance_numbers = Vec::new();
+        for index in 1..=3 {
+            let frame_path = frame_output_path(&output_path, index).unwrap();
+            let object = read_dicom_file(&frame_path).unwrap();
+            series_uids.push(object.element(tags::SERIES_INSTANCE_UID).unwrap().to_str().unwrap().into_owned());
+            instance_numbers.push(object.element(tags::INSTANCE_NUMBER).unwrap().to_str().unwrap().into_owned());
+            fs::remove_file(&frame_path).ok();
+        }
+        assert_eq!(series_uids[0], series_uids[1]);
+        assert_eq!(series_uids[1], series_uids[2]);
+        assert_eq!(instance_numbers, vec!["1", "2", "3"]);
+
+        for path in &paths {
+            fs::remove_file(path).ok();
+        }
+    }
+
+    #[test]
+    fn run_mpr_rejects_output_type_combined_with_a_volume_or_dicom_series_extension() {
+        let paths = write_synthetic_ct_series_for_cli(4, 1.0);
+
+        let mut nifti_cli = base_cli();
+        nifti_cli.mpr = Some("axial".to_string());
+        nifti_cli.output_type = Some(OutputType::Png);
+        let nifti_output = temp_output_path("mpr-conflict").with_extension("nii");
+        assert!(run_mpr(&nifti_cli, &paths, &nifti_output).is_err());
+
+        for path in &paths {
+            fs::remove_file(path).ok();
+        }
+    }
+
+    #[test]
+    fn parses_multiple_positional_paths_directly_as_a_shell_glob_would_expand_them() {
+        // No --files/-I needed - a shell glob (series_dir/*.dcm) just expands into extra bare
+        // positional args, exactly like INPUT/OUTPUT already do for a single file.
+        let matches = Cli::command()
+            .try_get_matches_from([
+                "dcmnorm", "--mpr", "axial", "a.dcm", "b.dcm", "c.dcm", "out.png",
+            ])
+            .unwrap();
+        let cli = Cli::from_arg_matches(&matches).unwrap().finalize();
+
+        assert_eq!(cli.mpr.as_deref(), Some("axial"));
+        assert!(!cli.stdin_paths);
+        assert_eq!(
+            cli.paths,
+            vec![
+                PathBuf::from("a.dcm"),
+                PathBuf::from("b.dcm"),
+                PathBuf::from("c.dcm"),
+                PathBuf::from("out.png"),
+            ]
+        );
+    }
+
+    #[test]
+    fn finalize_derives_legacy_input_output_only_for_zero_one_or_two_paths() {
+        let zero = Cli { paths: vec![], ..base_cli() }.finalize();
+        assert_eq!(zero.input, None);
+        assert_eq!(zero.output, None);
+
+        let one = Cli { paths: vec![PathBuf::from("a.dcm")], ..base_cli() }.finalize();
+        assert_eq!(one.input, Some(PathBuf::from("a.dcm")));
+        assert_eq!(one.output, None);
+
+        let two = Cli { paths: vec![PathBuf::from("a.dcm"), PathBuf::from("b.json")], ..base_cli() }.finalize();
+        assert_eq!(two.input, Some(PathBuf::from("a.dcm")));
+        assert_eq!(two.output, Some(PathBuf::from("b.json")));
+
+        // 3+ paths is multi-input territory (batch or --mpr) - run() reads `paths` directly for
+        // that, not these derived fields, so finalize() deliberately leaves output unset here.
+        let three = Cli {
+            paths: vec![PathBuf::from("a.dcm"), PathBuf::from("b.dcm"), PathBuf::from("c.dcm")],
+            ..base_cli()
+        }
+        .finalize();
+        assert_eq!(three.input, Some(PathBuf::from("a.dcm")));
+        assert_eq!(three.output, None);
+    }
+
+    #[test]
+    fn stdin_paths_allows_at_most_one_extra_positional_for_mpr_output() {
+        // Parses fine with any number of positionals - run() is what actually rejects 2+ extra
+        // positionals alongside -I (covered by manual verification, since run() itself reads
+        // real stdin/argv and isn't unit-tested independently of the functions it dispatches to,
+        // matching this file's existing convention for run()).
+        let matches = Cli::command()
+            .try_get_matches_from(["dcmnorm", "-I", "--mpr", "axial", "out.png"])
+            .unwrap();
+        let cli = Cli::from_arg_matches(&matches).unwrap().finalize();
+        assert!(cli.stdin_paths);
+        assert_eq!(cli.mpr.as_deref(), Some("axial"));
+        assert_eq!(cli.paths, vec![PathBuf::from("out.png")]);
+    }
+
+    fn write_synthetic_ct_series_for_cli(count: usize, spacing_mm: f64) -> Vec<PathBuf> {
+        let base = read_dicom_file(fixture_path("ct.dcm")).unwrap();
+        (0..count)
+            .map(|index| {
+                let mut object = base.clone();
+                let z = 1115.0 + (index as f64) * spacing_mm;
+                object.put(DataElement::new(
+                    tags::IMAGE_POSITION_PATIENT,
+                    VR::DS,
+                    PrimitiveValue::from(format!("-151.493508\\-36.6564417\\{z}")),
+                ));
+                let path = temp_output_path(&format!("mpr-cli-slice-{index}")).with_extension("dcm");
+                write_dicom_file(&mut object, &path).unwrap();
+                path
+            })
+            .collect()
+    }
+
+    /// Like write_synthetic_ct_series_for_cli, but each slice also gets a distinct
+    /// RescaleIntercept (baked into that slice's own values during volume building - see
+    /// dicom_io::volume's own "bake modality LUT per-slice before storage" design) - unlike the
+    /// plain helper (which reuses the SAME pixel content for every "slice", differing only in
+    /// ImagePositionPatient), this makes different depths/slabs through the resulting volume
+    /// genuinely distinguishable in absolute value, not just position.
+    fn write_synthetic_ct_series_with_varying_intercept_for_cli(count: usize, spacing_mm: f64) -> Vec<PathBuf> {
+        let base = read_dicom_file(fixture_path("ct.dcm")).unwrap();
+        (0..count)
+            .map(|index| {
+                let mut object = base.clone();
+                let z = 1115.0 + (index as f64) * spacing_mm;
+                object.put(DataElement::new(
+                    tags::IMAGE_POSITION_PATIENT,
+                    VR::DS,
+                    PrimitiveValue::from(format!("-151.493508\\-36.6564417\\{z}")),
+                ));
+                let intercept = -1000.0 + (index as f64) * 500.0;
+                object.put(DataElement::new(
+                    tags::RESCALE_INTERCEPT,
+                    VR::DS,
+                    PrimitiveValue::from(format!("{intercept}")),
+                ));
+                let path = temp_output_path(&format!("mpr-cli-varying-slice-{index}")).with_extension("dcm");
+                write_dicom_file(&mut object, &path).unwrap();
+                path
+            })
+            .collect()
+    }
+
+    #[test]
+    fn run_mpr_rejects_an_empty_path_list() {
+        let mut cli = base_cli();
+        cli.mpr = Some("axial".to_string());
+        let output_path = temp_output_path("mpr-empty").with_extension("png");
+
+        let result = run_mpr(&cli, &[], &output_path);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn run_mpr_writes_a_reformatted_image_for_a_synthetic_series() {
+        let paths = write_synthetic_ct_series_for_cli(4, 1.0);
+        let output_path = temp_output_path("mpr-axial").with_extension("png");
+
+        let mut cli = base_cli();
+        cli.mpr = Some("axial".to_string());
+
+        run_mpr(&cli, &paths, &output_path).unwrap();
+
+        let metadata = fs::metadata(&output_path).unwrap();
+        assert!(metadata.len() > 0);
+
+        fs::remove_file(&output_path).ok();
+        for path in &paths {
+            fs::remove_file(path).ok();
+        }
+    }
+
+    #[test]
+    fn run_mpr_writes_a_reformatted_image_for_a_rotation_triplet() {
+        let paths = write_synthetic_ct_series_for_cli(4, 1.0);
+        let output_path = temp_output_path("mpr-oblique").with_extension("png");
+
+        let mut cli = base_cli();
+        cli.mpr = Some("15,30,0".to_string());
+
+        run_mpr(&cli, &paths, &output_path).unwrap();
+
+        let metadata = fs::metadata(&output_path).unwrap();
+        assert!(metadata.len() > 0);
+
+        fs::remove_file(&output_path).ok();
+        for path in &paths {
+            fs::remove_file(path).ok();
+        }
+    }
+
+    #[test]
+    fn run_mpr_rejects_unknown_mpr_view() {
+        let paths = write_synthetic_ct_series_for_cli(3, 1.0);
+        let mut cli = base_cli();
+        let output_path = temp_output_path("mpr-bad-view").with_extension("png");
+        cli.mpr = Some("frontal".to_string());
+
+        let result = run_mpr(&cli, &paths, &output_path);
+        assert!(result.is_err());
+
+        for path in &paths {
+            fs::remove_file(path).ok();
+        }
     }
 
     #[test]
@@ -2436,7 +3614,7 @@ mod tests {
                 "out.jpg",
             ])
             .unwrap();
-        let cli = Cli::from_arg_matches(&matches).unwrap();
+        let cli = Cli::from_arg_matches(&matches).unwrap().finalize();
 
         assert_eq!(cli.redact_box, vec!["-0,-0,20%,20%".to_string()]);
     }
@@ -2461,7 +3639,7 @@ mod tests {
                 "StudyDescription=Normalized",
             ])
             .unwrap();
-        let cli = Cli::from_arg_matches(&matches).unwrap();
+        let cli = Cli::from_arg_matches(&matches).unwrap().finalize();
 
         assert!(cli.stdin_paths);
         assert!(cli.overwrite);

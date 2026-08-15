@@ -10,6 +10,30 @@ export declare class DicomServerHandle {
   close(): void
 }
 
+export declare class DicomVolumeHandle {
+  /** Rows in the source slices (image height). */
+  get rows(): number
+  /** Columns in the source slices (image width). */
+  get cols(): number
+  /** Number of slices in the built volume. */
+  get numSlices(): number
+  /**
+   * The volume's own acquisition-native orientation, for seeding an "axial" reformat -
+   * `[rowDir(3), colDir(3)]`.
+   */
+  get nativeBasis(): Array<number>
+  /** The volume's own physical center, in patient/LPS mm - a reasonable default reformat origin. */
+  get center(): Array<number>
+  /** The volume's own smallest voxel dimension, in mm - a reasonable default output spacing. */
+  get minSpacingMm(): number
+  /**
+   * Resamples one plane through this volume and encodes it exactly like a normal 2D render
+   * (same `RenderedFrame` shape `renderFrame` returns), so callers can reuse their existing
+   * image-display code path unchanged.
+   */
+  reformat(options: ReformatPlaneOptions): Promise<unknown>
+}
+
 export declare class EchoScuHandle {
   /** The eventual Status code (0 = success), without requesting cancellation. */
   result(): Promise<number>
@@ -79,6 +103,16 @@ export declare class StoreScuHandle {
    */
   abort(): Promise<Array<StoreScuResult>>
 }
+
+/**
+ * Builds a 3D volume from a parallel stack of DICOM slice files (e.g. every image instance in
+ * one CT/MR/PT series) sharing consistent `ImageOrientationPatient`. Slices are spatially
+ * re-sorted internally by `ImagePositionPatient`, regardless of `filePaths`' own order. Returns a
+ * `DicomVolumeHandle` for repeated `reformat()` calls. Rejects (rather than silently
+ * mis-rendering) fewer than 2 files, mismatched Rows/Columns, or a non-parallel/gantry-tilt-
+ * inconsistent stack.
+ */
+export declare function buildVolume(filePaths: Array<string>): Promise<unknown>
 
 /**
  * Reports whether a file looks like valid DICOM. Mirrors `dcmnorm
@@ -212,6 +246,39 @@ export interface ReadJsonOptions {
 }
 
 export declare function readTags(filePath: string, tags: Array<string>): Promise<unknown>
+
+export interface ReformatPlaneOptions {
+  /** World-space (mm, patient/LPS) point at the CENTER of the reformatted output image. */
+  origin: Array<number>
+  /** Unit vector: direction of travel across the output image as the column index increases. */
+  rowDir: Array<number>
+  /** Unit vector: direction of travel down the output image as the row index increases. */
+  colDir: Array<number>
+  outputWidth: number
+  outputHeight: number
+  /** Physical size of one output pixel, in mm - the same in both output axes. */
+  spacingMm: number
+  windowCenter?: number
+  windowWidth?: number
+  /** 'jpeg' (default) or 'png'. */
+  format?: string
+  jpegQuality?: number
+  /**
+   * 'trilinear' (default) or 'nearest' - nearest is faster and intended for a live-drag
+   * preview frame, trilinear for the settled/idle frame.
+   */
+  interpolation?: string
+  /**
+   * Total slab thickness in mm, centered on `origin` along the plane's own normal. Omitted or
+   * 0 reformats an infinitely-thin plane (the original single-voxel-thick MPR behavior).
+   */
+  slabThicknessMm?: number
+  /**
+   * How the slab's samples combine when `slabThicknessMm > 0`: 'mip' (default, maximum
+   * intensity projection), 'minip' (minimum intensity projection), or 'average'.
+   */
+  slabProjection?: string
+}
 
 export interface RenderedFrame {
   mimeType: string

@@ -59,15 +59,65 @@ where
                 ));
             }
 
-            if let Some(location) = locate_element_value(source, tag, expected_bytes_for_lookup)? {
-                let uri = match options.bulk_data_uri_base {
-                    Some(base) => format!(
-                        "{}?offset={}&length={}",
-                        base, location.offset, location.length
-                    ),
-                    None => format!("?offset={}&length={}", location.offset, location.length),
-                };
-                return Ok(BulkRepresentation::Uri(uri));
+            // locate_element_value re-scans the raw file by hand (tag by tag, from the start of
+            // the dataset) to find this element's byte range - it's a best-effort accelerator
+            // that lets the client fetch large values on demand instead of inlining them here,
+            // not something JSON generation should ever hard-fail on. Real-world files can
+            // contain constructs this hand-rolled scanner doesn't model correctly (e.g. a
+            // Siemens CSA header stored as a private sequence of VR=UN elements with undefined
+            // length, which per DICOM PS3.5 6.2.2 requires switching to Implicit VR parsing for
+            // its nested content - a rule this scanner doesn't implement) and desync partway
+            // through the dataset - if that happens, fall back to inlining THIS element (we
+            // already have its correctly decoded bytes via the proper parser, in raw_bytes)
+            // rather than failing the entire study's metadata - a working (if occasionally
+            // larger) response beats a broken one.
+            //
+            // Once the scan has failed once for this source, bulk_scan_failed (set by the
+            // caller, shared across every element of the same file/write pass) short-circuits
+            // every later attempt: every bulk element restarts its scan from the same beginning
+            // position, so if one already desynced, all the rest are equally doomed - retrying
+            // each independently turned one failure into every bulk element paying its own full
+            // failed scan (a multi-second stall for files with several such elements, since
+            // there's no early delimiter to find and the scan runs to EOF each time).
+            let already_broken = options.bulk_scan_failed.is_some_and(|cell| cell.get());
+            if !already_broken {
+                // bulk_scan_cursor: elements are visited by the JSON writer in ascending tag
+                // order, which for a conformant DICOM dataset is also ascending file-offset
+                // order (top-level elements and, within a sequence, its items are both required
+                // to appear in that order). So each successful lookup can hand the NEXT one a
+                // hint to resume scanning from, instead of restarting at the dataset's start
+                // every time. This matters most for a tag that repeats across many sibling
+                // sequence items (e.g. a private per-item block) - without the hint, finding the
+                // Nth occurrence means walking past all N-1 earlier non-matching ones from
+                // scratch, for every one of the N elements: O(N^2) total instead of O(N).
+                // Purely a speed hint, not a correctness assumption: if scanning from the hint
+                // doesn't find the tag, locate_element_value retries once from the true start
+                // before giving up, so an out-of-order visit can never cause a false miss.
+                let resume_hint = options.bulk_scan_cursor.map(|cell| cell.get()).unwrap_or(0);
+                match locate_element_value(source, tag, expected_bytes_for_lookup, resume_hint) {
+                    Ok(Some(location)) => {
+                        if let Some(cell) = options.bulk_scan_cursor {
+                            let end = location.offset + location.length;
+                            if end > cell.get() {
+                                cell.set(end);
+                            }
+                        }
+                        let uri = match options.bulk_data_uri_base {
+                            Some(base) => format!(
+                                "{}?offset={}&length={}",
+                                base, location.offset, location.length
+                            ),
+                            None => format!("?offset={}&length={}", location.offset, location.length),
+                        };
+                        return Ok(BulkRepresentation::Uri(uri));
+                    }
+                    Ok(None) => {}
+                    Err(_) => {
+                        if let Some(cell) = options.bulk_scan_failed {
+                            cell.set(true);
+                        }
+                    }
+                }
             }
 
             return Ok(BulkRepresentation::InlineBinary(
@@ -91,7 +141,7 @@ where
     P: AsRef<[u8]>,
 {
     if let Some(source) = bulk_data_source {
-        if let Some(location) = locate_element_value(source, tag, None)? {
+        if let Some(location) = locate_element_value(source, tag, None, 0)? {
             return Ok(source[location.offset..location.offset + location.length].to_vec());
         }
     }
@@ -335,10 +385,42 @@ fn parse_bulk_data_uri(uri: &str) -> Result<(usize, usize), DicomJsonError> {
     }
 }
 
+// Upper bound on how many elements/items a single scan attempt (locate_tag_in_dataset,
+// skip_undefined_length_value, and locate_element_value_by_matching_bytes each get their own
+// fresh budget) will walk before giving up. A well-formed DICOM dataset - even a large one with
+// thousands of per-frame functional-group items - stays well under this; it exists purely to
+// bound the worst case when the scan has desynced (e.g. into high-entropy compressed pixel data,
+// where nearly any 2 bytes can look like a plausible tag) and would otherwise treat a multi-MB
+// remaining byte range as an unbounded number of tiny fake elements before finally hitting EOF -
+// observed taking upwards of 15-20 SECONDS for a single ~500KB file before this cap existed.
+const MAX_SCAN_STEPS: usize = 20_000;
+
+fn take_scan_step(steps: &mut usize) -> Result<(), DicomJsonError> {
+    if *steps == 0 {
+        return Err(DicomJsonError::InvalidBulkDataUri(
+            "scan exceeded maximum step budget".to_owned(),
+        ));
+    }
+    *steps -= 1;
+    Ok(())
+}
+
+// The byte-content fallback search (locate_element_value_by_matching_bytes) has a fundamentally
+// different cost shape than the tag-walking scan above: each outer-loop iteration calls
+// find_subslice, whose own cost is proportional to how much of the remaining buffer it has to
+// examine (up to the whole thing), not to a fixed per-iteration step. So it gets its own, much
+// smaller attempt budget, plus a cap on the needle size: an element big enough to matter here
+// should already have been found by the direct tag scan, and matching a large needle by content
+// against a large haystack (e.g. long zero-padding runs, common in private/CSA blobs) is exactly
+// the shape that made a single scan attempt take upwards of 10+ seconds before this cap existed.
+const MAX_MATCH_NEEDLE_LEN: usize = 64 * 1024;
+const MAX_MATCH_SCAN_ATTEMPTS: usize = 2_000;
+
 fn locate_element_value(
     source: &[u8],
     target: Tag,
     expected_bytes: Option<&[u8]>,
+    resume_hint: usize,
 ) -> Result<Option<ElementLocation>, DicomJsonError> {
     let has_part10_preamble = source.len() >= 132 && &source[128..132] == b"DICM";
 
@@ -350,7 +432,9 @@ fn locate_element_value(
     };
 
     if has_part10_preamble {
+        let mut meta_steps = MAX_SCAN_STEPS;
         while position + 8 <= source.len() {
+            take_scan_step(&mut meta_steps)?;
             let header = parse_element_header(source, position, true, true)?;
             if header.tag.group() != 0x0002 {
                 break;
@@ -382,13 +466,36 @@ fn locate_element_value(
     }
 
     let syntax = transfer_syntax_from_uid(transfer_syntax_uid.as_str())?;
+    let dataset_start = position;
+    let scan_from = resume_hint.max(dataset_start);
+
+    if scan_from > dataset_start {
+        let mut steps = MAX_SCAN_STEPS;
+        if let Some(location) = locate_tag_in_dataset(
+            source,
+            scan_from,
+            target,
+            syntax.explicit_vr,
+            syntax.little_endian,
+            expected_bytes,
+            &mut steps,
+        )? {
+            return Ok(Some(location));
+        }
+        // Not found from the hint onward - retry once from the true dataset start, in case this
+        // particular tag actually precedes the hint (an out-of-order visit relative to file
+        // layout). This keeps the hint a pure speed optimization, never a correctness risk.
+    }
+
+    let mut steps = MAX_SCAN_STEPS;
     if let Some(location) = locate_tag_in_dataset(
         source,
-        position,
+        dataset_start,
         target,
         syntax.explicit_vr,
         syntax.little_endian,
         expected_bytes,
+        &mut steps,
     )? {
         return Ok(Some(location));
     }
@@ -413,15 +520,20 @@ fn locate_tag_in_dataset(
     explicit_vr: bool,
     little_endian: bool,
     expected_bytes: Option<&[u8]>,
+    steps: &mut usize,
 ) -> Result<Option<ElementLocation>, DicomJsonError> {
     while position + 8 <= source.len() {
+        take_scan_step(steps)?;
         let header = parse_element_header(source, position, explicit_vr, little_endian)?;
         let value_offset = position + header.header_length;
-        let length = if let Some(length) = header.length {
-            length
+        // Undefined-length values are scanned ONCE (not once for the length, then again for the
+        // next position) - both are derived from the same skip_undefined_length_value call.
+        let (length, next_position) = if let Some(length) = header.length {
+            (length, value_offset + length)
         } else {
-            skip_undefined_length_value(source, value_offset, explicit_vr, little_endian)?
-                .saturating_sub(value_offset)
+            let end_position =
+                skip_undefined_length_value(source, value_offset, explicit_vr, little_endian, steps)?;
+            (end_position.saturating_sub(value_offset), end_position + 8)
         };
 
         if header.tag == target && value_matches(source, value_offset, length, expected_bytes) {
@@ -431,11 +543,7 @@ fn locate_tag_in_dataset(
             }));
         }
 
-        position = if header.length.is_some() {
-            value_offset + length
-        } else {
-            skip_undefined_length_value(source, value_offset, explicit_vr, little_endian)? + 8
-        };
+        position = next_position;
     }
 
     Ok(None)
@@ -448,12 +556,15 @@ fn locate_element_value_by_matching_bytes(
     explicit_vr: bool,
     little_endian: bool,
 ) -> Result<Option<ElementLocation>, DicomJsonError> {
-    if expected.is_empty() {
+    if expected.is_empty() || expected.len() > MAX_MATCH_NEEDLE_LEN {
         return Ok(None);
     }
 
     let mut search_start = 0;
+    let mut attempts = MAX_MATCH_SCAN_ATTEMPTS;
+    let mut steps = MAX_SCAN_STEPS;
     while search_start + expected.len() <= source.len() {
+        take_scan_step(&mut attempts)?;
         let Some(relative_match) = find_subslice(&source[search_start..], expected) else {
             break;
         };
@@ -466,6 +577,7 @@ fn locate_element_value_by_matching_bytes(
             expected.len(),
             explicit_vr,
             little_endian,
+            &mut steps,
         )? {
             return Ok(Some(location));
         }
@@ -483,6 +595,7 @@ fn try_locate_header_for_value_offset(
     expected_length: usize,
     explicit_vr: bool,
     little_endian: bool,
+    steps: &mut usize,
 ) -> Result<Option<ElementLocation>, DicomJsonError> {
     let header_lengths: &[usize] = if explicit_vr { &[8, 12] } else { &[8] };
 
@@ -508,7 +621,7 @@ fn try_locate_header_for_value_offset(
         let length = if let Some(length) = header.length {
             length
         } else {
-            skip_undefined_length_value(source, value_offset, explicit_vr, little_endian)?
+            skip_undefined_length_value(source, value_offset, explicit_vr, little_endian, steps)?
                 .saturating_sub(value_offset)
         };
 
@@ -555,8 +668,10 @@ fn skip_undefined_length_value(
     mut position: usize,
     explicit_vr: bool,
     little_endian: bool,
+    steps: &mut usize,
 ) -> Result<usize, DicomJsonError> {
     while position + 8 <= source.len() {
+        take_scan_step(steps)?;
         let tag = read_tag(source, position, little_endian)?;
         if tag == SEQUENCE_DELIMITATION_TAG || tag == ITEM_DELIMITATION_TAG {
             return Ok(position);
@@ -566,7 +681,7 @@ fn skip_undefined_length_value(
             let item_length = read_u32(source, position + 4, little_endian)? as usize;
             position += 8;
             position = if item_length == u32::MAX as usize {
-                skip_undefined_length_value(source, position, explicit_vr, little_endian)? + 8
+                skip_undefined_length_value(source, position, explicit_vr, little_endian, steps)? + 8
             } else {
                 position + item_length
             };
@@ -578,7 +693,7 @@ fn skip_undefined_length_value(
         position = if let Some(length) = header.length {
             value_offset + length
         } else {
-            skip_undefined_length_value(source, value_offset, explicit_vr, little_endian)? + 8
+            skip_undefined_length_value(source, value_offset, explicit_vr, little_endian, steps)? + 8
         };
     }
 
