@@ -15,6 +15,7 @@ use std::path::Path;
 use dicom_core::Tag;
 use dicom_dictionary_std::tags;
 use dicom_object::DefaultDicomObject;
+use rayon::prelude::*;
 
 use super::io::read_dicom_file;
 use super::render::{
@@ -337,7 +338,7 @@ struct SourceSlice {
 /// Rejects (rather than silently mis-rendering) a series whose slices don't share a consistent
 /// `ImageOrientationPatient`/dimensions - true oblique/gantry-tilt-inconsistent stacks aren't a
 /// resamplable orthogonal volume without more advanced reconstruction, which is out of scope.
-pub fn build_volume<P: AsRef<Path>>(file_paths: &[P]) -> Result<Volume, VolumeError> {
+pub fn build_volume<P: AsRef<Path> + Sync>(file_paths: &[P]) -> Result<Volume, VolumeError> {
     if file_paths.is_empty() {
         return Err(VolumeError::Empty);
     }
@@ -348,28 +349,34 @@ pub fn build_volume<P: AsRef<Path>>(file_paths: &[P]) -> Result<Volume, VolumeEr
         });
     }
 
-    let mut slices = Vec::with_capacity(file_paths.len());
-    for path in file_paths {
-        let object = read_dicom_file(path.as_ref())?;
-        let (row_vector, col_vector) = read_orientation(&object)?;
-        let position = read_position(&object)?;
-        let (row_spacing_mm, col_spacing_mm) = read_pixel_spacing(&object)?;
-        let (metadata, values) = decode_frame_grayscale_values(&object, 0)?;
-        if !matches!(metadata.photometric_interpretation.as_str(), "MONOCHROME1" | "MONOCHROME2") {
-            return Err(VolumeError::UnsupportedPhotometricInterpretation(
-                metadata.photometric_interpretation.clone(),
-            ));
-        }
-        slices.push(SourceSlice {
-            row_vector,
-            col_vector,
-            position,
-            row_spacing_mm,
-            col_spacing_mm,
-            metadata,
-            values,
-        });
-    }
+    // Reading + decoding each slice is the expensive part of building a volume (DICOM parse plus
+    // transfer-syntax decompression per file), and slices are independent of each other until the
+    // sort/consistency checks below, so read them concurrently rather than one at a time.
+    let results: Vec<Result<SourceSlice, VolumeError>> = file_paths
+        .par_iter()
+        .map(|path| {
+            let object = read_dicom_file(path.as_ref())?;
+            let (row_vector, col_vector) = read_orientation(&object)?;
+            let position = read_position(&object)?;
+            let (row_spacing_mm, col_spacing_mm) = read_pixel_spacing(&object)?;
+            let (metadata, values) = decode_frame_grayscale_values(&object, 0)?;
+            if !matches!(metadata.photometric_interpretation.as_str(), "MONOCHROME1" | "MONOCHROME2") {
+                return Err(VolumeError::UnsupportedPhotometricInterpretation(
+                    metadata.photometric_interpretation.clone(),
+                ));
+            }
+            Ok(SourceSlice {
+                row_vector,
+                col_vector,
+                position,
+                row_spacing_mm,
+                col_spacing_mm,
+                metadata,
+                values,
+            })
+        })
+        .collect();
+    let slices: Vec<SourceSlice> = results.into_iter().collect::<Result<Vec<_>, _>>()?;
 
     let rows = slices[0].metadata.rows;
     let cols = slices[0].metadata.cols;
