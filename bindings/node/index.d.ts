@@ -32,6 +32,15 @@ export declare class DicomVolumeHandle {
    * image-display code path unchanged.
    */
   reformat(options: ReformatPlaneOptions): Promise<unknown>
+  /**
+   * Packs this volume's own NATIVE voxel lattice - not a resampled oblique plane, see
+   * `exportTexture`'s own doc - as a lossless GPU-upload-ready texture payload (16-bit
+   * samples, row-major, optionally gzip-compressed). Unlike `reformat()`, this is a one-shot
+   * call per volume, not one per interaction: the render-server ships the returned `data`
+   * once and the client does all further rotate/scroll/window-level manipulation itself in a
+   * WebGL2 shader.
+   */
+  exportTexture(options?: ExportVolumeTextureOptions | undefined | null): Promise<unknown>
 }
 
 export declare class EchoScuHandle {
@@ -147,6 +156,44 @@ export interface EditTagsOptions {
   set?: Record<string, string>
   remove?: Array<string>
   removePrivateTags?: boolean
+}
+
+/**
+ * Packs a single frame's raw (unwindowed) physical values as a depth-1 "1-slice volume" texture
+ * - lets a large diagnostic 2D image (e.g. DX/CR/mammography) reuse the exact same client GPU
+ * texture/shader pipeline as an MPR volume, instead of the lossy zoomed-JPEG path `renderFrame`
+ * produces. Mirrors `dcmnorm --render-frame ... --output-type texture file.dcm out.sbtex`.
+ */
+export declare function exportFrameTexture(filePath: string, options?: ExportFrameTextureOptions | undefined | null): Promise<unknown>
+
+export interface ExportFrameTextureOptions {
+  /** Zero-based frame index for a multi-frame file. Defaults to 0. */
+  frameIndex?: number
+  targetMaxDim?: number
+  /** 'gzip' (default) or 'none'. */
+  compression?: string
+  windowCenter?: number
+  windowWidth?: number
+}
+
+export interface ExportVolumeTextureOptions {
+  /**
+   * Caps the longest of width/height/depth at this many samples, proportionally downsampling
+   * (trilinear) if the native volume exceeds it. Omitted means no cap (full native
+   * resolution) - the caller (render-server) is expected to derive this from the client's
+   * reported `MAX_3D_TEXTURE_SIZE`, or from a small fixed value for a fast "progressive"
+   * first pass ahead of the full-resolution texture.
+   */
+  targetMaxDim?: number
+  /** 'gzip' (default) or 'none'. */
+  compression?: string
+  /**
+   * Optional default window/level to carry through to `TextureExportResult.defaultWindowCenter`
+   * /`defaultWindowWidth` - purely informational for the client's initial render, since the
+   * exported samples themselves are never windowed.
+   */
+  windowCenter?: number
+  windowWidth?: number
 }
 
 /**
@@ -412,6 +459,53 @@ export interface StoreScuOptions {
 export interface StoreScuResult {
   sopInstanceUid: string
   status: number
+}
+
+export interface TextureExportResult {
+  /** 'volume' or 'image2d'. */
+  contentKind: string
+  /** 'int16' or 'uint16'. */
+  sampleFormat: string
+  /** 'none' or 'gzip' - matches how `data` below is actually encoded. */
+  compression: string
+  /**
+   * `false` means `data` is a bounded-error quantization (see `rescaleSlope`/
+   * `rescaleIntercept`), not an exact round-trip of the source samples.
+   */
+  lossless: boolean
+  width: number
+  height: number
+  /** Always 1 for `contentKind: 'image2d'`. */
+  depth: number
+  /** `texel * rescaleSlope + rescaleIntercept` recovers the physical value (e.g. HU). */
+  rescaleSlope: number
+  rescaleIntercept: number
+  rowSpacingMm: number
+  colSpacingMm: number
+  /** `0` for `contentKind: 'image2d'`. */
+  sliceSpacingMm: number
+  /** `[x, y, z]`, LPS mm, center of voxel (0,0,0). */
+  origin: Array<number>
+  rowDir: Array<number>
+  colDir: Array<number>
+  normalDir: Array<number>
+  defaultWindowCenter?: number
+  defaultWindowWidth?: number
+  nativeWidth: number
+  nativeHeight: number
+  nativeDepth: number
+  downsampled: boolean
+  /**
+   * Uncompressed byte length of `data`'s content - an exact integer, safely representable as
+   * `f64` at any real texture size (well under 2^53).
+   */
+  payloadBytesRaw: number
+  /**
+   * `data.length` - included on the result too (not just derivable from `data` client-side)
+   * so the render-server can log/cap transfer size without touching the buffer itself.
+   */
+  payloadBytesStored: number
+  data: Buffer
 }
 
 /**

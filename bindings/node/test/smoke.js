@@ -2,6 +2,7 @@ const assert = require("assert");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
+const zlib = require("zlib");
 const { execFileSync } = require("child_process");
 const binding = require("../index.js");
 
@@ -9,6 +10,7 @@ const fixture = path.join(__dirname, "..", "..", "..", "test", "files", "us.dcm"
 const overlayFixture = path.join(__dirname, "..", "..", "..", "test", "files", "overlay.dcm");
 const overlayMultiFixture = path.join(__dirname, "..", "..", "..", "test", "files", "overlay_multi.dcm");
 const overlayEmbeddedFixture = path.join(__dirname, "..", "..", "..", "test", "files", "overlay_embedded.dcm");
+const ctFixture = path.join(__dirname, "..", "..", "..", "test", "files", "ct.dcm");
 
 // The addon must run on the oldest glibc among its consumers' runtime images - node:22-slim
 // (edge services), Debian bookworm, GLIBC 2.36 - even though render-server's node:24-trixie-slim
@@ -144,6 +146,82 @@ const tagsJson = await binding.readTags(fixture, ["StudyInstanceUID", "SOPInstan
   const embeddedOverlay = await binding.renderFrame(overlayEmbeddedFixture, { format: "png" });
   assert.strictEqual(embeddedOverlay.overlays.length, 1, "overlay_embedded.dcm should report one overlay plane");
   assert.strictEqual(embeddedOverlay.selectedOverlayIndex, 0);
+
+  // --- MPR volume + GPU texture export (buildVolume / DicomVolumeHandle.exportTexture /
+  // exportFrameTexture) --------------------------------------------------------------------
+  //
+  // Every synthetic "slice" below reuses ct.dcm's own pixel content unchanged - only
+  // ImagePositionPatient differs (same recipe the dcmnorm-cli Rust tests use) - so the built
+  // volume's slices must be byte-identical to each other, and to a standalone exportFrameTexture
+  // of the same base file, once decompressed. That gives a real, meaningful correctness check
+  // without needing to reimplement DICOM pixel decoding here in JS.
+  const sliceCount = 4;
+  const slicePaths = [];
+  for (let index = 0; index < sliceCount; index += 1) {
+    const slicePath = path.join(tmpDir, `ct-slice-${index}.dcm`);
+    await binding.editTags(ctFixture, {
+      outputPath: slicePath,
+      set: { ImagePositionPatient: `-151.493508\\-36.6564417\\${1115.0 + index}` },
+    });
+    slicePaths.push(slicePath);
+  }
+
+  const volumeHandle = await binding.buildVolume(slicePaths);
+  assert.strictEqual(volumeHandle.rows, 512, "ct.dcm fixture should be 512 rows");
+  assert.strictEqual(volumeHandle.cols, 512, "ct.dcm fixture should be 512 cols");
+  assert.strictEqual(volumeHandle.numSlices, sliceCount);
+
+  const volumeTexture = await volumeHandle.exportTexture({ compression: "gzip", windowCenter: 40, windowWidth: 400 });
+  assert.strictEqual(volumeTexture.contentKind, "volume");
+  assert.strictEqual(volumeTexture.sampleFormat, "int16");
+  assert.strictEqual(volumeTexture.compression, "gzip");
+  assert.strictEqual(volumeTexture.lossless, true);
+  assert.strictEqual(volumeTexture.width, 512);
+  assert.strictEqual(volumeTexture.height, 512);
+  assert.strictEqual(volumeTexture.depth, sliceCount);
+  assert.deepStrictEqual([volumeTexture.nativeWidth, volumeTexture.nativeHeight, volumeTexture.nativeDepth], [512, 512, sliceCount]);
+  assert.strictEqual(volumeTexture.downsampled, false);
+  assert.strictEqual(volumeTexture.defaultWindowCenter, 40);
+  assert.strictEqual(volumeTexture.defaultWindowWidth, 400);
+  assert.strictEqual(volumeTexture.payloadBytesRaw, 512 * 512 * sliceCount * 2);
+  assert.strictEqual(volumeTexture.payloadBytesStored, volumeTexture.data.length);
+
+  const decompressedVolume = zlib.gunzipSync(volumeTexture.data);
+  assert.strictEqual(decompressedVolume.length, volumeTexture.payloadBytesRaw);
+
+  const bytesPerSlice = 512 * 512 * 2;
+  const firstSlice = decompressedVolume.subarray(0, bytesPerSlice);
+  for (let index = 1; index < sliceCount; index += 1) {
+    const slice = decompressedVolume.subarray(index * bytesPerSlice, (index + 1) * bytesPerSlice);
+    assert.ok(firstSlice.equals(slice), `slice ${index} should be byte-identical to slice 0 - every synthetic slice shares the same source pixel content`);
+  }
+
+  const frameTexture = await binding.exportFrameTexture(ctFixture, { compression: "none" });
+  assert.strictEqual(frameTexture.contentKind, "image2d");
+  assert.strictEqual(frameTexture.depth, 1);
+  assert.strictEqual(frameTexture.width, 512);
+  assert.strictEqual(frameTexture.height, 512);
+  assert.ok(
+    frameTexture.data.equals(firstSlice),
+    "exportFrameTexture on the unedited base file should byte-match the volume texture's first slice - both decode the same source pixel data",
+  );
+
+  const downsampledVolumeTexture = await volumeHandle.exportTexture({ targetMaxDim: 2, compression: "none" });
+  assert.strictEqual(downsampledVolumeTexture.downsampled, true);
+  assert.ok(downsampledVolumeTexture.width <= 2 && downsampledVolumeTexture.height <= 2 && downsampledVolumeTexture.depth <= 2);
+  assert.deepStrictEqual(
+    [downsampledVolumeTexture.nativeWidth, downsampledVolumeTexture.nativeHeight, downsampledVolumeTexture.nativeDepth],
+    [512, 512, sliceCount],
+  );
+
+  let compressionRejected = false;
+  try {
+    await volumeHandle.exportTexture({ compression: "bogus" });
+  } catch (error) {
+    compressionRejected = true;
+    assert.ok(error.message.includes("compression"), `unexpected error message: ${error.message}`);
+  }
+  assert.ok(compressionRejected, "an invalid compression value should reject");
 
   fs.rmSync(tmpDir, { recursive: true, force: true });
   console.log("smoke test passed");

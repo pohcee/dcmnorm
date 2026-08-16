@@ -12,6 +12,7 @@ use dcmnorm::dicom_io::{
     find_scu as dcm_find_scu, move_scu as dcm_move_scu, parse_attribute_override,
     parse_filter_requests, parse_tag_key, probe_dicom_file_for_sop_class_uid, read_dicom_bytes,
     read_dicom_file, read_dicom_json_with_options, read_dicom_object_for_filter,
+    pack_dicom_frame_texture as dcm_pack_dicom_frame_texture, pack_volume_texture as dcm_pack_volume_texture,
     reformat_plane as dcm_reformat_plane, remove_attribute, remove_private_tags_inplace,
     render_dicom_frame as dcm_render_dicom_frame, set_attribute, start_scp as dcm_start_scp,
     store_scu as dcm_store_scu, transcode_dicom_file, write_dicom_file,
@@ -23,7 +24,8 @@ use dcmnorm::dicom_io::{
     PlaneParams as DcmPlaneParams, RenderOutputFormat as DcmRenderOutputFormat,
     RenderPipelineOptions as DcmRenderPipelineOptions, ScpHandlers as DcmScpHandlers,
     ScpOptions as DcmScpOptions, SlabProjection as DcmSlabProjection,
-    StoreScuOptions as DcmStoreScuOptions, Volume as DcmVolume,
+    StoreScuOptions as DcmStoreScuOptions, TextureCompression as DcmTextureCompression,
+    TextureMeta as DcmTextureMeta, Volume as DcmVolume,
 };
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 
@@ -1503,6 +1505,229 @@ impl DicomVolumeHandle {
     pub fn reformat(&self, options: ReformatPlaneOptions) -> AsyncTask<ReformatPlaneTask> {
         AsyncTask::new(ReformatPlaneTask { volume: self.volume.clone(), options })
     }
+
+    /// Packs this volume's own NATIVE voxel lattice - not a resampled oblique plane, see
+    /// `exportTexture`'s own doc - as a lossless GPU-upload-ready texture payload (16-bit
+    /// samples, row-major, optionally gzip-compressed). Unlike `reformat()`, this is a one-shot
+    /// call per volume, not one per interaction: the render-server ships the returned `data`
+    /// once and the client does all further rotate/scroll/window-level manipulation itself in a
+    /// WebGL2 shader.
+    #[napi]
+    pub fn export_texture(&self, options: Option<ExportVolumeTextureOptions>) -> AsyncTask<ExportVolumeTextureTask> {
+        AsyncTask::new(ExportVolumeTextureTask {
+            volume: self.volume.clone(),
+            options: options.unwrap_or_default(),
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Texture export: DicomVolumeHandle.exportTexture / exportFrameTexture
+// ---------------------------------------------------------------------------------------------
+//
+// See dcmnorm::dicom_io::texture_export's own module doc for the format contract (metadata +
+// raw row-major int16/uint16 payload, optionally gzip-compressed). `exportTexture` (volume) and
+// `exportFrameTexture` (a single decoded 2D frame, packed as a depth-1 "1-slice volume" so the
+// client can reuse the exact same GPU texture/shader code for both) share the same options shape
+// and result-mapping helper below.
+
+#[napi(object)]
+#[derive(Default)]
+pub struct ExportVolumeTextureOptions {
+    /// Caps the longest of width/height/depth at this many samples, proportionally downsampling
+    /// (trilinear) if the native volume exceeds it. Omitted means no cap (full native
+    /// resolution) - the caller (render-server) is expected to derive this from the client's
+    /// reported `MAX_3D_TEXTURE_SIZE`, or from a small fixed value for a fast "progressive"
+    /// first pass ahead of the full-resolution texture.
+    pub target_max_dim: Option<u32>,
+    /// 'gzip' (default) or 'none'.
+    pub compression: Option<String>,
+    /// Optional default window/level to carry through to `TextureExportResult.defaultWindowCenter`
+    /// /`defaultWindowWidth` - purely informational for the client's initial render, since the
+    /// exported samples themselves are never windowed.
+    pub window_center: Option<f64>,
+    pub window_width: Option<f64>,
+}
+
+#[napi(object)]
+#[derive(Default)]
+pub struct ExportFrameTextureOptions {
+    /// Zero-based frame index for a multi-frame file. Defaults to 0.
+    pub frame_index: Option<u32>,
+    pub target_max_dim: Option<u32>,
+    /// 'gzip' (default) or 'none'.
+    pub compression: Option<String>,
+    pub window_center: Option<f64>,
+    pub window_width: Option<f64>,
+}
+
+#[napi(object)]
+pub struct TextureExportResult {
+    /// 'volume' or 'image2d'.
+    pub content_kind: String,
+    /// 'int16' or 'uint16'.
+    pub sample_format: String,
+    /// 'none' or 'gzip' - matches how `data` below is actually encoded.
+    pub compression: String,
+    /// `false` means `data` is a bounded-error quantization (see `rescaleSlope`/
+    /// `rescaleIntercept`), not an exact round-trip of the source samples.
+    pub lossless: bool,
+    pub width: u32,
+    pub height: u32,
+    /// Always 1 for `contentKind: 'image2d'`.
+    pub depth: u32,
+    /// `texel * rescaleSlope + rescaleIntercept` recovers the physical value (e.g. HU).
+    pub rescale_slope: f64,
+    pub rescale_intercept: f64,
+    pub row_spacing_mm: f64,
+    pub col_spacing_mm: f64,
+    /// `0` for `contentKind: 'image2d'`.
+    pub slice_spacing_mm: f64,
+    /// `[x, y, z]`, LPS mm, center of voxel (0,0,0).
+    pub origin: Vec<f64>,
+    pub row_dir: Vec<f64>,
+    pub col_dir: Vec<f64>,
+    pub normal_dir: Vec<f64>,
+    pub default_window_center: Option<f64>,
+    pub default_window_width: Option<f64>,
+    pub native_width: u32,
+    pub native_height: u32,
+    pub native_depth: u32,
+    pub downsampled: bool,
+    /// Uncompressed byte length of `data`'s content - an exact integer, safely representable as
+    /// `f64` at any real texture size (well under 2^53).
+    pub payload_bytes_raw: f64,
+    /// `data.length` - included on the result too (not just derivable from `data` client-side)
+    /// so the render-server can log/cap transfer size without touching the buffer itself.
+    pub payload_bytes_stored: f64,
+    pub data: Buffer,
+}
+
+fn parse_texture_compression(value: Option<&str>) -> Result<DcmTextureCompression> {
+    match value {
+        None | Some("gzip") => Ok(DcmTextureCompression::Gzip),
+        Some("none") => Ok(DcmTextureCompression::None),
+        Some(other) => Err(Error::from_reason(format!(
+            "invalid compression '{other}'; expected 'gzip' or 'none'"
+        ))),
+    }
+}
+
+fn texture_export_result(meta: &DcmTextureMeta, payload: Vec<u8>) -> TextureExportResult {
+    let (content_kind, sample_format, compression) = (
+        match meta.content_kind {
+            dcmnorm::dicom_io::ContentKind::Volume => "volume",
+            dcmnorm::dicom_io::ContentKind::Image2D => "image2d",
+        },
+        match meta.sample_format {
+            dcmnorm::dicom_io::SampleFormat::Int16 => "int16",
+            dcmnorm::dicom_io::SampleFormat::Uint16 => "uint16",
+        },
+        match meta.compression {
+            DcmTextureCompression::None => "none",
+            DcmTextureCompression::Gzip => "gzip",
+        },
+    );
+    TextureExportResult {
+        content_kind: content_kind.to_owned(),
+        sample_format: sample_format.to_owned(),
+        compression: compression.to_owned(),
+        lossless: meta.lossless,
+        width: meta.width,
+        height: meta.height,
+        depth: meta.depth,
+        rescale_slope: meta.rescale_slope,
+        rescale_intercept: meta.rescale_intercept,
+        row_spacing_mm: meta.row_spacing_mm,
+        col_spacing_mm: meta.col_spacing_mm,
+        slice_spacing_mm: meta.slice_spacing_mm,
+        origin: meta.origin.to_vec(),
+        row_dir: meta.row_dir.to_vec(),
+        col_dir: meta.col_dir.to_vec(),
+        normal_dir: meta.normal_dir.to_vec(),
+        default_window_center: meta.default_window_center,
+        default_window_width: meta.default_window_width,
+        native_width: meta.native_dims.0,
+        native_height: meta.native_dims.1,
+        native_depth: meta.native_dims.2,
+        downsampled: meta.downsampled,
+        payload_bytes_raw: meta.payload_bytes_raw as f64,
+        payload_bytes_stored: meta.payload_bytes_stored as f64,
+        data: payload.into(),
+    }
+}
+
+pub struct ExportVolumeTextureTask {
+    volume: Arc<DcmVolume>,
+    options: ExportVolumeTextureOptions,
+}
+
+impl Task for ExportVolumeTextureTask {
+    type Output = TextureExportResult;
+    type JsValue = TextureExportResult;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        guarded(|| {
+            let compression = parse_texture_compression(self.options.compression.as_deref())?;
+            let default_window = match (self.options.window_center, self.options.window_width) {
+                (Some(center), Some(width)) => Some((center, width)),
+                _ => None,
+            };
+            let packed = dcm_pack_volume_texture(&self.volume, self.options.target_max_dim, default_window, compression)
+                .map_err(to_napi_err)?;
+            Ok(texture_export_result(&packed.meta, packed.payload))
+        })
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(output)
+    }
+}
+
+pub struct ExportFrameTextureTask {
+    file_path: PathBuf,
+    options: ExportFrameTextureOptions,
+}
+
+impl Task for ExportFrameTextureTask {
+    type Output = TextureExportResult;
+    type JsValue = TextureExportResult;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        guarded(|| {
+            let compression = parse_texture_compression(self.options.compression.as_deref())?;
+            let default_window = match (self.options.window_center, self.options.window_width) {
+                (Some(center), Some(width)) => Some((center, width)),
+                _ => None,
+            };
+            let object = read_dicom_file(&self.file_path).map_err(to_napi_err)?;
+            let packed = dcm_pack_dicom_frame_texture(
+                &object,
+                self.options.frame_index.unwrap_or(0) as usize,
+                self.options.target_max_dim,
+                default_window,
+                compression,
+            )
+            .map_err(to_napi_err)?;
+            Ok(texture_export_result(&packed.meta, packed.payload))
+        })
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(output)
+    }
+}
+
+/// Packs a single frame's raw (unwindowed) physical values as a depth-1 "1-slice volume" texture
+/// - lets a large diagnostic 2D image (e.g. DX/CR/mammography) reuse the exact same client GPU
+/// texture/shader pipeline as an MPR volume, instead of the lossy zoomed-JPEG path `renderFrame`
+/// produces. Mirrors `dcmnorm --render-frame ... --output-type texture file.dcm out.sbtex`.
+#[napi]
+pub fn export_frame_texture(file_path: String, options: Option<ExportFrameTextureOptions>) -> AsyncTask<ExportFrameTextureTask> {
+    AsyncTask::new(ExportFrameTextureTask {
+        file_path: PathBuf::from(file_path),
+        options: options.unwrap_or_default(),
+    })
 }
 
 // ---------------------------------------------------------------------------------------------
