@@ -660,6 +660,54 @@ pub fn reformat_plane(
     encode_rendered_frame(&frame, output_format, jpeg_quality).map_err(VolumeError::from)
 }
 
+/// Resamples `volume`'s ENTIRE native voxel grid (not an oblique plane/slab - see
+/// `reformat_plane_values` for that) down to a coarser `target_cols`x`target_rows`x`target_slices`
+/// uniform grid, covering the same physical extent. Used by `super::texture_export` to fit a
+/// volume within a client GPU's texture-size limit, or to produce a small, fast "progressive"
+/// first pass before the full-resolution texture arrives.
+///
+/// Each target axis is sampled at points evenly spaced across `[0, native_dim - 1]` in that axis's
+/// own native voxel-index space (not world space - there's no need to round-trip through
+/// `sample_volume_at_world_point`'s world-to-voxel transform when we're already working in voxel
+/// indices on both ends), so the corner voxels of the coarse grid land exactly on the corner
+/// voxels of the native grid. A target dimension of `1` samples the native axis's midpoint.
+pub fn resample_volume(volume: &Volume, target_cols: u32, target_rows: u32, target_slices: u32, interpolation: Interpolation) -> Vec<f32> {
+    let target_cols = target_cols.max(1);
+    let target_rows = target_rows.max(1);
+    let target_slices = target_slices.max(1);
+
+    let col_step = if target_cols > 1 { (volume.cols as f64 - 1.0) / (target_cols as f64 - 1.0) } else { 0.0 };
+    let row_step = if target_rows > 1 { (volume.rows as f64 - 1.0) / (target_rows as f64 - 1.0) } else { 0.0 };
+    let slice_step = if target_slices > 1 { (volume.num_slices as f64 - 1.0) / (target_slices as f64 - 1.0) } else { 0.0 };
+
+    let axis_coordinate = |target_index: u32, target_len: u32, step: f64, native_len: u32| -> f64 {
+        if target_len > 1 {
+            target_index as f64 * step
+        } else {
+            (native_len as f64 - 1.0) / 2.0
+        }
+    };
+
+    let plane = target_cols as usize * target_rows as usize;
+    let mut out = vec![0f32; plane * target_slices as usize];
+    for target_slice in 0..target_slices {
+        let slice_f = axis_coordinate(target_slice, target_slices, slice_step, volume.num_slices);
+        for target_row in 0..target_rows {
+            let row_f = axis_coordinate(target_row, target_rows, row_step, volume.rows);
+            for target_col in 0..target_cols {
+                let col_f = axis_coordinate(target_col, target_cols, col_step, volume.cols);
+                let value = match interpolation {
+                    Interpolation::Nearest => sample_nearest(volume, row_f, col_f, slice_f),
+                    Interpolation::Trilinear => sample_trilinear(volume, row_f, col_f, slice_f),
+                };
+                let index = target_slice as usize * plane + target_row as usize * target_cols as usize + target_col as usize;
+                out[index] = value as f32;
+            }
+        }
+    }
+    out
+}
+
 /// The three canonical LPS-aligned views ("axial" reuses the volume's own acquisition basis;
 /// "coronal"/"sagittal" are fixed patient-anatomy planes, independent of acquisition angle).
 /// Matches the convention the viewer's own client-side snap buttons use, so CLI, server, and
@@ -951,6 +999,37 @@ mod tests {
                 "rotation broke orthogonality at yaw={yaw} pitch={pitch} roll={roll}"
             );
         }
+    }
+
+    #[test]
+    fn resample_volume_at_native_dims_reproduces_every_voxel_exactly() {
+        let volume = axis_aligned_test_volume();
+        let resampled = resample_volume(&volume, 4, 4, 4, Interpolation::Nearest);
+        assert_eq!(resampled, volume.samples);
+    }
+
+    #[test]
+    fn resample_volume_downsamples_a_linear_ramp_correctly() {
+        // Samples increase by 1 for each unit step in col (see axis_aligned_test_volume's
+        // samples[idx]==idx layout with cols=4). Downsampling cols 4->2 places the two output
+        // columns exactly on native columns 0 and 3 (the corners), so this also exercises that
+        // corner-alignment guarantee, not just the interpolation math.
+        let volume = axis_aligned_test_volume();
+        let resampled = resample_volume(&volume, 2, 4, 4, Interpolation::Trilinear);
+        assert_eq!(resampled.len(), 2 * 4 * 4);
+        // row=0,slice=0: native col 0 -> voxel_index(...,col=0)=0; native col 3 -> voxel_index(...,col=3)=3.
+        assert_eq!(resampled[0], voxel_index(4, 4, 0, 0, 0));
+        assert_eq!(resampled[1], voxel_index(4, 4, 0, 3, 0));
+    }
+
+    #[test]
+    fn resample_volume_to_a_single_voxel_per_axis_samples_the_midpoint() {
+        let volume = axis_aligned_test_volume();
+        let resampled = resample_volume(&volume, 1, 1, 1, Interpolation::Nearest);
+        assert_eq!(resampled.len(), 1);
+        // Midpoint of [0,3] on every axis is 1.5, which nearest-rounds to voxel (1 or 2, ...) -
+        // just assert it's some genuine in-range voxel value, not a default/zeroed placeholder.
+        assert!(resampled[0] >= 0.0 && resampled[0] <= 63.0);
     }
 
     #[test]

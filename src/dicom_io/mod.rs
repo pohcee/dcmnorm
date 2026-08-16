@@ -14,6 +14,7 @@ mod standard_json;
 #[cfg(test)]
 mod tests;
 mod secondary_capture;
+mod texture_export;
 mod types;
 mod volume;
 mod volume_export;
@@ -53,10 +54,15 @@ pub use types::{
     TransferSyntaxSupport, WithMetaError, WriteError,
 };
 pub use volume::{
-    build_volume, canonical_view_basis, reformat_plane, reformat_plane_values, rotate_basis,
-    Interpolation, PlaneParams, SlabProjection, Volume, VolumeError,
+    build_volume, canonical_view_basis, reformat_plane, reformat_plane_values, resample_volume,
+    rotate_basis, Interpolation, PlaneParams, SlabProjection, Volume, VolumeError,
 };
 pub use volume_export::{generate_uid, write_nifti, write_nrrd, VolumeExportError, VolumeGeometry};
+pub use texture_export::{
+    pack_dicom_frame_texture, pack_frame_texture, pack_volume_texture, quantize_samples,
+    resample_frame_2d, ContentKind, PackedTexture, SampleFormat, TextureCompression,
+    TextureExportError, TextureMeta,
+};
 pub use secondary_capture::{write_reformatted_dicom_slice, SecondaryCaptureError, SliceGeometry};
 pub mod dicom_edit;
 pub use dicom_edit::{

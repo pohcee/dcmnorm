@@ -16,7 +16,8 @@ use dcmnorm::dicom_io::{
     probe_dicom_file_for_sop_class_uid,
     build_volume, canonical_view_basis, generate_uid, reformat_plane, reformat_plane_values, rotate_basis,
     write_nifti, write_nrrd, write_reformatted_dicom_slice,
-    Interpolation, PlaneParams, SlabProjection, SliceGeometry, Volume, VolumeGeometry,
+    pack_dicom_frame_texture, pack_volume_texture,
+    Interpolation, PackedTexture, PlaneParams, SlabProjection, SliceGeometry, TextureCompression, Volume, VolumeGeometry,
 };
 use dcmnorm::remove_private_tags_inplace;
 use dcmnorm::perf;
@@ -154,7 +155,7 @@ struct Cli {
     #[arg(
         long,
         value_enum,
-        help = "Override output type detection (dicom, json, raw, png, jpeg, mpeg4). For render formats (raw/png/jpeg/mpeg4), extensions .mp4/.m4v/.mpeg4/.mov are inferred as mpeg4",
+        help = "Override output type detection (dicom, json, raw, png, jpeg, mpeg4, texture). For render formats (raw/png/jpeg/mpeg4/texture), extensions .mp4/.m4v/.mpeg4/.mov are inferred as mpeg4 and .sbtex as texture",
         help_heading = "General",
         display_order = 9
     )]
@@ -459,6 +460,24 @@ struct Cli {
         display_order = 58
     )]
     mpr_projection: Option<String>,
+
+    #[arg(
+        long,
+        value_name = "N",
+        help = "Cap the longest axis of a texture-format (.sbtex / --output-type texture) export at N samples, proportionally downsampling if the source exceeds it. Defaults to no cap (full native resolution)",
+        help_heading = "Texture Export",
+        display_order = 60
+    )]
+    texture_max_dim: Option<u32>,
+
+    #[arg(
+        long,
+        value_enum,
+        help = "Compression applied to a texture-format export's raw payload bytes. Defaults to gzip",
+        help_heading = "Texture Export",
+        display_order = 61
+    )]
+    texture_compression: Option<TextureCompressionArg>,
 }
 
 impl Cli {
@@ -504,6 +523,13 @@ enum OutputType {
     Png,
     Jpeg,
     Mpeg4,
+    Texture,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum TextureCompressionArg {
+    None,
+    Gzip,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -524,6 +550,7 @@ enum RenderFormat {
     Png,
     Jpeg,
     Mpeg4,
+    Texture,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -1391,6 +1418,49 @@ fn run_dicom_to_render_with_object(
     );
     apply_attribute_overrides(cli, &mut object)?;
     let format = resolve_render_format(cli, output_path)?;
+
+    // Texture export bypasses the whole windowed/overlay/redaction 2D-render pipeline below
+    // (it wants raw, unwindowed physical values - see dicom_io::texture_export's module doc) -
+    // handled here, early, rather than threaded through RenderPipelineOptions.
+    if format == RenderFormat::Texture {
+        for (flag, present) in [
+            ("--render-all-frames", cli.render_all_frames),
+            ("--render-fps", cli.render_fps.is_some()),
+            ("--output-width", cli.output_width.is_some()),
+            ("--output-height", cli.output_height.is_some()),
+            ("--scale-max-size", cli.scale_max_size.is_some()),
+            ("--redact-box", !cli.redact_box.is_empty()),
+        ] {
+            if present {
+                return Err(io::Error::new(
+                    ErrorKind::InvalidInput,
+                    format!("{flag} is not valid with texture output - it always exports the frame's native resolution and raw physical values"),
+                )
+                .into());
+            }
+        }
+
+        let default_window = match (cli.window_center, cli.window_width) {
+            (Some(center), Some(width)) => Some((center, width)),
+            _ => None,
+        };
+        let compression = resolve_texture_compression(cli);
+        let packed = {
+            let _scope = perf::scope("cli.dicom_to_render.pack_dicom_frame_texture");
+            pack_dicom_frame_texture(&object, cli.render_frame, cli.texture_max_dim, default_window, compression)
+                .map_err(|error| io::Error::new(ErrorKind::InvalidInput, error.to_string()))?
+        };
+        verbose_log(
+            cli,
+            format!(
+                "Packed frame texture: {}x{} lossless={} ({} bytes stored, {} bytes raw)",
+                packed.meta.width, packed.meta.height, packed.meta.lossless, packed.meta.payload_bytes_stored, packed.meta.payload_bytes_raw
+            ),
+        );
+        write_packed_texture(output_path, &packed)?;
+        return Ok(());
+    }
+
     verbose_log(
         cli,
         format!(
@@ -1696,6 +1766,56 @@ fn run_mpr(cli: &Cli, inputs: &[PathBuf], output_path: &Path) -> Result<(), Box<
             "--output-type is not valid with .nii/.nii.gz/.nrrd/.dcm --mpr output - format is determined by the output extension",
         )
         .into());
+    }
+
+    // A texture export ships the volume's own NATIVE voxel lattice (see
+    // dicom_io::texture_export's module doc) - none of the plane/depth/spacing flags above
+    // (already parsed by this point) apply, so reject them explicitly rather than silently
+    // ignoring a value the user thought was taking effect.
+    if matches!(output_kind, MprOutputKind::Rendered(RenderFormat::Texture)) {
+        for (flag, present) in [
+            ("--mpr-origin", cli.mpr_origin.is_some()),
+            ("--mpr-depth", cli.mpr_depth.is_some()),
+            ("--mpr-spacing", cli.mpr_spacing.is_some()),
+            ("--mpr-thickness", cli.mpr_thickness.is_some()),
+            ("--mpr-projection", cli.mpr_projection.is_some()),
+            ("--output-width", cli.output_width.is_some()),
+            ("--output-height", cli.output_height.is_some()),
+        ] {
+            if present {
+                return Err(io::Error::new(
+                    ErrorKind::InvalidInput,
+                    format!("{flag} is not valid with texture (.sbtex) --mpr output - it always exports the whole native volume lattice, not a reformatted plane"),
+                )
+                .into());
+            }
+        }
+
+        let default_window = match (cli.window_center, cli.window_width) {
+            (Some(center), Some(width)) => Some((center, width)),
+            _ => None,
+        };
+        let compression = resolve_texture_compression(cli);
+        let packed = {
+            let _scope = perf::scope("cli.run_mpr.pack_volume_texture");
+            pack_volume_texture(&volume, cli.texture_max_dim, default_window, compression)
+                .map_err(|error| io::Error::new(ErrorKind::InvalidInput, error.to_string()))?
+        };
+        verbose_log(
+            cli,
+            format!(
+                "Packed volume texture: {}x{}x{} lossless={} downsampled={} ({} bytes stored, {} bytes raw)",
+                packed.meta.width,
+                packed.meta.height,
+                packed.meta.depth,
+                packed.meta.lossless,
+                packed.meta.downsampled,
+                packed.meta.payload_bytes_stored,
+                packed.meta.payload_bytes_raw
+            ),
+        );
+        write_packed_texture(output_path, &packed)?;
+        return Ok(());
     }
 
     let output_width = cli.output_width.unwrap_or(volume.cols);
@@ -2374,7 +2494,7 @@ fn detect_output_kind(path: &Path, explicit_type: Option<OutputType>) -> Option<
         return Some(match output_type {
             OutputType::Dicom => FileKind::Dicom,
             OutputType::Json => FileKind::Json,
-            OutputType::Raw | OutputType::Png | OutputType::Jpeg | OutputType::Mpeg4 => FileKind::Render,
+            OutputType::Raw | OutputType::Png | OutputType::Jpeg | OutputType::Mpeg4 | OutputType::Texture => FileKind::Render,
         });
     }
 
@@ -2387,7 +2507,7 @@ fn detect_kind_from_extension(path: &Path) -> Option<FileKind> {
     match extension.as_str() {
         "json" => Some(FileKind::Json),
         "dcm" | "dicom" => Some(FileKind::Dicom),
-        "jpg" | "jpeg" | "png" | "raw" | "mp4" | "m4v" | "mpeg4" | "mov" => Some(FileKind::Render),
+        "jpg" | "jpeg" | "png" | "raw" | "mp4" | "m4v" | "mpeg4" | "mov" | "sbtex" => Some(FileKind::Render),
         _ => None,
     }
 }
@@ -2398,6 +2518,7 @@ fn output_type_to_render_format(output_type: OutputType) -> Option<RenderFormat>
         OutputType::Png => Some(RenderFormat::Png),
         OutputType::Jpeg => Some(RenderFormat::Jpeg),
         OutputType::Mpeg4 => Some(RenderFormat::Mpeg4),
+        OutputType::Texture => Some(RenderFormat::Texture),
         _ => None,
     }
 }
@@ -2570,9 +2691,10 @@ fn resolve_render_format(
         "png" => Ok(RenderFormat::Png),
         "jpg" | "jpeg" => Ok(RenderFormat::Jpeg),
         "mp4" | "m4v" | "mpeg4" | "mov" => Ok(RenderFormat::Mpeg4),
+        "sbtex" => Ok(RenderFormat::Texture),
         _ => Err(io::Error::new(
             ErrorKind::InvalidInput,
-            "render output extension must be .raw, .png, .jpg/.jpeg, or .mp4/.m4v/.mpeg4/.mov, or use --output-type (raw/png/jpeg/mpeg4)",
+            "render output extension must be .raw, .png, .jpg/.jpeg, .mp4/.m4v/.mpeg4/.mov, or .sbtex, or use --output-type (raw/png/jpeg/mpeg4/texture)",
         )
         .into()),
     }
@@ -2584,6 +2706,9 @@ fn to_render_output_format(format: RenderFormat) -> RenderOutputFormat {
         RenderFormat::Png => RenderOutputFormat::Png,
         RenderFormat::Jpeg => RenderOutputFormat::Jpeg,
         RenderFormat::Mpeg4 => RenderOutputFormat::Png,
+        RenderFormat::Texture => {
+            unreachable!("RenderFormat::Texture is handled directly in run_dicom_to_render_with_object/run_mpr, before reaching to_render_output_format")
+        }
     }
 }
 
@@ -2618,7 +2743,32 @@ fn write_multi_frame_outputs(
             "MPEG4 output is handled separately",
         )
         .into()),
+        RenderFormat::Texture => Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "texture output is handled separately and does not support --render-all-frames",
+        )
+        .into()),
     }
+}
+
+fn resolve_texture_compression(cli: &Cli) -> TextureCompression {
+    match cli.texture_compression {
+        Some(TextureCompressionArg::None) => TextureCompression::None,
+        Some(TextureCompressionArg::Gzip) | None => TextureCompression::Gzip,
+    }
+}
+
+/// Writes a `PackedTexture` as `output_path` (the raw/gzip payload bytes) plus
+/// `output_path`-with-`.json`-appended (the `TextureMeta` sidecar) - the standalone,
+/// server-independent contract a texture-format export is meant to expose (see the CLI's
+/// "Texture Export" flags).
+fn write_packed_texture(output_path: &Path, packed: &PackedTexture) -> Result<(), Box<dyn std::error::Error>> {
+    fs::write(output_path, &packed.payload)?;
+    let mut sidecar_name = output_path.as_os_str().to_owned();
+    sidecar_name.push(".json");
+    let json_text = serde_json::to_string_pretty(&packed.meta.to_json())?;
+    fs::write(PathBuf::from(sidecar_name), json_text)?;
+    Ok(())
 }
 
 fn frame_output_path(
@@ -2722,8 +2872,9 @@ mod tests {
         apply_filter_to_object, build_volume, canonical_view_basis, depth_steps, detect_output_kind,
         frame_output_path, infer_direction, parse_attribute_override, parse_depth_spec,
         parse_filter_requests, parse_redact_box, resolve_depths, resolve_mpr_output_kind,
-        run_dicom_to_json_with_object, run_mpr, resolve_render_format, Cli, DepthSpec, Direction,
-        FileKind, MprOutputKind, OutputType, RenderFormat, VolumeFormat,
+        run_dicom_to_json_with_object, run_dicom_to_render_with_object, run_mpr, resolve_render_format,
+        Cli, DepthSpec, Direction, FileKind, MprOutputKind, OutputType, RenderFormat, TextureCompressionArg,
+        VolumeFormat,
     };
     use clap::{CommandFactory, FromArgMatches};
     use dicom_dictionary_std::tags;
@@ -2801,6 +2952,8 @@ mod tests {
             mpr_spacing: None,
             mpr_thickness: None,
             mpr_projection: None,
+            texture_max_dim: None,
+            texture_compression: None,
         }
     }
 
@@ -2944,6 +3097,50 @@ mod tests {
         assert!(!json.contains("\"Modality\""));
         assert!(!json.contains("\"FileMetaInformationVersion\""));
         assert!(!json.contains("\"TransferSyntaxUID\""));
+    }
+
+    #[test]
+    fn run_dicom_to_render_with_object_writes_a_valid_single_frame_texture_export() {
+        let object = read_dicom_file(fixture_path("ct.dcm")).unwrap();
+
+        let mut cli = base_cli();
+        let output_path = temp_output_path("frame-texture").with_extension("sbtex");
+        cli.output = Some(output_path.clone());
+        cli.window_center = Some(40.0);
+        cli.window_width = Some(400.0);
+
+        run_dicom_to_render_with_object(&cli, object).unwrap();
+
+        let sidecar_path = {
+            let mut name = output_path.as_os_str().to_owned();
+            name.push(".json");
+            PathBuf::from(name)
+        };
+        let meta: serde_json::Value = serde_json::from_str(&fs::read_to_string(&sidecar_path).unwrap()).unwrap();
+        assert_eq!(meta["contentKind"], "image2d");
+        assert_eq!(meta["depth"], 1);
+        assert_eq!(meta["width"], 512);
+        assert_eq!(meta["height"], 512);
+        assert_eq!(meta["defaultWindowCenter"], 40.0);
+        assert_eq!(meta["defaultWindowWidth"], 400.0);
+        let payload_bytes_raw = meta["payloadBytesRaw"].as_u64().unwrap();
+        assert_eq!(payload_bytes_raw, 512 * 512 * 2);
+
+        fs::remove_file(&output_path).ok();
+        fs::remove_file(&sidecar_path).ok();
+    }
+
+    #[test]
+    fn run_dicom_to_render_with_object_rejects_output_width_with_texture_output() {
+        let object = read_dicom_file(fixture_path("ct.dcm")).unwrap();
+
+        let mut cli = base_cli();
+        let output_path = temp_output_path("frame-texture-conflict").with_extension("sbtex");
+        cli.output = Some(output_path.clone());
+        cli.output_width = Some(256);
+
+        assert!(run_dicom_to_render_with_object(&cli, object).is_err());
+        assert!(!output_path.exists());
     }
 
     #[test]
@@ -3129,6 +3326,7 @@ mod tests {
         assert_eq!(resolve_mpr_output_kind(&cli, Path::new("out.dcm")).unwrap(), MprOutputKind::DicomSeries);
         assert_eq!(resolve_mpr_output_kind(&cli, Path::new("out.dicom")).unwrap(), MprOutputKind::DicomSeries);
         assert_eq!(resolve_mpr_output_kind(&cli, Path::new("out.png")).unwrap(), MprOutputKind::Rendered(RenderFormat::Png));
+        assert_eq!(resolve_mpr_output_kind(&cli, Path::new("out.sbtex")).unwrap(), MprOutputKind::Rendered(RenderFormat::Texture));
     }
 
     #[test]
@@ -3225,6 +3423,94 @@ mod tests {
         assert!(header_text.contains("space: left-posterior-superior\n"));
 
         fs::remove_file(&output_path).ok();
+        for path in &paths {
+            fs::remove_file(path).ok();
+        }
+    }
+
+    #[test]
+    fn run_mpr_writes_a_valid_texture_export_with_a_metadata_sidecar() {
+        let paths = write_synthetic_ct_series_for_cli(6, 1.0);
+        let output_path = temp_output_path("mpr-texture").with_extension("sbtex");
+
+        let mut cli = base_cli();
+        cli.mpr = Some("axial".to_string());
+        cli.window_center = Some(40.0);
+        cli.window_width = Some(400.0);
+        run_mpr(&cli, &paths, &output_path).unwrap();
+
+        let sidecar_path = {
+            let mut name = output_path.as_os_str().to_owned();
+            name.push(".json");
+            PathBuf::from(name)
+        };
+        let meta: serde_json::Value = serde_json::from_str(&fs::read_to_string(&sidecar_path).unwrap()).unwrap();
+        assert_eq!(meta["contentKind"], "volume");
+        assert_eq!(meta["compression"], "gzip");
+        assert_eq!(meta["width"], 512);
+        assert_eq!(meta["height"], 512);
+        assert_eq!(meta["depth"], 6);
+        assert_eq!(meta["defaultWindowCenter"], 40.0);
+        assert_eq!(meta["defaultWindowWidth"], 400.0);
+        assert_eq!(meta["downsampled"], false);
+        let payload_bytes_raw = meta["payloadBytesRaw"].as_u64().unwrap();
+        assert_eq!(payload_bytes_raw, 512 * 512 * 6 * 2);
+
+        let compressed = fs::read(&output_path).unwrap();
+        let mut decoder = flate2::read::GzDecoder::new(&compressed[..]);
+        let mut decompressed = Vec::new();
+        std::io::Read::read_to_end(&mut decoder, &mut decompressed).unwrap();
+        assert_eq!(decompressed.len() as u64, payload_bytes_raw);
+
+        fs::remove_file(&output_path).ok();
+        fs::remove_file(&sidecar_path).ok();
+        for path in &paths {
+            fs::remove_file(path).ok();
+        }
+    }
+
+    #[test]
+    fn run_mpr_texture_export_downsamples_when_requested() {
+        let paths = write_synthetic_ct_series_for_cli(6, 1.0);
+        let output_path = temp_output_path("mpr-texture-downsampled").with_extension("sbtex");
+
+        let mut cli = base_cli();
+        cli.mpr = Some("axial".to_string());
+        cli.texture_max_dim = Some(64);
+        cli.texture_compression = Some(TextureCompressionArg::None);
+        run_mpr(&cli, &paths, &output_path).unwrap();
+
+        let sidecar_path = {
+            let mut name = output_path.as_os_str().to_owned();
+            name.push(".json");
+            PathBuf::from(name)
+        };
+        let meta: serde_json::Value = serde_json::from_str(&fs::read_to_string(&sidecar_path).unwrap()).unwrap();
+        assert_eq!(meta["downsampled"], true);
+        assert_eq!(meta["compression"], "none");
+        assert!(meta["width"].as_u64().unwrap() <= 64);
+        assert!(meta["height"].as_u64().unwrap() <= 64);
+        assert!(meta["depth"].as_u64().unwrap() <= 64);
+        assert_eq!(meta["nativeDims"], serde_json::json!([512, 512, 6]));
+
+        fs::remove_file(&output_path).ok();
+        fs::remove_file(&sidecar_path).ok();
+        for path in &paths {
+            fs::remove_file(path).ok();
+        }
+    }
+
+    #[test]
+    fn run_mpr_texture_export_rejects_reformat_only_flags() {
+        let paths = write_synthetic_ct_series_for_cli(6, 1.0);
+        let output_path = temp_output_path("mpr-texture-conflict").with_extension("sbtex");
+
+        let mut cli = base_cli();
+        cli.mpr = Some("axial".to_string());
+        cli.mpr_depth = Some("-2:2:1".to_string());
+        assert!(run_mpr(&cli, &paths, &output_path).is_err());
+        assert!(!output_path.exists());
+
         for path in &paths {
             fs::remove_file(path).ok();
         }
