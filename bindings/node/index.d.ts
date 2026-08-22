@@ -159,10 +159,25 @@ export interface EditTagsOptions {
 }
 
 /**
+ * Packs several independent frames (from one or more files) as one texture-array upload - see
+ * `dcmnorm::dicom_io::pack_frame_stack_texture`'s own doc for the full contract (no resampling,
+ * no cross-layer interpolation, no physical geometry). Mirrors `exportFrameTexture`'s
+ * options/result shape, generalized to many sources.
+ */
+export declare function exportFrameStackTexture(sources: Array<FrameStackSource>, options?: ExportFrameStackTextureOptions | undefined | null): Promise<unknown>
+
+export interface ExportFrameStackTextureOptions {
+  /** 'gzip' (default) or 'none'. */
+  compression?: string
+  windowCenter?: number
+  windowWidth?: number
+}
+
+/**
  * Packs a single frame's raw (unwindowed) physical values as a depth-1 "1-slice volume" texture
  * - lets a large diagnostic 2D image (e.g. DX/CR/mammography) reuse the exact same client GPU
  * texture/shader pipeline as an MPR volume, instead of the lossy zoomed-JPEG path `renderFrame`
- * produces. Mirrors `dcmnorm --render-frame ... --output-type texture file.dcm out.sbtex`.
+ * produces. Mirrors `dcmnorm --render-frame ... --output-type texture file.dcm out.gputex`.
  */
 export declare function exportFrameTexture(filePath: string, options?: ExportFrameTextureOptions | undefined | null): Promise<unknown>
 
@@ -213,6 +228,12 @@ export interface FindScuOptions {
   calledAeTitle?: string
   maxPduLength?: number
   timeoutMs?: number
+}
+
+export interface FrameStackSource {
+  filePath: string
+  /** Zero-based frame indices to include from this file, in order. Defaults to `[0]`. */
+  frameIndices?: Array<number>
 }
 
 /**

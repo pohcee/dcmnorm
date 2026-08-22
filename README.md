@@ -318,7 +318,7 @@ General:
 - `--filter <KEY>`
 - `--overwrite`
 - `--input-type <dicom|json>`
-- `--output-type <dicom|json|raw|png|jpeg|mpeg4>`
+- `--output-type <dicom|json|raw|png|jpeg|mpeg4|texture>`
 
 DICOM editing:
 
@@ -367,6 +367,11 @@ MPR (Multiplanar Reformation):
 - `--mpr-spacing <MM>`
 - `--mpr-thickness <MM>`
 - `--mpr-projection <mip|minip|average>`
+
+Texture Export:
+
+- `--texture-max-dim <N>`
+- `--texture-compression <none|gzip>`
 
 ### JSON conversion defaults
 
@@ -475,7 +480,7 @@ Behavior:
 ### Override type detection with `--input-type` / `--output-type`
 
 Useful for files with no extension or a misleading one. Supported `--output-type` values are
-`dicom`, `json`, `raw`, `png`, `jpeg`, `mpeg4`.
+`dicom`, `json`, `raw`, `png`, `jpeg`, `mpeg4`, `texture`.
 
 ```bash
 # Convert a DICOM file with no extension to JSON
@@ -557,6 +562,46 @@ Photometric interpretations supported by rendering:
 - `RGB`
 
 Both planar configurations are supported for RGB rendering (`PlanarConfiguration` 0 and 1).
+
+### Export a GPU texture (`.gputex`)
+
+`--output-type texture` (or a `.gputex` output extension) packs a frame or volume as a lossless,
+GPU-upload-ready payload instead of an 8-bit windowed render: the raw `int16`/`uint16` sample
+lattice (row-major, little-endian, gzip-compressed by default), plus a `rescaleSlope`/
+`rescaleIntercept` pair for recovering physical values (e.g. HU). This lets a client do its own
+window/level and oblique reslicing in a GPU shader instead of round-tripping to the server per
+interaction - see `dicom_io::texture_export`'s module doc for the full rationale.
+
+Every export writes two files: `OUTPUT` (the payload bytes) and `OUTPUT.json` (a `TextureMeta`
+sidecar - dimensions, physical spacing/origin/orientation, rescale slope/intercept, a default
+window/level, and whether/how the payload is compressed). Always read `compression` from the
+sidecar rather than assuming gzip - `--texture-compression none` disables it per export.
+
+Export a single frame as a depth-1 texture:
+
+```bash
+cargo run -p dcmnorm-cli -- test/files/dx.dcm frame.gputex
+```
+
+Export a specific frame with an explicit default window, capping the longest axis at 1024 samples:
+
+```bash
+cargo run -p dcmnorm-cli -- test/files/ct.dcm frame.gputex --render-frame 1 --window-center 40 --window-width 400 --texture-max-dim 1024
+```
+
+Export a whole CT/MR series as one volume texture (its own native voxel lattice, not a reformatted
+plane - `--mpr`'s plane/depth/spacing flags don't apply here, only the volume-building/plane-value
+is needed to select `--mpr`'s multi-file mode):
+
+```bash
+dcmnorm --mpr axial series_dir/*.dcm volume.gputex
+```
+
+Skip gzip compression (e.g. when the transport already compresses, such as a websocket permessage-deflate connection):
+
+```bash
+dcmnorm --mpr axial series_dir/*.dcm volume.gputex --texture-compression none
+```
 
 ### Render a Multiplanar Reformation (MPR)
 

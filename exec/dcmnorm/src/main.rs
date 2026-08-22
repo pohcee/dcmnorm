@@ -155,7 +155,7 @@ struct Cli {
     #[arg(
         long,
         value_enum,
-        help = "Override output type detection (dicom, json, raw, png, jpeg, mpeg4, texture). For render formats (raw/png/jpeg/mpeg4/texture), extensions .mp4/.m4v/.mpeg4/.mov are inferred as mpeg4 and .sbtex as texture",
+        help = "Override output type detection (dicom, json, raw, png, jpeg, mpeg4, texture). For render formats (raw/png/jpeg/mpeg4/texture), extensions .mp4/.m4v/.mpeg4/.mov are inferred as mpeg4 and .gputex as texture",
         help_heading = "General",
         display_order = 9
     )]
@@ -464,7 +464,7 @@ struct Cli {
     #[arg(
         long,
         value_name = "N",
-        help = "Cap the longest axis of a texture-format (.sbtex / --output-type texture) export at N samples, proportionally downsampling if the source exceeds it. Defaults to no cap (full native resolution)",
+        help = "Cap the longest axis of a texture-format (.gputex / --output-type texture) export at N samples, proportionally downsampling if the source exceeds it. Defaults to no cap (full native resolution)",
         help_heading = "Texture Export",
         display_order = 60
     )]
@@ -1785,7 +1785,7 @@ fn run_mpr(cli: &Cli, inputs: &[PathBuf], output_path: &Path) -> Result<(), Box<
             if present {
                 return Err(io::Error::new(
                     ErrorKind::InvalidInput,
-                    format!("{flag} is not valid with texture (.sbtex) --mpr output - it always exports the whole native volume lattice, not a reformatted plane"),
+                    format!("{flag} is not valid with texture (.gputex) --mpr output - it always exports the whole native volume lattice, not a reformatted plane"),
                 )
                 .into());
             }
@@ -2507,7 +2507,7 @@ fn detect_kind_from_extension(path: &Path) -> Option<FileKind> {
     match extension.as_str() {
         "json" => Some(FileKind::Json),
         "dcm" | "dicom" => Some(FileKind::Dicom),
-        "jpg" | "jpeg" | "png" | "raw" | "mp4" | "m4v" | "mpeg4" | "mov" | "sbtex" => Some(FileKind::Render),
+        "jpg" | "jpeg" | "png" | "raw" | "mp4" | "m4v" | "mpeg4" | "mov" | "gputex" => Some(FileKind::Render),
         _ => None,
     }
 }
@@ -2691,10 +2691,10 @@ fn resolve_render_format(
         "png" => Ok(RenderFormat::Png),
         "jpg" | "jpeg" => Ok(RenderFormat::Jpeg),
         "mp4" | "m4v" | "mpeg4" | "mov" => Ok(RenderFormat::Mpeg4),
-        "sbtex" => Ok(RenderFormat::Texture),
+        "gputex" => Ok(RenderFormat::Texture),
         _ => Err(io::Error::new(
             ErrorKind::InvalidInput,
-            "render output extension must be .raw, .png, .jpg/.jpeg, .mp4/.m4v/.mpeg4/.mov, or .sbtex, or use --output-type (raw/png/jpeg/mpeg4/texture)",
+            "render output extension must be .raw, .png, .jpg/.jpeg, .mp4/.m4v/.mpeg4/.mov, or .gputex, or use --output-type (raw/png/jpeg/mpeg4/texture)",
         )
         .into()),
     }
@@ -3104,7 +3104,7 @@ mod tests {
         let object = read_dicom_file(fixture_path("ct.dcm")).unwrap();
 
         let mut cli = base_cli();
-        let output_path = temp_output_path("frame-texture").with_extension("sbtex");
+        let output_path = temp_output_path("frame-texture").with_extension("gputex");
         cli.output = Some(output_path.clone());
         cli.window_center = Some(40.0);
         cli.window_width = Some(400.0);
@@ -3135,7 +3135,7 @@ mod tests {
         let object = read_dicom_file(fixture_path("ct.dcm")).unwrap();
 
         let mut cli = base_cli();
-        let output_path = temp_output_path("frame-texture-conflict").with_extension("sbtex");
+        let output_path = temp_output_path("frame-texture-conflict").with_extension("gputex");
         cli.output = Some(output_path.clone());
         cli.output_width = Some(256);
 
@@ -3326,7 +3326,7 @@ mod tests {
         assert_eq!(resolve_mpr_output_kind(&cli, Path::new("out.dcm")).unwrap(), MprOutputKind::DicomSeries);
         assert_eq!(resolve_mpr_output_kind(&cli, Path::new("out.dicom")).unwrap(), MprOutputKind::DicomSeries);
         assert_eq!(resolve_mpr_output_kind(&cli, Path::new("out.png")).unwrap(), MprOutputKind::Rendered(RenderFormat::Png));
-        assert_eq!(resolve_mpr_output_kind(&cli, Path::new("out.sbtex")).unwrap(), MprOutputKind::Rendered(RenderFormat::Texture));
+        assert_eq!(resolve_mpr_output_kind(&cli, Path::new("out.gputex")).unwrap(), MprOutputKind::Rendered(RenderFormat::Texture));
     }
 
     #[test]
@@ -3431,7 +3431,7 @@ mod tests {
     #[test]
     fn run_mpr_writes_a_valid_texture_export_with_a_metadata_sidecar() {
         let paths = write_synthetic_ct_series_for_cli(6, 1.0);
-        let output_path = temp_output_path("mpr-texture").with_extension("sbtex");
+        let output_path = temp_output_path("mpr-texture").with_extension("gputex");
 
         let mut cli = base_cli();
         cli.mpr = Some("axial".to_string());
@@ -3472,7 +3472,7 @@ mod tests {
     #[test]
     fn run_mpr_texture_export_downsamples_when_requested() {
         let paths = write_synthetic_ct_series_for_cli(6, 1.0);
-        let output_path = temp_output_path("mpr-texture-downsampled").with_extension("sbtex");
+        let output_path = temp_output_path("mpr-texture-downsampled").with_extension("gputex");
 
         let mut cli = base_cli();
         cli.mpr = Some("axial".to_string());
@@ -3503,7 +3503,7 @@ mod tests {
     #[test]
     fn run_mpr_texture_export_rejects_reformat_only_flags() {
         let paths = write_synthetic_ct_series_for_cli(6, 1.0);
-        let output_path = temp_output_path("mpr-texture-conflict").with_extension("sbtex");
+        let output_path = temp_output_path("mpr-texture-conflict").with_extension("gputex");
 
         let mut cli = base_cli();
         cli.mpr = Some("axial".to_string());

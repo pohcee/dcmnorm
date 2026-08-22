@@ -12,6 +12,7 @@ use dcmnorm::dicom_io::{
     find_scu as dcm_find_scu, move_scu as dcm_move_scu, parse_attribute_override,
     parse_filter_requests, parse_tag_key, probe_dicom_file_for_sop_class_uid, read_dicom_bytes,
     read_dicom_file, read_dicom_json_with_options, read_dicom_object_for_filter,
+    pack_dicom_frame_stack_texture as dcm_pack_dicom_frame_stack_texture,
     pack_dicom_frame_texture as dcm_pack_dicom_frame_texture, pack_volume_texture as dcm_pack_volume_texture,
     reformat_plane as dcm_reformat_plane, remove_attribute, remove_private_tags_inplace,
     render_dicom_frame as dcm_render_dicom_frame, set_attribute, start_scp as dcm_start_scp,
@@ -1618,6 +1619,7 @@ fn texture_export_result(meta: &DcmTextureMeta, payload: Vec<u8>) -> TextureExpo
         match meta.content_kind {
             dcmnorm::dicom_io::ContentKind::Volume => "volume",
             dcmnorm::dicom_io::ContentKind::Image2D => "image2d",
+            dcmnorm::dicom_io::ContentKind::FrameStack => "framestack",
         },
         match meta.sample_format {
             dcmnorm::dicom_io::SampleFormat::Int16 => "int16",
@@ -1721,13 +1723,96 @@ impl Task for ExportFrameTextureTask {
 /// Packs a single frame's raw (unwindowed) physical values as a depth-1 "1-slice volume" texture
 /// - lets a large diagnostic 2D image (e.g. DX/CR/mammography) reuse the exact same client GPU
 /// texture/shader pipeline as an MPR volume, instead of the lossy zoomed-JPEG path `renderFrame`
-/// produces. Mirrors `dcmnorm --render-frame ... --output-type texture file.dcm out.sbtex`.
+/// produces. Mirrors `dcmnorm --render-frame ... --output-type texture file.dcm out.gputex`.
 #[napi]
 pub fn export_frame_texture(file_path: String, options: Option<ExportFrameTextureOptions>) -> AsyncTask<ExportFrameTextureTask> {
     AsyncTask::new(ExportFrameTextureTask {
         file_path: PathBuf::from(file_path),
         options: options.unwrap_or_default(),
     })
+}
+
+// ---------------------------------------------------------------------------------------------
+// Texture export: exportFrameStackTexture
+// ---------------------------------------------------------------------------------------------
+//
+// One entry per source FILE, not per frame - a cine/multiframe instance uses ONE source with
+// several frameIndices (its file is parsed once, however many of its frames end up in the
+// stack), while a multi-image series uses one source per instance file (frameIndices defaulting
+// to just [0]). Either way, the resulting layer order is the flattened source order followed by
+// each source's own frameIndices order - the caller (render-server) is responsible for supplying
+// sources in the exact order the client's own frame/instance index expects, since a mismatch here
+// would silently show the wrong layer for a given index client-side.
+
+#[napi(object)]
+pub struct FrameStackSource {
+    pub file_path: String,
+    /// Zero-based frame indices to include from this file, in order. Defaults to `[0]`.
+    pub frame_indices: Option<Vec<u32>>,
+}
+
+#[napi(object)]
+#[derive(Default)]
+pub struct ExportFrameStackTextureOptions {
+    /// 'gzip' (default) or 'none'.
+    pub compression: Option<String>,
+    pub window_center: Option<f64>,
+    pub window_width: Option<f64>,
+}
+
+pub struct ExportFrameStackTextureTask {
+    sources: Vec<FrameStackSource>,
+    options: ExportFrameStackTextureOptions,
+}
+
+impl Task for ExportFrameStackTextureTask {
+    type Output = TextureExportResult;
+    type JsValue = TextureExportResult;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        guarded(|| {
+            let compression = parse_texture_compression(self.options.compression.as_deref())?;
+            let default_window = match (self.options.window_center, self.options.window_width) {
+                (Some(center), Some(width)) => Some((center, width)),
+                _ => None,
+            };
+
+            // Read each distinct source file exactly once, regardless of how many frame indices
+            // it contributes - avoids re-parsing the same multi-MB file per frame for a cine loop.
+            let objects = self
+                .sources
+                .iter()
+                .map(|source| read_dicom_file(PathBuf::from(&source.file_path)).map_err(to_napi_err))
+                .collect::<Result<Vec<_>>>()?;
+
+            let mut frame_refs: Vec<(&dicom_object::DefaultDicomObject, usize)> = Vec::new();
+            for (source, object) in self.sources.iter().zip(objects.iter()) {
+                let indices = source.frame_indices.clone().unwrap_or_else(|| vec![0]);
+                for index in indices {
+                    frame_refs.push((object, index as usize));
+                }
+            }
+
+            let packed = dcm_pack_dicom_frame_stack_texture(&frame_refs, default_window, compression).map_err(to_napi_err)?;
+            Ok(texture_export_result(&packed.meta, packed.payload))
+        })
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(output)
+    }
+}
+
+/// Packs several independent frames (from one or more files) as one texture-array upload - see
+/// `dcmnorm::dicom_io::pack_frame_stack_texture`'s own doc for the full contract (no resampling,
+/// no cross-layer interpolation, no physical geometry). Mirrors `exportFrameTexture`'s
+/// options/result shape, generalized to many sources.
+#[napi]
+pub fn export_frame_stack_texture(
+    sources: Vec<FrameStackSource>,
+    options: Option<ExportFrameStackTextureOptions>,
+) -> AsyncTask<ExportFrameStackTextureTask> {
+    AsyncTask::new(ExportFrameStackTextureTask { sources, options: options.unwrap_or_default() })
 }
 
 // ---------------------------------------------------------------------------------------------

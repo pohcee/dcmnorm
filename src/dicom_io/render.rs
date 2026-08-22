@@ -1480,6 +1480,16 @@ fn decode_grayscale_values(
     metadata: &RenderMetadata,
 ) -> Result<Vec<f64>, RenderError> {
     let _scope = perf::scope("render.decode_grayscale_values");
+    // render_dicom_frame's own samples_per_pixel dispatch (1 => here, 3 => render_rgb_frame)
+    // already guarantees this for its two callers - this is a safety net for
+    // decode_frame_grayscale_values (the texture-export path's own entry point below), which has
+    // no such dispatch and previously called straight into here regardless of pixel layout. A
+    // true multi-channel (RGB/YBR) frame's bytes are 3x this function's expected pixel_count and
+    // interleaved besides - reading them as single-channel samples doesn't fail loudly, it just
+    // silently produces a badly aliased/banded image, which is worse than an explicit error here.
+    if metadata.samples_per_pixel > 1 {
+        return Err(RenderError::UnsupportedSamplesPerPixel(metadata.samples_per_pixel));
+    }
     let pixel_count = usize::from(metadata.rows) * usize::from(metadata.cols);
 
     match metadata.bits_allocated {

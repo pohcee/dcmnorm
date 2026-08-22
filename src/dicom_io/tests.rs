@@ -155,6 +155,7 @@ use super::{
     Jpeg2000Backend, MoveScuOptions, RenderError, RenderOutputFormat, RenderPipelineOptions,
     ScpHandlers, ScpOptions, StoreScuOptions,
     build_volume, reformat_plane, Interpolation, PlaneParams, SlabProjection, VolumeError,
+    pack_dicom_frame_stack_texture, pack_dicom_frame_texture, ContentKind, TextureCompression, TextureExportError,
 };
 
 #[test]
@@ -3599,3 +3600,54 @@ fn build_volume_rejects_a_non_parallel_orientation_in_the_stack() {
     }
 }
 
+
+#[test]
+fn pack_dicom_frame_texture_rejects_a_color_instance_instead_of_misreading_it_as_grayscale() {
+    // us.dcm is a real RGB (SamplesPerPixel=3) fixture - the texture-export path has no notion
+    // of a multi-channel pixel layout, and previously read straight past it as if it were
+    // single-channel samples, producing a badly aliased/garbled image instead of an error.
+    let source = fixture_bytes(fixture_path("us.dcm"));
+    let object = read_dicom_bytes(&source).unwrap();
+
+    let result = pack_dicom_frame_texture(&object, 0, None, None, TextureCompression::None);
+    assert!(
+        matches!(result, Err(TextureExportError::Render(RenderError::UnsupportedSamplesPerPixel(3)))),
+        "expected UnsupportedSamplesPerPixel(3), got {result:?}"
+    );
+}
+
+#[test]
+fn pack_dicom_frame_stack_texture_packs_multiple_sources_as_layers_in_order() {
+    // Same real fixture used twice as two distinct "sources" - a stand-in for a multi-image
+    // series' two instance files (each contributing frame 0) - exercises the actual
+    // read_dicom_file/decode_frame_grayscale_values path this function is a thin wrapper over,
+    // not just the pure pack_frame_stack_texture(&[DecodedFrame]) logic already covered in
+    // texture_export.rs's own unit tests.
+    let source = fixture_bytes(fixture_path("dx.dcm"));
+    let object = read_dicom_bytes(&source).unwrap();
+    let sources = [(&object, 0usize), (&object, 0usize)];
+
+    let packed = pack_dicom_frame_stack_texture(&sources, None, TextureCompression::None).unwrap();
+    assert_eq!(packed.meta.content_kind, ContentKind::FrameStack);
+    assert_eq!(packed.meta.depth, 2);
+    assert!(!packed.meta.downsampled);
+    // Both layers came from the same frame, so they must be byte-identical.
+    let layer_bytes = packed.payload.len() / 2;
+    assert_eq!(packed.payload[..layer_bytes], packed.payload[layer_bytes..]);
+}
+
+#[test]
+fn pack_dicom_frame_stack_texture_fails_closed_if_any_source_is_a_color_instance() {
+    // A stack with one grayscale source and one RGB source (us.dcm, SamplesPerPixel=3) must
+    // reject the WHOLE stack, not silently drop just the color frame - matching
+    // pack_dicom_frame_texture's own single-frame rejection above.
+    let grayscale = read_dicom_bytes(&fixture_bytes(fixture_path("dx.dcm"))).unwrap();
+    let color = read_dicom_bytes(&fixture_bytes(fixture_path("us.dcm"))).unwrap();
+    let sources = [(&grayscale, 0usize), (&color, 0usize)];
+
+    let result = pack_dicom_frame_stack_texture(&sources, None, TextureCompression::None);
+    assert!(
+        matches!(result, Err(TextureExportError::Render(RenderError::UnsupportedSamplesPerPixel(3)))),
+        "expected UnsupportedSamplesPerPixel(3), got {result:?}"
+    );
+}

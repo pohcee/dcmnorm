@@ -710,6 +710,7 @@ module.exports.buildVolume = nativeBinding.buildVolume
 module.exports.checkDicom = nativeBinding.checkDicom
 module.exports.echoScu = nativeBinding.echoScu
 module.exports.editTags = nativeBinding.editTags
+module.exports.exportFrameStackTexture = nativeBinding.exportFrameStackTexture
 module.exports.exportFrameTexture = nativeBinding.exportFrameTexture
 module.exports.findScu = nativeBinding.findScu
 module.exports.moveScu = nativeBinding.moveScu

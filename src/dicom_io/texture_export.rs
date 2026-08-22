@@ -29,6 +29,11 @@ pub enum TextureExportError {
     /// `values.len()` didn't match the declared `width * height` (or `width * height * depth`).
     SampleCountMismatch { expected: usize, found: usize },
     InvalidDimensions,
+    /// A frame stack's frames didn't all share the same width/height - unlike `Volume`'s slices
+    /// (guaranteed consistent Rows/Columns within a series by `build_volume`), frame-stack
+    /// sources may come from independently-selected instances, so this is checked explicitly
+    /// rather than assumed.
+    FrameDimensionMismatch { expected: (u32, u32), found: (u32, u32) },
 }
 
 impl fmt::Display for TextureExportError {
@@ -41,6 +46,12 @@ impl fmt::Display for TextureExportError {
                 "texture export sample count ({found}) does not match its declared dimensions ({expected} expected)"
             ),
             Self::InvalidDimensions => write!(formatter, "texture export dimensions must all be non-zero"),
+            Self::FrameDimensionMismatch { expected, found } => write!(
+                formatter,
+                "frame stack texture export requires every frame to share the same dimensions \
+                 ({}x{} expected, found {}x{})",
+                expected.0, expected.1, found.0, found.1
+            ),
         }
     }
 }
@@ -86,6 +97,12 @@ impl SampleFormat {
 pub enum ContentKind {
     Volume,
     Image2D,
+    /// Layers of independent original frames (a non-MPR-eligible multi-image series, or a
+    /// multi-frame cine instance), uploaded once as a texture array. Distinct from `Volume` on
+    /// purpose: `origin`/`row_dir`/`col_dir`/spacing carry no meaning for this kind (see
+    /// `pack_frame_stack_texture`) - there is no physical/spatial claim being made, only "many
+    /// frames, picked by index."
+    FrameStack,
 }
 
 impl ContentKind {
@@ -93,6 +110,7 @@ impl ContentKind {
         match self {
             Self::Volume => "volume",
             Self::Image2D => "image2d",
+            Self::FrameStack => "framestack",
         }
     }
 }
@@ -251,6 +269,26 @@ pub fn quantize_samples(raw: &[f32]) -> (Vec<u8>, SampleFormat, f64, f64, bool) 
     (bytes, SampleFormat::Uint16, slope, intercept, false)
 }
 
+/// Falls back to a min/max-spanning window (`center = (min+max)/2`, `width = max(max-min, 1)`)
+/// when the caller didn't supply an explicit default window - the exact same span
+/// `normalize_to_u8` (`super::render`) uses for the old JPEG path's own last-resort fallback when
+/// an instance has neither a caller override nor its own `WindowCenter`/`WindowWidth` tags.
+/// Without this, `default_window_center`/`width` stay `None` and the GPU shader's own hardcoded
+/// default (`center=0, width=1`) clips nearly all real (non-zero-centered) pixel data to white.
+fn min_max_window(raw: &[f32]) -> (f64, f64) {
+    let mut min = f64::INFINITY;
+    let mut max = f64::NEG_INFINITY;
+    for &sample in raw {
+        let value = sample as f64;
+        min = min.min(value);
+        max = max.max(value);
+    }
+    if !min.is_finite() || !max.is_finite() {
+        return (0.0, 1.0);
+    }
+    ((min + max) / 2.0, (max - min).max(1.0))
+}
+
 fn apply_compression(quantized: Vec<u8>, compression: TextureCompression) -> Result<(Vec<u8>, u64), TextureExportError> {
     let payload_bytes_raw = quantized.len() as u64;
     let payload = match compression {
@@ -294,6 +332,7 @@ pub fn pack_volume_texture(
     }
 
     let (quantized, sample_format, rescale_slope, rescale_intercept, lossless) = quantize_samples(&raw);
+    let default_window = default_window.or_else(|| Some(min_max_window(&raw)));
     let (payload, payload_bytes_raw) = apply_compression(quantized, compression)?;
     let payload_bytes_stored = payload.len() as u64;
 
@@ -416,6 +455,7 @@ pub fn pack_frame_texture(
     };
 
     let (quantized, sample_format, rescale_slope, rescale_intercept, lossless) = quantize_samples(&raw);
+    let default_window = default_window.or_else(|| Some(min_max_window(&raw)));
     let (payload, payload_bytes_raw) = apply_compression(quantized, compression)?;
     let payload_bytes_stored = payload.len() as u64;
 
@@ -464,6 +504,119 @@ pub fn pack_dicom_frame_texture(
     let (metadata, values) = decode_frame_grayscale_values(object, frame_index)?;
     let raw: Vec<f32> = values.into_iter().map(|value| value as f32).collect();
     pack_frame_texture(&raw, metadata.cols as u32, metadata.rows as u32, default_window, target_max_dim, compression)
+}
+
+/// One already-decoded 2D frame, as input to `pack_frame_stack_texture` - the frame-stack analog
+/// of `pack_frame_texture`'s bare `values`/`width`/`height` triple, bundled into a struct since a
+/// stack takes many of them at once.
+#[derive(Clone, Debug)]
+pub struct DecodedFrame {
+    pub values: Vec<f32>,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Packs `frames` - independent original frames, in caller-supplied order (this order becomes
+/// the texture array's own layer order, and must match the client's own frame-index ordering, so
+/// scrolling/cine playback picks the right layer) - as one texture array upload: no cross-layer
+/// interpolation, no physical geometry, just "many same-sized frames, picked by index."
+///
+/// Deliberately DOES NOT resample/downsample: unlike `pack_volume_texture`'s `target_max_dim`,
+/// there is no size-reduction path here at all. A stack that would be too large to upload is the
+/// caller's job to reject BEFORE calling this (see the render-server's size-ceiling guard) - once
+/// a frame is in the stack, it is exactly the source frame, which matters for cine playback where
+/// a resampled frame could visibly differ from what per-tick server JPEG rendering already showed
+/// during the mid-playback swap.
+///
+/// All frames must share the same width/height (`FrameDimensionMismatch` otherwise) - DICOM
+/// guarantees this within a series' Rows/Columns in practice, but frame-stack sources aren't
+/// necessarily from a single geometrically-consistent series (that's exactly the case real MPR
+/// volumes reject and this tier exists to still serve), so it's checked explicitly rather than
+/// assumed.
+pub fn pack_frame_stack_texture(
+    frames: &[DecodedFrame],
+    default_window: Option<(f64, f64)>,
+    compression: TextureCompression,
+) -> Result<PackedTexture, TextureExportError> {
+    let Some(first) = frames.first() else {
+        return Err(TextureExportError::InvalidDimensions);
+    };
+    let (width, height) = (first.width, first.height);
+    if width == 0 || height == 0 {
+        return Err(TextureExportError::InvalidDimensions);
+    }
+    let expected_per_frame = width as usize * height as usize;
+
+    let mut concatenated = Vec::with_capacity(expected_per_frame * frames.len());
+    for frame in frames {
+        if frame.width != width || frame.height != height {
+            return Err(TextureExportError::FrameDimensionMismatch {
+                expected: (width, height),
+                found: (frame.width, frame.height),
+            });
+        }
+        if frame.values.len() != expected_per_frame {
+            return Err(TextureExportError::SampleCountMismatch { expected: expected_per_frame, found: frame.values.len() });
+        }
+        concatenated.extend_from_slice(&frame.values);
+    }
+
+    let depth = frames.len() as u32;
+    let native_dims = (width, height, depth);
+
+    let (quantized, sample_format, rescale_slope, rescale_intercept, lossless) = quantize_samples(&concatenated);
+    let default_window = default_window.or_else(|| Some(min_max_window(&concatenated)));
+    let (payload, payload_bytes_raw) = apply_compression(quantized, compression)?;
+    let payload_bytes_stored = payload.len() as u64;
+
+    let meta = TextureMeta {
+        content_kind: ContentKind::FrameStack,
+        sample_format,
+        compression,
+        lossless,
+        width,
+        height,
+        depth,
+        rescale_slope,
+        rescale_intercept,
+        // No physical geometry, ever - see the module doc and ContentKind::FrameStack. Kept at
+        // the same identity/zero values pack_frame_texture uses for its own non-volume case.
+        row_spacing_mm: 1.0,
+        col_spacing_mm: 1.0,
+        slice_spacing_mm: 0.0,
+        origin: [0.0, 0.0, 0.0],
+        row_dir: [1.0, 0.0, 0.0],
+        col_dir: [0.0, 1.0, 0.0],
+        normal_dir: [0.0, 0.0, 1.0],
+        default_window_center: default_window.map(|(center, _)| center),
+        default_window_width: default_window.map(|(_, width)| width),
+        native_dims,
+        downsampled: false,
+        payload_bytes_raw,
+        payload_bytes_stored,
+    };
+
+    Ok(PackedTexture { meta, payload })
+}
+
+/// Convenience wrapper mirroring `pack_dicom_frame_texture`: decodes `(object, frame_index)` for
+/// each entry of `sources` and packs the result as a frame stack. A source repeated with
+/// different frame indices (same multi-frame object, decoded once per index by the caller) is
+/// exactly how a cine instance's own frames become a stack; one entry per distinct object (each
+/// at frame_index 0) is exactly how a multi-image series' instances become a stack - this
+/// function doesn't need to know which case it's in, since both reduce to the same flat list.
+pub fn pack_dicom_frame_stack_texture(
+    sources: &[(&dicom_object::DefaultDicomObject, usize)],
+    default_window: Option<(f64, f64)>,
+    compression: TextureCompression,
+) -> Result<PackedTexture, TextureExportError> {
+    let mut decoded = Vec::with_capacity(sources.len());
+    for (object, frame_index) in sources {
+        let (metadata, values) = decode_frame_grayscale_values(object, *frame_index)?;
+        let raw: Vec<f32> = values.into_iter().map(|value| value as f32).collect();
+        decoded.push(DecodedFrame { values: raw, width: metadata.cols as u32, height: metadata.rows as u32 });
+    }
+    pack_frame_stack_texture(&decoded, default_window, compression)
 }
 
 #[cfg(test)]
@@ -646,6 +799,29 @@ mod tests {
     }
 
     #[test]
+    fn pack_frame_texture_without_a_default_window_falls_back_to_min_max_span() {
+        // Values 0..15 (min=0, max=15) with no caller-supplied window - must NOT leave
+        // default_window_center/width as None (the GPU shader's own hardcoded center=0/width=1
+        // fallback would clip nearly everything to white for real, non-zero-centered pixel data).
+        let width = 4u32;
+        let height = 4u32;
+        let values: Vec<f32> = (0..width * height).map(|index| index as f32).collect();
+        let packed = pack_frame_texture(&values, width, height, None, None, TextureCompression::None).unwrap();
+        assert_eq!(packed.meta.default_window_center, Some(7.5));
+        assert_eq!(packed.meta.default_window_width, Some(15.0));
+    }
+
+    #[test]
+    fn pack_volume_texture_without_a_default_window_falls_back_to_min_max_span() {
+        let volume = axis_aligned_test_volume(2, 2, 2);
+        let packed = pack_volume_texture(&volume, None, None, TextureCompression::None).unwrap();
+        // axis_aligned_test_volume fills samples as `index - 1024.0` over 2*2*2=8 voxels (indices
+        // 0..7), so min=-1024.0, max=-1017.0.
+        assert_eq!(packed.meta.default_window_center, Some((-1024.0 + -1017.0) / 2.0));
+        assert_eq!(packed.meta.default_window_width, Some(7.0));
+    }
+
+    #[test]
     fn texture_meta_to_json_round_trips_expected_fields() {
         let volume = axis_aligned_test_volume(2, 2, 2);
         let packed = pack_volume_texture(&volume, None, Some((40.0, 400.0)), TextureCompression::Gzip).unwrap();
@@ -657,5 +833,76 @@ mod tests {
         assert_eq!(json["defaultWindowCenter"], 40.0);
         assert_eq!(json["defaultWindowWidth"], 400.0);
         assert_eq!(json["nativeDims"], serde_json::json!([2, 2, 2]));
+    }
+
+    fn ramp_frame(width: u32, height: u32, base: f32) -> DecodedFrame {
+        let values = (0..width * height).map(|index| base + index as f32).collect();
+        DecodedFrame { values, width, height }
+    }
+
+    #[test]
+    fn pack_frame_stack_texture_concatenates_layers_in_source_order() {
+        let frames = vec![ramp_frame(2, 2, 0.0), ramp_frame(2, 2, 100.0), ramp_frame(2, 2, 200.0)];
+        let packed = pack_frame_stack_texture(&frames, None, TextureCompression::None).unwrap();
+        assert_eq!(packed.meta.content_kind, ContentKind::FrameStack);
+        assert_eq!((packed.meta.width, packed.meta.height, packed.meta.depth), (2, 2, 3));
+        assert_eq!(packed.meta.native_dims, (2, 2, 3));
+        assert!(!packed.meta.downsampled);
+        // Each layer is exactly 2*2=4 int16 samples (values are all integral here, so this is the
+        // exact/lossless quantize_samples path) - verify layer 1 (base=100) lands at the expected
+        // byte offset, not interleaved or reordered relative to layer 0/2.
+        assert!(packed.meta.lossless);
+        let layer1_offset = 1 * 4 * 2; // layer index * samples-per-layer * bytes-per-sample
+        let value = i16::from_le_bytes(packed.payload[layer1_offset..layer1_offset + 2].try_into().unwrap());
+        assert_eq!(value, 100);
+    }
+
+    #[test]
+    fn pack_frame_stack_texture_never_carries_physical_geometry() {
+        let frames = vec![ramp_frame(2, 2, 0.0), ramp_frame(2, 2, 1.0)];
+        let packed = pack_frame_stack_texture(&frames, None, TextureCompression::None).unwrap();
+        assert_eq!(packed.meta.origin, [0.0, 0.0, 0.0]);
+        assert_eq!(packed.meta.slice_spacing_mm, 0.0);
+        assert_eq!(packed.meta.row_dir, [1.0, 0.0, 0.0]);
+        assert_eq!(packed.meta.col_dir, [0.0, 1.0, 0.0]);
+    }
+
+    #[test]
+    fn pack_frame_stack_texture_rejects_mismatched_frame_dimensions() {
+        let frames = vec![ramp_frame(2, 2, 0.0), ramp_frame(3, 2, 0.0)];
+        let error = pack_frame_stack_texture(&frames, None, TextureCompression::None).unwrap_err();
+        assert!(matches!(
+            error,
+            TextureExportError::FrameDimensionMismatch { expected: (2, 2), found: (3, 2) }
+        ));
+    }
+
+    #[test]
+    fn pack_frame_stack_texture_rejects_an_empty_stack() {
+        let error = pack_frame_stack_texture(&[], None, TextureCompression::None).unwrap_err();
+        assert!(matches!(error, TextureExportError::InvalidDimensions));
+    }
+
+    #[test]
+    fn pack_frame_stack_texture_never_downsamples_even_when_large() {
+        // No target_max_dim parameter exists at all for this function (see its own doc) - a
+        // frame larger than any volume/image2d target_max_dim ceiling used elsewhere in this
+        // module must still come out at native resolution, unlike pack_volume_texture/
+        // pack_frame_texture which would shrink it.
+        let frames = vec![ramp_frame(16, 16, 0.0)];
+        let packed = pack_frame_stack_texture(&frames, None, TextureCompression::None).unwrap();
+        assert_eq!((packed.meta.width, packed.meta.height), (16, 16));
+        assert!(!packed.meta.downsampled);
+    }
+
+    #[test]
+    fn pack_frame_stack_texture_default_window_spans_the_whole_stack_not_just_one_layer() {
+        // base offsets 0/100/200 over a 2x2 ramp (values 0..3, 100..103, 200..203) - the fallback
+        // min/max window must reflect the FULL concatenated range (0..203), not get reset/
+        // overwritten by whichever layer happens to be processed last.
+        let frames = vec![ramp_frame(2, 2, 0.0), ramp_frame(2, 2, 100.0), ramp_frame(2, 2, 200.0)];
+        let packed = pack_frame_stack_texture(&frames, None, TextureCompression::None).unwrap();
+        assert_eq!(packed.meta.default_window_center, Some((0.0 + 203.0) / 2.0));
+        assert_eq!(packed.meta.default_window_width, Some(203.0));
     }
 }
