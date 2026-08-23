@@ -148,7 +148,10 @@ To install every CLI under `exec/` with one command, use the helper script inste
 
 This script auto-detects Kakadu headers/libraries and enables `kakadu-ffi` when available,
 and verifies the default codec toolchain (`pkg-config`, `clang`, standard C headers, and the
-FFmpeg development packages above) before invoking Cargo.
+FFmpeg development packages above) before invoking Cargo. If it detects Claude Code on the
+machine (an existing `~/.claude` directory), it also installs the [`skills/dcmnorm`](skills/dcmnorm/)
+skill to `~/.claude/skills/dcmnorm` — set `DCMNORM_SKIP_SKILL=1` to skip this, or
+`CLAUDE_SKILLS_DIR` to install elsewhere (and to force the install even without `~/.claude`).
 
 Either method installs into Cargo's bin directory, usually `~/.cargo/bin`. If that isn't on
 your `PATH` yet, add:
@@ -186,6 +189,20 @@ Or, generally:
 
 ```bash
 curl -sSL pohcee.com/dcmnorm | sh
+```
+
+This script also installs the `dcmnorm` Claude Code skill (downloaded from this repo's
+`skills/dcmnorm/SKILL.md`) if it detects Claude Code on the machine — same `DCMNORM_SKIP_SKILL`/
+`CLAUDE_SKILLS_DIR` overrides as above.
+
+On Debian/Ubuntu (`linux-x86_64` only), pass `--deb` to install a downloaded `.deb` package via
+`apt install` instead of copying binaries into `INSTALL_DIR` — this resolves runtime dependencies
+(`ffmpeg`, `ca-certificates`) automatically and needs root (the script `sudo`s automatically if not
+already running as root):
+
+```bash
+./scripts/install-release.sh --deb
+./scripts/install-release.sh 0.2.1 --deb
 ```
 
 ## Docker
@@ -249,9 +266,9 @@ Release flow:
 1. Run the **SemVer Tag** workflow from the Actions tab and choose `patch`, `minor`, or `major`.
 2. The workflow pushes a new version tag (for example `v0.1.1`).
 3. The **Build and Release CLIs** workflow is triggered by that tag and publishes, for each of `dcmnorm` and `dcmtalk`:
-    - `<name>-<tag>-linux-x86_64.tar.gz`
-    - `<name>-<tag>-linux-x86_64.tar.gz.sha256`
-    - `<name>-linux-x86_64.tar.gz` / `.sha256` (rolling "latest" alias, overwritten each release)
+    - `<name>-<tag>-linux-x86_64.tar.gz` (+ `.sha256`)
+    - `<name>-<tag>-linux-x86_64.deb` (+ `.sha256`) — built with [`cargo-deb`](https://github.com/kornelski/cargo-deb) from each exec crate's `[package.metadata.deb]`, `Depends:` on `ffmpeg`/`ca-certificates` plus whatever `cargo-deb`'s `$auto` detects from the linked shared libraries
+    - `<name>-linux-x86_64.tar.gz` / `.deb` + `.sha256` (rolling "latest" aliases, overwritten each release)
 
 Prereleases are supported in the SemVer tag workflow via the `prerelease` input.
 
@@ -602,6 +619,13 @@ Skip gzip compression (e.g. when the transport already compresses, such as a web
 ```bash
 dcmnorm --mpr axial series_dir/*.dcm volume.gputex --texture-compression none
 ```
+
+A third texture kind, `ContentKind::FrameStack` (`"framestack"` in the sidecar), packs several
+independent original frames — a cine instance's own frames, or one file per instance in a
+non-MPR-eligible multi-image series — as one texture-array upload with no resampling and no
+physical geometry (`rowSpacing`/`origin`/etc. are meaningless for this kind). It has no CLI
+invocation today; it's exposed only via the Node bindings' `exportFrameStackTexture` — see
+[`bindings/node`](bindings/node/)'s own README.
 
 ### Render a Multiplanar Reformation (MPR)
 

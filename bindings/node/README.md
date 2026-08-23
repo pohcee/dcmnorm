@@ -46,6 +46,67 @@ npm test             # runs test/smoke.js against the fixtures in ../../test/fil
   — renders every frame of a multiframe instance to an MP4 (requires `ffmpeg` on `PATH`). Does not
   currently support the overlay options `renderFrame` does.
 
+### MPR (Multiplanar Reformation)
+
+- `buildVolume(filePaths: string[]): Promise<DicomVolumeHandle>` — reads and decodes every slice
+  of a parallel stack (e.g. one CT/MR/PT series), spatially re-sorted by `ImagePositionPatient`
+  regardless of input order. Rejects fewer than 2 files, mismatched Rows/Columns, or a
+  non-parallel/gantry-tilt-inconsistent stack. This is the expensive step — build once per series
+  and keep the returned handle resident (e.g. in a volume cache) so every subsequent `reformat()`
+  call is cheap.
+- `DicomVolumeHandle` — an opaque, read-only handle around the built volume:
+  - getters: `rows`, `cols`, `numSlices`, `nativeBasis` (`[rowDir(3), colDir(3)]`, the volume's own
+    acquisition-native orientation — a reasonable seed for an "axial" reformat), `center`
+    (`[x,y,z]` LPS mm, the volume's physical center), `minSpacingMm` (its smallest voxel
+    dimension, a reasonable default output spacing)
+  - `reformat(options): Promise<RenderedFrame>` — resamples one plane through the volume and
+    encodes it exactly like `renderFrame`'s output shape, so callers reuse their existing
+    image-display code path. `options`: `{ origin: number[3], rowDir: number[3], colDir: number[3],
+    outputWidth, outputHeight, spacingMm, windowCenter?, windowWidth?, format?: 'jpeg'|'png',
+    jpegQuality?, interpolation?: 'trilinear'|'nearest', slabThicknessMm?, slabProjection?:
+    'mip'|'minip'|'average' }`. `interpolation` defaults to `'trilinear'`; use `'nearest'` (faster)
+    for a live-drag preview frame. `slabThicknessMm` (default 0, an infinitely-thin plane) turns on
+    a thick-slab reformat centered on `origin`, combined per `slabProjection` (default `'mip'`).
+  - `exportTexture(options?): Promise<TextureExportResult>` — see
+    [Texture export](#texture-export) below.
+
+### Texture export
+
+Packs a volume, a single frame, or several independent frames as a lossless, GPU-upload-ready
+payload (16-bit samples, row-major, optionally gzip-compressed) instead of an 8-bit windowed
+render — the client does its own window/level and oblique reslicing in a GPU shader instead of
+round-tripping to the server per interaction. Mirrors the CLI's `--output-type texture`/`.gputex`
+(`exportTexture`/`exportFrameTexture`) — see the main [README](../../README.md#export-a-gpu-texture-gputex)
+and `dcmnorm::dicom_io::texture_export`'s own module doc for the full format contract.
+
+- `DicomVolumeHandle.exportTexture(options?: { targetMaxDim?, compression?: 'gzip'|'none', windowCenter?, windowWidth? }): Promise<TextureExportResult>`
+  — packs the volume's own NATIVE voxel lattice (not a resampled oblique plane — that's
+  `reformat()`). `targetMaxDim` caps the longest of width/height/depth, proportionally
+  downsampling (trilinear) if the native volume exceeds it; omitted means full native resolution.
+  `compression` defaults to `'gzip'`. `windowCenter`/`windowWidth` are purely informational,
+  carried through to the result for the client's initial render — the exported samples are never
+  windowed.
+- `exportFrameTexture(filePath, options?: { frameIndex?, targetMaxDim?, compression?, windowCenter?, windowWidth? }): Promise<TextureExportResult>`
+  — packs one decoded 2D frame as a depth-1 "1-slice volume" texture, so a large diagnostic 2D
+  image (DX/CR/mammography) can reuse the same client GPU texture/shader pipeline as an MPR
+  volume. `frameIndex` defaults to 0.
+- `exportFrameStackTexture(sources: FrameStackSource[], options?: { compression?, windowCenter?, windowWidth? }): Promise<TextureExportResult>`
+  — packs several independent original frames (no resampling, no cross-layer interpolation, no
+  physical geometry) as one texture-array upload: a cine/multiframe instance supplies one source
+  with several `frameIndices` (its file is parsed once), a multi-image series supplies one source
+  per instance file (`frameIndices` defaulting to `[0]`). `FrameStackSource` is `{ filePath,
+  frameIndices?: number[] }`. The result's layer order is the flattened source order followed by
+  each source's own `frameIndices` order — callers must supply sources in the exact order the
+  client's own frame/instance index expects. This has no CLI equivalent — it's Node-bindings-only.
+- `TextureExportResult`: `{ contentKind: 'volume'|'image2d'|'framestack', sampleFormat:
+  'int16'|'uint16', compression: 'none'|'gzip', lossless, width, height, depth, rescaleSlope,
+  rescaleIntercept, rowSpacingMm, colSpacingMm, sliceSpacingMm, origin: number[3], rowDir:
+  number[3], colDir: number[3], normalDir: number[3], defaultWindowCenter?, defaultWindowWidth?,
+  nativeWidth, nativeHeight, nativeDepth, downsampled, payloadBytesRaw, payloadBytesStored, data:
+  Buffer }`. `texel * rescaleSlope + rescaleIntercept` recovers the physical value (e.g. HU).
+  Geometry fields (`rowSpacingMm`/`origin`/`rowDir`/etc.) carry no meaning for `contentKind:
+  'framestack'` — only `'volume'` makes a real spatial claim.
+
 All return values that carry data are JSON strings — parse them JS-side. This
 sidesteps a napi-rs constraint (`Task::JsValue` requires `TypeName`, which
 `serde_json::Value` doesn't implement) and matches how the CLI already talks

@@ -38,11 +38,22 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install cargo-deb
+        shell: bash
+        run: cargo install cargo-deb --locked
+
       - name: Build release binaries
         shell: bash
         run: |
           set -euo pipefail
           cargo build --package dcmnorm-cli --package dcmtalk --release
+
+      - name: Build .deb packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo deb --no-build -p dcmnorm-cli
+          cargo deb --no-build -p dcmtalk
 
       - name: Package release artifacts
         id: package
@@ -70,6 +81,22 @@ jobs:
             sha256sum "$LATEST_ARCHIVE" > "$LATEST_CHECKSUM"
 
             FILES+=("$ARCHIVE" "$CHECKSUM" "$LATEST_ARCHIVE" "$LATEST_CHECKSUM")
+
+            # cargo-deb names the file `<name>_<version>-<deb-revision>_<arch>.deb`; glob for it
+            # rather than hardcoding the version/revision/arch.
+            DEB_SRC="$(ls target/debian/${BINARY_NAME}_*.deb)"
+            DEB="${BINARY_NAME}-${TAG}-linux-x86_64.deb"
+            DEB_CHECKSUM="${DEB}.sha256"
+            LATEST_DEB="${BINARY_NAME}-linux-x86_64.deb"
+            LATEST_DEB_CHECKSUM="${LATEST_DEB}.sha256"
+
+            cp "$DEB_SRC" "$DEB"
+            sha256sum "$DEB" > "$DEB_CHECKSUM"
+
+            cp "$DEB" "$LATEST_DEB"
+            sha256sum "$LATEST_DEB" > "$LATEST_DEB_CHECKSUM"
+
+            FILES+=("$DEB" "$DEB_CHECKSUM" "$LATEST_DEB" "$LATEST_DEB_CHECKSUM")
           done
 
           {

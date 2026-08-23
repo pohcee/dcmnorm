@@ -25,8 +25,10 @@ The operation is **inferred from the file extensions** of INPUT and OUTPUT:
 | `.dcm` | `.dcm` | DICOM → DICOM (edit / transcode) |
 | `.dcm` | `.png` / `.jpg` / `.raw` | Render a frame to an image |
 | `.dcm` | `.mp4` / `.mov` | Render frames to MPEG4 video |
+| `.dcm` (+ `--mpr`) | `.png` / `.dcm` / `.nii(.gz)` / `.nrrd` | Multiplanar reformation — see [MPR](#multiplanar-reformation-mpr) below |
+| `.dcm` | `.gputex` | Lossless GPU texture export — see [GPU texture export](#gpu-texture-export-gputex) below |
 
-When extensions are missing or misleading, override detection with `--input-type dicom|json` and `--output-type dicom|json|raw|png|jpeg|mpeg4`.
+When extensions are missing or misleading, override detection with `--input-type dicom|json` and `--output-type dicom|json|raw|png|jpeg|mpeg4|texture`.
 
 ## Reading / inspecting DICOM
 
@@ -148,6 +150,39 @@ Burn redaction boxes over the pixels (e.g. to mask burned-in PHI). Coordinates a
 dcmnorm --redact-box 10,10,200,40 --redact-box -110,-60,100,50 \
         --redact-color '#000000' us.dcm redacted.png
 ```
+
+## Multiplanar Reformation (MPR)
+
+`--mpr` combines multiple slice files from one parallel stack (e.g. a CT/MR/PT series) into a 3D volume — honoring real `ImagePositionPatient`/`ImageOrientationPatient`/spacing, not just stacking images — and reformats a plane or a whole stack of planes out of it. Give it every slice file as INPUT with the last path as OUTPUT (shell globs work as usual):
+
+```bash
+dcmnorm --mpr axial series_dir/*.dcm axial.png
+dcmnorm --mpr coronal series_dir/*.dcm coronal.png
+dcmnorm --mpr 15,30,0 series_dir/*.dcm oblique.png   # YAW,PITCH,ROLL degrees, oblique camera
+```
+
+Useful modifiers (all require `--mpr`): `--mpr-origin X,Y,Z` (mm, defaults to volume center), `--mpr-depth MM` (offset along the plane's own normal), `--mpr-spacing MM` (output pixel size), `--mpr-thickness MM` + `--mpr-projection mip|minip|average` (thick-slab projection instead of an infinitely-thin plane).
+
+`--mpr-depth` also accepts a range (`START:END`, `START:END:STEP`, or `all`/`all:STEP`) to reformat a whole stack of slices instead of one plane — output extension decides the result shape: numbered PNGs, a proper multi-instance DICOM series (`.dcm`), or one whole-volume file (`.nii`/`.nii.gz`/`.nrrd`, float32 physical values, never 8-bit/windowed):
+
+```bash
+dcmnorm --mpr coronal --mpr-depth -40:40:2 series_dir/*.dcm coronal.dcm       # multi-instance DICOM series
+dcmnorm --mpr coronal --mpr-depth all --mpr-spacing 1 series_dir/*.dcm coronal.nii.gz
+```
+
+MPR mode is incompatible with `--filter`/`--transfer-syntax`/`--set`/`--remove`/`--render-all-frames`/`--render-fps`/`--scale-max-size`, and errors clearly (rather than silently mis-rendering) on an inconsistent/gantry-tilted stack.
+
+## GPU texture export (`.gputex`)
+
+`--output-type texture` (or a `.gputex` output extension) packs a frame or volume as a lossless, GPU-upload-ready payload — the raw `int16`/`uint16` sample lattice plus a `rescaleSlope`/`rescaleIntercept` pair for recovering physical values — instead of an 8-bit windowed render. Every export writes `OUTPUT` (payload bytes) plus `OUTPUT.json` (a metadata sidecar: dimensions, physical geometry, rescale slope/intercept, default window/level, compression):
+
+```bash
+dcmnorm frame.dcm frame.gputex                                       # single frame, depth-1 texture
+dcmnorm --mpr axial series_dir/*.dcm volume.gputex                   # whole series as one volume texture
+dcmnorm --mpr axial series_dir/*.dcm volume.gputex --texture-compression none  # skip gzip
+```
+
+`--texture-max-dim <N>` caps the longest axis (proportional downsample), for both a single-frame export and a `--mpr` volume export. A frame-stack variant (independent frames packed as a texture array, e.g. a cine loop's frames or one file per series instance, no resampling/physical geometry) exists only via the Node bindings' `exportFrameStackTexture` — no CLI flag for it yet.
 
 ## Tips
 

@@ -2,10 +2,22 @@
 name = "dcmtalk"
 version = "0.2.1"
 edition = "2021"
+authors = ["Jason Klotzer <jason@enlyt.com>"]
+license = "Apache-2.0"
+description = "DICOM network (DIMSE) CLI: echoscu/storescu/findscu/movescu/storescp"
 
 [[bin]]
 name = "dcmtalk"
 path = "src/main.rs"
+
+[package.metadata.deb]
+extended-description = """\
+A DIMSE (DICOM network) client/server covering the same ground as dcmtk's \
+echoscu/storescu/findscu/movescu/storescp, built on this repository's own DICOM Upper Layer \
+implementation."""
+depends = "$auto, ca-certificates, ffmpeg"
+section = "utils"
+priority = "optional"
 
 [dependencies]
 clap = { version = "4.6", features = ["derive"] }

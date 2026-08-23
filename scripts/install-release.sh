@@ -6,9 +6,23 @@ DEFAULT_VERSION="latest"
 MIN_SUPPORTED_VERSION="0.1.3"
 GITHUB_REPO="pohcee/dcmnorm"
 PLATFORM="linux-x86_64"
+INSTALL_METHOD="tarball"
 
-# Parse command line arguments
-VERSION="${1:-$DEFAULT_VERSION}"
+# Parse command line arguments: VERSION is the one positional argument, --deb/-h/--help are flags.
+VERSION="$DEFAULT_VERSION"
+for ARG in "$@"; do
+    case "$ARG" in
+        -h|--help)
+            HELP_REQUESTED=1
+            ;;
+        --deb)
+            INSTALL_METHOD="deb"
+            ;;
+        *)
+            VERSION="$ARG"
+            ;;
+    esac
+done
 
 # Detect platform if needed
 detect_platform() {
@@ -61,33 +75,57 @@ version_lt() {
 
 print_usage() {
     cat << EOF
-Usage: $0 [VERSION]
+Usage: $0 [VERSION] [--deb]
 
-Downloads and installs dcmnorm and dcmtalk from GitHub releases into $INSTALL_DIR.
+Downloads and installs dcmnorm and dcmtalk from GitHub releases.
+
+By default, downloads the platform tarball and copies the binaries into $INSTALL_DIR
+(no root needed). With --deb (Debian/Ubuntu, linux-x86_64 only), downloads the .deb
+package instead and installs it system-wide via 'apt install', which also resolves
+runtime dependencies (ffmpeg, ca-certificates) automatically; this needs root
+(sudo is used automatically if not already running as root).
 
 Arguments:
     VERSION       Version to install (default: latest GitHub release)
                                 If specified, must be >= $MIN_SUPPORTED_VERSION
+    --deb         Install via a downloaded .deb package instead of the tarball
 
 Examples:
     $0                        # Install latest release to $INSTALL_DIR
     $0 $MIN_SUPPORTED_VERSION # Install a specific supported version to $INSTALL_DIR
+    $0 --deb                  # Install latest release system-wide via apt/.deb
+    $0 $MIN_SUPPORTED_VERSION --deb
 
 Environment variables:
-  DCMNORM_PLATFORM  Override platform detection (e.g., linux-x86_64, macos-aarch64)
-  INSTALL_DIR       Override installation directory (default: ~/.cargo/bin)
+  DCMNORM_PLATFORM   Override platform detection (e.g., linux-x86_64, macos-aarch64)
+  INSTALL_DIR        Override installation directory for the tarball method (default: ~/.cargo/bin)
+  CLAUDE_SKILLS_DIR  Override the dcmnorm Claude Code skill's install directory
+                     (default: ~/.claude/skills; also forces skill install even
+                     without an existing ~/.claude directory)
+  DCMNORM_SKIP_SKILL Set to 1 to skip installing the dcmnorm Claude Code skill
 
 EOF
 }
 
 # Show help if requested
-if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
+if [ "${HELP_REQUESTED:-0}" = "1" ]; then
     print_usage
     exit 0
 fi
 
 # Auto-detect platform
 PLATFORM="${DCMNORM_PLATFORM:-$(detect_platform)}"
+
+if [ "$INSTALL_METHOD" = "deb" ]; then
+    if [ "$PLATFORM" != "linux-x86_64" ]; then
+        echo "Error: --deb is only available for linux-x86_64 (detected/forced platform: $PLATFORM)" >&2
+        exit 1
+    fi
+    if ! command -v apt-get >/dev/null 2>&1; then
+        echo "Error: --deb requires apt-get (Debian/Ubuntu)" >&2
+        exit 1
+    fi
+fi
 
 # Validate explicitly requested versions
 if [ "$VERSION" != "latest" ] && version_lt "$VERSION" "$MIN_SUPPORTED_VERSION"; then
@@ -96,14 +134,22 @@ if [ "$VERSION" != "latest" ] && version_lt "$VERSION" "$MIN_SUPPORTED_VERSION";
     exit 1
 fi
 
-if [ "$VERSION" = "latest" ]; then
-    echo "Installing latest dcmnorm and dcmtalk for $PLATFORM to $INSTALL_DIR"
+if [ "$INSTALL_METHOD" = "deb" ]; then
+    if [ "$VERSION" = "latest" ]; then
+        echo "Installing latest dcmnorm and dcmtalk for $PLATFORM via apt/.deb"
+    else
+        echo "Installing dcmnorm and dcmtalk v$VERSION for $PLATFORM via apt/.deb"
+    fi
 else
-    echo "Installing dcmnorm and dcmtalk v$VERSION for $PLATFORM to $INSTALL_DIR"
-fi
+    if [ "$VERSION" = "latest" ]; then
+        echo "Installing latest dcmnorm and dcmtalk for $PLATFORM to $INSTALL_DIR"
+    else
+        echo "Installing dcmnorm and dcmtalk v$VERSION for $PLATFORM to $INSTALL_DIR"
+    fi
 
-# Create installation directory
-mkdir -p "$INSTALL_DIR"
+    # Create installation directory
+    mkdir -p "$INSTALL_DIR"
+fi
 
 BINARIES="dcmnorm dcmtalk"
 
@@ -126,17 +172,23 @@ for BINARY_NAME in $BINARIES; do
     TEMP_DIR=$(mktemp -d)
     trap "rm -rf $TEMP_DIR" EXIT
 
+    if [ "$INSTALL_METHOD" = "deb" ]; then
+        EXT="deb"
+    else
+        EXT="tar.gz"
+    fi
+
     # Construct download URL
     if [ "$VERSION" = "latest" ]; then
-        DOWNLOAD_URL="https://github.com/${GITHUB_REPO}/releases/latest/download/${BINARY_NAME}-${PLATFORM}.tar.gz"
+        DOWNLOAD_URL="https://github.com/${GITHUB_REPO}/releases/latest/download/${BINARY_NAME}-${PLATFORM}.${EXT}"
     else
-        DOWNLOAD_URL="https://github.com/${GITHUB_REPO}/releases/download/v${VERSION}/${BINARY_NAME}-${PLATFORM}.tar.gz"
+        DOWNLOAD_URL="https://github.com/${GITHUB_REPO}/releases/download/v${VERSION}/${BINARY_NAME}-${PLATFORM}.${EXT}"
     fi
 
     echo "Downloading from: $DOWNLOAD_URL"
 
     # Download the release
-    if ! curl -fsSL -o "$TEMP_DIR/${BINARY_NAME}.tar.gz" "$DOWNLOAD_URL"; then
+    if ! curl -fsSL -o "$TEMP_DIR/${BINARY_NAME}.${EXT}" "$DOWNLOAD_URL"; then
         if [ "$VERSION" = "latest" ]; then
             echo "Error: Failed to download latest ${BINARY_NAME} for $PLATFORM" >&2
         else
@@ -145,6 +197,30 @@ for BINARY_NAME in $BINARIES; do
         echo "Check that the version and platform are correct." >&2
         echo "Available releases: https://github.com/$GITHUB_REPO/releases" >&2
         exit 1
+    fi
+
+    if [ "$INSTALL_METHOD" = "deb" ]; then
+        # 'apt install ./file.deb' (rather than 'dpkg -i') resolves and installs the package's
+        # own runtime Depends: (ffmpeg, ca-certificates) automatically.
+        if [ "$(id -u)" -eq 0 ]; then
+            apt-get install -y "$TEMP_DIR/${BINARY_NAME}.${EXT}"
+        else
+            sudo apt-get install -y "$TEMP_DIR/${BINARY_NAME}.${EXT}"
+        fi
+
+        NEW_VERSION=""
+        if command -v "$BINARY_NAME" >/dev/null 2>&1; then
+            NEW_VERSION="$("$BINARY_NAME" --version 2>/dev/null || true)"
+        fi
+
+        if [ -n "$OLD_VERSION" ]; then
+            echo "✓ ${BINARY_NAME} installed via apt (previous: ${OLD_VERSION}, new: ${NEW_VERSION:-v$VERSION})"
+        else
+            echo "✓ ${BINARY_NAME} installed via apt (version: ${NEW_VERSION:-v$VERSION})"
+        fi
+
+        rm -rf "$TEMP_DIR"
+        continue
     fi
 
     # Extract to temporary directory
@@ -180,13 +256,38 @@ for BINARY_NAME in $BINARIES; do
     rm -rf "$TEMP_DIR"
 done
 
-# Verify installation
-for BINARY_NAME in $BINARIES; do
-    if ! "$BINARY_NAME" --help >/dev/null 2>&1; then
-        echo "Warning: Could not verify ${BINARY_NAME} installation. Ensure $INSTALL_DIR is in your PATH." >&2
-        echo "  export PATH=\"$INSTALL_DIR:\$PATH\"" >&2
+# Verify installation (tarball method only - the deb method already confirmed via apt-get's own
+# exit status, and the binaries land on the system PATH via /usr/bin, not $INSTALL_DIR)
+if [ "$INSTALL_METHOD" != "deb" ]; then
+    for BINARY_NAME in $BINARIES; do
+        if ! "$BINARY_NAME" --help >/dev/null 2>&1; then
+            echo "Warning: Could not verify ${BINARY_NAME} installation. Ensure $INSTALL_DIR is in your PATH." >&2
+            echo "  export PATH=\"$INSTALL_DIR:\$PATH\"" >&2
+        fi
+    done
+fi
+
+# Install the dcmnorm Claude Code skill alongside the binaries, best-effort: only when there's
+# some sign of Claude Code on this machine (or the install dir is explicitly overridden), and
+# never fatal to the overall install if the download fails.
+SKILLS_DIR="${CLAUDE_SKILLS_DIR:-${HOME}/.claude/skills}"
+if [ "${DCMNORM_SKIP_SKILL:-0}" != "1" ] && { [ -d "${HOME}/.claude" ] || [ -n "${CLAUDE_SKILLS_DIR:-}" ]; }; then
+    SKILL_REF="main"
+    if [ "$VERSION" != "latest" ]; then
+        SKILL_REF="v$VERSION"
     fi
-done
+    SKILL_URL="https://raw.githubusercontent.com/${GITHUB_REPO}/${SKILL_REF}/skills/dcmnorm/SKILL.md"
+
+    SKILL_TEMP="$(mktemp)"
+    if curl -fsSL -o "$SKILL_TEMP" "$SKILL_URL"; then
+        mkdir -p "$SKILLS_DIR/dcmnorm"
+        cp -f "$SKILL_TEMP" "$SKILLS_DIR/dcmnorm/SKILL.md"
+        echo "✓ dcmnorm skill installed to $SKILLS_DIR/dcmnorm"
+    else
+        echo "Warning: could not download dcmnorm skill from $SKILL_URL (skipping)" >&2
+    fi
+    rm -f "$SKILL_TEMP"
+fi
 
 echo ""
 echo "Installation complete!"

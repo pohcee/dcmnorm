@@ -236,3 +236,24 @@ if [[ "$found_any" -eq 0 ]]; then
     echo "No installable crates found under $repo_root/exec" >&2
     exit 1
 fi
+
+install_skill() {
+    local skill_source="$repo_root/skills/dcmnorm"
+    if [[ ! -f "$skill_source/SKILL.md" ]]; then
+        return 0
+    fi
+
+    local skills_dir="${CLAUDE_SKILLS_DIR:-$HOME/.claude/skills}"
+    if [[ ! -d "$HOME/.claude" && -z "${CLAUDE_SKILLS_DIR:-}" ]]; then
+        # No sign of Claude Code on this machine and no explicit override; skip quietly.
+        return 0
+    fi
+
+    mkdir -p "$skills_dir/dcmnorm"
+    cp -f "$skill_source"/*.md "$skills_dir/dcmnorm/"
+    echo "✓ dcmnorm skill installed to $skills_dir/dcmnorm"
+}
+
+if [[ "${DCMNORM_SKIP_SKILL:-0}" != "1" ]]; then
+    install_skill
+fi

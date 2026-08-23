@@ -2,6 +2,9 @@
 name = "dcmnorm-cli"
 version = "0.2.1"
 edition = "2021"
+authors = ["Jason Klotzer <jason@enlyt.com>"]
+license = "Apache-2.0"
+description = "DICOM read/write/transcode/render CLI"
 
 [features]
 default = []
@@ -10,6 +13,15 @@ kakadu-ffi = ["dcmnorm/kakadu-ffi"]
 [[bin]]
 name = "dcmnorm"
 path = "src/main.rs"
+
+[package.metadata.deb]
+name = "dcmnorm"
+extended-description = """\
+Converts between DICOM, transcoded DICOM, JSON, and rendered images/raw frames; edits DICOM \
+elements; validates files; and renders pixel data to PNG/JPEG/raw/MPEG4/GPU-texture."""
+depends = "$auto, ca-certificates, ffmpeg"
+section = "utils"
+priority = "optional"
 
 [dependencies]
 clap = { version = "4.6", features = ["derive"] }
