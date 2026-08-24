@@ -18,7 +18,7 @@ use flate2::write::GzEncoder;
 use flate2::Compression;
 use serde_json::json;
 
-use super::render::decode_frame_grayscale_values;
+use super::render::{decode_frame_grayscale_values, resolve_default_window};
 use super::types::RenderError;
 use super::volume::{resample_volume, Interpolation, Volume};
 
@@ -494,6 +494,13 @@ pub fn pack_frame_texture(
 /// physical values - the same primitive `super::volume::build_volume` uses per-slice) and packs
 /// it, so callers (the CLI, and eventually the Node bindings) don't need to touch
 /// `decode_frame_grayscale_values` directly.
+///
+/// If the caller didn't supply an explicit `default_window`, resolves the object's OWN VOI window
+/// (top-level WindowCenter/Width, or the per-frame functional group fallback for Enhanced
+/// Multi-frame objects - see `render::resolve_default_window`) before falling further back to
+/// `pack_frame_texture`'s own min/max span. Without this, the GPU texture pipeline's initial
+/// window/level would silently disagree with the classic JPEG/PNG pipeline's `resolve_window` for
+/// any file whose caller (e.g. render-server) didn't already resolve and pass one itself.
 pub fn pack_dicom_frame_texture(
     object: &dicom_object::DefaultDicomObject,
     frame_index: usize,
@@ -501,6 +508,10 @@ pub fn pack_dicom_frame_texture(
     default_window: Option<(f64, f64)>,
     compression: TextureCompression,
 ) -> Result<PackedTexture, TextureExportError> {
+    let default_window = default_window.or_else(|| {
+        let (center, width) = resolve_default_window(object, frame_index);
+        center.zip(width)
+    });
     let (metadata, values) = decode_frame_grayscale_values(object, frame_index)?;
     let raw: Vec<f32> = values.into_iter().map(|value| value as f32).collect();
     pack_frame_texture(&raw, metadata.cols as u32, metadata.rows as u32, default_window, target_max_dim, compression)
@@ -605,11 +616,21 @@ pub fn pack_frame_stack_texture(
 /// exactly how a cine instance's own frames become a stack; one entry per distinct object (each
 /// at frame_index 0) is exactly how a multi-image series' instances become a stack - this
 /// function doesn't need to know which case it's in, since both reduce to the same flat list.
+///
+/// If the caller didn't supply an explicit `default_window`, resolves it from the FIRST source
+/// (same "one representative instance speaks for the whole stack" convention the render-server's
+/// own volume/stack export handlers already use) via `render::resolve_default_window` - see
+/// `pack_dicom_frame_texture`'s own doc for why this matters for Enhanced Multi-frame objects.
 pub fn pack_dicom_frame_stack_texture(
     sources: &[(&dicom_object::DefaultDicomObject, usize)],
     default_window: Option<(f64, f64)>,
     compression: TextureCompression,
 ) -> Result<PackedTexture, TextureExportError> {
+    let default_window = default_window.or_else(|| {
+        let (object, frame_index) = sources.first()?;
+        let (center, width) = resolve_default_window(object, *frame_index);
+        center.zip(width)
+    });
     let mut decoded = Vec::with_capacity(sources.len());
     for (object, frame_index) in sources {
         let (metadata, values) = decode_frame_grayscale_values(object, *frame_index)?;

@@ -929,7 +929,7 @@ fn render_grayscale_frame(
     }
 
     if options.apply_modality_lut {
-        apply_modality_lut(object, &mut values);
+        apply_modality_lut(object, options.frame_index, &mut values);
     }
 
     let mut rendered = if options.apply_voi_lut {
@@ -962,7 +962,7 @@ fn render_palette_color_frame(
     let mut values = decode_grayscale_values(&frame_bytes, metadata)?;
 
     if options.apply_modality_lut {
-        apply_modality_lut(object, &mut values);
+        apply_modality_lut(object, options.frame_index, &mut values);
     }
 
     let red = read_palette_channel(
@@ -1592,7 +1592,10 @@ pub(crate) fn decode_frame_grayscale_values(
         let metadata = read_render_metadata(&frame_object)?;
         let bytes = get_frame_bytes(&frame_object, &metadata, 0)?;
         let mut values = decode_grayscale_values(&bytes, &metadata)?;
-        apply_modality_lut(&frame_object, &mut values);
+        // frame_object's pixel data was narrowed to this one frame (see
+        // try_decode_single_frame_object's own doc), but its functional group sequences are an
+        // unmodified clone of `object`'s - still indexed by the ORIGINAL frame_index, not 0.
+        apply_modality_lut(&frame_object, frame_index, &mut values);
         return Ok((metadata, values));
     }
 
@@ -1600,18 +1603,59 @@ pub(crate) fn decode_frame_grayscale_values(
     let metadata = read_render_metadata(working.as_ref())?;
     let bytes = get_frame_bytes(working.as_ref(), &metadata, frame_index)?;
     let mut values = decode_grayscale_values(&bytes, &metadata)?;
-    apply_modality_lut(working.as_ref(), &mut values);
+    apply_modality_lut(working.as_ref(), frame_index, &mut values);
     Ok((metadata, values))
 }
 
-fn apply_modality_lut(object: &DefaultDicomObject, values: &mut [f64]) {
+// Enhanced Multi-frame objects (Enhanced CT/MR/PET, etc.) don't carry RescaleSlope/Intercept or
+// WindowCenter/Width at the top level at all - those live inside a functional group item instead:
+// PerFrameFunctionalGroupsSequence[frame_index] if the value varies per frame (e.g. multi-energy
+// CT), falling back to SharedFunctionalGroupsSequence's one item if it's the same for every frame
+// (the common case). Looks up `value_tag` inside `sub_sequence_tag` under either group, per-frame
+// first. Returns `None` if the object has no functional groups at all (a classic single-frame or
+// legacy multiframe object - callers already check the top-level tag themselves first) or the
+// tag genuinely isn't present in whichever functional group item was found.
+fn functional_group_numeric_value(
+    object: &DefaultDicomObject,
+    frame_index: usize,
+    sub_sequence_tag: Tag,
+    value_tag: Tag,
+) -> Option<f64> {
+    let lookup = |group_tag: Tag, item_index: usize| -> Option<f64> {
+        let group_item = object.get(group_tag)?.value().items()?.get(item_index)?;
+        let sub_item = group_item.get(sub_sequence_tag)?.value().items()?.first()?;
+        sub_item
+            .get(value_tag)
+            .and_then(|element| first_numeric_value(element.to_str().ok().as_deref()))
+    };
+    lookup(tags::PER_FRAME_FUNCTIONAL_GROUPS_SEQUENCE, frame_index)
+        .or_else(|| lookup(tags::SHARED_FUNCTIONAL_GROUPS_SEQUENCE, 0))
+}
+
+fn apply_modality_lut(object: &DefaultDicomObject, frame_index: usize, values: &mut [f64]) {
     let slope = object
         .get(tags::RESCALE_SLOPE)
         .and_then(|element| first_numeric_value(element.to_str().ok().as_deref()))
+        .or_else(|| {
+            functional_group_numeric_value(
+                object,
+                frame_index,
+                tags::PIXEL_VALUE_TRANSFORMATION_SEQUENCE,
+                tags::RESCALE_SLOPE,
+            )
+        })
         .unwrap_or(1.0);
     let intercept = object
         .get(tags::RESCALE_INTERCEPT)
         .and_then(|element| first_numeric_value(element.to_str().ok().as_deref()))
+        .or_else(|| {
+            functional_group_numeric_value(
+                object,
+                frame_index,
+                tags::PIXEL_VALUE_TRANSFORMATION_SEQUENCE,
+                tags::RESCALE_INTERCEPT,
+            )
+        })
         .unwrap_or(0.0);
 
     if (slope - 1.0).abs() < f64::EPSILON && intercept.abs() < f64::EPSILON {
@@ -1665,27 +1709,49 @@ fn resolve_window(
         return Ok((options.window_center, None));
     }
 
+    Ok(resolve_default_window(object, options.frame_index))
+}
+
+/// The object's OWN default VOI window for `frame_index` - top-level WindowCenter/WindowWidth
+/// first, falling back to the per-frame functional group the same way `apply_modality_lut` falls
+/// back for RescaleSlope/Intercept (see that function's doc). `None`/`None` means "this object has
+/// no usable VOI window anywhere" - callers fall back to their own min/max-derived normalization
+/// rather than treating that as an error.
+///
+/// pub(crate): the one shared place both rendering pipelines resolve a default window from a
+/// DICOM object - the classic JPEG/PNG pipeline via `resolve_window` above, and the GPU texture
+/// pipeline via `texture_export::pack_dicom_frame_texture`/`pack_dicom_frame_stack_texture` -
+/// so a file's own real VOI preset (wherever in the object it lives) applies identically to
+/// both, instead of the texture pipeline falling straight through to a naive whole-image min/max
+/// span whenever the tag isn't at the top level.
+pub(crate) fn resolve_default_window(object: &DefaultDicomObject, frame_index: usize) -> (Option<f64>, Option<f64>) {
     let center = object
         .get(tags::WINDOW_CENTER)
-        .and_then(|element| first_numeric_value(element.to_str().ok().as_deref()));
+        .and_then(|element| first_numeric_value(element.to_str().ok().as_deref()))
+        .or_else(|| {
+            functional_group_numeric_value(object, frame_index, tags::FRAME_VOILUT_SEQUENCE, tags::WINDOW_CENTER)
+        });
     let width = object
         .get(tags::WINDOW_WIDTH)
-        .and_then(|element| first_numeric_value(element.to_str().ok().as_deref()));
+        .and_then(|element| first_numeric_value(element.to_str().ok().as_deref()))
+        .or_else(|| {
+            functional_group_numeric_value(object, frame_index, tags::FRAME_VOILUT_SEQUENCE, tags::WINDOW_WIDTH)
+        });
 
     // Real-world datasets sometimes carry malformed VOI values (for example,
     // width=0 or width without center). Ignore those tags and fall back to
     // robust min/max normalization instead of failing the whole render.
     if width.is_some() && center.is_none() {
-        return Ok((None, None));
+        return (None, None);
     }
 
     if let Some(window_width) = width {
         if window_width <= 0.0 {
-            return Ok((None, None));
+            return (None, None);
         }
     }
 
-    Ok((center, width))
+    (center, width)
 }
 
 // pub(crate): also used by dicom_io::volume to window a reformatted plane's interpolated values.

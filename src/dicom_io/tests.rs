@@ -1505,6 +1505,109 @@ fn falls_back_when_window_is_outside_pixel_domain() {
     assert_eq!(default_rendered.bytes, no_voi_rendered.bytes);
 }
 
+// Enhanced Multi-frame objects (Enhanced CT/MR/PET) don't carry RescaleSlope/Intercept or
+// WindowCenter/Width at the top level - they live in a functional group item instead
+// (SharedFunctionalGroupsSequence, or PerFrameFunctionalGroupsSequence when the value varies per
+// frame). Regression coverage for that fallback in both the classic render pipeline
+// (render_dicom_frame) and the GPU texture pipeline (pack_dicom_frame_texture) - they must resolve
+// the identical window, not silently disagree (see resolve_default_window's own doc).
+fn shared_functional_groups_sequence_with_rescale_and_window(
+    rescale_slope: &str,
+    rescale_intercept: &str,
+    window_center: &str,
+    window_width: &str,
+) -> DataElement<InMemDicomObject> {
+    use dicom_core::value::Value as DicomValue;
+    use dicom_core::Length;
+
+    let pixel_value_transformation = InMemDicomObject::from_element_iter([
+        DataElement::new(tags::RESCALE_SLOPE, VR::DS, PrimitiveValue::from(rescale_slope)),
+        DataElement::new(tags::RESCALE_INTERCEPT, VR::DS, PrimitiveValue::from(rescale_intercept)),
+    ]);
+    let frame_voi_lut = InMemDicomObject::from_element_iter([
+        DataElement::new(tags::WINDOW_CENTER, VR::DS, PrimitiveValue::from(window_center)),
+        DataElement::new(tags::WINDOW_WIDTH, VR::DS, PrimitiveValue::from(window_width)),
+    ]);
+    let shared_group = InMemDicomObject::from_element_iter([
+        DataElement::new(
+            tags::PIXEL_VALUE_TRANSFORMATION_SEQUENCE,
+            VR::SQ,
+            DicomValue::new_sequence(vec![pixel_value_transformation], Length::UNDEFINED),
+        ),
+        DataElement::new(
+            tags::FRAME_VOILUT_SEQUENCE,
+            VR::SQ,
+            DicomValue::new_sequence(vec![frame_voi_lut], Length::UNDEFINED),
+        ),
+    ]);
+    DataElement::new(
+        tags::SHARED_FUNCTIONAL_GROUPS_SEQUENCE,
+        VR::SQ,
+        dicom_core::value::Value::new_sequence(vec![shared_group], Length::UNDEFINED),
+    )
+}
+
+#[test]
+fn resolves_rescale_and_window_from_shared_functional_group_when_absent_at_top_level() {
+    use super::render::{decode_frame_grayscale_values, resolve_default_window};
+
+    // Baseline: no rescale/window tags anywhere (top-level or functional group) - slope/intercept
+    // default to the identity (1.0/0.0), so these values ARE the untouched decoded pixel values.
+    let mut plain_object = read_dicom_file(fixture_path("dx.dcm")).unwrap();
+    plain_object.remove_element(tags::RESCALE_SLOPE);
+    plain_object.remove_element(tags::RESCALE_INTERCEPT);
+    plain_object.remove_element(tags::WINDOW_CENTER);
+    plain_object.remove_element(tags::WINDOW_WIDTH);
+    let (_, raw_values) = decode_frame_grayscale_values(&plain_object, 0).unwrap();
+    assert_eq!(resolve_default_window(&plain_object, 0), (None, None));
+
+    // Same object, but with a SharedFunctionalGroupsSequence carrying RescaleSlope=2/
+    // RescaleIntercept=-100 and WindowCenter=300/WindowWidth=500 - the Enhanced Multi-frame shape,
+    // nothing at the top level.
+    let mut grouped_object = read_dicom_file(fixture_path("dx.dcm")).unwrap();
+    grouped_object.remove_element(tags::RESCALE_SLOPE);
+    grouped_object.remove_element(tags::RESCALE_INTERCEPT);
+    grouped_object.remove_element(tags::WINDOW_CENTER);
+    grouped_object.remove_element(tags::WINDOW_WIDTH);
+    grouped_object.put(shared_functional_groups_sequence_with_rescale_and_window(
+        "2", "-100", "300", "500",
+    ));
+    let (_, rescaled_values) = decode_frame_grayscale_values(&grouped_object, 0).unwrap();
+
+    // Proves apply_modality_lut actually found and applied slope=2/intercept=-100 from the
+    // functional group, pixel-for-pixel - not silently left at the identity.
+    assert_eq!(raw_values.len(), rescaled_values.len());
+    for (raw, rescaled) in raw_values.iter().zip(rescaled_values.iter()) {
+        assert!((rescaled - (raw * 2.0 - 100.0)).abs() < 1e-6);
+    }
+
+    // Proves resolve_default_window (shared by both the classic and GPU-texture pipelines - see
+    // its own doc) found 300/500 via the functional group too, not a min/max fallback.
+    assert_eq!(
+        resolve_default_window(&grouped_object, 0),
+        (Some(300.0), Some(500.0))
+    );
+}
+
+#[test]
+fn pack_dicom_frame_texture_resolves_default_window_from_shared_functional_group() {
+    let mut object = read_dicom_file(fixture_path("dx.dcm")).unwrap();
+    object.remove_element(tags::RESCALE_SLOPE);
+    object.remove_element(tags::RESCALE_INTERCEPT);
+    object.remove_element(tags::WINDOW_CENTER);
+    object.remove_element(tags::WINDOW_WIDTH);
+    object.put(shared_functional_groups_sequence_with_rescale_and_window(
+        "2", "-100", "300", "500",
+    ));
+
+    let packed = pack_dicom_frame_texture(&object, 0, None, None, TextureCompression::None).unwrap();
+
+    // Same 300/500 the classic render pipeline resolves above (not a min/max span) - the two
+    // rendering pipelines must not silently disagree about a file's own default window.
+    assert_eq!(packed.meta.default_window_center, Some(300.0));
+    assert_eq!(packed.meta.default_window_width, Some(500.0));
+}
+
 #[test]
 fn ignores_invalid_window_width_from_dataset() {
     let mut object = read_dicom_file(fixture_path("dx.dcm")).unwrap();
