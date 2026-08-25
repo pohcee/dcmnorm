@@ -2677,7 +2677,7 @@ fn run_histogram(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let histograms = match cli.histogram_frame {
-        Some(frame_index) => vec![compute_frame_histogram(&object, frame_index, &options)?],
+        Some(frame_index) => compute_frame_histogram(&object, frame_index, &options)?,
         None => compute_instance_histograms(&object, &options)?,
     };
 
@@ -2686,6 +2686,7 @@ fn run_histogram(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         .map(|histogram| {
             serde_json::json!({
                 "frameIndex": histogram.frame_index,
+                "channel": histogram.channel,
                 "binCount": histogram.bin_count,
                 "rangeMin": histogram.range_min,
                 "rangeMax": histogram.range_max,

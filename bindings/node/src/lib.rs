@@ -1340,6 +1340,10 @@ pub struct HistogramOptions {
 #[napi(object)]
 pub struct FrameHistogram {
     pub frame_index: u32,
+    /// `null` for a grayscale frame. `"red" | "green" | "blue"` for one channel of an RGB/color
+    /// frame - `computeHistogram` returns three entries per frame for those, all sharing the same
+    /// `frameIndex`, each over that channel's own decoded 8-bit (0-255) samples.
+    pub channel: Option<String>,
     pub bin_count: u32,
     pub range_min: f64,
     pub range_max: f64,
@@ -1356,6 +1360,7 @@ impl From<dcmnorm::dicom_io::FrameHistogram> for FrameHistogram {
     fn from(value: dcmnorm::dicom_io::FrameHistogram) -> Self {
         FrameHistogram {
             frame_index: value.frame_index as u32,
+            channel: value.channel,
             bin_count: value.bin_count,
             range_min: value.range_min,
             range_max: value.range_max,
@@ -1390,7 +1395,7 @@ impl Task for ComputeHistogramTask {
 
             let histograms = match self.options.frame_index {
                 Some(frame_index) => {
-                    vec![dcm_compute_frame_histogram(&object, frame_index as usize, &dcm_options).map_err(to_napi_err)?]
+                    dcm_compute_frame_histogram(&object, frame_index as usize, &dcm_options).map_err(to_napi_err)?
                 }
                 None => dcm_compute_instance_histograms(&object, &dcm_options).map_err(to_napi_err)?,
             };
@@ -1693,6 +1698,11 @@ pub struct TextureExportResult {
     pub normal_dir: Vec<f64>,
     pub default_window_center: Option<f64>,
     pub default_window_width: Option<f64>,
+    /// Whether the client shader should display `1.0 - windowedIntensity` rather than
+    /// `windowedIntensity` - the invert decision `dcmnorm::dicom_io::render::resolve_grayscale_invert`
+    /// makes (PresentationLUTShape overriding PhotometricInterpretation's MONOCHROME1/2-derived
+    /// default). Always `false` for `contentKind: 'volume'` - see `TextureMeta::invert`'s own doc.
+    pub invert: bool,
     pub native_width: u32,
     pub native_height: u32,
     pub native_depth: u32,
@@ -1751,6 +1761,7 @@ fn texture_export_result(meta: &DcmTextureMeta, payload: Vec<u8>) -> TextureExpo
         normal_dir: meta.normal_dir.to_vec(),
         default_window_center: meta.default_window_center,
         default_window_width: meta.default_window_width,
+        invert: meta.invert,
         native_width: meta.native_dims.0,
         native_height: meta.native_dims.1,
         native_depth: meta.native_dims.2,

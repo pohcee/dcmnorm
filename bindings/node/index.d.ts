@@ -239,6 +239,12 @@ export interface FindScuOptions {
 /** Mirrors `dcmnorm::dicom_io::FrameHistogram` for the JS side. */
 export interface FrameHistogram {
   frameIndex: number
+  /**
+   * `null` for a grayscale frame. `"red" | "green" | "blue"` for one channel of an RGB/color
+   * frame - `computeHistogram` returns three entries per frame for those, all sharing the same
+   * `frameIndex`, each over that channel's own decoded 8-bit (0-255) samples.
+   */
+  channel?: string
   binCount: number
   rangeMin: number
   rangeMax: number
@@ -550,6 +556,13 @@ export interface TextureExportResult {
   normalDir: Array<number>
   defaultWindowCenter?: number
   defaultWindowWidth?: number
+  /**
+   * Whether the client shader should display `1.0 - windowedIntensity` rather than
+   * `windowedIntensity` - the invert decision `dcmnorm::dicom_io::render::resolve_grayscale_invert`
+   * makes (PresentationLUTShape overriding PhotometricInterpretation's MONOCHROME1/2-derived
+   * default). Always `false` for `contentKind: 'volume'` - see `TextureMeta::invert`'s own doc.
+   */
+  invert: boolean
   nativeWidth: number
   nativeHeight: number
   nativeDepth: number

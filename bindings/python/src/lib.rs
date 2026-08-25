@@ -1224,6 +1224,11 @@ struct TextureExportResult {
     normal_dir: Vec<f64>,
     default_window_center: Option<f64>,
     default_window_width: Option<f64>,
+    /// Whether the client shader should display `1.0 - windowed_intensity` rather than
+    /// `windowed_intensity` - the invert decision `dcmnorm::dicom_io::render::resolve_grayscale_invert`
+    /// makes (PresentationLUTShape overriding PhotometricInterpretation's MONOCHROME1/2-derived
+    /// default). Always `False` for `content_kind: 'volume'` - see `TextureMeta::invert`'s own doc.
+    invert: bool,
     native_width: u32,
     native_height: u32,
     native_depth: u32,
@@ -1271,6 +1276,7 @@ fn texture_export_result(py: Python<'_>, meta: &DcmTextureMeta, payload: Vec<u8>
         normal_dir: meta.normal_dir.to_vec(),
         default_window_center: meta.default_window_center,
         default_window_width: meta.default_window_width,
+        invert: meta.invert,
         native_width: meta.native_dims.0,
         native_height: meta.native_dims.1,
         native_depth: meta.native_dims.2,

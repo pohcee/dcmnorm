@@ -939,7 +939,7 @@ fn render_grayscale_frame(
         normalize_to_u8(&values)
     };
 
-    if metadata.photometric_interpretation == "MONOCHROME1" {
+    if resolve_grayscale_invert(object, &metadata.photometric_interpretation) {
         for value in &mut rendered {
             *value = 255u8.saturating_sub(*value);
         }
@@ -1337,7 +1337,11 @@ fn ybr_rct_to_rgb(y: u8, cb: u8, cr: u8) -> (u8, u8, u8) {
     )
 }
 
-fn read_render_metadata(object: &DefaultDicomObject) -> Result<RenderMetadata, RenderError> {
+// pub(crate): also used by dicom_io::histogram to cheaply peek SamplesPerPixel (a whole-dataset
+// attribute, never per-frame) before deciding whether a frame needs the grayscale or RGB decode
+// path - a plain top-level tag read, no pixel data touched, so calling it on the object BEFORE
+// narrowing to a single frame/transcoding is always safe and cheap.
+pub(crate) fn read_render_metadata(object: &DefaultDicomObject) -> Result<RenderMetadata, RenderError> {
     let rows = required_u16(object, tags::ROWS, "Rows")?;
     let cols = required_u16(object, tags::COLUMNS, "Columns")?;
     let samples_per_pixel = required_u16(object, tags::SAMPLES_PER_PIXEL, "SamplesPerPixel")?;
@@ -1387,6 +1391,26 @@ fn read_render_metadata(object: &DefaultDicomObject) -> Result<RenderMetadata, R
         number_of_frames,
         photometric_interpretation,
     })
+}
+
+// pub(crate): shared with dicom_io::texture_export, whose GPU-texture pipeline needs the same
+// invert decision as the classic grayscale render path below - see the module-level pipeline
+// contract doc (docs/rendering-pipeline-contract.md at the repo root) for why this single
+// resolver, not two independent checks, is the point.
+//
+// Per DICOM PS3.3 C.11.6.1, an explicit Presentation LUT Shape (2050,0020) - INVERSE or IDENTITY
+// - REPLACES the Photometric Interpretation-derived default; it is never combined with it. In the
+// absence of an explicit Shape, MONOCHROME1 behaves as INVERSE and MONOCHROME2 as IDENTITY.
+pub(crate) fn resolve_grayscale_invert(object: &DefaultDicomObject, photometric_interpretation: &str) -> bool {
+    let shape = object
+        .get(tags::PRESENTATION_LUT_SHAPE)
+        .and_then(|element| element.to_str().ok())
+        .map(|value| value.trim().to_ascii_uppercase());
+    match shape.as_deref() {
+        Some("INVERSE") => true,
+        Some("IDENTITY") => false,
+        _ => photometric_interpretation == "MONOCHROME1",
+    }
 }
 
 fn required_u16(
@@ -1605,6 +1629,32 @@ pub(crate) fn decode_frame_grayscale_values(
     let mut values = decode_grayscale_values(&bytes, &metadata)?;
     apply_modality_lut(working.as_ref(), frame_index, &mut values);
     Ok((metadata, values))
+}
+
+/// Decodes one frame's RGB pixel bytes - row-major, 3 interleaved 8-bit samples per pixel, using
+/// the same YBR-to-RGB conversion and planar-configuration handling `render_rgb_frame` already
+/// does for 2D rendering (16-bit sources are normalized down to 0-255 there too) - plus its
+/// `RenderMetadata`. The RGB counterpart to `decode_frame_grayscale_values` above, for the same
+/// reason: `dicom_io::histogram` needs a reusable, correctly-decoded pixel primitive rather than
+/// duplicating the YBR/planar-config handling itself. Does NOT apply an embedded ICC profile
+/// (unlike `render_single_frame`'s own RGB path) - that's a display color-management step with no
+/// bearing on a value-distribution histogram of the decoded samples.
+pub(crate) fn decode_frame_rgb_values(
+    object: &DefaultDicomObject,
+    frame_index: usize,
+) -> Result<(RenderMetadata, Vec<u8>), RenderError> {
+    if let Some(frame_object) = try_decode_single_frame_object(object, frame_index)? {
+        let metadata = read_render_metadata(&frame_object)?;
+        let options = RenderPipelineOptions { frame_index: 0, ..Default::default() };
+        let rendered = render_rgb_frame(&frame_object, &metadata, &options)?;
+        return Ok((metadata, rendered.bytes));
+    }
+
+    let working = ensure_native_render_object(object)?;
+    let metadata = read_render_metadata(working.as_ref())?;
+    let options = RenderPipelineOptions { frame_index, ..Default::default() };
+    let rendered = render_rgb_frame(working.as_ref(), &metadata, &options)?;
+    Ok((metadata, rendered.bytes))
 }
 
 // Enhanced Multi-frame objects (Enhanced CT/MR/PET, etc.) don't carry RescaleSlope/Intercept or

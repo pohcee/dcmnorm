@@ -1608,6 +1608,93 @@ fn pack_dicom_frame_texture_resolves_default_window_from_shared_functional_group
     assert_eq!(packed.meta.default_window_width, Some(500.0));
 }
 
+// Per DICOM PS3.3 C.11.6.1, an explicit PresentationLUTShape (INVERSE/IDENTITY) REPLACES the
+// PhotometricInterpretation-derived default (MONOCHROME1 behaves as INVERSE, MONOCHROME2 as
+// IDENTITY, absent an explicit Shape) - it is never combined with it. Regression coverage for
+// both the resolver itself and the two pipelines (render_dicom_frame, pack_dicom_frame_texture)
+// that must each honor it identically, not silently disagree.
+#[test]
+fn resolve_grayscale_invert_prefers_presentation_lut_shape_over_photometric_interpretation() {
+    use super::render::resolve_grayscale_invert;
+
+    let mut object = read_dicom_file(fixture_path("dx.dcm")).unwrap();
+
+    // MONOCHROME2 alone defaults to no inversion, but an explicit INVERSE shape must win.
+    object.put(DataElement::new(
+        tags::PRESENTATION_LUT_SHAPE,
+        VR::CS,
+        PrimitiveValue::from("INVERSE"),
+    ));
+    assert!(resolve_grayscale_invert(&object, "MONOCHROME2"));
+
+    // MONOCHROME1 alone defaults to inversion, but an explicit IDENTITY shape must win.
+    object.put(DataElement::new(
+        tags::PRESENTATION_LUT_SHAPE,
+        VR::CS,
+        PrimitiveValue::from("IDENTITY"),
+    ));
+    assert!(!resolve_grayscale_invert(&object, "MONOCHROME1"));
+
+    // No explicit shape at all falls back to the photometric-interpretation-derived default.
+    object.remove_element(tags::PRESENTATION_LUT_SHAPE);
+    assert!(resolve_grayscale_invert(&object, "MONOCHROME1"));
+    assert!(!resolve_grayscale_invert(&object, "MONOCHROME2"));
+}
+
+#[test]
+fn render_dicom_frame_honors_presentation_lut_shape_override_when_it_disagrees_with_photometric_interpretation() {
+    // RenderOutputFormat::Raw returns undecoded frame bytes (no VOI windowing or invert applied
+    // at all - see ignores_invalid_window_width_from_dataset above), so this needs an actually
+    // rendered format to exercise render_grayscale_frame's invert step.
+    let decode_luma = |bytes: &[u8]| image::load_from_memory(bytes).unwrap().to_luma8();
+
+    let mut baseline = read_dicom_file(fixture_path("dx.dcm")).unwrap();
+    baseline.put(DataElement::new(
+        tags::PHOTOMETRIC_INTERPRETATION,
+        VR::CS,
+        PrimitiveValue::from("MONOCHROME2"),
+    ));
+    let baseline_rendered =
+        render_dicom_frame(&baseline, RenderOutputFormat::Png, &RenderPipelineOptions::default()).unwrap();
+    let baseline_luma = decode_luma(&baseline_rendered.bytes);
+
+    let mut overridden = baseline.clone();
+    overridden.put(DataElement::new(
+        tags::PRESENTATION_LUT_SHAPE,
+        VR::CS,
+        PrimitiveValue::from("INVERSE"),
+    ));
+    let overridden_rendered =
+        render_dicom_frame(&overridden, RenderOutputFormat::Png, &RenderPipelineOptions::default()).unwrap();
+    let overridden_luma = decode_luma(&overridden_rendered.bytes);
+
+    // An explicit INVERSE shape must flip every pixel relative to the MONOCHROME2 (no shape)
+    // baseline, exactly like a MONOCHROME1 image would - not silently do nothing because the
+    // dataset's PhotometricInterpretation alone said "no inversion needed".
+    for (baseline_pixel, overridden_pixel) in baseline_luma.pixels().zip(overridden_luma.pixels()) {
+        assert_eq!(overridden_pixel.0[0], 255u8 - baseline_pixel.0[0]);
+    }
+}
+
+#[test]
+fn pack_dicom_frame_texture_resolves_invert_from_presentation_lut_shape_override() {
+    let mut object = read_dicom_file(fixture_path("dx.dcm")).unwrap();
+    object.put(DataElement::new(
+        tags::PHOTOMETRIC_INTERPRETATION,
+        VR::CS,
+        PrimitiveValue::from("MONOCHROME2"),
+    ));
+    object.put(DataElement::new(
+        tags::PRESENTATION_LUT_SHAPE,
+        VR::CS,
+        PrimitiveValue::from("INVERSE"),
+    ));
+
+    let packed = pack_dicom_frame_texture(&object, 0, None, None, TextureCompression::None).unwrap();
+
+    assert!(packed.meta.invert);
+}
+
 #[test]
 fn ignores_invalid_window_width_from_dataset() {
     let mut object = read_dicom_file(fixture_path("dx.dcm")).unwrap();

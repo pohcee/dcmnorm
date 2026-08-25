@@ -53,8 +53,12 @@ npm test             # runs test/smoke.js against the fixtures in ../../test/fil
   field-by-field output shape. `binCount` defaults to 256; `frameIndex` (0-based) restricts the
   result to one frame instead of every frame in the instance; `minValue`/`maxValue` (must be set
   together) pin the bin range instead of defaulting to each frame's own observed min/max.
-  `FrameHistogram` is `{ frameIndex, binCount, rangeMin, rangeMax, binWidth, counts: number[],
-  pixelCount, minValue, maxValue, mean, stdDev }`.
+  `FrameHistogram` is `{ frameIndex, channel: 'red'|'green'|'blue'|null, binCount, rangeMin,
+  rangeMax, binWidth, counts: number[], pixelCount, minValue, maxValue, mean, stdDev }`.
+  `channel` is `null` for a grayscale frame; an RGB/color frame (YBR variants converted to RGB
+  first) instead resolves to **three** entries per frame index, one per channel, each over that
+  channel's own 8-bit (0-255) samples with the bin range defaulted to the full 0-255 domain
+  rather than each channel's own min/max.
 
 ### MPR (Multiplanar Reformation)
 

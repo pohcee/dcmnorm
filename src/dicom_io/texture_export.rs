@@ -18,7 +18,7 @@ use flate2::write::GzEncoder;
 use flate2::Compression;
 use serde_json::json;
 
-use super::render::{decode_frame_grayscale_values, resolve_default_window};
+use super::render::{decode_frame_grayscale_values, resolve_default_window, resolve_grayscale_invert};
 use super::types::RenderError;
 use super::volume::{resample_volume, Interpolation, Volume};
 
@@ -130,9 +130,11 @@ impl TextureCompression {
     }
 }
 
-/// Mirrors the cross-repo `TextureMeta` JSON contract (see the dcmnorm GPU-texture plan) -
+/// Mirrors the cross-repo `TextureMeta` JSON contract - see docs/rendering-pipeline-contract.md
+/// at the umbrella repo root for the full pipeline-stage/field list this spans across
+/// dcmnorm, the Node/Python bindings, sb-api's render-server, and sb-website's GPU shaders.
 /// `to_json` is the single source of truth for field names/casing consumed by the CLI sidecar,
-/// the Node bindings, and eventually the render-server's WS response.
+/// the Node/Python bindings, and the render-server's WS response.
 #[derive(Clone, Debug)]
 pub struct TextureMeta {
     pub content_kind: ContentKind,
@@ -161,6 +163,12 @@ pub struct TextureMeta {
     pub normal_dir: [f64; 3],
     pub default_window_center: Option<f64>,
     pub default_window_width: Option<f64>,
+    /// Whether the client shader should display `1.0 - windowed_intensity` rather than
+    /// `windowed_intensity` - the same single invert decision `render::resolve_grayscale_invert`
+    /// makes for the classic JPEG/PNG path (PresentationLUTShape overriding PhotometricInterpretation's
+    /// MONOCHROME1/2-derived default). Always `false` for `ContentKind::Volume`: `pack_volume_texture`
+    /// only has voxel samples, not a source DICOM object, to resolve this from - see its own doc.
+    pub invert: bool,
     /// `(width, height, depth)` before any capability/progressive-driven downsampling.
     pub native_dims: (u32, u32, u32),
     pub downsampled: bool,
@@ -190,6 +198,7 @@ impl TextureMeta {
             "normalDir": self.normal_dir,
             "defaultWindowCenter": self.default_window_center,
             "defaultWindowWidth": self.default_window_width,
+            "invert": self.invert,
             "nativeDims": [self.native_dims.0, self.native_dims.1, self.native_dims.2],
             "downsampled": self.downsampled,
             "payloadBytesRaw": self.payload_bytes_raw,
@@ -366,6 +375,10 @@ pub fn pack_volume_texture(
         normal_dir: volume.slice_normal,
         default_window_center: default_window.map(|(center, _)| center),
         default_window_width: default_window.map(|(_, width)| width),
+        // See TextureMeta::invert's own doc: no source DICOM object is available here to resolve
+        // PresentationLUTShape/PhotometricInterpretation from (deliberately - same reasoning as
+        // the per-frame VOI/rescale fix that left this MPR volume path alone).
+        invert: false,
         native_dims,
         downsampled,
         payload_bytes_raw,
@@ -436,6 +449,7 @@ pub fn pack_frame_texture(
     default_window: Option<(f64, f64)>,
     target_max_dim: Option<u32>,
     compression: TextureCompression,
+    invert: bool,
 ) -> Result<PackedTexture, TextureExportError> {
     if width == 0 || height == 0 {
         return Err(TextureExportError::InvalidDimensions);
@@ -481,6 +495,7 @@ pub fn pack_frame_texture(
         normal_dir: [0.0, 0.0, 1.0],
         default_window_center: default_window.map(|(center, _)| center),
         default_window_width: default_window.map(|(_, width)| width),
+        invert,
         native_dims,
         downsampled,
         payload_bytes_raw,
@@ -513,8 +528,9 @@ pub fn pack_dicom_frame_texture(
         center.zip(width)
     });
     let (metadata, values) = decode_frame_grayscale_values(object, frame_index)?;
+    let invert = resolve_grayscale_invert(object, &metadata.photometric_interpretation);
     let raw: Vec<f32> = values.into_iter().map(|value| value as f32).collect();
-    pack_frame_texture(&raw, metadata.cols as u32, metadata.rows as u32, default_window, target_max_dim, compression)
+    pack_frame_texture(&raw, metadata.cols as u32, metadata.rows as u32, default_window, target_max_dim, compression, invert)
 }
 
 /// One already-decoded 2D frame, as input to `pack_frame_stack_texture` - the frame-stack analog
@@ -548,6 +564,7 @@ pub fn pack_frame_stack_texture(
     frames: &[DecodedFrame],
     default_window: Option<(f64, f64)>,
     compression: TextureCompression,
+    invert: bool,
 ) -> Result<PackedTexture, TextureExportError> {
     let Some(first) = frames.first() else {
         return Err(TextureExportError::InvalidDimensions);
@@ -601,6 +618,7 @@ pub fn pack_frame_stack_texture(
         normal_dir: [0.0, 0.0, 1.0],
         default_window_center: default_window.map(|(center, _)| center),
         default_window_width: default_window.map(|(_, width)| width),
+        invert,
         native_dims,
         downsampled: false,
         payload_bytes_raw,
@@ -631,13 +649,22 @@ pub fn pack_dicom_frame_stack_texture(
         let (center, width) = resolve_default_window(object, *frame_index);
         center.zip(width)
     });
+    // Same "first source speaks for the whole stack" convention as default_window above: a
+    // frame stack is either one multi-frame instance's own frames (one object, uniform
+    // PhotometricInterpretation/PresentationLUTShape by definition) or a multi-image series
+    // (independently-selected instances, but in practice never mixing MONOCHROME1 and
+    // MONOCHROME2 members within one series).
+    let mut invert = false;
     let mut decoded = Vec::with_capacity(sources.len());
-    for (object, frame_index) in sources {
+    for (index, (object, frame_index)) in sources.iter().enumerate() {
         let (metadata, values) = decode_frame_grayscale_values(object, *frame_index)?;
+        if index == 0 {
+            invert = resolve_grayscale_invert(object, &metadata.photometric_interpretation);
+        }
         let raw: Vec<f32> = values.into_iter().map(|value| value as f32).collect();
         decoded.push(DecodedFrame { values: raw, width: metadata.cols as u32, height: metadata.rows as u32 });
     }
-    pack_frame_stack_texture(&decoded, default_window, compression)
+    pack_frame_stack_texture(&decoded, default_window, compression, invert)
 }
 
 #[cfg(test)]
@@ -800,7 +827,7 @@ mod tests {
 
     #[test]
     fn pack_frame_texture_rejects_a_sample_count_mismatch() {
-        let error = pack_frame_texture(&[0.0; 3], 2, 2, None, None, TextureCompression::None).unwrap_err();
+        let error = pack_frame_texture(&[0.0; 3], 2, 2, None, None, TextureCompression::None, false).unwrap_err();
         assert!(matches!(
             error,
             TextureExportError::SampleCountMismatch { expected: 4, found: 3 }
@@ -812,7 +839,7 @@ mod tests {
         let width = 8u32;
         let height = 8u32;
         let values: Vec<f32> = (0..width * height).map(|index| index as f32).collect();
-        let packed = pack_frame_texture(&values, width, height, None, Some(4), TextureCompression::None).unwrap();
+        let packed = pack_frame_texture(&values, width, height, None, Some(4), TextureCompression::None, false).unwrap();
         assert!(packed.meta.downsampled);
         assert_eq!(packed.meta.depth, 1);
         assert_eq!(packed.meta.native_dims, (8, 8, 1));
@@ -827,7 +854,7 @@ mod tests {
         let width = 4u32;
         let height = 4u32;
         let values: Vec<f32> = (0..width * height).map(|index| index as f32).collect();
-        let packed = pack_frame_texture(&values, width, height, None, None, TextureCompression::None).unwrap();
+        let packed = pack_frame_texture(&values, width, height, None, None, TextureCompression::None, true).unwrap();
         assert_eq!(packed.meta.default_window_center, Some(7.5));
         assert_eq!(packed.meta.default_window_width, Some(15.0));
     }
@@ -864,7 +891,7 @@ mod tests {
     #[test]
     fn pack_frame_stack_texture_concatenates_layers_in_source_order() {
         let frames = vec![ramp_frame(2, 2, 0.0), ramp_frame(2, 2, 100.0), ramp_frame(2, 2, 200.0)];
-        let packed = pack_frame_stack_texture(&frames, None, TextureCompression::None).unwrap();
+        let packed = pack_frame_stack_texture(&frames, None, TextureCompression::None, false).unwrap();
         assert_eq!(packed.meta.content_kind, ContentKind::FrameStack);
         assert_eq!((packed.meta.width, packed.meta.height, packed.meta.depth), (2, 2, 3));
         assert_eq!(packed.meta.native_dims, (2, 2, 3));
@@ -881,7 +908,7 @@ mod tests {
     #[test]
     fn pack_frame_stack_texture_never_carries_physical_geometry() {
         let frames = vec![ramp_frame(2, 2, 0.0), ramp_frame(2, 2, 1.0)];
-        let packed = pack_frame_stack_texture(&frames, None, TextureCompression::None).unwrap();
+        let packed = pack_frame_stack_texture(&frames, None, TextureCompression::None, false).unwrap();
         assert_eq!(packed.meta.origin, [0.0, 0.0, 0.0]);
         assert_eq!(packed.meta.slice_spacing_mm, 0.0);
         assert_eq!(packed.meta.row_dir, [1.0, 0.0, 0.0]);
@@ -891,7 +918,7 @@ mod tests {
     #[test]
     fn pack_frame_stack_texture_rejects_mismatched_frame_dimensions() {
         let frames = vec![ramp_frame(2, 2, 0.0), ramp_frame(3, 2, 0.0)];
-        let error = pack_frame_stack_texture(&frames, None, TextureCompression::None).unwrap_err();
+        let error = pack_frame_stack_texture(&frames, None, TextureCompression::None, false).unwrap_err();
         assert!(matches!(
             error,
             TextureExportError::FrameDimensionMismatch { expected: (2, 2), found: (3, 2) }
@@ -900,7 +927,7 @@ mod tests {
 
     #[test]
     fn pack_frame_stack_texture_rejects_an_empty_stack() {
-        let error = pack_frame_stack_texture(&[], None, TextureCompression::None).unwrap_err();
+        let error = pack_frame_stack_texture(&[], None, TextureCompression::None, false).unwrap_err();
         assert!(matches!(error, TextureExportError::InvalidDimensions));
     }
 
@@ -911,7 +938,7 @@ mod tests {
         // module must still come out at native resolution, unlike pack_volume_texture/
         // pack_frame_texture which would shrink it.
         let frames = vec![ramp_frame(16, 16, 0.0)];
-        let packed = pack_frame_stack_texture(&frames, None, TextureCompression::None).unwrap();
+        let packed = pack_frame_stack_texture(&frames, None, TextureCompression::None, false).unwrap();
         assert_eq!((packed.meta.width, packed.meta.height), (16, 16));
         assert!(!packed.meta.downsampled);
     }
@@ -922,7 +949,7 @@ mod tests {
         // min/max window must reflect the FULL concatenated range (0..203), not get reset/
         // overwritten by whichever layer happens to be processed last.
         let frames = vec![ramp_frame(2, 2, 0.0), ramp_frame(2, 2, 100.0), ramp_frame(2, 2, 200.0)];
-        let packed = pack_frame_stack_texture(&frames, None, TextureCompression::None).unwrap();
+        let packed = pack_frame_stack_texture(&frames, None, TextureCompression::None, false).unwrap();
         assert_eq!(packed.meta.default_window_center, Some((0.0 + 203.0) / 2.0));
         assert_eq!(packed.meta.default_window_width, Some(203.0));
     }

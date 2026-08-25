@@ -512,6 +512,12 @@ it as JSON to `OUTPUT` or stdout, instead of the default DICOM/JSON conversion. 
 to each frame's own observed min/max; `--histogram-min`/`--histogram-max` (must be given together)
 pin it to a fixed range instead, e.g. to compare several frames or instances on the same axis.
 
+For an RGB/color frame (`SamplesPerPixel` 3 - YBR variants are converted to RGB first, same as 2D
+rendering), each frame produces **three** entries instead of one - one per `"red"`/`"green"`/
+`"blue"` `channel` - each over that channel's own decoded 8-bit (0-255) samples, defaulting the
+bin range to the full 0-255 domain (not each channel's own min/max) so all three stay directly
+comparable. A grayscale frame's entry has `channel: null`.
+
 Every frame in the instance:
 
 ```bash
@@ -524,13 +530,15 @@ One frame, with a custom bin count, written to a file:
 cargo run -p dcmnorm-cli -- --histogram --histogram-frame 0 --histogram-bins 64 test/files/ct.dcm histogram.json
 ```
 
-Output shape (`{"frames": [...]}`, one entry per computed frame, `counts` has `binCount` entries):
+Output shape (`{"frames": [...]}`, one entry per computed frame - or three, for an RGB/color
+frame; `counts` has `binCount` entries):
 
 ```json
 {
   "frames": [
     {
       "frameIndex": 0,
+      "channel": null,
       "binCount": 8,
       "rangeMin": -1000.0,
       "rangeMax": 2540.0,
