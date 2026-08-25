@@ -8,6 +8,7 @@ This repository contains:
 - [`exec/dcmnorm`](exec/dcmnorm/): a CLI for converting between DICOM, transcoded DICOM, JSON, and rendered images/raw frames
 - [`exec/dcmtalk`](exec/dcmtalk/): a DIMSE network CLI (C-ECHO/C-STORE/C-FIND/C-MOVE SCU plus a storage SCP), covering the same ground as [dcmtk](https://dcmtk.org/)'s `echoscu`/`storescu`/`findscu`/`movescu`/`storescp`
 - [`bindings/node`](bindings/node/): Node.js bindings (`@pohcee/dcmnorm-node`) that call the library in-process via napi-rs — see that package's own README for its API
+- [`bindings/python`](bindings/python/): Python bindings (`dcmnorm-python`) that call the library in-process via PyO3 — see that package's own README for its API
 
 ## Contents
 
@@ -31,7 +32,8 @@ This repository contains:
 │   ├── dcmnorm/       # dcmnorm-cli package (the `dcmnorm` binary)
 │   └── dcmtalk/       # dcmtalk package (the `dcmtalk` binary)
 ├── bindings/
-│   └── node/          # @pohcee/dcmnorm-node napi-rs bindings
+│   ├── node/          # @pohcee/dcmnorm-node napi-rs bindings
+│   └── python/        # dcmnorm-python PyO3 bindings
 ├── scripts/           # install / release helper scripts
 └── test/
     └── files/         # sample DICOM fixtures used by docs and tests
@@ -390,6 +392,14 @@ Texture Export:
 - `--texture-max-dim <N>`
 - `--texture-compression <none|gzip>`
 
+Histogram:
+
+- `--histogram`
+- `--histogram-bins <N>`
+- `--histogram-frame <N>`
+- `--histogram-min <FLOAT>`
+- `--histogram-max <FLOAT>`
+
 ### JSON conversion defaults
 
 DICOM to JSON defaults to:
@@ -493,6 +503,48 @@ Behavior:
 - suppresses per-file failure messages
 - returns exit code `0` when all inputs are valid
 - returns exit code `1` if any input is invalid, unreadable, or not a regular file
+
+### Compute a pixel histogram with `--histogram`
+
+Computes a value histogram per frame (Hounsfield units for CT, the rescaled physical value
+otherwise - the same modality-LUT-applied values rendering and `--render-frame` use) and prints
+it as JSON to `OUTPUT` or stdout, instead of the default DICOM/JSON conversion. Bin range defaults
+to each frame's own observed min/max; `--histogram-min`/`--histogram-max` (must be given together)
+pin it to a fixed range instead, e.g. to compare several frames or instances on the same axis.
+
+Every frame in the instance:
+
+```bash
+cargo run -p dcmnorm-cli -- --histogram test/files/ct.dcm
+```
+
+One frame, with a custom bin count, written to a file:
+
+```bash
+cargo run -p dcmnorm-cli -- --histogram --histogram-frame 0 --histogram-bins 64 test/files/ct.dcm histogram.json
+```
+
+Output shape (`{"frames": [...]}`, one entry per computed frame, `counts` has `binCount` entries):
+
+```json
+{
+  "frames": [
+    {
+      "frameIndex": 0,
+      "binCount": 8,
+      "rangeMin": -1000.0,
+      "rangeMax": 2540.0,
+      "binWidth": 442.5,
+      "counts": [130793, 6601, 116719, 7134, 883, 4, 3, 7],
+      "pixelCount": 262144,
+      "minValue": -1000.0,
+      "maxValue": 2540.0,
+      "mean": -469.71,
+      "stdDev": 530.11
+    }
+  ]
+}
+```
 
 ### Override type detection with `--input-type` / `--output-type`
 

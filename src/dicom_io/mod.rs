@@ -3,6 +3,7 @@ mod common;
 mod dimse;
 mod filter;
 mod flat_json;
+mod histogram;
 mod io;
 mod jpeg_ls;
 mod json;
@@ -42,6 +43,7 @@ pub use json::{
     write_dicom_json_full, write_dicom_json_full_with_source, write_dicom_json_with_options,
     write_dicom_json_with_source,
 };
+pub use histogram::{compute_frame_histogram, compute_instance_histograms, FrameHistogram, HistogramOptions};
 pub use render::{
     redact_dicom_pixels_to_transfer_syntax, render_all_dicom_frames,
     render_all_dicom_video_frames, render_dicom_frame, render_dicom_frames,

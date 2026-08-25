@@ -1,0 +1,20 @@
+[build-system]
+requires = ["maturin>=1.5,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "dcmnorm-python"
+version = "0.1.0"
+description = "Native Python bindings for dcmnorm (in-process, no CLI subprocess)"
+requires-python = ">=3.9"
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Private :: Do Not Upload",
+]
+
+[tool.maturin]
+# The compiled extension module is imported as `import dcmnorm` - see `#[pymodule] fn dcmnorm`
+# in src/lib.rs. Matches `[lib] name = "dcmnorm"` in Cargo.toml.
+module-name = "dcmnorm"
+features = ["pyo3/extension-module"]

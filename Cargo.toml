@@ -9,6 +9,7 @@ members = [
 	"exec/dcmnorm",
 	"exec/dcmtalk",
 	"bindings/node",
+	"bindings/python",
 ]
 resolver = "2"
 

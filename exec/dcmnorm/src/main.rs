@@ -5,14 +5,15 @@ use std::path::{Path, PathBuf};
 
 use clap::{ArgAction, CommandFactory, FromArgMatches, Parser, ValueEnum};
 use dcmnorm::dicom_io::{
-    apply_filter_to_object, jpeg2000_backend_name, kakadu_ffi_enabled, list_transfer_syntax_support,
+    apply_filter_to_object, compute_frame_histogram, compute_instance_histograms, jpeg2000_backend_name,
+    kakadu_ffi_enabled, list_transfer_syntax_support,
     parse_attribute_override, parse_filter_requests, parse_tag_key, read_dicom_bytes, read_dicom_file,
     read_dicom_json_with_options, read_dicom_object_for_filter,
     redact_dicom_pixels_to_transfer_syntax, remove_attribute, render_all_dicom_frames,
     render_dicom_frame, set_attribute, transcode_dicom_object, write_dicom_file,
     write_dicom_json_with_options, write_dicom_video, BoundingBox, BoxLength, DicomJsonBulkDataMode, DicomJsonFormat,
     DicomJsonKeyStyle, DicomJsonReadOptions, DicomJsonWriteOptions,
-    RenderOutputFormat, RenderPipelineOptions, JPEG2000_CODEC_ENV_FLAG, JPEG2000_DEBUG_ENV_FLAG,
+    RenderOutputFormat, RenderPipelineOptions, HistogramOptions, JPEG2000_CODEC_ENV_FLAG, JPEG2000_DEBUG_ENV_FLAG,
     probe_dicom_file_for_sop_class_uid,
     build_volume, canonical_view_basis, generate_uid, reformat_plane, reformat_plane_values, rotate_basis,
     write_nifti, write_nrrd, write_reformatted_dicom_slice,
@@ -478,6 +479,51 @@ struct Cli {
         display_order = 61
     )]
     texture_compression: Option<TextureCompressionArg>,
+
+    #[arg(
+        long,
+        action = ArgAction::SetTrue,
+        help = "Compute a pixel-value histogram (one per frame) and print it as JSON to OUTPUT or stdout, instead of the default DICOM/JSON conversion",
+        help_heading = "Histogram",
+        display_order = 70
+    )]
+    histogram: bool,
+
+    #[arg(
+        long,
+        default_value_t = 256,
+        help = "Number of bins per frame histogram",
+        help_heading = "Histogram",
+        display_order = 71
+    )]
+    histogram_bins: u32,
+
+    #[arg(
+        long,
+        value_name = "N",
+        help = "Compute only this zero-based frame's histogram, instead of every frame in the instance",
+        help_heading = "Histogram",
+        display_order = 72
+    )]
+    histogram_frame: Option<usize>,
+
+    #[arg(
+        long,
+        value_name = "FLOAT",
+        help = "Lower bound of the binned value range. Defaults to each frame's own observed minimum. Requires --histogram-max",
+        help_heading = "Histogram",
+        display_order = 73
+    )]
+    histogram_min: Option<f64>,
+
+    #[arg(
+        long,
+        value_name = "FLOAT",
+        help = "Upper bound of the binned value range. Defaults to each frame's own observed maximum. Requires --histogram-min",
+        help_heading = "Histogram",
+        display_order = 74
+    )]
+    histogram_max: Option<f64>,
 }
 
 impl Cli {
@@ -620,6 +666,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     if cli.check_dicom {
         validate_check_dicom_flags(&cli)?;
         return run_check_dicom(&cli);
+    }
+
+    if cli.histogram {
+        validate_histogram_flags(&cli)?;
+        return run_histogram(&cli);
     }
 
     if !cli.mpr_requested()
@@ -2596,6 +2647,65 @@ fn validate_check_dicom_flags(cli: &Cli) -> Result<(), Box<dyn std::error::Error
             "--check-dicom only accepts INPUT (or --stdin-paths) and optional --verbose",
         )
         .into());
+    }
+
+    Ok(())
+}
+
+fn validate_histogram_flags(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+    if cli.histogram_min.is_some() != cli.histogram_max.is_some() {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "--histogram-min and --histogram-max must be given together",
+        )
+        .into());
+    }
+
+    Ok(())
+}
+
+fn run_histogram(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+    let input_path = cli.input.as_ref().ok_or_else(|| {
+        io::Error::new(ErrorKind::InvalidInput, "an input path is required for --histogram")
+    })?;
+
+    let object = read_dicom_file(input_path)?;
+    let options = HistogramOptions {
+        bin_count: cli.histogram_bins,
+        min_value: cli.histogram_min,
+        max_value: cli.histogram_max,
+    };
+
+    let histograms = match cli.histogram_frame {
+        Some(frame_index) => vec![compute_frame_histogram(&object, frame_index, &options)?],
+        None => compute_instance_histograms(&object, &options)?,
+    };
+
+    let json_frames: Vec<JsonValue> = histograms
+        .iter()
+        .map(|histogram| {
+            serde_json::json!({
+                "frameIndex": histogram.frame_index,
+                "binCount": histogram.bin_count,
+                "rangeMin": histogram.range_min,
+                "rangeMax": histogram.range_max,
+                "binWidth": histogram.bin_width,
+                "counts": histogram.counts,
+                "pixelCount": histogram.pixel_count,
+                "minValue": histogram.min_value,
+                "maxValue": histogram.max_value,
+                "mean": histogram.mean,
+                "stdDev": histogram.std_dev,
+            })
+        })
+        .collect();
+
+    let output_json = serde_json::json!({ "frames": json_frames });
+    let text = serde_json::to_string_pretty(&output_json)?;
+
+    match cli.output.as_ref() {
+        Some(path) => fs::write(path, text)?,
+        None => println!("{text}"),
     }
 
     Ok(())

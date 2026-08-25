@@ -12,6 +12,8 @@ use dcmnorm::dicom_io::{
     find_scu as dcm_find_scu, move_scu as dcm_move_scu, parse_attribute_override,
     parse_filter_requests, parse_tag_key, probe_dicom_file_for_sop_class_uid, read_dicom_bytes,
     read_dicom_file, read_dicom_json_with_options, read_dicom_object_for_filter,
+    compute_frame_histogram as dcm_compute_frame_histogram,
+    compute_instance_histograms as dcm_compute_instance_histograms,
     pack_dicom_frame_stack_texture as dcm_pack_dicom_frame_stack_texture,
     pack_dicom_frame_texture as dcm_pack_dicom_frame_texture, pack_volume_texture as dcm_pack_volume_texture,
     reformat_plane as dcm_reformat_plane, remove_attribute, remove_private_tags_inplace,
@@ -20,7 +22,8 @@ use dcmnorm::dicom_io::{
     write_dicom_json_with_options, write_dicom_video as dcm_write_dicom_video, CancelMode as DcmCancelMode,
     CancelSignal, DicomJsonBulkDataMode, DicomJsonFormat, DicomJsonKeyStyle, DicomJsonReadOptions,
     DicomJsonWriteOptions, DicomScp, DimseLogger, EchoScuOptions as DcmEchoScuOptions,
-    FindScuOptions as DcmFindScuOptions, Interpolation as DcmInterpolation,
+    FindScuOptions as DcmFindScuOptions, HistogramOptions as DcmHistogramOptions,
+    Interpolation as DcmInterpolation,
     MoveScuOptions as DcmMoveScuOptions, OverlaySummary as DcmOverlaySummary,
     PlaneParams as DcmPlaneParams, RenderOutputFormat as DcmRenderOutputFormat,
     RenderPipelineOptions as DcmRenderPipelineOptions, ScpHandlers as DcmScpHandlers,
@@ -1307,6 +1310,105 @@ impl Task for RenderMovieTask {
 #[napi]
 pub fn render_movie(file_path: String, options: Option<RenderMovieOptions>) -> AsyncTask<RenderMovieTask> {
     AsyncTask::new(RenderMovieTask {
+        file_path: PathBuf::from(file_path),
+        options: options.unwrap_or_default(),
+    })
+}
+
+// ---------------------------------------------------------------------------------------------
+// Histogram: one bin-count array per frame, over the same modality-LUT-applied grayscale
+// values render_frame/renderMovie decode from (so bins line up with what the viewer's hover
+// probe already reports for the same frame - see dcmnorm::dicom_io::histogram's own doc).
+// ---------------------------------------------------------------------------------------------
+
+#[napi(object)]
+#[derive(Default)]
+pub struct HistogramOptions {
+    /// Number of bins per frame histogram. Defaults to 256.
+    pub bin_count: Option<u32>,
+    /// Compute only this zero-based frame's histogram, instead of every frame in the instance.
+    pub frame_index: Option<u32>,
+    /// Lower bound of the binned value range. Defaults to each frame's own observed minimum.
+    /// Must be set together with `maxValue`.
+    pub min_value: Option<f64>,
+    /// Upper bound of the binned value range. Defaults to each frame's own observed maximum.
+    /// Must be set together with `minValue`.
+    pub max_value: Option<f64>,
+}
+
+/// Mirrors `dcmnorm::dicom_io::FrameHistogram` for the JS side.
+#[napi(object)]
+pub struct FrameHistogram {
+    pub frame_index: u32,
+    pub bin_count: u32,
+    pub range_min: f64,
+    pub range_max: f64,
+    pub bin_width: f64,
+    pub counts: Vec<u32>,
+    pub pixel_count: u32,
+    pub min_value: f64,
+    pub max_value: f64,
+    pub mean: f64,
+    pub std_dev: f64,
+}
+
+impl From<dcmnorm::dicom_io::FrameHistogram> for FrameHistogram {
+    fn from(value: dcmnorm::dicom_io::FrameHistogram) -> Self {
+        FrameHistogram {
+            frame_index: value.frame_index as u32,
+            bin_count: value.bin_count,
+            range_min: value.range_min,
+            range_max: value.range_max,
+            bin_width: value.bin_width,
+            counts: value.counts,
+            pixel_count: value.pixel_count,
+            min_value: value.min_value,
+            max_value: value.max_value,
+            mean: value.mean,
+            std_dev: value.std_dev,
+        }
+    }
+}
+
+pub struct ComputeHistogramTask {
+    file_path: PathBuf,
+    options: HistogramOptions,
+}
+
+impl Task for ComputeHistogramTask {
+    type Output = Vec<FrameHistogram>;
+    type JsValue = Vec<FrameHistogram>;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        guarded(|| {
+            let object = read_dicom_file(&self.file_path).map_err(to_napi_err)?;
+            let dcm_options = DcmHistogramOptions {
+                bin_count: self.options.bin_count.unwrap_or(256),
+                min_value: self.options.min_value,
+                max_value: self.options.max_value,
+            };
+
+            let histograms = match self.options.frame_index {
+                Some(frame_index) => {
+                    vec![dcm_compute_frame_histogram(&object, frame_index as usize, &dcm_options).map_err(to_napi_err)?]
+                }
+                None => dcm_compute_instance_histograms(&object, &dcm_options).map_err(to_napi_err)?,
+            };
+
+            Ok(histograms.into_iter().map(FrameHistogram::from).collect())
+        })
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(output)
+    }
+}
+
+/// Computes a pixel-value histogram for every frame of a DICOM file (or just one, via
+/// `options.frameIndex`). Mirrors `dcmnorm --histogram --histogram-bins ... file.dcm`.
+#[napi]
+pub fn compute_histogram(file_path: String, options: Option<HistogramOptions>) -> AsyncTask<ComputeHistogramTask> {
+    AsyncTask::new(ComputeHistogramTask {
         file_path: PathBuf::from(file_path),
         options: options.unwrap_or_default(),
     })

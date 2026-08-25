@@ -45,6 +45,16 @@ npm test             # runs test/smoke.js against the fixtures in ../../test/fil
 - `renderMovie(filePath, options?: { outputWidth?, outputHeight?, windowCenter?, windowWidth?, fps? }): Promise<{ mimeType, data: Buffer }>`
   — renders every frame of a multiframe instance to an MP4 (requires `ffmpeg` on `PATH`). Does not
   currently support the overlay options `renderFrame` does.
+- `computeHistogram(filePath, options?: { binCount?, frameIndex?, minValue?, maxValue? }): Promise<FrameHistogram[]>`
+  — computes a pixel-value histogram per frame, over the same modality-LUT-applied grayscale
+  values `renderFrame` decodes from (so e.g. a CT frame's bins are in Hounsfield units). Mirrors
+  the CLI's `--histogram`/`--histogram-bins`/`--histogram-frame`/`--histogram-min`/`--histogram-max`
+  — see the main [README](../../README.md#compute-a-pixel-histogram-with---histogram) for the
+  field-by-field output shape. `binCount` defaults to 256; `frameIndex` (0-based) restricts the
+  result to one frame instead of every frame in the instance; `minValue`/`maxValue` (must be set
+  together) pin the bin range instead of defaulting to each frame's own observed min/max.
+  `FrameHistogram` is `{ frameIndex, binCount, rangeMin, rangeMax, binWidth, counts: number[],
+  pixelCount, minValue, maxValue, mean, stdDev }`.
 
 ### MPR (Multiplanar Reformation)
 

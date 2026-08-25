@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+# maturin's own local dev-build output (from `maturin develop`) - not what gets committed;
+# `dist/*.whl` (from `build-in-docker.sh`) is the actual shipped artifact and IS committed.
+build/

@@ -130,6 +130,12 @@ export declare function buildVolume(filePaths: Array<string>): Promise<unknown>
 export declare function checkDicom(filePath: string): Promise<unknown>
 
 /**
+ * Computes a pixel-value histogram for every frame of a DICOM file (or just one, via
+ * `options.frameIndex`). Mirrors `dcmnorm --histogram --histogram-bins ... file.dcm`.
+ */
+export declare function computeHistogram(filePath: string, options?: HistogramOptions | undefined | null): Promise<unknown>
+
+/**
  * Performs a C-ECHO (DICOM Verification) against `destination` ("host:port"). Resolves with the
  * response Status code (0 = success); rejects only if the association itself could not be
  * established (unreachable host, no accepted presentation context, etc). `onLog`, if given, is
@@ -230,10 +236,42 @@ export interface FindScuOptions {
   timeoutMs?: number
 }
 
+/** Mirrors `dcmnorm::dicom_io::FrameHistogram` for the JS side. */
+export interface FrameHistogram {
+  frameIndex: number
+  binCount: number
+  rangeMin: number
+  rangeMax: number
+  binWidth: number
+  counts: Array<number>
+  pixelCount: number
+  minValue: number
+  maxValue: number
+  mean: number
+  stdDev: number
+}
+
 export interface FrameStackSource {
   filePath: string
   /** Zero-based frame indices to include from this file, in order. Defaults to `[0]`. */
   frameIndices?: Array<number>
+}
+
+export interface HistogramOptions {
+  /** Number of bins per frame histogram. Defaults to 256. */
+  binCount?: number
+  /** Compute only this zero-based frame's histogram, instead of every frame in the instance. */
+  frameIndex?: number
+  /**
+   * Lower bound of the binned value range. Defaults to each frame's own observed minimum.
+   * Must be set together with `maxValue`.
+   */
+  minValue?: number
+  /**
+   * Upper bound of the binned value range. Defaults to each frame's own observed maximum.
+   * Must be set together with `minValue`.
+   */
+  maxValue?: number
 }
 
 /**
