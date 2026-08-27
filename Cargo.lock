@@ -436,8 +436,6 @@ dependencies = [
 [[package]]
 name = "dicom-core"
 version = "0.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2fdbd35275bc59b88c78e1a3cb73b9162f00e0157e6677d7a8a713d996b4c239"
 dependencies = [
  "chrono",
  "either",

@@ -80,6 +80,40 @@ fn writes_flat_json_with_source_uri_mode_for_nested_bulk_value() {
     );
 }
 
+#[test]
+fn reads_element_with_nonstandard_ambiguous_vr_shorthand_as_unsigned_short() {
+    // Some vendor DICOM writers emit their own internal "ambiguous VR"
+    // placeholder ("xs" meaning "US or SS") literally into the file instead
+    // of resolving it against PixelRepresentation. Regression test for a
+    // real customer file that failed with "Could not read data set token".
+    let mut source = fixture_bytes(fixture_path("dx.dcm"));
+    let tag = Tag(0x0028, 0x0107); // LargestImagePixelValue
+    append_explicit_vr_header(&mut source, tag, *b"xs", 2);
+    source.extend_from_slice(&4017u16.to_le_bytes());
+
+    let object = read_dicom_bytes(&source).unwrap();
+    let element = object.element(tag).unwrap();
+    assert_eq!(element.header().vr(), VR::US);
+    assert_eq!(element.to_int::<u16>().unwrap(), 4017);
+}
+
+#[test]
+fn reads_element_with_nonstandard_ambiguous_vr_shorthand_ox_as_other_word() {
+    // "ox" (dcmjs shorthand for "OB or OW") is long-form like the VR it
+    // stands in for, so unlike "xs" it was never actually parse-breaking via
+    // the VR::UN fallback (UN is also long-form) - this just locks in
+    // VR-reporting consistency with dcmjs's own resolution.
+    let mut source = fixture_bytes(fixture_path("dx.dcm"));
+    let tag = Tag(0x0028, 0x9999); // undefined public tag, used only to carry the raw VR bytes
+    let payload = [0xAB, 0xCD, 0xEF, 0x01];
+    append_explicit_vr_header(&mut source, tag, *b"ox", payload.len() as u32);
+    source.extend_from_slice(&payload);
+
+    let object = read_dicom_bytes(&source).unwrap();
+    let element = object.element(tag).unwrap();
+    assert_eq!(element.header().vr(), VR::OW);
+}
+
 fn append_nested_icc_profile_sequence(bytes: &mut Vec<u8>, payload: &[u8]) {
     let sequence_tag = Tag(0x0048, 0x0105); // OpticalPathSequence
     let icc_profile_tag = Tag(0x0028, 0x2000); // ICCProfile
@@ -127,6 +161,7 @@ fn uses_32_bit_vr_length(vr: [u8; 2]) -> bool {
     matches!(
         &vr,
         b"OB" | b"OD" | b"OF" | b"OL" | b"OV" | b"OW" | b"SQ" | b"UC" | b"UR" | b"UT" | b"UN"
+            | b"ox"
     )
 }
 

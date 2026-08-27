@@ -45,5 +45,17 @@ cc = "1.2"
 # corrupted output (periodic banding) on any lossless JPEG that uses restart markers, which
 # is common in mammography (Hologic C-View/tomosynthesis) DICOM. See vendor/jpeg-decoder
 # for the fix; remove this patch once upstream (image-rs/jpeg-decoder) releases a fix.
+#
+# Patched copy of dicom-core 0.9.1: VR::from_binary only recognizes the 32 standard DICOM
+# VR codes, so an unrecognized 2-byte VR field falls back to VR::UN (long-form, 4-byte
+# length) in dicom-encoding's explicit VR decoders. Some vendor DICOM writers instead write
+# their own internal ambiguous-VR dictionary placeholder literally into the file - e.g.
+# "xs" meaning "US or SS" - which is short-form (2-byte length) like the VR it stands in
+# for, so the VR::UN fallback misreads the length field and desyncs the rest of the
+# dataset ("Could not read data set token" from dicom-object). Also resolves "ox" ("OB or
+# OW") for VR-reporting consistency, per dcmjs's dictionary, though that one was never
+# parse-breaking. See vendor/dicom-core for the fix; remove this patch once upstream
+# (dicom-rs) tolerates non-standard VR bytes without erroring.
 [patch.crates-io]
 jpeg-decoder = { path = "vendor/jpeg-decoder" }
+dicom-core = { path = "vendor/dicom-core" }
