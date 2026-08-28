@@ -1349,7 +1349,15 @@ pub(crate) fn read_render_metadata(object: &DefaultDicomObject) -> Result<Render
     let cols = required_u16(object, tags::COLUMNS, "Columns")?;
     let samples_per_pixel = required_u16(object, tags::SAMPLES_PER_PIXEL, "SamplesPerPixel")?;
     let bits_allocated = required_u16(object, tags::BITS_ALLOCATED, "BitsAllocated")?;
-    let bits_stored = required_u16(object, tags::BITS_STORED, "BitsStored")?;
+    // BitsStored is Type 1 per PS3.3, but some non-conformant encoders (seen
+    // from Hologic Cenova R2 CAD secondary captures) omit it. BitsAllocated
+    // is the only sound default: it constrains the actual sample width, so
+    // window/level and LUT math stay correct even when it overestimates the
+    // stored bit depth. Mirrors the fallback in decode_jpeg2000_with_kakadu.
+    let bits_stored = object
+        .get(tags::BITS_STORED)
+        .and_then(|element| element.uint16().ok())
+        .unwrap_or(bits_allocated);
     let pixel_representation = object
         .get(tags::PIXEL_REPRESENTATION)
         .and_then(|element| element.uint16().ok())
@@ -2240,13 +2248,29 @@ fn decode_overlay_data_bits(
 #[cfg(test)]
 mod tests {
     use super::{
-        clamped_box, mpeg4_input_pixel_format, mpeg4_muxer_name, mpeg4_video_filter,
-        normalize_decoded_render_attributes, ybr_rct_to_rgb, ybr_to_rgb, BoundingBox, BoxLength,
+        clamped_box, is_jpeg2000_transfer_syntax, mpeg4_input_pixel_format, mpeg4_muxer_name,
+        mpeg4_video_filter, normalize_decoded_render_attributes, ybr_rct_to_rgb, ybr_to_rgb,
+        BoundingBox, BoxLength,
     };
     use crate::dicom_io::read_dicom_file;
     use dicom_core::{DataElement, PrimitiveValue, VR};
     use dicom_dictionary_std::tags;
     use std::path::PathBuf;
+
+    #[test]
+    fn recognizes_high_throughput_jpeg2000_as_jpeg2000() {
+        assert!(is_jpeg2000_transfer_syntax("1.2.840.10008.1.2.4.90"));
+        assert!(is_jpeg2000_transfer_syntax("1.2.840.10008.1.2.4.91"));
+        assert!(is_jpeg2000_transfer_syntax("1.2.840.10008.1.2.4.92"));
+        assert!(is_jpeg2000_transfer_syntax("1.2.840.10008.1.2.4.93"));
+        assert!(is_jpeg2000_transfer_syntax("1.2.840.10008.1.2.4.201"));
+        assert!(is_jpeg2000_transfer_syntax("1.2.840.10008.1.2.4.202"));
+        assert!(is_jpeg2000_transfer_syntax("1.2.840.10008.1.2.4.203"));
+        // JPIP HTJ2K Referenced (Deflate) - no embedded codestream, not a
+        // JPEG2000 decode-path case.
+        assert!(!is_jpeg2000_transfer_syntax("1.2.840.10008.1.2.4.204"));
+        assert!(!is_jpeg2000_transfer_syntax("1.2.840.10008.1.2.4.205"));
+    }
 
     #[test]
     fn resolves_negative_offsets_from_right_and_bottom() {
@@ -2920,6 +2944,12 @@ fn is_jpeg2000_transfer_syntax(uid: &str) -> bool {
             | "1.2.840.10008.1.2.4.91"
             | "1.2.840.10008.1.2.4.92"
             | "1.2.840.10008.1.2.4.93"
+            // High-Throughput JPEG 2000 (Lossless Only / RPCL / lossy) - same
+            // codestream format as classic JPEG 2000, so YBR/MCT handling on
+            // decode needs the same treatment.
+            | "1.2.840.10008.1.2.4.201"
+            | "1.2.840.10008.1.2.4.202"
+            | "1.2.840.10008.1.2.4.203"
     )
 }
 

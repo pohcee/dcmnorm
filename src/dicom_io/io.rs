@@ -148,7 +148,15 @@ fn jpeg2000_debug_log(message: impl AsRef<str>) {
 fn is_jpeg2000_transfer_syntax(uid: &str) -> bool {
     matches!(
         normalize_transfer_syntax_uid(uid),
-        "1.2.840.10008.1.2.4.91" | "1.2.840.10008.1.2.4.90"
+        "1.2.840.10008.1.2.4.91"
+            | "1.2.840.10008.1.2.4.90"
+            // High-Throughput JPEG 2000 (Lossless Only / RPCL / lossy) - same
+            // codestream format as classic JPEG 2000, decoded by the same
+            // OpenJPEG/Kakadu backends, so it needs the same MCT/component
+            // correction and Kakadu dispatch logic gated by this check.
+            | "1.2.840.10008.1.2.4.201"
+            | "1.2.840.10008.1.2.4.202"
+            | "1.2.840.10008.1.2.4.203"
     )
 }
 
@@ -1523,4 +1531,22 @@ fn normalize_decoded_pixel_data_attributes(
         PrimitiveValue::from(normalized_photometric),
     ));
     object.remove_element(tags::PLANAR_CONFIGURATION);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_jpeg2000_transfer_syntax;
+
+    #[test]
+    fn recognizes_high_throughput_jpeg2000_as_jpeg2000() {
+        assert!(is_jpeg2000_transfer_syntax("1.2.840.10008.1.2.4.90"));
+        assert!(is_jpeg2000_transfer_syntax("1.2.840.10008.1.2.4.91"));
+        assert!(is_jpeg2000_transfer_syntax("1.2.840.10008.1.2.4.201"));
+        assert!(is_jpeg2000_transfer_syntax("1.2.840.10008.1.2.4.202"));
+        assert!(is_jpeg2000_transfer_syntax("1.2.840.10008.1.2.4.203"));
+        // JPIP HTJ2K Referenced (Deflate) - no embedded codestream, not a
+        // JPEG2000 decode-path case.
+        assert!(!is_jpeg2000_transfer_syntax("1.2.840.10008.1.2.4.204"));
+        assert!(!is_jpeg2000_transfer_syntax("1.2.840.10008.1.2.4.205"));
+    }
 }

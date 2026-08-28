@@ -1293,6 +1293,25 @@ fn renders_dx_frame_to_png() {
 }
 
 #[test]
+fn renders_frame_when_bits_stored_is_missing() {
+    // Some non-conformant encoders (seen from Hologic Cenova R2 CAD
+    // secondary captures) omit BitsStored even though it's Type 1 per
+    // PS3.3. Rendering should fall back to BitsAllocated instead of
+    // hard-failing.
+    let mut object = read_dicom_file(fixture_path("dx.dcm")).unwrap();
+    assert!(remove_attribute(&mut object, tags::BITS_STORED));
+
+    let rendered = render_dicom_frame(
+        &object,
+        RenderOutputFormat::Png,
+        &RenderPipelineOptions::default(),
+    )
+    .unwrap();
+
+    assert_eq!(&rendered.bytes[..8], b"\x89PNG\r\n\x1a\n");
+}
+
+#[test]
 fn renders_dx_frame_to_jpeg() {
     let object = read_dicom_file(fixture_path("dx.dcm")).unwrap();
     let rendered = render_dicom_frame(
