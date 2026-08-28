@@ -14,7 +14,10 @@ use image::{ColorType, GrayImage, ImageEncoder, RgbImage};
 use lcms2::{Intent, PixelFormat, Profile, Transform};
 use rayon::prelude::*;
 
-use super::io::{jpeg2000_frame_uses_mct, kakadu_ffi_enabled, transcode_dicom_object, JPEG2000_DEBUG_ENV_FLAG};
+use super::io::{
+    apply_jpeg2000_component_correction, jpeg2000_component_mismatch, jpeg2000_frame_uses_mct,
+    kakadu_ffi_enabled, transcode_dicom_object, JPEG2000_DEBUG_ENV_FLAG,
+};
 use super::types::RenderError;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2752,6 +2755,28 @@ fn try_decode_single_frame_object(
         return Ok(None);
     };
 
+    // Some non-conformant JPEG 2000 encoders declare a SamplesPerPixel that
+    // disagrees with the codestream's real component count (e.g. an
+    // ultrasound machine-UI screen capture saved as SamplesPerPixel=3/RGB
+    // when the codestream is genuinely single-component grayscale). Decoding
+    // against the declared count then leaves unfilled channels zeroed,
+    // rendering as solid red - correct the attributes to match the
+    // codestream before decoding.
+    let corrected_object;
+    let decode_object: &DefaultDicomObject = if is_jpeg2000_transfer_syntax(source_uid) {
+        match jpeg2000_component_mismatch(object, frame_index) {
+            Some(actual_components) => {
+                let mut cloned = object.clone();
+                apply_jpeg2000_component_correction(&mut cloned, actual_components);
+                corrected_object = cloned;
+                &corrected_object
+            }
+            None => object,
+        }
+    } else {
+        object
+    };
+
     let mut decoded = Vec::new();
     let _scope = perf::scope("render.decode_single_frame_only");
     if is_jpeg2000_transfer_syntax(source_uid) {
@@ -2762,7 +2787,7 @@ fn try_decode_single_frame_object(
         ));
     }
     reader
-        .decode_frame(object, frame_index as u32, &mut decoded)
+        .decode_frame(decode_object, frame_index as u32, &mut decoded)
         .map_err(|error| {
             if is_jpeg2000_transfer_syntax(source_uid) {
                 jpeg2000_debug_log(format!(
@@ -2785,10 +2810,10 @@ fn try_decode_single_frame_object(
     }
 
     let jpeg2000_uses_mct = is_jpeg2000_transfer_syntax(source_uid)
-        .then(|| jpeg2000_frame_uses_mct(object, frame_index))
+        .then(|| jpeg2000_frame_uses_mct(decode_object, frame_index))
         .flatten();
 
-    let mut working = object.clone();
+    let mut working = decode_object.clone();
     replace_with_native_frame_pixel_data(&mut working, decoded)?;
     normalize_decoded_render_attributes(&mut working, source_uid, jpeg2000_uses_mct);
     working.remove_element(tags::NUMBER_OF_FRAMES);

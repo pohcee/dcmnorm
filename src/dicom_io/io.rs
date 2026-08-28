@@ -193,6 +193,105 @@ fn codestream_uses_mct(codestream: &[u8]) -> Option<bool> {
     window.get(marker_start + 8).map(|&byte| byte != 0)
 }
 
+/// Determines the true number of components a JPEG 2000 codestream carries
+/// for the given frame, independent of the DICOM SamplesPerPixel attribute.
+///
+/// Some non-conformant encoders (seen from certain ultrasound modalities)
+/// leave SamplesPerPixel=3/PhotometricInterpretation=RGB on a frame whose
+/// codestream was actually only ever encoded with a single (grayscale)
+/// component - e.g. a machine-UI screen capture saved as frame 1 of a study.
+/// A decoder sizing its output buffer from the declared SamplesPerPixel then
+/// only fills the first (red) channel and leaves green/blue zeroed, which
+/// renders as a solid red image. See jpeg2000_component_mismatch, which uses
+/// this to detect and correct that case before decoding.
+pub(super) fn jpeg2000_frame_component_count(
+    object: &DefaultDicomObject,
+    frame_index: usize,
+) -> Option<u16> {
+    let fragments = object.element(tags::PIXEL_DATA).ok()?.fragments()?;
+    let number_of_frames = object
+        .get(tags::NUMBER_OF_FRAMES)
+        .and_then(|element| element.to_str().ok())
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(1);
+
+    let bytes = if fragments.len() == number_of_frames {
+        fragments.get(frame_index)?
+    } else {
+        fragments.first()?
+    };
+
+    codestream_component_count(bytes)
+}
+
+/// Scans a raw JPEG 2000 codestream's main header for the SIZ marker segment
+/// and reads its Csiz (number of components) field. Marker layout (ITU-T
+/// T.800): FF51 (2) + Lsiz (2) + Rsiz (2) + Xsiz/Ysiz/XOsiz/YOsiz/XTsiz/
+/// YTsiz/XTOsiz/YTOsiz (4 bytes each, 32 total) + Csiz (2) - i.e. Csiz sits
+/// 38 bytes after the start of the FF51 marker.
+fn codestream_component_count(codestream: &[u8]) -> Option<u16> {
+    let window = &codestream[..codestream.len().min(4096)];
+    let marker_start = window.windows(2).position(|pair| pair == [0xFF, 0x51])?;
+    let csiz_start = marker_start + 38;
+    let bytes = window.get(csiz_start..csiz_start + 2)?;
+    Some(u16::from_be_bytes([bytes[0], bytes[1]]))
+}
+
+/// Returns the actual component count when it disagrees with a >1 declared
+/// SamplesPerPixel, i.e. when applying it via
+/// [`apply_jpeg2000_component_correction`] would change anything.
+pub(super) fn jpeg2000_component_mismatch(
+    object: &DefaultDicomObject,
+    frame_index: usize,
+) -> Option<u16> {
+    let declared_samples_per_pixel = object
+        .get(tags::SAMPLES_PER_PIXEL)
+        .and_then(|element| element.uint16().ok())
+        .unwrap_or(1);
+
+    if declared_samples_per_pixel <= 1 {
+        return None;
+    }
+
+    let actual_components = jpeg2000_frame_component_count(object, frame_index)?;
+
+    if actual_components == 0 || actual_components >= declared_samples_per_pixel {
+        return None;
+    }
+
+    Some(actual_components)
+}
+
+/// Rewrites SamplesPerPixel (and, when the codestream is single-component,
+/// PhotometricInterpretation/PlanarConfiguration) to match a codestream's
+/// real component count ahead of decoding, so every backend (OpenJPEG,
+/// Kakadu) sizes and fills its output buffer correctly instead of leaving
+/// unfilled channels zeroed. Call only when [`jpeg2000_component_mismatch`]
+/// found a real mismatch.
+pub(super) fn apply_jpeg2000_component_correction(
+    object: &mut DefaultDicomObject,
+    actual_components: u16,
+) {
+    jpeg2000_debug_log(format!(
+        "codestream carries {actual_components} component(s), correcting SamplesPerPixel before decode"
+    ));
+
+    object.put(DataElement::new(
+        tags::SAMPLES_PER_PIXEL,
+        VR::US,
+        PrimitiveValue::from(actual_components),
+    ));
+
+    if actual_components == 1 {
+        object.put(DataElement::new(
+            tags::PHOTOMETRIC_INTERPRETATION,
+            VR::CS,
+            PrimitiveValue::from("MONOCHROME2".to_owned()),
+        ));
+        object.remove_element(tags::PLANAR_CONFIGURATION);
+    }
+}
+
 fn is_mpeg_transfer_syntax(uid: &str) -> bool {
     let normalized = normalize_transfer_syntax_uid(uid);
     matches!(
@@ -925,6 +1024,13 @@ fn decode_pixel_data(
 ) -> Result<(), TranscodeError> {
     let _scope = perf::scope("transcode.decode_pixel_data");
     let codec_preference = jpeg2000_codec_preference();
+
+    if is_jpeg2000_transfer_syntax(source_ts.uid()) {
+        if let Some(actual_components) = jpeg2000_component_mismatch(object, 0) {
+            apply_jpeg2000_component_correction(object, actual_components);
+        }
+    }
+
     let jpeg2000_uses_mct = is_jpeg2000_transfer_syntax(source_ts.uid())
         .then(|| jpeg2000_frame_uses_mct(object, 0))
         .flatten();
