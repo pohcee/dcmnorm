@@ -413,8 +413,10 @@ where
             };
 
             if self.offset_table_next {
-                // offset table
-                let mut offset_table = Vec::with_capacity(len);
+                // offset table. Not pre-sized to `len` (an untrusted, file-controlled item
+                // length) - `read_u32_to_vec` already grows this in bounded chunks internally,
+                // and pre-allocating the full declared length here would defeat that.
+                let mut offset_table = Vec::new();
 
                 self.offset_table_next = false;
 
@@ -428,8 +430,9 @@ where
                     },
                 )
             } else {
-                // item value
-                let mut value = Vec::with_capacity(len);
+                // item value. Not pre-sized to `len` (untrusted, file-controlled) - see the
+                // offset-table branch above for why.
+                let mut value = Vec::new();
 
                 // need to pop item delimiter on the next iteration
                 self.delimiter_check_pending = true;

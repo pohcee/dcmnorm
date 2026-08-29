@@ -37,17 +37,17 @@ impl PixelDataReader for UncompressedAdapter {
         frame: u32,
         dst: &mut Vec<u8>,
     ) -> DecodeResult<()> {
-        // just copy the specific fragment into the output vector
-        let pixeldata = src
-            .raw_pixel_data()
-            .context(decode_error::MissingAttributeSnafu { name: "Pixel Data" })?;
-
-        let fragment = pixeldata
-            .fragments
-            .get(frame as usize)
+        // `fragment()` is zero-copy (`Cow::Borrowed`) - unlike `raw_pixel_data()`, which clones
+        // every fragment just to let a per-frame caller index into one of them. That matters
+        // here: this is called once per frame for a multi-frame series (see
+        // `decode_pixel_data_parallel_frames` in dcmnorm's own `io.rs`), so going through
+        // `raw_pixel_data()` would clone the *entire* pixel buffer on every single frame call -
+        // O(frames^2) total bytes copied for an N-frame series where O(N) would do.
+        let fragment = src
+            .fragment(frame as usize)
             .context(decode_error::FrameRangeOutOfBoundsSnafu)?;
 
-        dst.extend_from_slice(fragment);
+        dst.extend_from_slice(&fragment);
 
         Ok(())
     }
@@ -82,11 +82,11 @@ impl PixelDataWriter for UncompressedAdapter {
         let frame_size =
             cols as usize * rows as usize * samples_per_pixel as usize * bytes_per_sample;
 
-        // identify frame data using the frame index
-        let pixeldata_uncompressed = &src
-            .raw_pixel_data()
-            .context(encode_error::MissingAttributeSnafu { name: "Pixel Data" })?
-            .fragments[0];
+        // identify frame data using the frame index. Zero-copy - see decode_frame's doc comment
+        // above for why this matters (called once per frame for a multi-frame series).
+        let pixeldata_uncompressed = src
+            .fragment(0)
+            .context(encode_error::MissingAttributeSnafu { name: "Pixel Data" })?;
 
         let len_before = pixeldata_uncompressed.len();
 

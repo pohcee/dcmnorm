@@ -124,14 +124,20 @@ impl InMemDicomObject {
     /// Apply an attribute mutation, as returned by a pixel data encoder after transcoding (e.g.
     /// a Photometric Interpretation or Planar Configuration adjustment required by the new
     /// transfer syntax).
-    pub fn apply(&mut self, op: AttributeOp) {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ApplyOpError::UnsupportedSelector`] if `op`'s selector is not a single
+    /// top-level tag. dcmnorm only ever applies single-step, top-level selectors today
+    /// (confirmed by its own usage in `io.rs` - pixel data codec post-transcode attribute
+    /// patches never target nested sequences), so a full attribute-selector-path walk isn't
+    /// implemented here - but a caller that *does* build one of those selectors should get a
+    /// clear error, not have the operation silently do nothing.
+    pub fn apply(&mut self, op: AttributeOp) -> Result<(), ApplyOpError> {
         use dcmnorm_core::ops::{AttributeAction, AttributeSelectorStep};
 
-        // dcmnorm only ever applies single-step, top-level selectors (confirmed by its own
-        // usage in io.rs - pixel data codec post-transcode attribute patches never target
-        // nested sequences), so a full attribute-selector-path walk isn't needed here.
         let AttributeSelectorStep::Tag(tag) = *op.selector.first_step() else {
-            return;
+            return Err(ApplyOpError::UnsupportedSelector);
         };
         let current_vr = || self.get(tag).map(|e| e.vr()).unwrap_or(VR::UN);
 
@@ -172,6 +178,7 @@ impl InMemDicomObject {
                 }
             _ => {}
         }
+        Ok(())
     }
 
     /// Attach a [`FileMetaTable`] built from a [`crate::FileMetaTableBuilder`], producing a
@@ -237,6 +244,35 @@ impl std::fmt::Display for MissingElementError {
 }
 
 impl std::error::Error for MissingElementError {}
+
+/// An [`AttributeOp`] could not be applied.
+#[derive(Debug, Clone, Copy)]
+pub enum ApplyOpError {
+    /// A required element was not present in the object.
+    MissingElement(MissingElementError),
+    /// The operation's selector was not a single top-level tag - see
+    /// [`InMemDicomObject::apply`]'s doc comment.
+    UnsupportedSelector,
+}
+
+impl From<MissingElementError> for ApplyOpError {
+    fn from(source: MissingElementError) -> Self {
+        ApplyOpError::MissingElement(source)
+    }
+}
+
+impl std::fmt::Display for ApplyOpError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ApplyOpError::MissingElement(source) => write!(f, "{source}"),
+            ApplyOpError::UnsupportedSelector => {
+                write!(f, "attribute operation selector is not a single top-level tag")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ApplyOpError {}
 
 /// Fold a `DataToken` stream into a tree of elements. `in_item` controls the stop condition:
 /// `false` runs until the token stream is exhausted (top-level data set); `true` runs until a
@@ -593,5 +629,36 @@ mod tests {
         cjk_with_charset
             .write_dataset_with_ts(&mut buf3, ts)
             .expect("declared SpecificCharacterSet=ISO_IR 192 should make CJK text writable");
+    }
+
+    /// `apply()` only implements single-step, top-level tag selectors (dcmnorm's own codec
+    /// adapters never build anything else). Before this was hardened, a nested-sequence
+    /// selector silently did nothing instead of erroring - this proves the fix: such a selector
+    /// now returns `ApplyOpError::UnsupportedSelector`, and (per the trait's "no changes on
+    /// error" contract) leaves the object untouched.
+    #[test]
+    fn apply_rejects_nested_selector_instead_of_silently_no_opping() {
+        use dcmnorm_core::ops::{AttributeAction, AttributeSelector, AttributeSelectorStep};
+
+        let sequence_tag = Tag(0x0008, 0x1140); // Referenced Image Sequence
+        let inner_tag = Tag(0x0008, 0x1150); // Referenced SOP Class UID
+
+        let mut object = InMemDicomObject::from_element_iter([]);
+        let selector = AttributeSelector::new([
+            AttributeSelectorStep::Tag(sequence_tag), // auto-reinterpreted as Nested{item: 0}
+            AttributeSelectorStep::Tag(inner_tag),
+        ])
+        .expect("well-formed two-step selector");
+        let op = AttributeOp::new(
+            selector,
+            AttributeAction::SetStr("1.2.840.10008.5.1.4.1.1.7".into()),
+        );
+
+        let result = object.apply(op);
+        assert!(
+            matches!(result, Err(ApplyOpError::UnsupportedSelector)),
+            "expected UnsupportedSelector, got {result:?}"
+        );
+        assert!(object.is_empty(), "object must be left untouched on error");
     }
 }

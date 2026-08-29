@@ -167,25 +167,30 @@ impl PixelDataReader for JpegAdapter {
         let base_offset = dst.len();
         dst.resize(base_offset + (samples_per_pixel as usize * stride), 0);
 
-        let raw = src
-            .raw_pixel_data()
-            .whatever_context("Expected to have raw pixel data available")?;
-
-        let frame_data = if raw.fragments.len() == 1 || raw.fragments.len() == nr_frames {
+        // Common case first, checked without ever fetching the full `raw_pixel_data()` (which
+        // clones every fragment): a 1:1 frame-to-fragment mapping only needs the one fragment
+        // this call is actually about, available zero-copy via `fragment()`. This matters
+        // because `decode_frame` is called once per frame for a multi-frame series (see
+        // `decode_pixel_data_parallel_frames` in dcmnorm's own `io.rs`) - going through
+        // `raw_pixel_data()` on every call would clone the *entire* pixel buffer each time,
+        // O(frames^2) total bytes copied for an N-frame series where O(N) would do.
+        let number_of_fragments = src.number_of_fragments().unwrap_or(0) as usize;
+        let frame_data = if number_of_fragments == 1 || number_of_fragments == nr_frames {
             // assuming 1:1 frame-to-fragment mapping
-            Cow::Borrowed(
-                raw.fragments
-                    .get(frame as usize)
-                    .with_whatever_context(|| {
-                        format!("Missing fragment #{frame} for the frame requested")
-                    })?,
-            )
+            src.fragment(frame as usize).with_whatever_context(|| {
+                format!("Missing fragment #{frame} for the frame requested")
+            })?
         } else {
-            // Some embedded JPEGs might span multiple fragments.
-            // In this case we look up the basic offset table
-            // and gather all of the frame's fragments in a single vector.
+            // Some embedded JPEGs might span multiple fragments. This is the rare path (most
+            // real encoders keep a 1:1 mapping), so the extra clone cost of `raw_pixel_data()`
+            // here is acceptable - it's genuinely needed to look up the basic offset table and
+            // gather all of the frame's fragments in a single vector.
             // Note: not the most efficient way to do this,
             // consider optimizing later with byte chunk readers
+            let raw = src
+                .raw_pixel_data()
+                .whatever_context("Expected to have raw pixel data available")?;
+
             let base_offset = raw.offset_table.get(frame as usize).copied();
             let base_offset = if frame == 0 {
                 base_offset.unwrap_or(0) as usize
@@ -279,11 +284,14 @@ impl PixelDataWriter for JpegAdapter {
         // record dst length before encoding to know full jpeg size
         let len_before = dst.len();
 
-        // identify frame data using the frame index
-        let pixeldata_uncompressed = &src
-            .raw_pixel_data()
-            .context(encode_error::MissingAttributeSnafu { name: "Pixel Data" })?
-            .fragments[0];
+        // identify frame data using the frame index. The source pixel data being encoded here
+        // is always uncompressed native format (one fragment holding all frames back-to-back),
+        // so `fragment(0)` (zero-copy) is exactly the same data `raw_pixel_data().fragments[0]`
+        // would give, without cloning it first - see decode_frame's doc comment for why that
+        // matters when this runs once per frame.
+        let pixeldata_uncompressed = src
+            .fragment(0)
+            .context(encode_error::MissingAttributeSnafu { name: "Pixel Data" })?;
 
         let frame_data = pixeldata_uncompressed
             .get(frame_size * frame as usize..frame_size * (frame as usize + 1))

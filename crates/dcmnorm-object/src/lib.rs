@@ -12,7 +12,7 @@ pub use file::{
     read_dataset_trial_parse, with_meta_from_bare_dataset, DefaultDicomObject, FileDicomObject,
     OpenFileOptions, ReadPreamble,
 };
-pub use mem::{InMemDicomObject, InMemElement, InMemFragment, MissingElementError};
+pub use mem::{ApplyOpError, InMemDicomObject, InMemElement, InMemFragment, MissingElementError};
 pub use meta::{FileMetaTable, FileMetaTableBuilder};
 
 /// Fallback implementation class UID used when a [`FileMetaTableBuilder`] doesn't specify one -

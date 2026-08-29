@@ -263,3 +263,77 @@ fn convert_to_u8(frame: &FrameInfo, data: Vec<u16>) -> Vec<u8> {
         ne_bytes.concat()
     }
 }
+
+#[cfg(test)]
+mod restart_marker_regression_test {
+    use crate::Decoder;
+
+    /// Regression test for a real production bug (periodic banding on lossless JPEG using
+    /// restart markers, common in mammography/tomosynthesis DICOM - see this crate's README):
+    /// the `Predictor::Ra` (Selection Value 1) reconstruction pass must reset to the frame's
+    /// default predictor constant for the first sample after *every* restart marker, not just
+    /// the very first sample of the scan, and regardless of where that sample falls relative to
+    /// a line boundary (PS3.5/T.81 Annex H.1.2.3). This builds a minimal, hand-encoded 4x1
+    /// single-component lossless JPEG (predictor Ra, 8-bit precision, restart_interval=2, one
+    /// RST0 marker after the first two samples) using a small custom canonical Huffman table,
+    /// and checks the decoded pixel values against values computed by hand from the spec rule.
+    #[test]
+    fn restart_resets_predictor_to_default_constant_not_left_neighbor() {
+        // Custom 3-symbol canonical DC Huffman table (table class 0, id 0):
+        // BITS = 1 code of length 1, 1 of length 2, 1 of length 3.
+        // HUFFVAL = [0, 1, 2] (DC difference categories 0, 1, 2).
+        // Canonical codes (ITU T.81 Annex C): category 0 -> "0", category 1 -> "10",
+        // category 2 -> "110".
+        let dht: &[u8] = &[
+            0xFF, 0xC4, 0x00, 0x16, // DHT, length 22
+            0x00, // Tc=0 (DC), Th=0
+            0x01, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, // BITS[1..16]
+            0x00, 0x01, 0x02, // HUFFVAL
+        ];
+        // SOF3 (lossless sequential), 8-bit precision, height=1, width=4, 1 component.
+        let sof3: &[u8] = &[
+            0xFF, 0xC3, 0x00, 0x0B, // SOF3, length 11
+            0x08, // precision
+            0x00, 0x01, // height = 1
+            0x00, 0x04, // width = 4
+            0x01, // Nf = 1 component
+            0x01, 0x11, 0x00, // component id=1, sampling 1x1, quant table id 0 (unused)
+        ];
+        // DRI: restart_interval = 2 MCUs (one restart marker after samples 0 and 1).
+        let dri: &[u8] = &[0xFF, 0xDD, 0x00, 0x04, 0x00, 0x02];
+        // SOS: 1 component, selector=1 using DC table 0, predictor selection Ss=1 (Ra), Se=0,
+        // Ah/Al=0.
+        let sos: &[u8] = &[
+            0xFF, 0xDA, 0x00, 0x08, 0x01, 0x01, 0x00, 0x01, 0x00, 0x00,
+        ];
+        // Entropy-coded data, MSB-first bit packing:
+        //   sample 0 (scan start, default predictor=128): category 2 "110" + extra "10"
+        //     (additional=2 => diff=+2) => "11010101" (byte-aligned) = 0xD5, decoded value 130
+        //   sample 1 (left predictor=130): category 1 "10" + extra "1" (additional=1 => diff=+1)
+        //     => folded into the byte above, decoded value 131
+        //   [restart marker RST0]
+        //   sample 2 (restart start, default predictor=128 - NOT left-neighbor 131): category 2
+        //     "110" + extra "00" (additional=0 => diff=-3) => decoded value 125
+        //   sample 3 (left predictor=125): category 1 "10" + extra "0" (additional=0 => diff=-1)
+        //     => folded into the byte above = "11000100" = 0xC4, decoded value 124
+        let entropy: &[u8] = &[0xD5, 0xFF, 0xD0, 0xC4];
+        let eoi: &[u8] = &[0xFF, 0xD9];
+
+        let mut bytes = vec![0xFF, 0xD8]; // SOI
+        bytes.extend_from_slice(dht);
+        bytes.extend_from_slice(sof3);
+        bytes.extend_from_slice(dri);
+        bytes.extend_from_slice(sos);
+        bytes.extend_from_slice(entropy);
+        bytes.extend_from_slice(eoi);
+
+        let mut decoder = Decoder::new(&bytes[..]);
+        let pixels = decoder.decode().expect("synthetic restart-marker JPEG should decode");
+
+        // If the restart-reset fix were absent, sample 2 would incorrectly predict from the
+        // left neighbor (131) instead of resetting to the default constant (128), giving 128
+        // instead of 125 - and sample 3 would cascade from that wrong value too.
+        assert_eq!(pixels, vec![130, 131, 125, 124]);
+    }
+}

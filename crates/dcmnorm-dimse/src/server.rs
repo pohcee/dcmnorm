@@ -18,7 +18,7 @@ use crate::error::{Error, Result};
 use crate::pdu::{
     AbortRQSource, AssociationAC, AssociationRJ, AssociationRJResult, Pdu,
     PresentationContextNegotiated, PresentationContextResult, PresentationContextResultReason,
-    UserVariableItem, DEFAULT_MAX_PDU,
+    UserVariableItem, DEFAULT_IO_TIMEOUT, DEFAULT_MAX_PDU, MAX_PDU_LENGTH_CEILING,
 };
 
 const APPLICATION_CONTEXT_NAME: &str = "1.2.840.10008.3.1.1.1";
@@ -49,8 +49,8 @@ impl Default for ServerAssociationOptions {
         ServerAssociationOptions {
             ae_title: "ANY-SCP".to_owned(),
             max_pdu_length: DEFAULT_MAX_PDU,
-            read_timeout: None,
-            write_timeout: None,
+            read_timeout: Some(DEFAULT_IO_TIMEOUT),
+            write_timeout: Some(DEFAULT_IO_TIMEOUT),
             abstract_syntax_uids: std::collections::HashSet::new(),
             promiscuous: false,
             transfer_syntax_uids: std::collections::HashSet::new(),
@@ -95,8 +95,10 @@ impl ServerAssociationOptions {
         self
     }
 
+    /// Clamped to [`MAX_PDU_LENGTH_CEILING`] regardless of what's requested - see that
+    /// constant's doc comment for why.
     pub fn max_pdu_length(mut self, len: u32) -> Self {
-        self.max_pdu_length = len;
+        self.max_pdu_length = len.min(MAX_PDU_LENGTH_CEILING);
         self
     }
 
@@ -290,5 +292,23 @@ impl<S: std::io::Read + std::io::Write> ServerAssociation<S> {
 
     pub fn receive_pdata(&mut self) -> crate::pdata::PDataReader<&mut S> {
         crate::pdata::PDataReader::new(&mut self.stream, self.acceptor_max_pdu_length)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn max_pdu_length_is_clamped_to_the_ceiling_regardless_of_request() {
+        let opts = ServerAssociationOptions::new().max_pdu_length(u32::MAX);
+        assert_eq!(opts.max_pdu_length, MAX_PDU_LENGTH_CEILING);
+    }
+
+    #[test]
+    fn defaults_apply_a_read_and_write_timeout_rather_than_blocking_forever() {
+        let opts = ServerAssociationOptions::new();
+        assert_eq!(opts.read_timeout, Some(DEFAULT_IO_TIMEOUT));
+        assert_eq!(opts.write_timeout, Some(DEFAULT_IO_TIMEOUT));
     }
 }

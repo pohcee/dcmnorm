@@ -2,6 +2,7 @@
 //! elements (transfer syntax, SOP class/instance UID, implementation identifiers, etc.) that
 //! precede the main data set in every DICOM Part 10 file.
 
+use std::io;
 use std::io::{Read, Write};
 
 use dcmnorm_core::header::{DataElement, Tag};
@@ -101,13 +102,23 @@ impl FileMetaTable {
 
     fn elements_for_write(&self) -> std::vec::IntoIter<InMemElement> {
         let mut elements = Vec::with_capacity(11);
-
-        let group_length = self.encoded_len();
         elements.push(primitive_element(
             tags::FILE_META_INFORMATION_GROUP_LENGTH,
             VR::UL,
-            PrimitiveValue::from(group_length),
+            PrimitiveValue::from(self.encoded_len()),
         ));
+        elements.extend(self.body_elements());
+        elements.into_iter()
+    }
+
+    /// Every group-0002 element *except* the group-length element itself, in write order. The
+    /// one place that decides which fields are present and how they're encoded - both
+    /// [`Self::elements_for_write`] (prepends the group-length element) and [`Self::encoded_len`]
+    /// (measures this same list's real encoded size) build on top of it, rather than each
+    /// independently hand-duplicating "which fields exist and what VR they use." Adding a new
+    /// meta field only ever needs a change here.
+    fn body_elements(&self) -> Vec<InMemElement> {
+        let mut elements = Vec::with_capacity(10);
         elements.push(primitive_element(
             tags::FILE_META_INFORMATION_VERSION,
             VR::OB,
@@ -175,42 +186,29 @@ impl FileMetaTable {
                 PrimitiveValue::from(v.clone()),
             ));
         }
-
-        elements.into_iter()
+        elements
     }
 
     /// The byte length of the meta group's elements *excluding* the group length element
-    /// itself - i.e. the value that belongs in (0002,0000). Always computed fresh from the
-    /// current field values, so it can never go stale relative to what's actually written.
+    /// itself - i.e. the value that belongs in (0002,0000). Computed by actually encoding
+    /// [`Self::body_elements`] (Explicit VR Little Endian, the same path [`Self::write_to`]
+    /// uses) into a throwaway buffer and measuring it, rather than a hand-maintained per-field
+    /// byte count - so it can never drift from what's actually written, by construction, not by
+    /// convention.
     fn encoded_len(&self) -> u32 {
-        let mut len = 0u32;
-        // Explicit VR Little Endian element framing: every element here uses a short-form VR
-        // (UI/SH/AE = 8-byte header: 4 tag + 2 VR + 2 length) except OB (12-byte header: 4 tag +
-        // 2 VR + 2 reserved + 4 length), per PS3.5 Table 7.1-1.
-        len += 12 + pad2(self.information_version.len() as u32); // OB
-        len += 8 + pad2(self.media_storage_sop_class_uid.len() as u32);
-        len += 8 + pad2(self.media_storage_sop_instance_uid.len() as u32);
-        len += 8 + pad2(self.transfer_syntax.len() as u32);
-        len += 8 + pad2(self.implementation_class_uid.len() as u32);
-        if let Some(v) = &self.implementation_version_name {
-            len += 8 + pad2(v.len() as u32);
+        let ts = TransferSyntaxRegistry
+            .get(dcmnorm_dictionary::uids::EXPLICIT_VR_LITTLE_ENDIAN)
+            .expect("Explicit VR Little Endian must be registered");
+        let mut buf = Vec::new();
+        {
+            let mut writer = dcmnorm_parser::dataset::DataSetWriter::with_ts(&mut buf, ts)
+                .expect("Explicit VR Little Endian writer construction cannot fail");
+            for element in self.body_elements() {
+                crate::mem::write_element_tokens(&mut writer, &element)
+                    .expect("encoding a well-formed in-memory meta element cannot fail");
+            }
         }
-        if let Some(v) = &self.source_application_entity_title {
-            len += 8 + pad2(v.len() as u32);
-        }
-        if let Some(v) = &self.sending_application_entity_title {
-            len += 8 + pad2(v.len() as u32);
-        }
-        if let Some(v) = &self.receiving_application_entity_title {
-            len += 8 + pad2(v.len() as u32);
-        }
-        if let Some(v) = &self.private_information_creator_uid {
-            len += 8 + pad2(v.len() as u32);
-        }
-        if let Some(v) = &self.private_information {
-            len += 12 + pad2(v.len() as u32); // OB
-        }
-        len
+        buf.len() as u32
     }
 
     /// Write the 128-byte preamble, "DICM" magic, and this meta group (Explicit VR Little
@@ -264,11 +262,34 @@ impl FileMetaTable {
     pub fn read_meta_group<R: Read>(mut from: R) -> Result<Self, ReadError> {
         let group_length = read_group_length_element(&mut from)?;
 
-        let mut meta_bytes = vec![0u8; group_length as usize];
-        from.read_exact(&mut meta_bytes).map_err(|source| ReadError::Io {
-            source,
-            context: "reading file meta group",
-        })?;
+        // `group_length` is a raw u32 taken directly from the file (up to ~4GiB) - read via
+        // `Take` + `read_to_end` rather than pre-allocating `vec![0u8; group_length]` upfront.
+        // Real meta groups are a few hundred bytes to a few KB; a corrupt/malicious file's first
+        // 12 bytes declaring an implausible group length would otherwise force a multi-GB
+        // allocation attempt before a single further byte is read, and a failing allocation of
+        // that shape aborts the process rather than returning a catchable error. This way, growth
+        // is bounded by bytes actually available on the stream, so a truncated/lying length
+        // surfaces as a clean `ReadError::Io` as soon as the real data runs out.
+        let mut meta_bytes = Vec::new();
+        (&mut from)
+            .take(group_length as u64)
+            .read_to_end(&mut meta_bytes)
+            .map_err(|source| ReadError::Io {
+                source,
+                context: "reading file meta group",
+            })?;
+        if meta_bytes.len() != group_length as usize {
+            return Err(ReadError::Io {
+                source: io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    format!(
+                        "declared meta group length {group_length} exceeds available data ({} bytes read)",
+                        meta_bytes.len()
+                    ),
+                ),
+                context: "reading file meta group",
+            });
+        }
 
         let ts = TransferSyntaxRegistry
             .get(dcmnorm_dictionary::uids::EXPLICIT_VR_LITTLE_ENDIAN)
@@ -372,10 +393,6 @@ fn read_group_length_element<R: Read>(from: &mut R) -> Result<u32, ReadError> {
     Ok(u32::from_le_bytes(value))
 }
 
-fn pad2(len: u32) -> u32 {
-    len + (len % 2)
-}
-
 fn primitive_element(tag: Tag, vr: VR, value: PrimitiveValue) -> InMemElement {
     DataElement::new(tag, vr, value)
 }
@@ -468,5 +485,47 @@ impl FileMetaTableBuilder {
 pub(crate) mod io_util {
     pub fn trim_uid(uid: &str) -> &str {
         uid.trim_end_matches(|c: char| c.is_whitespace() || c == '\0')
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A corrupt/malicious file can declare an implausible (0002,0000) group length (up to
+    /// ~4GiB) while actually containing only a handful of bytes. Before this was hardened,
+    /// `read_meta_group` allocated `vec![0u8; group_length]` upfront - a failing allocation of
+    /// that shape aborts the process rather than returning a catchable error. This proves the
+    /// fix: the declared length is far larger than the (tiny) actual stream, so this must return
+    /// a clean `Err` quickly, not hang or attempt a multi-GB allocation.
+    #[test]
+    fn read_meta_group_rejects_group_length_exceeding_available_data() {
+        let mut bytes = Vec::new();
+        // (0002,0000) UL, value length 4, declared group length far beyond what follows.
+        bytes.extend_from_slice(&[0x02, 0x00, 0x00, 0x00]); // tag
+        bytes.extend_from_slice(b"UL"); // VR
+        bytes.extend_from_slice(&4u16.to_le_bytes()); // value length
+        bytes.extend_from_slice(&0xFFFF_FFF0u32.to_le_bytes()); // group length: ~4GiB
+        bytes.extend_from_slice(b"only a few more bytes"); // far short of the declared length
+
+        let result = FileMetaTable::read_meta_group(std::io::Cursor::new(bytes));
+        assert!(
+            matches!(result, Err(ReadError::Io { .. })),
+            "expected a clean I/O error for a group length exceeding available data, got {result:?}"
+        );
+    }
+
+    /// A `group_length` of exactly 0 is a degenerate but well-formed case (an empty meta group)
+    /// and must not be confused with the "exceeds available data" error path above.
+    #[test]
+    fn read_meta_group_accepts_zero_group_length_as_empty() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&[0x02, 0x00, 0x00, 0x00]);
+        bytes.extend_from_slice(b"UL");
+        bytes.extend_from_slice(&4u16.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes()); // group length: 0
+
+        let result = FileMetaTable::read_meta_group(std::io::Cursor::new(bytes));
+        assert!(result.is_ok(), "expected a zero-length meta group to parse as empty, got {result:?}");
     }
 }

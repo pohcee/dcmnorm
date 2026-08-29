@@ -41,3 +41,41 @@ pub(crate) fn receive_pdu<R: Read>(stream: &mut R, max_pdu_length: u32) -> Resul
     stream.read_exact(&mut body)?;
     Ok(pdu::parse_pdu_body(pdu_type, &body)?)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    /// A hostile peer can send a 6-byte PDU header declaring an arbitrary length. This must be
+    /// rejected before `vec![0u8; length]` is ever allocated - proves the check at the top of
+    /// this function actually runs before the allocation, not after.
+    #[test]
+    fn receive_pdu_rejects_declared_length_exceeding_max_pdu_length() {
+        let max_pdu_length = 1024u32;
+        // PDU type 0x04 (P-DATA-TF), reserved byte, length = way beyond max_pdu_length.
+        let mut header = vec![0x04, 0x00];
+        header.extend_from_slice(&(max_pdu_length + 1).to_be_bytes());
+        let mut stream = Cursor::new(header); // no body bytes at all follow
+
+        let result = receive_pdu(&mut stream, max_pdu_length);
+        assert!(
+            matches!(result, Err(Error::Pdu(pdu::Error::PduTooLarge { .. }))),
+            "expected PduTooLarge, got {result:?}"
+        );
+    }
+
+    /// Even a length within the allowed ceiling must be rejected cleanly (not panic) if the
+    /// stream doesn't actually contain that many bytes.
+    #[test]
+    fn receive_pdu_errors_cleanly_on_truncated_body() {
+        let max_pdu_length = 1024u32;
+        let mut header = vec![0x04, 0x00];
+        header.extend_from_slice(&100u32.to_be_bytes()); // declares 100 bytes of body
+        header.extend_from_slice(b"only 10ba"); // far fewer than declared
+        let mut stream = Cursor::new(header);
+
+        let result = receive_pdu(&mut stream, max_pdu_length);
+        assert!(matches!(result, Err(Error::Io(_))), "expected a clean I/O error, got {result:?}");
+    }
+}

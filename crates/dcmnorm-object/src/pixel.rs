@@ -11,7 +11,7 @@ use dcmnorm_core::ops::{AttributeAction, AttributeOp, AttributeSelectorStep, App
 use dcmnorm_encoding::adapters::{PixelDataObject, RawPixelData};
 
 use crate::file::{DefaultDicomObject, FileDicomObject};
-use crate::mem::{InMemDicomObject, MissingElementError};
+use crate::mem::{ApplyOpError, InMemDicomObject, MissingElementError};
 
 const ROWS: Tag = Tag(0x0028, 0x0010);
 const COLUMNS: Tag = Tag(0x0028, 0x0011);
@@ -109,7 +109,7 @@ impl PixelDataObject for FileDicomObject<InMemDicomObject> {
 }
 
 impl ApplyOp for DefaultDicomObject {
-    type Err = MissingElementError;
+    type Err = ApplyOpError;
 
     fn apply(&mut self, op: AttributeOp) -> Result<(), Self::Err> {
         // Surface a real error only for the one failure mode dcmnorm's own callers actually
@@ -118,14 +118,13 @@ impl ApplyOp for DefaultDicomObject {
         // other action already treats absence as a valid outcome per `AttributeAction`'s own
         // documented semantics (e.g. Remove on a missing tag is a no-op, not an error).
         if let AttributeAction::Replace(_) | AttributeAction::ReplaceStr(_) = &op.action {
-            let AttributeSelectorStep::Tag(tag) = *op.selector.first_step() else {
-                return Ok(());
-            };
-            if self.object.get(tag).is_none() {
-                return Err(MissingElementError { tag });
+            if let AttributeSelectorStep::Tag(tag) = *op.selector.first_step() {
+                if self.object.get(tag).is_none() {
+                    return Err(ApplyOpError::MissingElement(MissingElementError { tag }));
+                }
             }
+            // else: an unsupported selector shape - `self.object.apply` below reports it.
         }
-        self.object.apply(op);
-        Ok(())
+        self.object.apply(op)
     }
 }

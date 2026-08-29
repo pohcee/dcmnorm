@@ -52,14 +52,10 @@ impl PixelDataReader for DeflatedImageFrameAdapter {
         dst: &mut Vec<u8>,
     ) -> DecodeResult<()> {
 
-        // just copy the specific fragment into the output vector
-        let pixeldata = src
-            .raw_pixel_data()
-            .context(decode_error::MissingAttributeSnafu { name: "Pixel Data" })?;
-
-        let fragment = pixeldata
-            .fragments
-            .get(frame as usize)
+        // Zero-copy - see `jpeg.rs`'s `decode_frame` for why this matters instead of
+        // `raw_pixel_data()` (called once per frame for a multi-frame series).
+        let fragment = src
+            .fragment(frame as usize)
             .context(decode_error::FrameRangeOutOfBoundsSnafu)?;
 
         let mut decoder = DeflateDecoder::new(&fragment[..]);
@@ -101,11 +97,11 @@ impl PixelDataWriter for DeflatedImageFrameAdapter {
         let frame_size =
             cols as usize * rows as usize * samples_per_pixel as usize * bytes_per_sample;
 
-        // identify frame data using the frame index
-        let pixeldata_uncompressed = &src
-            .raw_pixel_data()
-            .context(encode_error::MissingAttributeSnafu { name: "Pixel Data" })?
-            .fragments[0];
+        // identify frame data using the frame index. Zero-copy - see `jpeg.rs`'s `decode_frame`
+        // for why this matters instead of `raw_pixel_data()`.
+        let pixeldata_uncompressed = src
+            .fragment(0)
+            .context(encode_error::MissingAttributeSnafu { name: "Pixel Data" })?;
 
         let frame_data = pixeldata_uncompressed
             .get(frame_size * frame as usize..frame_size * (frame as usize + 1))

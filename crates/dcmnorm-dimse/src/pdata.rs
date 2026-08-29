@@ -139,10 +139,18 @@ impl<R: Read> Read for PDataReader<R> {
             }
         }
 
+        // Bulk-copy from the deque's (up to two, ring-buffer-wrapped) contiguous slices instead
+        // of popping one byte at a time - this is the streaming path for a whole received
+        // C-STORE data set/image, so a per-byte loop is a meaningful cost on multi-MB payloads.
         let n = out.len().min(self.buffer.len());
-        for slot in out.iter_mut().take(n) {
-            *slot = self.buffer.pop_front().unwrap();
+        let (front, back) = self.buffer.as_slices();
+        if n <= front.len() {
+            out[..n].copy_from_slice(&front[..n]);
+        } else {
+            out[..front.len()].copy_from_slice(front);
+            out[front.len()..n].copy_from_slice(&back[..n - front.len()]);
         }
+        self.buffer.drain(..n);
         Ok(n)
     }
 }

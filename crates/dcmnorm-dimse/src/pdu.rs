@@ -34,6 +34,23 @@ pub const DEFAULT_MAX_PDU: u32 = 16_384 - PDU_HEADER_SIZE;
 /// A generous internal buffer size, used to avoid over-allocating for a max PDU length that's
 /// unrealistically large.
 pub(crate) const LARGE_PDU_SIZE: u32 = 262_144 - PDU_HEADER_SIZE;
+/// Hard upper bound on `max_pdu_length`, enforced by both `ClientAssociationOptions` and
+/// `ServerAssociationOptions` regardless of what a caller configures. `conn::receive_pdu` already
+/// rejects any peer-declared PDU length above the *configured* `max_pdu_length` before
+/// allocating its receive buffer - but that check is only as good as the ceiling it's checked
+/// against. Without a floor here, a future caller (or a config regression) constructing options
+/// with an unbounded `max_pdu_length` would remove that protection entirely, letting a hostile
+/// peer force an allocation as large as whatever was configured. 64MiB is far beyond any real
+/// DICOM association's negotiated PDU size (large transfers are already fragmented across many
+/// PDVs/PDUs by the streaming design, not sent as one huge PDU) while still bounding worst-case
+/// memory well below "attacker forces gigabytes."
+pub const MAX_PDU_LENGTH_CEILING: u32 = 64 * 1024 * 1024;
+/// Default read/write timeout applied when a caller never explicitly configures one. Not
+/// `None` (block forever): a slow or hostile peer that dribbles bytes could otherwise hold a
+/// thread open indefinitely. Generous enough not to interfere with legitimate large transfers,
+/// which are bounded by their own progress (each PDV/PDU still needs to arrive within this
+/// window, not the whole transfer).
+pub const DEFAULT_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 #[derive(Debug)]
 pub enum Error {

@@ -17,7 +17,6 @@ use dcmnorm_encoding::text::{
     TextCodec, TextValidationOutcome,
 };
 use dcmnorm_encoding::transfer_syntax::{DynDecoder, TransferSyntax};
-use smallvec::smallvec;
 use snafu::{Backtrace, OptionExt, ResultExt, Snafu};
 use std::io::Read;
 use std::{fmt::Debug, io::Seek, io::SeekFrom};
@@ -413,6 +412,35 @@ where
     }
 }
 
+/// Read `n` fixed-width numeric elements via `$self.basic.$decode_fn`, in bounded chunks rather
+/// than allocating a `SmallVec` sized to the full, untrusted `n` upfront - `n` is always derived
+/// from a file-controlled length field here, so a corrupt/malicious file lying about a huge
+/// element count can only ever force a single bounded chunk's worth of allocation before the
+/// decode call's own read fails against the actually-truncated stream. Same reasoning as
+/// `StatefulDecoder::read_into_buffer`/`read_u32`, generalized over element type since
+/// `decode_ss_into`/`decode_fl_into`/etc. all take a pre-sized `&mut [T]` rather than supporting
+/// incremental growth the way `Read::read_to_end` does.
+macro_rules! read_numeric_chunked {
+    ($self:ident, $n:expr, $decode_fn:ident, $zero:expr) => {{
+        const CHUNK: usize = 65536;
+        let mut vec = smallvec::SmallVec::new();
+        let mut remaining: usize = $n;
+        while remaining > 0 {
+            let batch = remaining.min(CHUNK);
+            let base = vec.len();
+            vec.resize(base + batch, $zero);
+            $self
+                .basic
+                .$decode_fn(&mut $self.from, &mut vec[base..])
+                .context(ReadValueDataSnafu {
+                    position: $self.position,
+                })?;
+            remaining -= batch;
+        }
+        vec
+    }};
+}
+
 impl<D, S, BD, TC> StatefulDecoder<D, S, BD, TC>
 where
     D: DecodeFrom<S>,
@@ -431,6 +459,38 @@ where
                 position: self.position,
                 tag: header.tag,
             })
+    }
+
+    /// Read exactly `len` bytes into `self.buffer`, replacing its previous contents.
+    ///
+    /// `len` comes from an untrusted, file-controlled 32-bit length field (up to ~4GiB), so this
+    /// deliberately does not pre-allocate `len` bytes upfront the way `resize_with`/`vec![0; len]`
+    /// would - a corrupt or malicious file whose true size is a few hundred bytes but which
+    /// declares a multi-gigabyte element length would otherwise force an allocation attempt that
+    /// large before a single byte is even read, and a failing allocation of that shape aborts the
+    /// process (`handle_alloc_error`) rather than returning a catchable error. Reading via `Take`
+    /// + `read_to_end` instead grows the buffer only in proportion to bytes actually available on
+    /// the stream, so a truncated/lying length surfaces as a clean `ReadValueData` error as soon
+    /// as the real data runs out, never as a runaway allocation.
+    fn read_into_buffer(&mut self, len: usize) -> Result<()> {
+        self.buffer.clear();
+        (&mut self.from)
+            .take(len as u64)
+            .read_to_end(&mut self.buffer)
+            .context(ReadValueDataSnafu {
+                position: self.position,
+            })?;
+        if self.buffer.len() != len {
+            let actual = self.buffer.len();
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                format!("declared value length {len} exceeds available data ({actual} bytes read)"),
+            ))
+            .context(ReadValueDataSnafu {
+                position: self.position,
+            });
+        }
+        Ok(())
     }
 
     fn read_value_tag(&mut self, header: &DataElementHeader) -> Result<PrimitiveValue> {
@@ -456,11 +516,11 @@ where
         // (pixel sequence detection needs to be done by the caller)
         let len = self.require_known_length(header)?;
 
-        // sequence of 8-bit integers (or arbitrary byte data)
-        let mut buf = smallvec![0u8; len];
-        self.from.read_exact(&mut buf).context(ReadValueDataSnafu {
-            position: self.position,
-        })?;
+        // sequence of 8-bit integers (or arbitrary byte data). Read through the bounded
+        // `read_into_buffer` helper (see its doc comment) rather than `smallvec![0u8; len]`
+        // directly, since `len` is untrusted and file-controlled.
+        self.read_into_buffer(len)?;
+        let buf = smallvec::SmallVec::from_slice(&self.buffer);
         self.position += len as u64;
         Ok(PrimitiveValue::U8(buf))
     }
@@ -468,12 +528,7 @@ where
     fn read_value_strs(&mut self, header: &DataElementHeader) -> Result<PrimitiveValue> {
         let len = self.require_known_length(header)?;
         // sequence of strings
-        self.buffer.resize_with(len, Default::default);
-        self.from
-            .read_exact(&mut self.buffer)
-            .context(ReadValueDataSnafu {
-                position: self.position,
-            })?;
+        self.read_into_buffer(len)?;
 
         let use_charset_declared = match (self.charset_override, header.vr()) {
             (CharacterSetOverride::AnyVr, _) => true,
@@ -511,12 +566,7 @@ where
         let len = self.require_known_length(header)?;
 
         // a single string
-        self.buffer.resize_with(len, Default::default);
-        self.from
-            .read_exact(&mut self.buffer)
-            .context(ReadValueDataSnafu {
-                position: self.position,
-            })?;
+        self.read_into_buffer(len)?;
         self.position += len as u64;
         Ok(PrimitiveValue::Str(
             self.text
@@ -532,12 +582,7 @@ where
         let len = self.require_known_length(header)?;
 
         let n = len >> 1;
-        let mut vec = smallvec![0; n];
-        self.basic
-            .decode_ss_into(&mut self.from, &mut vec[..])
-            .context(ReadValueDataSnafu {
-                position: self.position,
-            })?;
+        let vec = read_numeric_chunked!(self, n, decode_ss_into, 0i16);
 
         self.position += len as u64;
         Ok(PrimitiveValue::I16(vec))
@@ -547,12 +592,7 @@ where
         let len = self.require_known_length(header)?;
         // sequence of 32-bit floats
         let n = len >> 2;
-        let mut vec = smallvec![0.; n];
-        self.basic
-            .decode_fl_into(&mut self.from, &mut vec[..])
-            .context(ReadValueDataSnafu {
-                position: self.position,
-            })?;
+        let vec = read_numeric_chunked!(self, n, decode_fl_into, 0f32);
         self.position += len as u64;
         Ok(PrimitiveValue::F32(vec))
     }
@@ -561,12 +601,7 @@ where
         let len = self.require_known_length(header)?;
         // sequence of dates
 
-        self.buffer.resize_with(len, Default::default);
-        self.from
-            .read_exact(&mut self.buffer)
-            .context(ReadValueDataSnafu {
-                position: self.position,
-            })?;
+        self.read_into_buffer(len)?;
         let buf = trim_trail_empty_bytes(&self.buffer);
         if buf.is_empty() {
             return Ok(PrimitiveValue::Empty);
@@ -600,12 +635,7 @@ where
         let len = self.require_known_length(header)?;
         // sequence of doubles in text form
 
-        self.buffer.resize_with(len, Default::default);
-        self.from
-            .read_exact(&mut self.buffer)
-            .context(ReadValueDataSnafu {
-                position: self.position,
-            })?;
+        self.read_into_buffer(len)?;
         let buf = trim_trail_empty_bytes(&self.buffer);
         if buf.is_empty() {
             return Ok(PrimitiveValue::Empty);
@@ -632,12 +662,7 @@ where
         let len = self.require_known_length(header)?;
         // sequence of datetimes
 
-        self.buffer.resize_with(len, Default::default);
-        self.from
-            .read_exact(&mut self.buffer)
-            .context(ReadValueDataSnafu {
-                position: self.position,
-            })?;
+        self.read_into_buffer(len)?;
         let buf = trim_trail_empty_bytes(&self.buffer);
         if buf.is_empty() {
             return Ok(PrimitiveValue::Empty);
@@ -669,12 +694,7 @@ where
     fn read_value_is(&mut self, header: &DataElementHeader) -> Result<PrimitiveValue> {
         let len = self.require_known_length(header)?;
         // sequence of signed integers in text form
-        self.buffer.resize_with(len, Default::default);
-        self.from
-            .read_exact(&mut self.buffer)
-            .context(ReadValueDataSnafu {
-                position: self.position,
-            })?;
+        self.read_into_buffer(len)?;
         let buf = trim_trail_empty_bytes(&self.buffer);
         if buf.is_empty() {
             return Ok(PrimitiveValue::Empty);
@@ -701,12 +721,7 @@ where
         let len = self.require_known_length(header)?;
         // sequence of time instances
 
-        self.buffer.resize_with(len, Default::default);
-        self.from
-            .read_exact(&mut self.buffer)
-            .context(ReadValueDataSnafu {
-                position: self.position,
-            })?;
+        self.read_into_buffer(len)?;
         let buf = trim_trail_empty_bytes(&self.buffer);
         if buf.is_empty() {
             return Ok(PrimitiveValue::Empty);
@@ -740,12 +755,7 @@ where
         let len = self.require_known_length(header)?;
         // sequence of 64-bit floats
         let n = len >> 3;
-        let mut vec = smallvec![0.; n];
-        self.basic
-            .decode_fd_into(&mut self.from, &mut vec[..])
-            .context(ReadValueDataSnafu {
-                position: self.position,
-            })?;
+        let vec = read_numeric_chunked!(self, n, decode_fd_into, 0f64);
         self.position += len as u64;
         Ok(PrimitiveValue::F64(vec))
     }
@@ -755,26 +765,32 @@ where
         // sequence of 32-bit unsigned integers
 
         let n = len >> 2;
-        let mut vec = smallvec![0u32; n];
-        self.basic
-            .decode_ul_into(&mut self.from, &mut vec[..])
-            .context(ReadValueDataSnafu {
-                position: self.position,
-            })?;
+        let vec = read_numeric_chunked!(self, n, decode_ul_into, 0u32);
         self.position += len as u64;
         Ok(PrimitiveValue::U32(vec))
     }
 
     fn read_u32(&mut self, n: usize, vec: &mut Vec<u32>) -> Result<()> {
-        let base = vec.len();
-        vec.resize(base + n, 0);
+        // `n` is derived from an untrusted, file-controlled length field - read (and allocate)
+        // in bounded chunks rather than resizing to the full `n` upfront, so a corrupt/malicious
+        // file that lies about a huge length can only ever force a bounded allocation attempt
+        // per chunk before decode_ul_into's own read fails on the actually-truncated stream. See
+        // `StatefulDecoder::read_into_buffer` for the byte-oriented equivalent of this reasoning.
+        const CHUNK: usize = 65536; // 256KiB per chunk
+        let mut remaining = n;
+        while remaining > 0 {
+            let batch = remaining.min(CHUNK);
+            let base = vec.len();
+            vec.resize(base + batch, 0);
 
-        self.basic
-            .decode_ul_into(&mut self.from, &mut vec[base..])
-            .context(ReadValueDataSnafu {
-                position: self.position,
-            })?;
-        self.position += n as u64 * 4;
+            self.basic
+                .decode_ul_into(&mut self.from, &mut vec[base..])
+                .context(ReadValueDataSnafu {
+                    position: self.position,
+                })?;
+            self.position += batch as u64 * 4;
+            remaining -= batch;
+        }
         Ok(())
     }
 
@@ -783,12 +799,7 @@ where
         // sequence of 16-bit unsigned integers
 
         let n = len >> 1;
-        let mut vec = smallvec![0; n];
-        self.basic
-            .decode_us_into(&mut self.from, &mut vec[..])
-            .context(ReadValueDataSnafu {
-                position: self.position,
-            })?;
+        let vec = read_numeric_chunked!(self, n, decode_us_into, 0u16);
 
         self.position += len as u64;
 
@@ -805,12 +816,7 @@ where
         // sequence of 64-bit unsigned integers
 
         let n = len >> 3;
-        let mut vec = smallvec![0; n];
-        self.basic
-            .decode_uv_into(&mut self.from, &mut vec[..])
-            .context(ReadValueDataSnafu {
-                position: self.position,
-            })?;
+        let vec = read_numeric_chunked!(self, n, decode_uv_into, 0u64);
         self.position += len as u64;
         Ok(PrimitiveValue::U64(vec))
     }
@@ -820,12 +826,7 @@ where
         // sequence of 32-bit signed integers
 
         let n = len >> 2;
-        let mut vec = smallvec![0; n];
-        self.basic
-            .decode_sl_into(&mut self.from, &mut vec[..])
-            .context(ReadValueDataSnafu {
-                position: self.position,
-            })?;
+        let vec = read_numeric_chunked!(self, n, decode_sl_into, 0i32);
         self.position += len as u64;
         Ok(PrimitiveValue::I32(vec))
     }
@@ -835,12 +836,7 @@ where
         // sequence of 64-bit signed integers
 
         let n = len >> 3;
-        let mut vec = smallvec![0; n];
-        self.basic
-            .decode_sv_into(&mut self.from, &mut vec[..])
-            .context(ReadValueDataSnafu {
-                position: self.position,
-            })?;
+        let vec = read_numeric_chunked!(self, n, decode_sv_into, 0i64);
         self.position += len as u64;
         Ok(PrimitiveValue::I64(vec))
     }
@@ -1679,5 +1675,42 @@ mod tests {
             .expect("Can read Body Part Examined");
 
         assert_eq!(val.to_str(), "脊柱侧弯-视图",);
+    }
+
+    /// A corrupt/malicious file can declare a huge (up to ~4GiB) value length on an element
+    /// while the file itself is tiny. Before `read_into_buffer`/`read_numeric_chunked!` existed,
+    /// every VR's value-reading path pre-allocated the full declared length upfront - a failing
+    /// allocation of that shape aborts the process rather than returning a catchable error. This
+    /// proves the fix across the three distinct code shapes it touched: a byte buffer (OB), a
+    /// text buffer (UI), and a typed numeric array (UL) all reject an oversized declared length
+    /// against a short stream with a clean `Err`, not a hang or an allocation attempt anywhere
+    /// near the declared size.
+    #[test]
+    fn oversized_declared_length_on_short_stream_errors_cleanly_for_every_value_shape() {
+        let short_data: &[u8] = b"only a few bytes, nowhere near 4GiB";
+        let huge_len = Length(0xFFFF_FFF0); // ~4GiB, but not the reserved 0xFFFFFFFF sentinel
+
+        for vr in [VR::OB, VR::UI, VR::UL] {
+            let mut cursor = Cursor::new(short_data);
+            let mut decoder = StatefulDecoder::new(
+                &mut cursor,
+                ExplicitVRLittleEndianDecoder::default(),
+                LittleEndianBasicDecoder,
+                SpecificCharacterSet::default(),
+            );
+            let header = DataElementHeader {
+                tag: Tag(0x0008, 0x0000),
+                vr,
+                len: huge_len,
+            };
+
+            let result = decoder.read_value(&header);
+            assert!(
+                result.is_err(),
+                "expected a clean error for VR {vr:?} with a declared length ({huge_len:?}) far \
+                 exceeding the {}-byte stream, got {result:?}",
+                short_data.len()
+            );
+        }
     }
 }

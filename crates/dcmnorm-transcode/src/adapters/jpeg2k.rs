@@ -61,25 +61,26 @@ impl PixelDataReader for Jpeg2000Adapter {
         let base_offset = dst.len();
         dst.resize(base_offset + (samples_per_pixel as usize * stride), 0);
 
-        let raw = src
-            .raw_pixel_data()
-            .whatever_context("Expected to have raw pixel data available")?;
-
-        let frame_data = if raw.fragments.len() == 1 || raw.fragments.len() == nr_frames {
+        // Common case first, checked without ever fetching the full `raw_pixel_data()` (which
+        // clones every fragment) - see `jpeg.rs`'s `decode_frame` for the full rationale (called
+        // once per frame for a multi-frame series, so this matters).
+        let number_of_fragments = src.number_of_fragments().unwrap_or(0) as usize;
+        let frame_data = if number_of_fragments == 1 || number_of_fragments == nr_frames {
             // assuming 1:1 frame-to-fragment mapping
-            Cow::Borrowed(
-                raw.fragments
-                    .get(frame as usize)
-                    .with_whatever_context(|| {
-                        format!("Missing fragment #{} for the frame requested", frame)
-                    })?,
-            )
+            src.fragment(frame as usize).with_whatever_context(|| {
+                format!("Missing fragment #{} for the frame requested", frame)
+            })?
         } else {
-            // Some embedded JPEGs might span multiple fragments.
-            // In this case we look up the basic offset table
-            // and gather all of the frame's fragments in a single vector.
+            // Some embedded JPEGs might span multiple fragments. This is the rare path (most
+            // real encoders keep a 1:1 mapping), so the extra clone cost of `raw_pixel_data()`
+            // here is acceptable - it's genuinely needed to look up the basic offset table and
+            // gather all of the frame's fragments in a single vector.
             // Note: not the most efficient way to do this,
             // consider optimizing later with byte chunk readers
+            let raw = src
+                .raw_pixel_data()
+                .whatever_context("Expected to have raw pixel data available")?;
+
             let base_offset = raw.offset_table.get(frame as usize).copied();
             let base_offset = if frame == 0 {
                 base_offset.unwrap_or(0) as usize
