@@ -102,7 +102,9 @@ Environment variables:
   CLAUDE_SKILLS_DIR  Override the dcmnorm Claude Code skill's install directory
                      (default: ~/.claude/skills; also forces skill install even
                      without an existing ~/.claude directory)
-  DCMNORM_SKIP_SKILL Set to 1 to skip installing the dcmnorm Claude Code skill
+  GEMINI_SKILLS_DIR  Same as CLAUDE_SKILLS_DIR, for Gemini CLI (default: ~/.gemini/skills)
+  CODEX_SKILLS_DIR   Same as CLAUDE_SKILLS_DIR, for Codex CLI (default: ~/.codex/skills)
+  DCMNORM_SKIP_SKILL Set to 1 to skip installing the dcmnorm skill for any agent
 
 EOF
 }
@@ -267,26 +269,51 @@ if [ "$INSTALL_METHOD" != "deb" ]; then
     done
 fi
 
-# Install the dcmnorm Claude Code skill alongside the binaries, best-effort: only when there's
-# some sign of Claude Code on this machine (or the install dir is explicitly overridden), and
-# never fatal to the overall install if the download fails.
-SKILLS_DIR="${CLAUDE_SKILLS_DIR:-${HOME}/.claude/skills}"
-if [ "${DCMNORM_SKIP_SKILL:-0}" != "1" ] && { [ -d "${HOME}/.claude" ] || [ -n "${CLAUDE_SKILLS_DIR:-}" ]; }; then
-    SKILL_REF="main"
-    if [ "$VERSION" != "latest" ]; then
-        SKILL_REF="v$VERSION"
-    fi
-    SKILL_URL="https://raw.githubusercontent.com/${GITHUB_REPO}/${SKILL_REF}/skills/dcmnorm/SKILL.md"
+# Install the dcmnorm skill for any AI agent CLI detected on this machine (Claude Code, Gemini
+# CLI, Codex CLI - all three use the same "<skills-dir>/dcmnorm/SKILL.md" convention), best-effort:
+# only when there's some sign of that agent on this machine (or its install dir is explicitly
+# overridden), and never fatal to the overall install if the download fails.
+install_skill_target() {
+    _target_name="$1"
+    _target_dir="$2"
+    _presence_dir="$3"
+    _env_override="$4"
+    _skill_temp="$5"
 
-    SKILL_TEMP="$(mktemp)"
-    if curl -fsSL -o "$SKILL_TEMP" "$SKILL_URL"; then
-        mkdir -p "$SKILLS_DIR/dcmnorm"
-        cp -f "$SKILL_TEMP" "$SKILLS_DIR/dcmnorm/SKILL.md"
-        echo "✓ dcmnorm skill installed to $SKILLS_DIR/dcmnorm"
-    else
-        echo "Warning: could not download dcmnorm skill from $SKILL_URL (skipping)" >&2
+    if [ -z "$_env_override" ] && [ ! -d "$_presence_dir" ]; then
+        return 0
     fi
-    rm -f "$SKILL_TEMP"
+
+    mkdir -p "$_target_dir/dcmnorm"
+    cp -f "$_skill_temp" "$_target_dir/dcmnorm/SKILL.md"
+    echo "✓ dcmnorm skill installed to $_target_dir/dcmnorm ($_target_name)"
+}
+
+if [ "${DCMNORM_SKIP_SKILL:-0}" != "1" ]; then
+    CLAUDE_SKILLS_DIR_RESOLVED="${CLAUDE_SKILLS_DIR:-${HOME}/.claude/skills}"
+    GEMINI_SKILLS_DIR_RESOLVED="${GEMINI_SKILLS_DIR:-${HOME}/.gemini/skills}"
+    CODEX_SKILLS_DIR_RESOLVED="${CODEX_SKILLS_DIR:-${HOME}/.codex/skills}"
+
+    if [ -n "${CLAUDE_SKILLS_DIR:-}" ] || [ -d "${HOME}/.claude" ] \
+        || [ -n "${GEMINI_SKILLS_DIR:-}" ] || [ -d "${HOME}/.gemini" ] \
+        || [ -n "${CODEX_SKILLS_DIR:-}" ] || [ -d "${HOME}/.codex" ]; then
+
+        SKILL_REF="main"
+        if [ "$VERSION" != "latest" ]; then
+            SKILL_REF="v$VERSION"
+        fi
+        SKILL_URL="https://raw.githubusercontent.com/${GITHUB_REPO}/${SKILL_REF}/skills/dcmnorm/SKILL.md"
+
+        SKILL_TEMP="$(mktemp)"
+        if curl -fsSL -o "$SKILL_TEMP" "$SKILL_URL"; then
+            install_skill_target "Claude Code" "$CLAUDE_SKILLS_DIR_RESOLVED" "${HOME}/.claude" "${CLAUDE_SKILLS_DIR:-}" "$SKILL_TEMP"
+            install_skill_target "Gemini CLI" "$GEMINI_SKILLS_DIR_RESOLVED" "${HOME}/.gemini" "${GEMINI_SKILLS_DIR:-}" "$SKILL_TEMP"
+            install_skill_target "Codex CLI" "$CODEX_SKILLS_DIR_RESOLVED" "${HOME}/.codex" "${CODEX_SKILLS_DIR:-}" "$SKILL_TEMP"
+        else
+            echo "Warning: could not download dcmnorm skill from $SKILL_URL (skipping)" >&2
+        fi
+        rm -f "$SKILL_TEMP"
+    fi
 fi
 
 echo ""

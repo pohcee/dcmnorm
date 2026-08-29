@@ -237,21 +237,36 @@ if [[ "$found_any" -eq 0 ]]; then
     exit 1
 fi
 
+# Each entry is "agent-name:env-var-override:default-skills-dir:presence-check-dir".
+# An agent's skills dir is only populated if either its env override is set or its
+# presence-check dir already exists (i.e. there's some sign that agent is installed).
+skill_install_targets=(
+    "Claude Code:CLAUDE_SKILLS_DIR:$HOME/.claude/skills:$HOME/.claude"
+    "Gemini CLI:GEMINI_SKILLS_DIR:$HOME/.gemini/skills:$HOME/.gemini"
+    "Codex CLI:CODEX_SKILLS_DIR:$HOME/.codex/skills:$HOME/.codex"
+)
+
 install_skill() {
     local skill_source="$repo_root/skills/dcmnorm"
     if [[ ! -f "$skill_source/SKILL.md" ]]; then
         return 0
     fi
 
-    local skills_dir="${CLAUDE_SKILLS_DIR:-$HOME/.claude/skills}"
-    if [[ ! -d "$HOME/.claude" && -z "${CLAUDE_SKILLS_DIR:-}" ]]; then
-        # No sign of Claude Code on this machine and no explicit override; skip quietly.
-        return 0
-    fi
+    local entry name env_var default_dir presence_dir env_value skills_dir
+    for entry in "${skill_install_targets[@]}"; do
+        IFS=':' read -r name env_var default_dir presence_dir <<< "$entry"
+        env_value="${!env_var:-}"
 
-    mkdir -p "$skills_dir/dcmnorm"
-    cp -f "$skill_source"/*.md "$skills_dir/dcmnorm/"
-    echo "✓ dcmnorm skill installed to $skills_dir/dcmnorm"
+        if [[ -z "$env_value" && ! -d "$presence_dir" ]]; then
+            # No sign of this agent on this machine and no explicit override; skip quietly.
+            continue
+        fi
+
+        skills_dir="${env_value:-$default_dir}"
+        mkdir -p "$skills_dir/dcmnorm"
+        cp -f "$skill_source"/*.md "$skills_dir/dcmnorm/"
+        echo "✓ dcmnorm skill installed to $skills_dir/dcmnorm ($name)"
+    done
 }
 
 if [[ "${DCMNORM_SKIP_SKILL:-0}" != "1" ]]; then
