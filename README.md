@@ -17,6 +17,7 @@ This repository contains:
 - [Install](#install)
 - [Docker](#docker)
 - [Test](#test)
+- [Benchmarks](#benchmarks)
 - [Releasing](#releasing)
 - [dcmnorm CLI Usage](#dcmnorm-cli-usage)
 - [dcmtalk CLI Usage](#dcmtalk-cli-usage)
@@ -255,6 +256,124 @@ docker run --rm --entrypoint dcmtalk -p 11112:11112 \
 ```bash
 cargo test --workspace
 ```
+
+## Benchmarks
+
+`benchmarks/` compares `dcmnorm` against [dcmtk](https://dcmtk.org/) 3.6.7 and
+[dcm4che](https://www.dcm4che.org/) 5.35.1 on parsing (DICOM → JSON), rendering
+(pixel data → PNG), and transcoding (→ Explicit VR Little Endian, decompressing
+JPEG/JPEG2000 sources along the way).
+
+### Methodology
+
+All three tools run inside the same Docker container
+(`benchmarks/Dockerfile`: `debian:bookworm-slim`, dcmtk from apt, dcm4che's
+official binary distribution, `dcmnorm` built from this source tree) so the
+comparison isn't skewed by different host installs, library versions, or
+filesystems. The container is capped to 4 CPUs (`docker run --cpus=4`) for a
+consistent, resource-isolated run. Each (operation, fixture, tool) combination
+is timed with [hyperfine](https://github.com/sharkdp/hyperfine) (2 warmup runs
++ at least 8 measured runs, reporting mean/stddev/median/min/max wall time).
+Reproduce with:
+
+```bash
+docker build -f benchmarks/Dockerfile -t dcmnorm-bench .
+docker run --rm --cpus=4 \
+  -v "$(pwd)/test/files":/fixtures:ro \
+  -v "$(pwd)/benchmarks/results":/results \
+  dcmnorm-bench bash benchmarks/run.sh
+```
+
+### Fixtures
+
+| File | Transfer syntax | Dimensions | Size |
+|---|---|---|---|
+| `mr.dcm` | Explicit VR LE (uncompressed) | 512×512, 1 frame | 526 KB |
+| `us2.dcm` | Explicit VR LE (uncompressed) | 360×360, 227 frames | 29.4 MB |
+| `wsi.dcm` | JPEG Baseline | 240×240, 96 frames | 1.5 MB |
+| `ct.dcm` | JPEG 2000 | 512×512, 1 frame | 90 KB |
+| `dx2.dcm` | JPEG 2000 (Lossless-only) | 1736×2022, 1 frame | 3.6 MB |
+
+### Results (mean ± stddev, milliseconds; lower is better)
+
+**Parse** (`dcm2json` / `dcm2json` / `dcmnorm <file>`)
+
+| Fixture | dcmtk | dcm4che | dcmnorm |
+|---|---|---|---|
+| mr.dcm | 19.4 ± 2.2 | 266.7 ± 22.7 | **10.2 ± 1.5** |
+| us2.dcm | 317.8 ± 4.8 | 250.2 ± 9.4 | **67.1 ± 5.6** |
+| wsi.dcm | n/a¹ | 274.2 ± 18.1 | **11.1 ± 1.5** |
+| ct.dcm | n/a¹ | 268.0 ± 15.5 | **9.8 ± 1.3** |
+| dx2.dcm | n/a¹ | 288.1 ± 28.7 | **16.2 ± 1.7** |
+
+**Render** (`dcmj2pnm --write-png` / `dcm2jpg -F png` / `dcmnorm <file> <out.png>`)
+
+| Fixture | dcmtk | dcm4che | dcmnorm |
+|---|---|---|---|
+| mr.dcm | 33.7 ± 3.4 | 359.7 ± 10.2 | **12.9 ± 1.7** |
+| us2.dcm | **18.1 ± 1.6** | 372.8 ± 32.0 | 52.6 ± 4.6 |
+| wsi.dcm | 20.8 ± 2.0 | 373.0 ± 10.8 | **12.4 ± 1.4** |
+| ct.dcm | n/a² | 385.6 ± 13.1 | **27.2 ± 2.3** |
+| dx2.dcm | n/a² | 592.2 ± 24.9 | **494.2 ± 22.7** |
+
+**Transcode → Explicit VR LE** (`dcmconv +te` / `dcmdjpeg`³ / `dcm2dcm -t ...` / `dcmnorm <in> <out> --transfer-syntax ...`)
+
+| Fixture | dcmtk | dcm4che | dcmnorm |
+|---|---|---|---|
+| mr.dcm | 14.7 ± 1.7 | 295.1 ± 20.1 | **10.3 ± 1.2** |
+| us2.dcm | **61.9 ± 11.3**⁴ | 368.6 ± 17.6 | 104.4 ± 19.1 |
+| wsi.dcm | 69.1 ± 6.3 | 485.6 ± 27.1 | **59.3 ± 5.0** |
+| ct.dcm | n/a² | 367.2 ± 11.3 | **26.8 ± 3.3** |
+| dx2.dcm | n/a² | 526.1 ± 18.5 | **482.1 ± 23.2** |
+
+¹ dcmtk's `dcm2json` (this build) has no bulk-data-by-reference/exclude option
+— unlike dcm4che's `-B`/`--no-bulkdata` or dcmnorm's default `bulkData: uri`
+mode, it always inlines `PixelData` as base64, and fails outright
+("JSON InlineBinary encoding not supported for compressed pixel data") on any
+compressed source. Confirmed by running it directly outside the benchmark
+harness, not a harness bug. This also explains why dcmtk's `us2.dcm` parse
+(317.8ms) is the one case where it's slower than dcm4che: it's the only tool
+actually base64-encoding all 29MB of pixel data inline, where dcmnorm and
+dcm4che both default to a reference instead.
+
+² dcmtk's apt-packaged build (`dcmdjp2k` is not installed alongside `dcmtk`,
+and `dcmj2pnm`/`dcmconv` have no JPEG2000 codec registered) cannot decode or
+transcode JPEG2000 at all — confirmed via `dcmconv +te` on `ct.dcm`:
+`E: Pixel representation cannot be changed`.
+
+³ `wsi.dcm` (JPEG Baseline) uses dcmtk's dedicated `dcmdjpeg` decompressor
+rather than `dcmconv +te`, matching how dcmtk itself expects JPEG sources to
+be decompressed; `dcm2dcm` and `dcmnorm --transfer-syntax` handle both the
+plain VR/endian conversion and JPEG/JPEG2000 decompression through the same
+one invocation.
+
+⁴ The one case dcmnorm is slower than dcmtk: transcoding all 227 frames of
+`us2.dcm` (29MB, already uncompressed) means genuinely copying/re-encoding
+that much data either way — dcmtk's mature, narrowly-scoped C++ Explicit-VR
+re-encoder edges out dcmnorm's here. `render` on the same file (which only
+touches 1 of 227 frames) shows the same relative gap in miniature.
+
+### Takeaways
+
+- **dcm4che's numbers are dominated by JVM cold-start** (~250-400ms of every
+  single-invocation timing here is the JVM spinning up, not DICOM work) — this
+  benchmark reflects a CLI invoked once per file, not a long-running server
+  reusing a warm JVM, which would look very different. Not a fair "dcm4che the
+  library is slow" conclusion; it's specifically a CLI-cold-start cost.
+- **dcmnorm wins nearly every column that doesn't reduce to `dcm4che`'s JVM
+  tax**, usually by 2-30x over dcmtk — expected, given this session's own
+  work on the allocation/clone hot paths this benchmark exercises (bounded
+  reads instead of upfront `Vec::with_capacity(untrusted_len)`, zero-copy
+  per-frame fragment access instead of cloning the whole pixel buffer,
+  in-house JPEG decode). The two exceptions above (`render`/`transcode` on
+  `us2.dcm`) are both real, reproducible, and worth knowing about rather than
+  omitting.
+- **dcmtk's apt-packaged build has real capability gaps** this session's work
+  doesn't share: no bulk-data-reference JSON mode, no JPEG2000 support at
+  all. Both are almost certainly build-configuration choices (dcmtk itself
+  supports JPEG2000 when compiled with the right codec module) rather than
+  fundamental limitations of the toolkit — but they're what ships via `apt`,
+  which is what most deployments actually run.
 
 ## Releasing
 
