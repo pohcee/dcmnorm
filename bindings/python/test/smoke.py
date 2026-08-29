@@ -16,6 +16,7 @@ OVERLAY_FIXTURE = os.path.join(FIXTURES, "overlay.dcm")
 OVERLAY_MULTI_FIXTURE = os.path.join(FIXTURES, "overlay_multi.dcm")
 OVERLAY_EMBEDDED_FIXTURE = os.path.join(FIXTURES, "overlay_embedded.dcm")
 CT_FIXTURE = os.path.join(FIXTURES, "ct.dcm")
+WSI_FIXTURE = os.path.join(FIXTURES, "wsi.dcm")
 
 # The wheel must run on the oldest glibc among its consumers' runtime images -
 # python:3.12-slim-bookworm, GLIBC 2.36 - same baseline the Node bindings pin to (node:22-slim,
@@ -154,6 +155,17 @@ def main():
         embedded = dcmnorm.render_frame(OVERLAY_EMBEDDED_FIXTURE, format="png")
         check(len(embedded.overlays) == 1, "overlay_embedded.dcm should report one overlay plane")
         check(embedded.selected_overlay_index == 0, "embedded overlay should be selected")
+
+        # wsi.dcm is JPEG Baseline (transfer syntax 1.2.840.10008.1.2.4.50) - the one fixture in
+        # this suite that exercises the in-house dcmnorm-jpeg decoder (crates/dcmnorm-jpeg)
+        # rather than an uncompressed or JPEG2000/openjpeg-sys path. Every other render_frame
+        # call above uses us.dcm/overlay*.dcm (uncompressed) or ct.dcm (JPEG2000), so without
+        # this the python binding's own test suite would never prove the JPEG decode path works
+        # when called through this binding, not just through the Rust test suite directly.
+        wsi_frame = dcmnorm.render_frame(WSI_FIXTURE, format="png")
+        check(wsi_frame.width == 240, "wsi.dcm (JPEG Baseline) should decode to 240x240")
+        check(wsi_frame.height == 240, "wsi.dcm (JPEG Baseline) should decode to 240x240")
+        check(len(wsi_frame.data) > 0, "JPEG-decoded frame should produce non-empty PNG bytes")
 
         # --- MPR volume + GPU texture export -------------------------------------------------
         slice_count = 4

@@ -11,6 +11,7 @@ const overlayFixture = path.join(__dirname, "..", "..", "..", "test", "files", "
 const overlayMultiFixture = path.join(__dirname, "..", "..", "..", "test", "files", "overlay_multi.dcm");
 const overlayEmbeddedFixture = path.join(__dirname, "..", "..", "..", "test", "files", "overlay_embedded.dcm");
 const ctFixture = path.join(__dirname, "..", "..", "..", "test", "files", "ct.dcm");
+const wsiFixture = path.join(__dirname, "..", "..", "..", "test", "files", "wsi.dcm");
 
 // The addon must run on the oldest glibc among its consumers' runtime images - node:22-slim
 // (edge services), Debian bookworm, GLIBC 2.36 - even though render-server's node:24-trixie-slim
@@ -146,6 +147,17 @@ const tagsJson = await binding.readTags(fixture, ["StudyInstanceUID", "SOPInstan
   const embeddedOverlay = await binding.renderFrame(overlayEmbeddedFixture, { format: "png" });
   assert.strictEqual(embeddedOverlay.overlays.length, 1, "overlay_embedded.dcm should report one overlay plane");
   assert.strictEqual(embeddedOverlay.selectedOverlayIndex, 0);
+
+  // wsi.dcm is JPEG Baseline (transfer syntax 1.2.840.10008.1.2.4.50) - the one fixture in this
+  // suite that actually exercises the in-house dcmnorm-jpeg decoder (crates/dcmnorm-jpeg) rather
+  // than an uncompressed or JPEG2000/openjpeg-sys path. Every other renderFrame/exportTexture
+  // call above uses us.dcm/overlay*.dcm (uncompressed) or ct.dcm (JPEG2000), so without this the
+  // node binding's own test suite would never actually prove the JPEG decode path works when
+  // called through this binding, not just through the Rust test suite directly.
+  const wsiFrame = await binding.renderFrame(wsiFixture, { format: "png" });
+  assert.strictEqual(wsiFrame.width, 240, "wsi.dcm (JPEG Baseline) should decode to 240x240");
+  assert.strictEqual(wsiFrame.height, 240, "wsi.dcm (JPEG Baseline) should decode to 240x240");
+  assert.ok(wsiFrame.data.length > 0, "JPEG-decoded frame should produce non-empty PNG bytes");
 
   // --- MPR volume + GPU texture export (buildVolume / DicomVolumeHandle.exportTexture /
   // exportFrameTexture) --------------------------------------------------------------------
