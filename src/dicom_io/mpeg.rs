@@ -1,7 +1,7 @@
 #[cfg(feature = "ffmpeg-codec")]
 pub mod mpeg_impl {
-    use dicom_dictionary_std::tags;
-    use dicom_object::DefaultDicomObject;
+    use dcmnorm_dictionary::tags;
+    use dcmnorm_object::DefaultDicomObject;
 
     /// Decode MPEG-encoded pixel data using FFmpeg
     pub fn decode_mpeg_pixel_data(object: &DefaultDicomObject) -> Result<Vec<u8>, String> {
@@ -82,7 +82,7 @@ pub mod mpeg_impl {
 
 #[cfg(not(feature = "ffmpeg-codec"))]
 pub mod mpeg_impl {
-    use dicom_object::DefaultDicomObject;
+    use dcmnorm_object::DefaultDicomObject;
 
     pub fn decode_mpeg_pixel_data(_object: &DefaultDicomObject) -> Result<Vec<u8>, String> {
         Err("MPEG codec support requires 'ffmpeg-codec' feature to be enabled".to_owned())

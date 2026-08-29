@@ -1,0 +1,14 @@
+[package]
+name = "dcmnorm-dimse"
+version = "0.1.0"
+edition = "2021"
+description = "In-house DICOM Upper Layer Protocol (PS3.8) implementation, replacing dicom-ul. See lib.rs."
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "dcmnorm_dimse"
+path = "src/lib.rs"
+
+[dependencies]
+dcmnorm-encoding = { path = "../dcmnorm-encoding" }
+dcmnorm-transcode = { path = "../dcmnorm-transcode", default-features = false }

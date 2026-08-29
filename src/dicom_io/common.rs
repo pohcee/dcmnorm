@@ -1,8 +1,8 @@
-use dicom_core::dictionary::{DataDictionary, DataDictionaryEntry};
-use dicom_core::header::Header;
-use dicom_core::{DataElement, Tag};
-use dicom_dictionary_std::{tags, StandardDataDictionary};
-use dicom_object::{FileMetaTableBuilder, InMemDicomObject};
+use dcmnorm_core::dictionary::{DataDictionary, DataDictionaryEntry};
+use dcmnorm_core::header::Header;
+use dcmnorm_core::{DataElement, Tag};
+use dcmnorm_dictionary::{tags, StandardDataDictionary};
+use dcmnorm_object::{FileMetaTableBuilder, InMemDicomObject};
 use serde_json::{Map as JsonMap, Number as JsonNumber, Value as JsonValue};
 
 use super::types::{DicomJsonError, DicomJsonKeyStyle};

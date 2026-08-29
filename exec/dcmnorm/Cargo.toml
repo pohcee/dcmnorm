@@ -26,9 +26,9 @@ priority = "optional"
 [dependencies]
 clap = { version = "4.6", features = ["derive"] }
 dcmnorm = { path = "../.." }
-dicom-core = "0.9.1"
-dicom-dictionary-std = "0.9.0"
-dicom-object = "0.9.1"
+dcmnorm-core = { path = "../../crates/dcmnorm-core" }
+dcmnorm-dictionary = { path = "../../crates/dcmnorm-dictionary" }
+dcmnorm-object = { path = "../../crates/dcmnorm-object" }
 serde_json = "1.0"
 sha2 = "0.10"
 

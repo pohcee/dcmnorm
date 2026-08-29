@@ -3,15 +3,15 @@
 //! (`echoscu`/`dcmsend`/`findscu`/`movescu`) this replaces, but as library calls that return
 //! structured results instead of printing/exiting - callers decide what counts as a failure.
 //!
-//! `dicom-ul` (the DICOM Upper Layer/association crate used here) is purely transport-layer: it
+//! `dcmnorm-dimse` (the DICOM Upper Layer/association crate used here) is purely transport-layer: it
 //! knows about PDUs and presentation-context negotiation, nothing about DIMSE command semantics.
 //! Every operation below hand-builds its own command dataset via
-//! `InMemDicomObject::command_from_element_iter` + `dicom_dictionary_std::tags`, the same way
+//! `InMemDicomObject::command_from_element_iter` + `dcmnorm_dictionary::tags`, the same way
 //! dcmtk/dicom-rs's example CLIs do - there is no higher-level DIMSE helper anywhere in this
 //! dependency stack, including for C-MOVE (which has no reference implementation to port from;
 //! its command dataset and response loop are built directly from PS3.7).
 //!
-//! `dicom-ul` 0.9.1's `ClientAssociation` does not release on `Drop` (older versions did) - every
+//! `dcmnorm-dimse` 0.9.1's `ClientAssociation` does not release on `Drop` (older versions did) - every
 //! function here explicitly releases once it has a terminal result (via `release_and_log` - see
 //! its doc comment for why a failed release is only ever logged, never turned into an `Err`, and
 //! can't fall back to `.abort()` the way every other fallible step does) and aborts on error paths
@@ -27,19 +27,19 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use dicom_core::dictionary::{DataDictionary, DataDictionaryEntry};
-use dicom_core::{dicom_value, DataElement, VR};
-use dicom_dictionary_std::{tags, uids, StandardDataDictionary};
-use dicom_encoding::{TransferSyntax, TransferSyntaxIndex};
-use dicom_object::mem::InMemDicomObject;
-use dicom_transfer_syntax_registry::TransferSyntaxRegistry;
-use dicom_ul::{
+use dcmnorm_core::dictionary::{DataDictionary, DataDictionaryEntry};
+use dcmnorm_core::{dicom_value, DataElement, VR};
+use dcmnorm_dictionary::{tags, uids, StandardDataDictionary};
+use dcmnorm_encoding::{TransferSyntax, TransferSyntaxIndex};
+use dcmnorm_object::InMemDicomObject;
+use dcmnorm_transcode::TransferSyntaxRegistry;
+use dcmnorm_dimse::{
     association::{client::ClientAssociationOptions, Error as AssociationError},
     pdu::{PDataValue, PDataValueType, Pdu, PresentationContextNegotiated},
     ClientAssociation,
 };
 
-use super::io::{can_encode_transfer_syntax, read_dicom_file, transcode_dicom_object};
+use super::io::{can_encode_transfer_syntax, read_dicom_file, transcode_dcmnorm_object};
 use super::json::write_dataset_as_dicom_json_with_options;
 use super::types::{
     DicomJsonError, DicomJsonFormat, DicomJsonKeyStyle, DicomJsonWriteOptions, ReadError,
@@ -331,7 +331,7 @@ fn send_command(
 /// Sends a Command followed by its Data Set (the Identifier for C-FIND/C-MOVE, or the instance
 /// for C-STORE) as a single P-DATA-TF PDU - one `assoc.send()`, one write - whenever both fit
 /// under the negotiated PDU size. Splitting them into two separate PDUs/writes (as this used to
-/// do unconditionally for C-FIND/C-MOVE) leaves a gap between them that, since `dicom-ul`'s
+/// do unconditionally for C-FIND/C-MOVE) leaves a gap between them that, since `dcmnorm-dimse`'s
 /// TcpStream never sets TCP_NODELAY, Nagle's algorithm can stretch out unpredictably - at least
 /// one real-world SCP encountered in production doesn't tolerate that gap and drops or garbles
 /// the association. Falls back to two PDUs (fragmenting the data set via `send_pdata`) only when
@@ -401,7 +401,7 @@ fn read_pdata_to_end(assoc: &mut ClientAssociation<TcpStream>) -> Result<Vec<u8>
 /// This also can't reuse the log+abort pattern every other fallible step in these SCU functions
 /// uses, because `ClientAssociation::release`/`::abort` both take `self` by value - once
 /// `release()` has consumed and failed on `assoc`, there is no association object left to call
-/// `.abort()` on; that's a hard constraint of this dicom-ul version's API, not a choice made here.
+/// `.abort()` on; that's a hard constraint of this dcmnorm-dimse version's API, not a choice made here.
 /// `release()` sends A-RELEASE-RQ and then expects `Pdu::ReleaseRP` back; if the peer sends
 /// anything else first (including a stray trailing `PData` - the same shape as the RamSoft "Failed
 /// SOP Instance UID List sent as its own PDU" case `move_scu` already drains for, just now on a
@@ -445,7 +445,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(500);
 /// True if `error`'s source chain bottoms out in an `io::Error` of kind `WouldBlock` or
 /// `TimedOut` - i.e. this was just a `poll_bounded` tick finding nothing to read yet, not a real
 /// failure. Walks the chain rather than matching a specific `DimseError`/`AssociationError`/
-/// `ReadError` shape since a read timeout can surface wrapped in any of several dicom-ul
+/// `ReadError` shape since a read timeout can surface wrapped in any of several dcmnorm-dimse
 /// variants (`ReceivePdu`, `ReceivePduItem`, ...) depending on exactly where mid-PDU it landed.
 fn is_read_timeout(error: &DimseError) -> bool {
     let mut current: &(dyn StdError + 'static) = error;
@@ -549,7 +549,7 @@ fn command_status(command: &InMemDicomObject) -> Result<u16, DimseError> {
         .map_err(|error| DimseError::Protocol(format!("Status is not a valid integer: {error}")))
 }
 
-fn command_u16(command: &InMemDicomObject, tag: dicom_core::Tag) -> u16 {
+fn command_u16(command: &InMemDicomObject, tag: dcmnorm_core::Tag) -> u16 {
     command.element(tag).ok().and_then(|element| element.to_int::<u16>().ok()).unwrap_or(0)
 }
 
@@ -596,7 +596,7 @@ pub fn echo_scu(destination: &str, options: EchoScuOptions) -> Result<u16, Dimse
         destination,
         &options.calling_ae_title,
         options.called_ae_title.as_deref(),
-        dicom_ul::pdu::DEFAULT_MAX_PDU,
+        dcmnorm_dimse::pdu::DEFAULT_MAX_PDU,
         &[(uids::VERIFICATION.to_owned(), default_transfer_syntaxes())],
         options.timeout,
         logger,
@@ -696,7 +696,7 @@ fn probe_store_file(path: &Path) -> Result<StoreFile, DimseError> {
 /// has a file for - see [`select_store_presentation_context`] for how a decode-only accepted
 /// context is avoided as a transcode fallback for a *different* file's send.
 ///
-/// The fallback path still reuses dcmnorm's own [`transcode_dicom_object`], which (via
+/// The fallback path still reuses dcmnorm's own [`transcode_dcmnorm_object`], which (via
 /// openjpeg/kakadu/jpeg-ls/ffmpeg) can transcode a strictly wider set of source transfer syntaxes
 /// than the storescu CLI's uncompressed-only fallback did.
 ///
@@ -817,7 +817,7 @@ fn send_and_receive_store(
     let object = if target_ts.uid() == file.transfer_syntax_uid {
         object
     } else {
-        transcode_dicom_object(&object, target_ts.uid())?
+        transcode_dcmnorm_object(&object, target_ts.uid())?
     };
 
     let mut object_data = Vec::with_capacity(2048);
@@ -1160,7 +1160,7 @@ pub fn move_scu(
         // Identifier (Failed SOP Instance UID List) as its own P-DATA-TF following the command -
         // some SCPs (e.g. RamSoft) send this even for a Failure that fails the whole study. If we
         // don't drain it here it's still sitting on the wire when `release()` next calls
-        // `receive()` expecting A-RELEASE-RP, which dicom-ul then rejects as an unexpected PDU.
+        // `receive()` expecting A-RELEASE-RP, which dcmnorm-dimse then rejects as an unexpected PDU.
         if command_has_dataset(&response) {
             match poll_bounded(&mut assoc, deadline, stale_watch.as_mut(), cancel, read_pdata_to_end) {
                 Ok(_) => {}

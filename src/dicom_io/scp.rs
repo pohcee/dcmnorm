@@ -18,12 +18,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use dicom_core::{dicom_value, DataElement, VR};
-use dicom_dictionary_std::{tags, uids};
-use dicom_encoding::TransferSyntax;
-use dicom_object::mem::InMemDicomObject;
-use dicom_object::FileMetaTableBuilder;
-use dicom_ul::{
+use dcmnorm_core::{dicom_value, DataElement, VR};
+use dcmnorm_dictionary::{tags, uids};
+use dcmnorm_encoding::TransferSyntax;
+use dcmnorm_object::InMemDicomObject;
+use dcmnorm_object::FileMetaTableBuilder;
+use dcmnorm_dimse::{
     association::server::ServerAssociationOptions,
     pdu::{PDataValue, PDataValueType, Pdu, PresentationContextResultReason},
     ServerAssociation,
@@ -60,7 +60,7 @@ pub trait ScpHandlers: Send + Sync {
 pub struct ScpOptions {
     pub ae_title: String,
     /// The acceptor's own advertised max PDU length (sent back in A-ASSOCIATE-AC's Maximum
-    /// Length sub-item). dicom-ul's strict-mode reader also enforces this as a hard ceiling on
+    /// Length sub-item). dcmnorm-dimse's strict-mode reader also enforces this as a hard ceiling on
     /// every *incoming* PDU on this connection - including the initial A-ASSOCIATE-RQ itself,
     /// before we've parsed it - so this can't be chosen per-requestor; it has to be generous
     /// enough up front for whatever any requestor proposes (a request with many presentation
@@ -80,7 +80,7 @@ impl Default for ScpOptions {
     fn default() -> Self {
         Self {
             ae_title: "ANY-SCP".to_owned(),
-            // 256 KiB - matches dicom-ul's own internal LARGE_PDU_SIZE, so this doesn't cost any
+            // 256 KiB - matches dcmnorm-dimse's own internal LARGE_PDU_SIZE, so this doesn't cost any
             // extra buffer pre-allocation over what the crate already budgets for a "large" PDU.
             max_pdu_length: 262_144,
             idle_timeout: Duration::from_secs(300),
@@ -204,7 +204,7 @@ fn handle_association(stream: TcpStream, cache_path: &Path, handlers: &dyn ScpHa
         Ok(association) => {
             log_event(logger, || {
                 let contexts = association.presentation_contexts();
-                // `promiscuous(true)` only bypasses the *abstract syntax* check - dicom-ul still
+                // `promiscuous(true)` only bypasses the *abstract syntax* check - dcmnorm-dimse still
                 // negotiates a transfer syntax per context against its own registry's supported
                 // set, and a context whose only proposed transfer syntax isn't supported (e.g. a
                 // JPEG variant this build's registry can't decode) comes back here with `reason
@@ -336,15 +336,15 @@ fn negotiated_transfer_syntax(
     transfer_syntax(&pc.transfer_syntax).ok()
 }
 
-fn command_u16(command: &InMemDicomObject, tag: dicom_core::Tag) -> u16 {
+fn command_u16(command: &InMemDicomObject, tag: dcmnorm_core::Tag) -> u16 {
     command.element(tag).ok().and_then(|element| element.to_int::<u16>().ok()).unwrap_or(0)
 }
 
-fn command_str(command: &InMemDicomObject, tag: dicom_core::Tag) -> Option<String> {
+fn command_str(command: &InMemDicomObject, tag: dcmnorm_core::Tag) -> Option<String> {
     command.element(tag).ok().and_then(|element| element.to_str().ok()).map(|value| value.trim().to_owned())
 }
 
-fn element_str(object: &InMemDicomObject, tag: dicom_core::Tag) -> Option<String> {
+fn element_str(object: &InMemDicomObject, tag: dcmnorm_core::Tag) -> Option<String> {
     object.element(tag).ok().and_then(|element| element.to_str().ok()).map(|value| value.trim().to_owned())
 }
 
@@ -508,14 +508,14 @@ fn store_received_dataset(
     Ok(0x0000)
 }
 
-const FIND_IDENTIFIER_KEYS: &[(&str, dicom_core::Tag)] = &[
+const FIND_IDENTIFIER_KEYS: &[(&str, dcmnorm_core::Tag)] = &[
     ("StudyInstanceUID", tags::STUDY_INSTANCE_UID),
     ("StudyDate", tags::STUDY_DATE),
     ("PatientName", tags::PATIENT_NAME),
     ("PatientID", tags::PATIENT_ID),
 ];
 
-const FIND_RESPONSE_FIELDS: &[(&str, dicom_core::Tag, VR)] = &[
+const FIND_RESPONSE_FIELDS: &[(&str, dcmnorm_core::Tag, VR)] = &[
     ("StudyInstanceUID", tags::STUDY_INSTANCE_UID, VR::UI),
     ("AccessionNumber", tags::ACCESSION_NUMBER, VR::SH),
     ("PatientID", tags::PATIENT_ID, VR::LO),

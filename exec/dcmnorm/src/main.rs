@@ -8,9 +8,9 @@ use dcmnorm::dicom_io::{
     apply_filter_to_object, compute_frame_histogram, compute_instance_histograms, jpeg2000_backend_name,
     kakadu_ffi_enabled, list_transfer_syntax_support,
     parse_attribute_override, parse_filter_requests, parse_tag_key, read_dicom_bytes, read_dicom_file,
-    read_dicom_json_with_options, read_dicom_object_for_filter,
+    read_dicom_json_with_options, read_dcmnorm_object_for_filter,
     redact_dicom_pixels_to_transfer_syntax, remove_attribute, render_all_dicom_frames,
-    render_dicom_frame, set_attribute, transcode_dicom_object, write_dicom_file,
+    render_dicom_frame, set_attribute, transcode_dcmnorm_object, write_dicom_file,
     write_dicom_json_with_options, write_dicom_video, BoundingBox, BoxLength, DicomJsonBulkDataMode, DicomJsonFormat,
     DicomJsonKeyStyle, DicomJsonReadOptions, DicomJsonWriteOptions,
     RenderOutputFormat, RenderPipelineOptions, HistogramOptions, JPEG2000_CODEC_ENV_FLAG, JPEG2000_DEBUG_ENV_FLAG,
@@ -22,10 +22,10 @@ use dcmnorm::dicom_io::{
 };
 use dcmnorm::remove_private_tags_inplace;
 use dcmnorm::perf;
-use dicom_core::dictionary::{DataDictionary, DataDictionaryEntry};
-use dicom_core::Tag;
-use dicom_dictionary_std::tags;
-use dicom_dictionary_std::StandardDataDictionary;
+use dcmnorm_core::dictionary::{DataDictionary, DataDictionaryEntry};
+use dcmnorm_core::Tag;
+use dcmnorm_dictionary::tags;
+use dcmnorm_dictionary::StandardDataDictionary;
 use sha2::{Digest, Sha256};
 use serde_json::Value as JsonValue;
 
@@ -946,7 +946,7 @@ fn process_one(cli: &Cli, input_path: &Path) -> Result<(), Box<dyn std::error::E
             let input_bytes = fs::read(input_path)?;
             (read_dicom_bytes(&input_bytes)?, Some(input_bytes))
         } else {
-            (read_dicom_object_for_filter(input_path, &requests)?, None)
+            (read_dcmnorm_object_for_filter(input_path, &requests)?, None)
         };
 
         return match direction {
@@ -1130,7 +1130,7 @@ fn run_dicom_to_json_with_object(
     cli: &Cli,
     input_path: &Path,
     input_bytes: Option<&[u8]>,
-    mut object: dicom_object::DefaultDicomObject,
+    mut object: dcmnorm_object::DefaultDicomObject,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let _scope = perf::scope("cli.run_dicom_to_json");
     validate_no_render_or_redaction_flags(cli)?;
@@ -1262,7 +1262,7 @@ fn run_dicom_to_dicom(
 fn run_dicom_to_dicom_with_object(
     cli: &Cli,
     input_path: &Path,
-    mut object: dicom_object::DefaultDicomObject,
+    mut object: dcmnorm_object::DefaultDicomObject,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let _scope = perf::scope("cli.run_dicom_to_dicom");
     validate_non_dicom_to_dicom_render_flags(cli)?;
@@ -1385,7 +1385,7 @@ fn run_dicom_to_dicom_with_object(
         );
         let mut transcoded = {
             let _transcode_scope = perf::scope("cli.dicom_to_dicom.transcode");
-            transcode_dicom_object(&object, target_transfer_syntax)?
+            transcode_dcmnorm_object(&object, target_transfer_syntax)?
         };
         write_dicom_file(&mut transcoded, output_path)?;
     } else {
@@ -1410,7 +1410,7 @@ fn run_dicom_to_render(cli: &Cli, input_bytes: &[u8]) -> Result<(), Box<dyn std:
 
 fn run_dicom_to_render_with_object(
     cli: &Cli,
-    mut object: dicom_object::DefaultDicomObject,
+    mut object: dcmnorm_object::DefaultDicomObject,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let _scope = perf::scope("cli.run_dicom_to_render");
     if cli.keys != KeyFormat::Name {
@@ -2263,7 +2263,7 @@ fn run_json_to_dicom(cli: &Cli, input_bytes: &[u8]) -> Result<(), Box<dyn std::e
 
 fn apply_attribute_overrides(
     cli: &Cli,
-    object: &mut dicom_object::DefaultDicomObject,
+    object: &mut dcmnorm_object::DefaultDicomObject,
 ) -> Result<(), Box<dyn std::error::Error>> {
     for assignment in &cli.set {
         let (tag, vr, value) = parse_attribute_override(assignment)?;
@@ -2905,7 +2905,7 @@ fn verbose_log(cli: &Cli, message: impl AsRef<str>) {
     }
 }
 
-fn default_render_fps_from_dicom(object: &dicom_object::DefaultDicomObject) -> Option<f64> {
+fn default_render_fps_from_dicom(object: &dcmnorm_object::DefaultDicomObject) -> Option<f64> {
     first_numeric_tag(object, tags::RECOMMENDED_DISPLAY_FRAME_RATE_IN_FLOAT)
         .or_else(|| first_numeric_tag(object, tags::RECOMMENDED_DISPLAY_FRAME_RATE))
         .or_else(|| first_numeric_tag(object, tags::CINE_RATE))
@@ -2933,8 +2933,8 @@ fn default_render_fps_from_dicom(object: &dicom_object::DefaultDicomObject) -> O
 }
 
 fn first_numeric_tag(
-    object: &dicom_object::DefaultDicomObject,
-    tag: dicom_core::Tag,
+    object: &dcmnorm_object::DefaultDicomObject,
+    tag: dcmnorm_core::Tag,
 ) -> Option<f64> {
     object
         .get(tag)
@@ -2947,8 +2947,8 @@ fn first_numeric_tag(
 }
 
 fn numeric_values_tag(
-    object: &dicom_object::DefaultDicomObject,
-    tag: dicom_core::Tag,
+    object: &dcmnorm_object::DefaultDicomObject,
+    tag: dcmnorm_core::Tag,
 ) -> Option<Vec<f64>> {
     let text = object.get(tag).and_then(|element| element.to_str().ok())?;
     let values = text
@@ -2988,11 +2988,11 @@ mod tests {
         VolumeFormat,
     };
     use clap::{CommandFactory, FromArgMatches};
-    use dicom_dictionary_std::tags;
+    use dcmnorm_dictionary::tags;
     use dcmnorm::dicom_io::{next_tag, read_dicom_file, write_dicom_file};
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
-    use dicom_core::{DataElement, PrimitiveValue, Tag, VR};
+    use dcmnorm_core::{DataElement, PrimitiveValue, Tag, VR};
     use std::path::{Path, PathBuf};
 
     fn repo_root() -> PathBuf {
@@ -3954,7 +3954,7 @@ mod tests {
         let (tag, vr, value) =
             parse_attribute_override("SOPClassUID=1.2.840.10008.5.1.4.1.1.2").unwrap();
         assert_eq!(tag, Tag(0x0008, 0x0016));
-        assert_eq!(vr, dicom_core::VR::UI);
+        assert_eq!(vr, dcmnorm_core::VR::UI);
         assert_eq!(value, "1.2.840.10008.5.1.4.1.1.2");
     }
 

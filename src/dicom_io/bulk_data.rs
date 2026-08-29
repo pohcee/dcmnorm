@@ -1,8 +1,8 @@
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine as _;
-use dicom_core::value::{PixelFragmentSequence, Value as DicomValue};
-use dicom_core::{PrimitiveValue, Tag, VR};
-use dicom_dictionary_std::{tags, uids};
+use dcmnorm_core::value::{PixelFragmentSequence, Value as DicomValue};
+use dcmnorm_core::{PrimitiveValue, Tag, VR};
+use dcmnorm_dictionary::{tags, uids};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 use std::fs;
 
@@ -219,7 +219,7 @@ pub(super) fn raw_bytes_to_dicom_value(
     vr: VR,
     bytes: &[u8],
     transfer_syntax_uid: &str,
-) -> Result<DicomValue<dicom_object::InMemDicomObject>, DicomJsonError> {
+) -> Result<DicomValue<dcmnorm_object::InMemDicomObject>, DicomJsonError> {
     if tag == tags::PIXEL_DATA && is_encapsulated_transfer_syntax(transfer_syntax_uid) {
         return pixel_sequence_from_bytes(bytes);
     }
@@ -871,7 +871,7 @@ fn is_encapsulated_transfer_syntax(uid: &str) -> bool {
 
 fn pixel_sequence_from_bytes(
     bytes: &[u8],
-) -> Result<DicomValue<dicom_object::InMemDicomObject>, DicomJsonError> {
+) -> Result<DicomValue<dcmnorm_object::InMemDicomObject>, DicomJsonError> {
     let mut cursor = 0usize;
     let mut offset_table = Vec::new();
     let mut fragments = Vec::new();
@@ -917,7 +917,7 @@ fn pixel_sequence_from_bytes(
         cursor += length;
     }
 
-    Ok(DicomValue::<dicom_object::InMemDicomObject>::from(
+    Ok(DicomValue::<dcmnorm_object::InMemDicomObject>::from(
         PixelFragmentSequence::new(offset_table, fragments),
     ))
 }

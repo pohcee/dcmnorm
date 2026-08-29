@@ -1,0 +1,23 @@
+[package]
+name = "dcmnorm-core"
+version = "0.1.0"
+authors = ["Eduardo Pinho <enet4mikeenet@gmail.com>"]
+description = "In-house DICOM core value/VR/tag library, forked from dicom-core 0.9.1. See README.md."
+edition = "2018"
+rust-version = "1.72.0"
+license = "MIT OR Apache-2.0"
+keywords = ["dicom"]
+readme = "README.md"
+
+[lib]
+name = "dcmnorm_core"
+path = "src/lib.rs"
+
+[dependencies]
+chrono = { version = "0.4.31", default-features = false, features = ["std", "clock"] }
+either = "1.13.0"
+itertools = "0.14"
+num-traits = "0.2.12"
+safe-transmute = "0.11.0"
+smallvec = "1.6.1"
+snafu = "0.8"

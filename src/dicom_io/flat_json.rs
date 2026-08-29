@@ -1,9 +1,9 @@
-use dicom_core::dictionary::{DataDictionary, DataDictionaryEntry};
-use dicom_core::header::EmptyObject;
-use dicom_core::value::Value as DicomValue;
-use dicom_core::{DataElement, Length, PrimitiveValue, Tag, VR};
-use dicom_dictionary_std::{tags, StandardDataDictionary};
-use dicom_object::{DefaultDicomObject, InMemDicomObject};
+use dcmnorm_core::dictionary::{DataDictionary, DataDictionaryEntry};
+use dcmnorm_core::header::EmptyObject;
+use dcmnorm_core::value::Value as DicomValue;
+use dcmnorm_core::{DataElement, Length, PrimitiveValue, Tag, VR};
+use dcmnorm_dictionary::{tags, StandardDataDictionary};
+use dcmnorm_object::{DefaultDicomObject, InMemDicomObject};
 use serde_json::{Map as JsonMap, Number as JsonNumber, Value as JsonValue};
 
 use super::bulk_data::{
@@ -24,7 +24,7 @@ pub(super) fn write_flat_json_value(
     let mut json = JsonMap::new();
 
     for element in object.meta().to_element_iter() {
-        if element.header().tag == dicom_dictionary_std::tags::FILE_META_INFORMATION_GROUP_LENGTH {
+        if element.header().tag == dcmnorm_dictionary::tags::FILE_META_INFORMATION_GROUP_LENGTH {
             continue;
         }
 
@@ -69,10 +69,10 @@ pub(super) fn read_flat_json_value(
     let entries = normalize_flat_json_entries(entries)?;
 
     let transfer_syntax_uid = extract_transfer_syntax_from_flat(&entries)
-        .unwrap_or_else(|| dicom_dictionary_std::uids::EXPLICIT_VR_LITTLE_ENDIAN.to_owned());
+        .unwrap_or_else(|| dcmnorm_dictionary::uids::EXPLICIT_VR_LITTLE_ENDIAN.to_owned());
 
     let mut dataset_elements = Vec::new();
-    let mut meta_builder = dicom_object::FileMetaTableBuilder::new();
+    let mut meta_builder = dcmnorm_object::FileMetaTableBuilder::new();
 
     for (keyword, json_value) in &entries {
         let tag = StandardDataDictionary
@@ -83,7 +83,7 @@ pub(super) fn read_flat_json_value(
             .map(|entry| entry.vr().relaxed())
             .unwrap_or(VR::UN);
 
-        if tag == dicom_dictionary_std::tags::FILE_META_INFORMATION_GROUP_LENGTH {
+        if tag == dcmnorm_dictionary::tags::FILE_META_INFORMATION_GROUP_LENGTH {
             continue;
         }
 

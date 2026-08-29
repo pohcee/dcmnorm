@@ -6,18 +6,18 @@ use std::process::Command;
 use std::sync::OnceLock;
 
 use crate::perf;
-use dicom_core::ops::ApplyOp;
-use dicom_core::value::PixelFragmentSequence;
-use dicom_core::value::Value;
-use dicom_core::{DataElement, PrimitiveValue, Tag, VR};
-use dicom_dictionary_std::{tags, uids};
-use dicom_encoding::adapters::EncodeOptions;
-use dicom_encoding::transfer_syntax::{Codec, TransferSyntaxIndex};
-use dicom_object::file::ReadPreamble;
-use dicom_object::{
+use dcmnorm_core::ops::ApplyOp;
+use dcmnorm_core::value::PixelFragmentSequence;
+use dcmnorm_core::value::Value;
+use dcmnorm_core::{DataElement, PrimitiveValue, Tag, VR};
+use dcmnorm_dictionary::{tags, uids};
+use dcmnorm_encoding::adapters::EncodeOptions;
+use dcmnorm_encoding::transfer_syntax::{Codec, TransferSyntaxIndex};
+use dcmnorm_object::ReadPreamble;
+use dcmnorm_object::{
     DefaultDicomObject, FileMetaTableBuilder, InMemDicomObject, OpenFileOptions,
 };
-use dicom_transfer_syntax_registry::TransferSyntaxRegistry;
+use dcmnorm_transcode::TransferSyntaxRegistry;
 use rayon::prelude::*;
 
 use super::jpeg_ls;
@@ -145,11 +145,19 @@ fn jpeg2000_debug_log(message: impl AsRef<str>) {
     }
 }
 
-fn is_jpeg2000_transfer_syntax(uid: &str) -> bool {
+// The single canonical definition - previously duplicated (with a diverging UID list) in
+// render.rs. That copy was missing .92/.93 (JPEG 2000 Part 2 Multi-component), which wasn't
+// an intentional narrower scope, just drift between the two copies; this list is their union.
+pub(super) fn is_jpeg2000_transfer_syntax(uid: &str) -> bool {
     matches!(
         normalize_transfer_syntax_uid(uid),
-        "1.2.840.10008.1.2.4.91"
-            | "1.2.840.10008.1.2.4.90"
+        "1.2.840.10008.1.2.4.90"
+            | "1.2.840.10008.1.2.4.91"
+            // JPEG 2000 Part 2 Multi-component Image Compression (Lossless Only / lossy) -
+            // same codestream family, needs the same MCT/component-mismatch correction and
+            // Kakadu/OpenJPEG dispatch as classic JPEG 2000.
+            | "1.2.840.10008.1.2.4.92"
+            | "1.2.840.10008.1.2.4.93"
             // High-Throughput JPEG 2000 (Lossless Only / RPCL / lossy) - same
             // codestream format as classic JPEG 2000, decoded by the same
             // OpenJPEG/Kakadu backends, so it needs the same MCT/component
@@ -743,28 +751,14 @@ fn probe_transfer_syntax_from_uid(uid: &str) -> ProbeTransferSyntax {
     }
 }
 
-/// Recomputes the file meta group length before writing.
-///
-/// `dicom-object` can leave `information_group_length` stale relative to the
-/// meta elements it actually serializes (e.g. when the meta table gains a
-/// media storage SOP class/instance UID inferred from the data set after the
-/// group length was last computed). Writing that stale length produces a
-/// file whose meta group boundary doesn't match its real content, which
-/// corrupts everything read after it.
-fn refresh_meta_group_length(object: &mut DefaultDicomObject) {
-    object.meta_mut().update_information_group_length();
-}
-
 pub fn write_dicom_file<P>(object: &mut DefaultDicomObject, path: P) -> Result<(), WriteError>
 where
     P: AsRef<Path>,
 {
-    refresh_meta_group_length(object);
     object.write_to_file(path).map(|_| ())
 }
 
 pub fn write_dicom_bytes(object: &mut DefaultDicomObject) -> Result<Vec<u8>, WriteError> {
-    refresh_meta_group_length(object);
     let mut bytes = Vec::new();
     object.write_all(&mut bytes)?;
     Ok(bytes)
@@ -837,11 +831,11 @@ pub fn can_encode_transfer_syntax(uid: &str) -> bool {
             ))
 }
 
-pub fn transcode_dicom_object(
+pub fn transcode_dcmnorm_object(
     object: &DefaultDicomObject,
     target_transfer_syntax_uid: &str,
 ) -> Result<DefaultDicomObject, TranscodeError> {
-    let _scope = perf::scope("transcode.transcode_dicom_object");
+    let _scope = perf::scope("transcode.transcode_dcmnorm_object");
     let source_uid = normalize_transfer_syntax_uid(object.meta().transfer_syntax());
     let target_uid = normalize_transfer_syntax_uid(target_transfer_syntax_uid);
 
@@ -884,7 +878,7 @@ pub fn transcode_dicom_bytes(
     target_transfer_syntax_uid: &str,
 ) -> Result<Vec<u8>, TranscodeError> {
     let object = read_dicom_bytes(bytes)?;
-    let mut transcoded = transcode_dicom_object(&object, target_transfer_syntax_uid)?;
+    let mut transcoded = transcode_dcmnorm_object(&object, target_transfer_syntax_uid)?;
     Ok(write_dicom_bytes(&mut transcoded)?)
 }
 
@@ -898,25 +892,25 @@ where
     Q: AsRef<Path>,
 {
     let object = read_dicom_file(input_path)?;
-    let mut transcoded = transcode_dicom_object(&object, target_transfer_syntax_uid)?;
+    let mut transcoded = transcode_dcmnorm_object(&object, target_transfer_syntax_uid)?;
     write_dicom_file(&mut transcoded, output_path)?;
     Ok(())
 }
 
-fn normalize_transfer_syntax_uid(uid: &str) -> &str {
+pub(super) fn normalize_transfer_syntax_uid(uid: &str) -> &str {
     uid.trim_end_matches(|character: char| character.is_whitespace() || character == '\0')
 }
 
-fn can_read_dataset<D, R, W>(ts: &dicom_encoding::TransferSyntax<D, R, W>) -> bool {
+fn can_read_dataset<D, R, W>(ts: &dcmnorm_encoding::TransferSyntax<D, R, W>) -> bool {
     !matches!(ts.codec(), Codec::Dataset(None))
 }
 
-fn can_write_dataset<D, R, W>(ts: &dicom_encoding::TransferSyntax<D, R, W>) -> bool {
+fn can_write_dataset<D, R, W>(ts: &dcmnorm_encoding::TransferSyntax<D, R, W>) -> bool {
     !matches!(ts.codec(), Codec::Dataset(None))
 }
 
 fn can_decode_pixel_data<D, R, W>(
-    ts: &dicom_encoding::TransferSyntax<D, R, W>,
+    ts: &dcmnorm_encoding::TransferSyntax<D, R, W>,
     kakadu_enabled: bool,
     _ffmpeg_enabled: bool,
 ) -> bool {
@@ -928,7 +922,7 @@ fn can_decode_pixel_data<D, R, W>(
 }
 
 fn can_encode_pixel_data<D, R, W>(
-    ts: &dicom_encoding::TransferSyntax<D, R, W>,
+    ts: &dcmnorm_encoding::TransferSyntax<D, R, W>,
     _kakadu_enabled: bool,
     _ffmpeg_enabled: bool,
 ) -> bool {
@@ -1003,7 +997,7 @@ fn decode_jpeg2000_with_kakadu(object: &DefaultDicomObject) -> Result<Vec<u8>, S
     )
 }
 
-fn is_encapsulated_transfer_syntax<D, R, W>(ts: &dicom_encoding::TransferSyntax<D, R, W>) -> bool {
+fn is_encapsulated_transfer_syntax<D, R, W>(ts: &dcmnorm_encoding::TransferSyntax<D, R, W>) -> bool {
     matches!(ts.codec(), Codec::EncapsulatedPixelData(_, _))
 }
 
@@ -1020,15 +1014,15 @@ fn pixel_data_representation(object: &DefaultDicomObject) -> PixelDataRepresenta
     };
 
     match element.value() {
-        dicom_core::value::Value::Primitive(_) => PixelDataRepresentation::Native,
-        dicom_core::value::Value::PixelSequence(_) => PixelDataRepresentation::Encapsulated,
-        dicom_core::value::Value::Sequence(_) => PixelDataRepresentation::Absent,
+        dcmnorm_core::value::Value::Primitive(_) => PixelDataRepresentation::Native,
+        dcmnorm_core::value::Value::PixelSequence(_) => PixelDataRepresentation::Encapsulated,
+        dcmnorm_core::value::Value::Sequence(_) => PixelDataRepresentation::Absent,
     }
 }
 
 fn decode_pixel_data(
     object: &mut DefaultDicomObject,
-    source_ts: &dicom_encoding::TransferSyntax,
+    source_ts: &dcmnorm_encoding::TransferSyntax,
 ) -> Result<(), TranscodeError> {
     let _scope = perf::scope("transcode.decode_pixel_data");
     let codec_preference = jpeg2000_codec_preference();
@@ -1225,7 +1219,7 @@ fn decode_pixel_data(
 }
 
 fn decode_pixel_data_parallel_frames(
-    reader: &(dyn dicom_encoding::adapters::PixelDataReader + Send + Sync),
+    reader: &(dyn dcmnorm_encoding::adapters::PixelDataReader + Send + Sync),
     object: &DefaultDicomObject,
     number_of_frames: usize,
 ) -> Result<Vec<u8>, String> {
@@ -1297,7 +1291,7 @@ fn is_parallel_decode_transfer_syntax(uid: &str) -> bool {
 
 fn encode_pixel_data(
     object: &mut DefaultDicomObject,
-    target_ts: &dicom_encoding::TransferSyntax,
+    target_ts: &dcmnorm_encoding::TransferSyntax,
 ) -> Result<(), TranscodeError> {
     let _scope = perf::scope("transcode.encode_pixel_data");
     if is_jpeg2000_transfer_syntax(target_ts.uid()) {
@@ -1541,6 +1535,8 @@ mod tests {
     fn recognizes_high_throughput_jpeg2000_as_jpeg2000() {
         assert!(is_jpeg2000_transfer_syntax("1.2.840.10008.1.2.4.90"));
         assert!(is_jpeg2000_transfer_syntax("1.2.840.10008.1.2.4.91"));
+        assert!(is_jpeg2000_transfer_syntax("1.2.840.10008.1.2.4.92"));
+        assert!(is_jpeg2000_transfer_syntax("1.2.840.10008.1.2.4.93"));
         assert!(is_jpeg2000_transfer_syntax("1.2.840.10008.1.2.4.201"));
         assert!(is_jpeg2000_transfer_syntax("1.2.840.10008.1.2.4.202"));
         assert!(is_jpeg2000_transfer_syntax("1.2.840.10008.1.2.4.203"));

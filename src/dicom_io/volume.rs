@@ -12,9 +12,9 @@ use std::error::Error;
 use std::fmt;
 use std::path::Path;
 
-use dicom_core::Tag;
-use dicom_dictionary_std::tags;
-use dicom_object::DefaultDicomObject;
+use dcmnorm_core::Tag;
+use dcmnorm_dictionary::tags;
+use dcmnorm_object::DefaultDicomObject;
 use rayon::prelude::*;
 
 use super::io::read_dicom_file;

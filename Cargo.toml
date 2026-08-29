@@ -6,6 +6,14 @@ build = "build.rs"
 
 [workspace]
 members = [
+	"crates/dcmnorm-core",
+	"crates/dcmnorm-dictionary",
+	"crates/dcmnorm-encoding",
+	"crates/dcmnorm-transcode",
+	"crates/dcmnorm-parser",
+	"crates/dcmnorm-object",
+	"crates/dcmnorm-dimse",
+	"crates/dcmnorm-jpeg",
 	"exec/dcmnorm",
 	"exec/dcmtalk",
 	"bindings/node",
@@ -21,12 +29,12 @@ jpeg-ls-codec = ["dep:charls"]
 
 [dependencies]
 base64 = "0.22"
-dicom-core = "0.9.1"
-dicom-dictionary-std = "0.9.0"
-dicom-encoding = "0.9.1"
-dicom-object = "0.9.1"
-dicom-transfer-syntax-registry = { version = "0.9.1", default-features = false, features = ["native", "deflate", "openjpeg-sys"] }
-dicom-ul = "0.9.1"
+dcmnorm-core = { path = "crates/dcmnorm-core" }
+dcmnorm-dictionary = { path = "crates/dcmnorm-dictionary" }
+dcmnorm-encoding = { path = "crates/dcmnorm-encoding" }
+dcmnorm-object = { path = "crates/dcmnorm-object" }
+dcmnorm-transcode = { path = "crates/dcmnorm-transcode", default-features = false, features = ["native", "deflate", "openjpeg-sys"] }
+dcmnorm-dimse = { path = "crates/dcmnorm-dimse" }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 lcms2 = "6"
 serde_json = "1.0"
@@ -39,23 +47,16 @@ uuid = { version = "1", features = ["v4"] }
 [build-dependencies]
 cc = "1.2"
 
-# Patched copy of jpeg-decoder 0.3.2: the Predictor::Ra (JPEG Lossless SV1) fast path in
-# src/decoder/lossless.rs ignores restart-interval boundaries entirely, and the generic
-# predictor path checks a stale scalar instead of a per-pixel restart flag. Both produce
-# corrupted output (periodic banding) on any lossless JPEG that uses restart markers, which
-# is common in mammography (Hologic C-View/tomosynthesis) DICOM. See vendor/jpeg-decoder
-# for the fix; remove this patch once upstream (image-rs/jpeg-decoder) releases a fix.
+# All seven original dicom-rs dependencies (dicom-core, dicom-dictionary-std, dicom-encoding,
+# dicom-transfer-syntax-registry, dicom-parser, dicom-object, dicom-ul) have been fully
+# replaced by In-house crates under crates/ - see each crate's README for its
+# individual history (mechanical fork vs. from-scratch rewrite). All five forked crates were
+# renamed off their original dicom-rs package/lib names once nothing left in the dependency
+# graph needed the original names anymore (Phase 6 of the dicom-rs removal plan), so they're
+# now plain path dependencies above rather than crates.io substitutions - no [patch.crates-io]
+# entries needed for them.
 #
-# Patched copy of dicom-core 0.9.1: VR::from_binary only recognizes the 32 standard DICOM
-# VR codes, so an unrecognized 2-byte VR field falls back to VR::UN (long-form, 4-byte
-# length) in dicom-encoding's explicit VR decoders. Some vendor DICOM writers instead write
-# their own internal ambiguous-VR dictionary placeholder literally into the file - e.g.
-# "xs" meaning "US or SS" - which is short-form (2-byte length) like the VR it stands in
-# for, so the VR::UN fallback misreads the length field and desyncs the rest of the
-# dataset ("Could not read data set token" from dicom-object). Also resolves "ox" ("OB or
-# OW") for VR-reporting consistency, per dcmjs's dictionary, though that one was never
-# parse-breaking. See vendor/dicom-core for the fix; remove this patch once upstream
-# (dicom-rs) tolerates non-standard VR bytes without erroring.
-[patch.crates-io]
-jpeg-decoder = { path = "vendor/jpeg-decoder" }
-dicom-core = { path = "vendor/dicom-core" }
+# jpeg-decoder 0.3.2 was also vendored (fixing a Predictor::Ra / JPEG Lossless SV1 restart-
+# interval bug that caused periodic banding on mammography lossless JPEG - common in Hologic
+# C-View/tomosynthesis DICOM) and has since been fully absorbed as crates/dcmnorm-jpeg - see
+# that crate's README. No crates.io jpeg-decoder dependency or patch remains.

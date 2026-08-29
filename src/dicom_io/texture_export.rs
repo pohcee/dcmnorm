@@ -517,7 +517,7 @@ pub fn pack_frame_texture(
 /// window/level would silently disagree with the classic JPEG/PNG pipeline's `resolve_window` for
 /// any file whose caller (e.g. render-server) didn't already resolve and pass one itself.
 pub fn pack_dicom_frame_texture(
-    object: &dicom_object::DefaultDicomObject,
+    object: &dcmnorm_object::DefaultDicomObject,
     frame_index: usize,
     target_max_dim: Option<u32>,
     default_window: Option<(f64, f64)>,
@@ -640,7 +640,7 @@ pub fn pack_frame_stack_texture(
 /// own volume/stack export handlers already use) via `render::resolve_default_window` - see
 /// `pack_dicom_frame_texture`'s own doc for why this matters for Enhanced Multi-frame objects.
 pub fn pack_dicom_frame_stack_texture(
-    sources: &[(&dicom_object::DefaultDicomObject, usize)],
+    sources: &[(&dcmnorm_object::DefaultDicomObject, usize)],
     default_window: Option<(f64, f64)>,
     compression: TextureCompression,
 ) -> Result<PackedTexture, TextureExportError> {

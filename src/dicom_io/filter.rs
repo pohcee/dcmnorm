@@ -2,11 +2,11 @@ use std::fs;
 use std::io::{self, ErrorKind};
 use std::path::Path;
 
-use dicom_core::dictionary::DataDictionary;
-use dicom_core::Tag;
-use dicom_dictionary_std::StandardDataDictionary;
-use dicom_object::file::ReadPreamble;
-use dicom_object::{DefaultDicomObject, OpenFileOptions};
+use dcmnorm_core::dictionary::DataDictionary;
+use dcmnorm_core::Tag;
+use dcmnorm_dictionary::StandardDataDictionary;
+use dcmnorm_object::ReadPreamble;
+use dcmnorm_object::{DefaultDicomObject, OpenFileOptions};
 
 use super::io::{read_dicom_bytes, read_dicom_file};
 use super::types::ReadError;
@@ -63,7 +63,7 @@ pub fn next_tag(tag: Tag) -> Option<Tag> {
 /// Reads only as much of the file as is needed to cover every requested tag,
 /// stopping right after the highest one. Falls back to a full read if the
 /// fast path fails (e.g. a preambleless/raw dataset).
-pub fn read_dicom_object_for_filter(
+pub fn read_dcmnorm_object_for_filter(
     input_path: &Path,
     requests: &[FilterRequest],
 ) -> Result<DefaultDicomObject, ReadError> {

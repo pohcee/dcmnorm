@@ -1,8 +1,8 @@
-use dicom_core::header::EmptyObject;
-use dicom_core::value::Value as DicomValue;
-use dicom_core::{Length, PrimitiveValue, Tag, VR};
-use dicom_dictionary_std::tags;
-use dicom_object::{DefaultDicomObject, InMemDicomObject};
+use dcmnorm_core::header::EmptyObject;
+use dcmnorm_core::value::Value as DicomValue;
+use dcmnorm_core::{Length, PrimitiveValue, Tag, VR};
+use dcmnorm_dictionary::tags;
+use dcmnorm_object::{DefaultDicomObject, InMemDicomObject};
 use serde_json::{Map as JsonMap, Number as JsonNumber, Value as JsonValue};
 
 use super::bulk_data::{
@@ -75,10 +75,10 @@ pub(super) fn read_standard_json_value(
     };
 
     let transfer_syntax_uid = extract_transfer_syntax_from_standard(entries)
-        .unwrap_or_else(|| dicom_dictionary_std::uids::EXPLICIT_VR_LITTLE_ENDIAN.to_owned());
+        .unwrap_or_else(|| dcmnorm_dictionary::uids::EXPLICIT_VR_LITTLE_ENDIAN.to_owned());
 
     let mut dataset_elements = Vec::new();
-    let mut meta_builder = dicom_object::FileMetaTableBuilder::new();
+    let mut meta_builder = dcmnorm_object::FileMetaTableBuilder::new();
 
     for (tag_text, element_json) in entries {
         let tag = tag_text
@@ -99,7 +99,7 @@ pub(super) fn read_standard_json_value(
             bulk_data_source,
             transfer_syntax_uid.as_str(),
         )?;
-        let element = dicom_core::DataElement::new(tag, vr, value);
+        let element = dcmnorm_core::DataElement::new(tag, vr, value);
 
         if tag.group() == 0x0002 {
             apply_meta_element(&mut meta_builder, &element)?;
@@ -438,7 +438,7 @@ fn read_standard_dataset_object(
             bulk_data_source,
             transfer_syntax_uid,
         )?;
-        elements.push(dicom_core::DataElement::new(tag, vr, value));
+        elements.push(dcmnorm_core::DataElement::new(tag, vr, value));
     }
 
     Ok(InMemDicomObject::from_element_iter(elements))

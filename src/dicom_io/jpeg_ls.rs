@@ -1,7 +1,7 @@
 #[cfg(feature = "jpeg-ls-codec")]
 pub mod jpeg_ls_impl {
-    use dicom_dictionary_std::tags;
-    use dicom_object::DefaultDicomObject;
+    use dcmnorm_dictionary::tags;
+    use dcmnorm_object::DefaultDicomObject;
 
     /// Decode JPEG-LS encoded pixel data
     pub fn decode_jpeg_ls_pixel_data(object: &DefaultDicomObject) -> Result<Vec<u8>, String> {
@@ -74,7 +74,7 @@ pub mod jpeg_ls_impl {
 
 #[cfg(not(feature = "jpeg-ls-codec"))]
 pub mod jpeg_ls_impl {
-    use dicom_object::DefaultDicomObject;
+    use dcmnorm_object::DefaultDicomObject;
 
     pub fn decode_jpeg_ls_pixel_data(_object: &DefaultDicomObject) -> Result<Vec<u8>, String> {
         Err("JPEG-LS codec support requires 'jpeg-ls-codec' feature to be enabled".to_owned())

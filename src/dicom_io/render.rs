@@ -2,12 +2,12 @@ use std::borrow::Cow;
 use std::sync::OnceLock;
 
 use crate::perf;
-use dicom_core::value::Value;
-use dicom_core::{DataElement, PrimitiveValue, Tag, VR};
-use dicom_dictionary_std::{tags, uids};
-use dicom_encoding::transfer_syntax::{Codec, TransferSyntaxIndex};
-use dicom_object::DefaultDicomObject;
-use dicom_transfer_syntax_registry::TransferSyntaxRegistry;
+use dcmnorm_core::value::Value;
+use dcmnorm_core::{DataElement, PrimitiveValue, Tag, VR};
+use dcmnorm_dictionary::{tags, uids};
+use dcmnorm_encoding::transfer_syntax::{Codec, TransferSyntaxIndex};
+use dcmnorm_object::DefaultDicomObject;
+use dcmnorm_transcode::TransferSyntaxRegistry;
 use image::codecs::jpeg::JpegEncoder;
 use image::codecs::png::PngEncoder;
 use image::{ColorType, GrayImage, ImageEncoder, RgbImage};
@@ -15,8 +15,9 @@ use lcms2::{Intent, PixelFormat, Profile, Transform};
 use rayon::prelude::*;
 
 use super::io::{
-    apply_jpeg2000_component_correction, jpeg2000_component_mismatch, jpeg2000_frame_uses_mct,
-    kakadu_ffi_enabled, transcode_dicom_object, JPEG2000_DEBUG_ENV_FLAG,
+    apply_jpeg2000_component_correction, is_jpeg2000_transfer_syntax, jpeg2000_component_mismatch,
+    jpeg2000_frame_uses_mct, kakadu_ffi_enabled, normalize_transfer_syntax_uid,
+    transcode_dcmnorm_object, JPEG2000_DEBUG_ENV_FLAG,
 };
 use super::types::RenderError;
 
@@ -519,7 +520,7 @@ pub fn render_dicom_to_recompressed_object(
     target_transfer_syntax_uid: &str,
     options: &RenderPipelineOptions,
 ) -> Result<DefaultDicomObject, RenderError> {
-    let mut working = transcode_dicom_object(object, uids::EXPLICIT_VR_LITTLE_ENDIAN)?;
+    let mut working = transcode_dcmnorm_object(object, uids::EXPLICIT_VR_LITTLE_ENDIAN)?;
     let metadata = read_render_metadata(&working)?;
     let rendered_frames = render_all_frames(&working, &metadata, options)?;
 
@@ -585,7 +586,7 @@ pub fn render_dicom_to_recompressed_object(
         working.remove_element(tags::PLANAR_CONFIGURATION);
     }
 
-    let recompressed = transcode_dicom_object(&working, target_transfer_syntax_uid)?;
+    let recompressed = transcode_dcmnorm_object(&working, target_transfer_syntax_uid)?;
     Ok(recompressed)
 }
 
@@ -595,7 +596,7 @@ pub fn redact_dicom_pixels_to_transfer_syntax(
     boxes: &[BoundingBox],
     color: [u8; 3],
 ) -> Result<DefaultDicomObject, RenderError> {
-    let mut working = transcode_dicom_object(object, uids::EXPLICIT_VR_LITTLE_ENDIAN)?;
+    let mut working = transcode_dcmnorm_object(object, uids::EXPLICIT_VR_LITTLE_ENDIAN)?;
     let metadata = read_render_metadata(&working)?;
 
     if metadata.bits_allocated != 1 && metadata.bits_allocated != 8 && metadata.bits_allocated != 16
@@ -636,7 +637,7 @@ pub fn redact_dicom_pixels_to_transfer_syntax(
         PrimitiveValue::from(redacted_pixel_data),
     ));
 
-    let recompressed = transcode_dicom_object(&working, target_transfer_syntax_uid)?;
+    let recompressed = transcode_dcmnorm_object(&working, target_transfer_syntax_uid)?;
     Ok(recompressed)
 }
 
@@ -1426,7 +1427,7 @@ pub(crate) fn resolve_grayscale_invert(object: &DefaultDicomObject, photometric_
 
 fn required_u16(
     object: &DefaultDicomObject,
-    tag: dicom_core::Tag,
+    tag: dcmnorm_core::Tag,
     name: &'static str,
 ) -> Result<u16, RenderError> {
     object
@@ -2248,29 +2249,13 @@ fn decode_overlay_data_bits(
 #[cfg(test)]
 mod tests {
     use super::{
-        clamped_box, is_jpeg2000_transfer_syntax, mpeg4_input_pixel_format, mpeg4_muxer_name,
-        mpeg4_video_filter, normalize_decoded_render_attributes, ybr_rct_to_rgb, ybr_to_rgb,
-        BoundingBox, BoxLength,
+        clamped_box, mpeg4_input_pixel_format, mpeg4_muxer_name, mpeg4_video_filter,
+        normalize_decoded_render_attributes, ybr_rct_to_rgb, ybr_to_rgb, BoundingBox, BoxLength,
     };
     use crate::dicom_io::read_dicom_file;
-    use dicom_core::{DataElement, PrimitiveValue, VR};
-    use dicom_dictionary_std::tags;
+    use dcmnorm_core::{DataElement, PrimitiveValue, VR};
+    use dcmnorm_dictionary::tags;
     use std::path::PathBuf;
-
-    #[test]
-    fn recognizes_high_throughput_jpeg2000_as_jpeg2000() {
-        assert!(is_jpeg2000_transfer_syntax("1.2.840.10008.1.2.4.90"));
-        assert!(is_jpeg2000_transfer_syntax("1.2.840.10008.1.2.4.91"));
-        assert!(is_jpeg2000_transfer_syntax("1.2.840.10008.1.2.4.92"));
-        assert!(is_jpeg2000_transfer_syntax("1.2.840.10008.1.2.4.93"));
-        assert!(is_jpeg2000_transfer_syntax("1.2.840.10008.1.2.4.201"));
-        assert!(is_jpeg2000_transfer_syntax("1.2.840.10008.1.2.4.202"));
-        assert!(is_jpeg2000_transfer_syntax("1.2.840.10008.1.2.4.203"));
-        // JPIP HTJ2K Referenced (Deflate) - no embedded codestream, not a
-        // JPEG2000 decode-path case.
-        assert!(!is_jpeg2000_transfer_syntax("1.2.840.10008.1.2.4.204"));
-        assert!(!is_jpeg2000_transfer_syntax("1.2.840.10008.1.2.4.205"));
-    }
 
     #[test]
     fn resolves_negative_offsets_from_right_and_bottom() {
@@ -2659,8 +2644,8 @@ struct PaletteChannel {
 
 fn read_palette_channel(
     object: &DefaultDicomObject,
-    descriptor_tag: dicom_core::Tag,
-    data_tag: dicom_core::Tag,
+    descriptor_tag: dcmnorm_core::Tag,
+    data_tag: dcmnorm_core::Tag,
 ) -> Result<PaletteChannel, RenderError> {
     let descriptor_element = object
         .element(descriptor_tag)
@@ -2752,7 +2737,7 @@ fn ensure_native_render_object<'a>(
     }
 
     let _scope = perf::scope("render.transcode_to_explicit_vr_le");
-    let transcoded = transcode_dicom_object(object, uids::EXPLICIT_VR_LITTLE_ENDIAN)?;
+    let transcoded = transcode_dcmnorm_object(object, uids::EXPLICIT_VR_LITTLE_ENDIAN)?;
     Ok(Cow::Owned(transcoded))
 }
 
@@ -2931,26 +2916,6 @@ fn normalize_decoded_render_attributes(
             PrimitiveValue::from(0u16),
         ));
     }
-}
-
-fn normalize_transfer_syntax_uid(uid: &str) -> &str {
-    uid.trim_end_matches(|character: char| character.is_whitespace() || character == '\0')
-}
-
-fn is_jpeg2000_transfer_syntax(uid: &str) -> bool {
-    matches!(
-        normalize_transfer_syntax_uid(uid),
-        "1.2.840.10008.1.2.4.90"
-            | "1.2.840.10008.1.2.4.91"
-            | "1.2.840.10008.1.2.4.92"
-            | "1.2.840.10008.1.2.4.93"
-            // High-Throughput JPEG 2000 (Lossless Only / RPCL / lossy) - same
-            // codestream format as classic JPEG 2000, so YBR/MCT handling on
-            // decode needs the same treatment.
-            | "1.2.840.10008.1.2.4.201"
-            | "1.2.840.10008.1.2.4.202"
-            | "1.2.840.10008.1.2.4.203"
-    )
 }
 
 fn jpeg2000_debug_enabled() -> bool {

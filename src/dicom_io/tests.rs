@@ -24,14 +24,14 @@ fn writes_flat_json_with_source_uri_mode_for_large_meta_without_part10_header() 
     let object = read_dicom_bytes(&source).unwrap();
 
     // Synthesize a large meta field (simulate >32B value)
-    use dicom_core::value::PrimitiveValue;
-    use dicom_core::DataElement;
-    use dicom_dictionary_std::tags;
+    use dcmnorm_core::value::PrimitiveValue;
+    use dcmnorm_core::DataElement;
+    use dcmnorm_dictionary::tags;
     let big_bytes = vec![0xAB; 64];
     let mut object = object;
     object.put(DataElement::new(
         tags::IMPLEMENTATION_VERSION_NAME,
-        dicom_core::VR::SH,
+        dcmnorm_core::VR::SH,
         PrimitiveValue::from(big_bytes.clone()),
     ));
 
@@ -169,10 +169,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use dicom_core::{dicom_value, DataElement, PrimitiveValue, Tag, VR};
-use dicom_dictionary_std::tags;
-use dicom_dictionary_std::uids;
-use dicom_object::mem::InMemDicomObject;
+use dcmnorm_core::{dicom_value, DataElement, PrimitiveValue, Tag, VR};
+use dcmnorm_dictionary::tags;
+use dcmnorm_dictionary::uids;
+use dcmnorm_object::InMemDicomObject;
 use serde_json::Value as JsonValue;
 
 use super::{
@@ -182,7 +182,7 @@ use super::{
     read_dicom_file, read_dicom_json, read_dicom_json_full, read_dicom_json_full_with_source,
     read_dicom_json_with_options, read_dicom_json_with_source,
     redact_dicom_pixels_to_transfer_syntax, remove_attribute, render_all_dicom_video_frames, render_dicom_frame,
-    set_attribute, start_scp, store_scu, transcode_dicom_object, write_dicom_bytes, write_dicom_file,
+    set_attribute, start_scp, store_scu, transcode_dcmnorm_object, write_dicom_bytes, write_dicom_file,
     write_dicom_json, write_dicom_json_full, write_dicom_json_full_with_source,
     write_dicom_json_with_options, write_dicom_json_with_source, BoundingBox, BoxLength,
     DicomJsonBulkDataMode, DicomJsonFormat, DicomJsonKeyStyle, DicomJsonReadOptions,
@@ -310,7 +310,7 @@ fn transcodes_rle_ybr_full_preserving_photometric_interpretation() {
         return;
     };
     let source = read_dicom_file(path).unwrap();
-    let transcoded = transcode_dicom_object(&source, uids::EXPLICIT_VR_LITTLE_ENDIAN).unwrap();
+    let transcoded = transcode_dcmnorm_object(&source, uids::EXPLICIT_VR_LITTLE_ENDIAN).unwrap();
 
     let photometric = transcoded
         .element(tags::PHOTOMETRIC_INTERPRETATION)
@@ -475,7 +475,7 @@ fn writes_dicom_file_with_explicit_length_nested_sequences_stays_readable() {
     // parseable data set, not just one that passes a shallow SOP Class UID
     // probe.
     let mut object = read_dicom_file(fixture_path("sr.dcm")).unwrap();
-    object.put_str(tags::PATIENT_NAME, dicom_core::VR::PN, "TEST");
+    object.put_str(tags::PATIENT_NAME, dcmnorm_core::VR::PN, "TEST");
 
     let bytes = write_dicom_bytes(&mut object).unwrap();
     let roundtrip = read_dicom_bytes(&bytes).unwrap();
@@ -618,11 +618,11 @@ fn reads_flat_json_with_file_bulk_data_uri_without_source() {
     );
 }
 
-fn icc_bytes(object: &dicom_object::DefaultDicomObject) -> Vec<u8> {
+fn icc_bytes(object: &dcmnorm_object::DefaultDicomObject) -> Vec<u8> {
     let sequence_tag = Tag(0x0048, 0x0105); // OpticalPathSequence
     let icc_profile_tag = Tag(0x0028, 0x2000); // ICCProfile
 
-    let dicom_core::value::Value::Sequence(sequence) =
+    let dcmnorm_core::value::Value::Sequence(sequence) =
         object.element(sequence_tag).unwrap().value()
     else {
         panic!("OpticalPathSequence did not decode as a sequence");
@@ -1027,7 +1027,7 @@ fn writes_and_reads_full_json_large_integer_falls_back_to_string() {
 #[test]
 fn transcodes_native_dataset_to_big_endian() {
     let original = read_dicom_file(fixture_path("dx.dcm")).unwrap();
-    let mut transcoded = transcode_dicom_object(&original, EXPLICIT_VR_BIG_ENDIAN_UID).unwrap();
+    let mut transcoded = transcode_dcmnorm_object(&original, EXPLICIT_VR_BIG_ENDIAN_UID).unwrap();
     let bytes = write_dicom_bytes(&mut transcoded).unwrap();
     let roundtrip = read_dicom_bytes(&bytes).unwrap();
 
@@ -1055,13 +1055,13 @@ fn transcodes_native_dataset_to_big_endian() {
 #[test]
 fn transcodes_native_dataset_to_encapsulated_uncompressed_and_back() {
     let original = read_dicom_file(fixture_path("dx.dcm")).unwrap();
-    let encapsulated = transcode_dicom_object(
+    let encapsulated = transcode_dcmnorm_object(
         &original,
         uids::ENCAPSULATED_UNCOMPRESSED_EXPLICIT_VR_LITTLE_ENDIAN,
     )
     .unwrap();
     let rehydrated =
-        transcode_dicom_object(&encapsulated, uids::EXPLICIT_VR_LITTLE_ENDIAN).unwrap();
+        transcode_dcmnorm_object(&encapsulated, uids::EXPLICIT_VR_LITTLE_ENDIAN).unwrap();
 
     assert_eq!(
         encapsulated.meta().transfer_syntax(),
@@ -1100,7 +1100,7 @@ fn reports_jpeg_2000_transfer_syntax_capabilities() {
     assert!(!jpeg_2000.can_transcode_to());
 
     let original = read_dicom_file(fixture_path("dx.dcm")).unwrap();
-    let error = transcode_dicom_object(&original, JPEG_2000_IMAGE_COMPRESSION_UID)
+    let error = transcode_dcmnorm_object(&original, JPEG_2000_IMAGE_COMPRESSION_UID)
         .unwrap_err()
         .to_string();
     assert!(error.contains(JPEG_2000_IMAGE_COMPRESSION_UID));
@@ -1111,7 +1111,7 @@ fn reports_jpeg_2000_transfer_syntax_capabilities() {
 fn redacts_monochrome_pixels_in_dicom_to_dicom_path() {
     let original = read_dicom_file(fixture_path("dx.dcm")).unwrap();
     let original_native =
-        transcode_dicom_object(&original, uids::EXPLICIT_VR_LITTLE_ENDIAN).unwrap();
+        transcode_dcmnorm_object(&original, uids::EXPLICIT_VR_LITTLE_ENDIAN).unwrap();
     let redacted = redact_dicom_pixels_to_transfer_syntax(
         &original,
         uids::EXPLICIT_VR_LITTLE_ENDIAN,
@@ -1148,7 +1148,7 @@ fn redacts_monochrome_pixels_in_dicom_to_dicom_path() {
 #[test]
 fn redacts_rgb_pixels_when_planar_configuration_is_one() {
     let source = read_dicom_file(fixture_path("sc.dcm")).unwrap();
-    let mut object = transcode_dicom_object(&source, uids::EXPLICIT_VR_LITTLE_ENDIAN).unwrap();
+    let mut object = transcode_dcmnorm_object(&source, uids::EXPLICIT_VR_LITTLE_ENDIAN).unwrap();
 
     let samples = object
         .get(tags::SAMPLES_PER_PIXEL)
@@ -1571,8 +1571,8 @@ fn shared_functional_groups_sequence_with_rescale_and_window(
     window_center: &str,
     window_width: &str,
 ) -> DataElement<InMemDicomObject> {
-    use dicom_core::value::Value as DicomValue;
-    use dicom_core::Length;
+    use dcmnorm_core::value::Value as DicomValue;
+    use dcmnorm_core::Length;
 
     let pixel_value_transformation = InMemDicomObject::from_element_iter([
         DataElement::new(tags::RESCALE_SLOPE, VR::DS, PrimitiveValue::from(rescale_slope)),
@@ -1597,7 +1597,7 @@ fn shared_functional_groups_sequence_with_rescale_and_window(
     DataElement::new(
         tags::SHARED_FUNCTIONAL_GROUPS_SEQUENCE,
         VR::SQ,
-        dicom_core::value::Value::new_sequence(vec![shared_group], Length::UNDEFINED),
+        dcmnorm_core::value::Value::new_sequence(vec![shared_group], Length::UNDEFINED),
     )
 }
 
@@ -1825,7 +1825,7 @@ fn renders_rgb_fixture_when_present() {
 #[test]
 fn renders_single_frame_with_stale_ybr_rct_after_decode() {
     let source = read_dicom_file(fixture_path("sc.dcm")).unwrap();
-    let mut object = transcode_dicom_object(
+    let mut object = transcode_dcmnorm_object(
         &source,
         uids::ENCAPSULATED_UNCOMPRESSED_EXPLICIT_VR_LITTLE_ENDIAN,
     )
@@ -2022,8 +2022,8 @@ fn repo_root_path(name: &str) -> PathBuf {
 }
 
 fn assert_core_fields_match(
-    expected: &dicom_object::DefaultDicomObject,
-    actual: &dicom_object::DefaultDicomObject,
+    expected: &dcmnorm_object::DefaultDicomObject,
+    actual: &dcmnorm_object::DefaultDicomObject,
 ) {
     assert_eq!(
         expected.meta().transfer_syntax(),
@@ -2033,8 +2033,8 @@ fn assert_core_fields_match(
 }
 
 fn assert_dataset_fields_match(
-    expected: &dicom_object::DefaultDicomObject,
-    actual: &dicom_object::DefaultDicomObject,
+    expected: &dcmnorm_object::DefaultDicomObject,
+    actual: &dcmnorm_object::DefaultDicomObject,
 ) {
     assert_eq!(
         expected
@@ -2083,7 +2083,7 @@ fn temp_file_path(prefix: &str) -> PathBuf {
     std::env::temp_dir().join(format!("{prefix}-{nanos}.dcm"))
 }
 
-fn mono_sample_value(object: &dicom_object::DefaultDicomObject, x: usize, y: usize) -> Option<u16> {
+fn mono_sample_value(object: &dcmnorm_object::DefaultDicomObject, x: usize, y: usize) -> Option<u16> {
     let cols = object.element(tags::COLUMNS).ok()?.uint16().ok()? as usize;
     let rows = object.element(tags::ROWS).ok()?.uint16().ok()? as usize;
     if x >= cols || y >= rows {
@@ -2141,9 +2141,9 @@ fn scaled_u8_to_bits_stored(value: u8, bits_stored: u16) -> u16 {
 // DIMSE (echo/store/find/move SCU) - in-process mock SCP round trips
 // ---------------------------------------------------------------------------------------------
 
-fn dimse_implicit_vr_le() -> &'static dicom_encoding::TransferSyntax {
-    use dicom_encoding::TransferSyntaxIndex;
-    dicom_transfer_syntax_registry::TransferSyntaxRegistry
+fn dimse_implicit_vr_le() -> &'static dcmnorm_encoding::TransferSyntax {
+    use dcmnorm_encoding::TransferSyntaxIndex;
+    dcmnorm_transcode::TransferSyntaxRegistry
         .get(uids::IMPLICIT_VR_LITTLE_ENDIAN)
         .unwrap()
 }
@@ -2155,12 +2155,12 @@ fn dimse_implicit_vr_le() -> &'static dicom_encoding::TransferSyntax {
 /// connect to.
 fn spawn_mock_scp(
     abstract_syntax: impl Into<String>,
-    handler: impl FnOnce(&mut dicom_ul::ServerAssociation<std::net::TcpStream>) + Send + 'static,
+    handler: impl FnOnce(&mut dcmnorm_dimse::ServerAssociation<std::net::TcpStream>) + Send + 'static,
 ) -> (std::thread::JoinHandle<()>, std::net::SocketAddr) {
     let abstract_syntax = abstract_syntax.into();
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
-    let scp = dicom_ul::association::server::ServerAssociationOptions::new()
+    let scp = dcmnorm_dimse::association::server::ServerAssociationOptions::new()
         .ae_title("MOCK-SCP")
         .with_abstract_syntax(abstract_syntax);
 
@@ -2169,8 +2169,8 @@ fn spawn_mock_scp(
         let mut association = scp.establish(stream).unwrap();
         handler(&mut association);
         let pdu = association.receive().unwrap();
-        assert_eq!(pdu, dicom_ul::pdu::Pdu::ReleaseRQ);
-        association.send(&dicom_ul::pdu::Pdu::ReleaseRP).unwrap();
+        assert_eq!(pdu, dcmnorm_dimse::pdu::Pdu::ReleaseRQ);
+        association.send(&dcmnorm_dimse::pdu::Pdu::ReleaseRP).unwrap();
     });
     (handle, addr)
 }
@@ -2178,10 +2178,10 @@ fn spawn_mock_scp(
 /// Reads one Command PDV off the wire (assumes it's alone in its PDU - true for every request
 /// this replaces except `store_scu`'s combined command+data PDU, handled separately below).
 fn dimse_recv_command(
-    association: &mut dicom_ul::ServerAssociation<std::net::TcpStream>,
+    association: &mut dcmnorm_dimse::ServerAssociation<std::net::TcpStream>,
 ) -> InMemDicomObject {
     match association.receive().unwrap() {
-        dicom_ul::pdu::Pdu::PData { data } => {
+        dcmnorm_dimse::pdu::Pdu::PData { data } => {
             InMemDicomObject::read_dataset_with_ts(data[0].data.as_slice(), dimse_implicit_vr_le()).unwrap()
         }
         other => panic!("expected a Command P-Data PDU, got {other:?}"),
@@ -2189,17 +2189,17 @@ fn dimse_recv_command(
 }
 
 fn dimse_send_command(
-    association: &mut dicom_ul::ServerAssociation<std::net::TcpStream>,
+    association: &mut dcmnorm_dimse::ServerAssociation<std::net::TcpStream>,
     pc_id: u8,
     command: &InMemDicomObject,
 ) {
     let mut data = Vec::new();
     command.write_dataset_with_ts(&mut data, dimse_implicit_vr_le()).unwrap();
     association
-        .send(&dicom_ul::pdu::Pdu::PData {
-            data: vec![dicom_ul::pdu::PDataValue {
+        .send(&dcmnorm_dimse::pdu::Pdu::PData {
+            data: vec![dcmnorm_dimse::pdu::PDataValue {
                 presentation_context_id: pc_id,
-                value_type: dicom_ul::pdu::PDataValueType::Command,
+                value_type: dcmnorm_dimse::pdu::PDataValueType::Command,
                 is_last: true,
                 data,
             }],
@@ -2252,7 +2252,7 @@ fn echo_scu_round_trips_success_status() {
 fn echo_scu_returns_cancelled_error_when_signalled_mid_wait() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
-    let scp = dicom_ul::association::server::ServerAssociationOptions::new()
+    let scp = dcmnorm_dimse::association::server::ServerAssociationOptions::new()
         .ae_title("MOCK-SCP")
         .with_abstract_syntax(uids::VERIFICATION);
 
@@ -2301,15 +2301,15 @@ fn echo_scu_returns_cancelled_error_when_signalled_mid_wait() {
 /// alone, then streams the Data separately via `send_pdata` (arriving as its own PData PDU(s),
 /// read here with `receive_pdata()`).
 fn dimse_recv_command_with_data(
-    association: &mut dicom_ul::ServerAssociation<std::net::TcpStream>,
+    association: &mut dcmnorm_dimse::ServerAssociation<std::net::TcpStream>,
 ) -> (u8, InMemDicomObject, Vec<u8>) {
     match association.receive().unwrap() {
-        dicom_ul::pdu::Pdu::PData { data } if data.len() == 2 => {
+        dcmnorm_dimse::pdu::Pdu::PData { data } if data.len() == 2 => {
             let command =
                 InMemDicomObject::read_dataset_with_ts(data[0].data.as_slice(), dimse_implicit_vr_le()).unwrap();
             (data[0].presentation_context_id, command, data[1].data.clone())
         }
-        dicom_ul::pdu::Pdu::PData { data } if data.len() == 1 => {
+        dcmnorm_dimse::pdu::Pdu::PData { data } if data.len() == 1 => {
             let pc_id = data[0].presentation_context_id;
             let command =
                 InMemDicomObject::read_dataset_with_ts(data[0].data.as_slice(), dimse_implicit_vr_le()).unwrap();
@@ -2435,7 +2435,7 @@ fn store_scu_streams_data_for_large_files() {
 ///
 /// Uses two real fixtures rather than a hand-built second object: an earlier version of this
 /// test stripped `PixelData` from a cloned/retagged object to sidestep encapsulation mismatches,
-/// but that made `transcode_dicom_object` a no-op (nothing to encode) and the test passed even
+/// but that made `transcode_dcmnorm_object` a no-op (nothing to encode) and the test passed even
 /// against the pre-fix code. `dx.dcm`'s native pixel data has to actually survive an attempted
 /// transcode for the failure this guards against to be reachable at all.
 #[test]
@@ -2524,7 +2524,7 @@ fn store_scu_transcodes_into_fallback_context_when_peer_rejects_native_transfer_
     let scp_handle = std::thread::spawn(move || {
         // Only the two fallback transfer syntaxes store_scu can always write - never the file's
         // own native (compressed) one - simulating a peer that can't handle JPEG 2000.
-        let scp = dicom_ul::association::server::ServerAssociationOptions::new()
+        let scp = dcmnorm_dimse::association::server::ServerAssociationOptions::new()
             .ae_title("MOCK-SCP")
             .with_abstract_syntax(expected_sop_class_uid.clone())
             .with_transfer_syntax(uids::EXPLICIT_VR_LITTLE_ENDIAN)
@@ -2550,8 +2550,8 @@ fn store_scu_transcodes_into_fallback_context_when_peer_rejects_native_transfer_
         dimse_send_command(&mut association, pc_id, &response);
 
         let pdu = association.receive().unwrap();
-        assert_eq!(pdu, dicom_ul::pdu::Pdu::ReleaseRQ);
-        association.send(&dicom_ul::pdu::Pdu::ReleaseRP).unwrap();
+        assert_eq!(pdu, dcmnorm_dimse::pdu::Pdu::ReleaseRQ);
+        association.send(&dcmnorm_dimse::pdu::Pdu::ReleaseRP).unwrap();
     });
 
     let results = store_scu(
@@ -2581,8 +2581,8 @@ fn find_scu_collects_pending_matches_until_success_status() {
     let (scp_handle, addr) = spawn_mock_scp(abstract_syntax, move |association| {
         let pc = association.presentation_contexts()[0].clone();
         let ts = {
-            use dicom_encoding::TransferSyntaxIndex;
-            dicom_transfer_syntax_registry::TransferSyntaxRegistry.get(&pc.transfer_syntax).unwrap()
+            use dcmnorm_encoding::TransferSyntaxIndex;
+            dcmnorm_transcode::TransferSyntaxRegistry.get(&pc.transfer_syntax).unwrap()
         };
 
         let (_pc_id, request, identifier_bytes) = dimse_recv_command_with_data(association);
@@ -2608,10 +2608,10 @@ fn find_scu_collects_pending_matches_until_success_status() {
         let mut matched_bytes = Vec::new();
         matched.write_dataset_with_ts(&mut matched_bytes, ts).unwrap();
         association
-            .send(&dicom_ul::pdu::Pdu::PData {
-                data: vec![dicom_ul::pdu::PDataValue {
+            .send(&dcmnorm_dimse::pdu::Pdu::PData {
+                data: vec![dcmnorm_dimse::pdu::PDataValue {
                     presentation_context_id: pc.id,
-                    value_type: dicom_ul::pdu::PDataValueType::Data,
+                    value_type: dcmnorm_dimse::pdu::PDataValueType::Data,
                     is_last: true,
                     data: matched_bytes,
                 }],
@@ -2720,7 +2720,8 @@ fn move_scu_collects_suboperation_progress_until_terminal_status() {
 /// from the command PDU - unlike `find_scu`'s per-match Identifier, which `dimse_send_command`'s
 /// callers combine into a single `Pdu::PData`. Before the `command_has_dataset` drain in
 /// `move_scu`, that stray PDU was still on the wire when `release()` next called `receive()`
-/// expecting `Pdu::ReleaseRP`, and dicom-ul rejected it as "unexpected response from peer".
+/// expecting `Pdu::ReleaseRP`, and the old dicom-ul dependency (since replaced by
+/// `crates/dcmnorm-dimse`) rejected it as "unexpected response from peer".
 #[test]
 fn move_scu_drains_failed_sop_instance_uid_list_sent_as_separate_pdu() {
     let abstract_syntax = uids::STUDY_ROOT_QUERY_RETRIEVE_INFORMATION_MODEL_MOVE;
@@ -2753,10 +2754,10 @@ fn move_scu_drains_failed_sop_instance_uid_list_sent_as_separate_pdu() {
         let mut identifier_bytes = Vec::new();
         identifier.write_dataset_with_ts(&mut identifier_bytes, dimse_implicit_vr_le()).unwrap();
         association
-            .send(&dicom_ul::pdu::Pdu::PData {
-                data: vec![dicom_ul::pdu::PDataValue {
+            .send(&dcmnorm_dimse::pdu::Pdu::PData {
+                data: vec![dcmnorm_dimse::pdu::PDataValue {
                     presentation_context_id: pc_id,
-                    value_type: dicom_ul::pdu::PDataValueType::Data,
+                    value_type: dcmnorm_dimse::pdu::PDataValueType::Data,
                     is_last: true,
                     data: identifier_bytes,
                 }],
@@ -2805,7 +2806,7 @@ fn move_scu_still_returns_the_terminal_result_when_the_peer_does_not_send_releas
     let abstract_syntax = uids::STUDY_ROOT_QUERY_RETRIEVE_INFORMATION_MODEL_MOVE;
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
-    let scp = dicom_ul::association::server::ServerAssociationOptions::new()
+    let scp = dcmnorm_dimse::association::server::ServerAssociationOptions::new()
         .ae_title("MOCK-SCP")
         .with_abstract_syntax(abstract_syntax);
 
@@ -2831,13 +2832,14 @@ fn move_scu_still_returns_the_terminal_result_when_the_peer_does_not_send_releas
 
         // The client now sends A-RELEASE-RQ expecting A-RELEASE-RP back - instead, send a stray
         // P-DATA-TF, the same "unexpected PDU where the handshake expected something specific"
-        // shape dicom-ul's release() has no tolerance for.
+        // shape that broke the old dicom-ul dependency's release() (see the regression test
+        // above) and that dcmnorm_dimse's release() must tolerate instead.
         let pdu = association.receive().unwrap();
-        assert_eq!(pdu, dicom_ul::pdu::Pdu::ReleaseRQ);
-        let _ = association.send(&dicom_ul::pdu::Pdu::PData {
-            data: vec![dicom_ul::pdu::PDataValue {
+        assert_eq!(pdu, dcmnorm_dimse::pdu::Pdu::ReleaseRQ);
+        let _ = association.send(&dcmnorm_dimse::pdu::Pdu::PData {
+            data: vec![dcmnorm_dimse::pdu::PDataValue {
                 presentation_context_id: pc_id,
-                value_type: dicom_ul::pdu::PDataValueType::Data,
+                value_type: dcmnorm_dimse::pdu::PDataValueType::Data,
                 is_last: true,
                 data: vec![0u8; 4],
             }],
@@ -2877,7 +2879,7 @@ fn move_scu_aborts_on_absolute_timeout_despite_continued_pending_responses() {
     let abstract_syntax = uids::STUDY_ROOT_QUERY_RETRIEVE_INFORMATION_MODEL_MOVE;
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
-    let scp = dicom_ul::association::server::ServerAssociationOptions::new()
+    let scp = dcmnorm_dimse::association::server::ServerAssociationOptions::new()
         .ae_title("MOCK-SCP")
         .with_abstract_syntax(abstract_syntax);
 
@@ -2903,10 +2905,10 @@ fn move_scu_aborts_on_absolute_timeout_despite_continued_pending_responses() {
                 DataElement::new(tags::NUMBER_OF_FAILED_SUBOPERATIONS, VR::US, dicom_value!(U16, [0])),
                 DataElement::new(tags::NUMBER_OF_WARNING_SUBOPERATIONS, VR::US, dicom_value!(U16, [0])),
             ]);
-            if association.send(&dicom_ul::pdu::Pdu::PData {
-                data: vec![dicom_ul::pdu::PDataValue {
+            if association.send(&dcmnorm_dimse::pdu::Pdu::PData {
+                data: vec![dcmnorm_dimse::pdu::PDataValue {
                     presentation_context_id: pc_id,
-                    value_type: dicom_ul::pdu::PDataValueType::Command,
+                    value_type: dcmnorm_dimse::pdu::PDataValueType::Command,
                     is_last: true,
                     data: {
                         let mut buf = Vec::new();
@@ -2951,7 +2953,7 @@ fn move_scu_aborts_when_stale_data_path_receives_no_new_files() {
     let abstract_syntax = uids::STUDY_ROOT_QUERY_RETRIEVE_INFORMATION_MODEL_MOVE;
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
-    let scp = dicom_ul::association::server::ServerAssociationOptions::new()
+    let scp = dcmnorm_dimse::association::server::ServerAssociationOptions::new()
         .ae_title("MOCK-SCP")
         .with_abstract_syntax(abstract_syntax);
 
@@ -2973,10 +2975,10 @@ fn move_scu_aborts_when_stale_data_path_receives_no_new_files() {
                 DataElement::new(tags::NUMBER_OF_FAILED_SUBOPERATIONS, VR::US, dicom_value!(U16, [0])),
                 DataElement::new(tags::NUMBER_OF_WARNING_SUBOPERATIONS, VR::US, dicom_value!(U16, [0])),
             ]);
-            if association.send(&dicom_ul::pdu::Pdu::PData {
-                data: vec![dicom_ul::pdu::PDataValue {
+            if association.send(&dcmnorm_dimse::pdu::Pdu::PData {
+                data: vec![dcmnorm_dimse::pdu::PDataValue {
                     presentation_context_id: pc_id,
-                    value_type: dicom_ul::pdu::PDataValueType::Command,
+                    value_type: dcmnorm_dimse::pdu::PDataValueType::Command,
                     is_last: true,
                     data: {
                         let mut buf = Vec::new();
@@ -3041,7 +3043,7 @@ fn move_scu_returns_cancelled_result_when_signalled_mid_wait() {
         let (pc_id, request, _identifier_bytes) = dimse_recv_command_with_data(association);
         let message_id = dimse_message_id(&request);
 
-        let send_pending = |association: &mut dicom_ul::ServerAssociation<std::net::TcpStream>| {
+        let send_pending = |association: &mut dcmnorm_dimse::ServerAssociation<std::net::TcpStream>| {
             let pending = InMemDicomObject::command_from_element_iter([
                 DataElement::new(tags::AFFECTED_SOP_CLASS_UID, VR::UI, dicom_value!(Str, abstract_syntax)),
                 DataElement::new(tags::COMMAND_FIELD, VR::US, dicom_value!(U16, [0x8021])),
@@ -3054,10 +3056,10 @@ fn move_scu_returns_cancelled_result_when_signalled_mid_wait() {
                 DataElement::new(tags::NUMBER_OF_WARNING_SUBOPERATIONS, VR::US, dicom_value!(U16, [0])),
             ]);
             association
-                .send(&dicom_ul::pdu::Pdu::PData {
-                    data: vec![dicom_ul::pdu::PDataValue {
+                .send(&dcmnorm_dimse::pdu::Pdu::PData {
+                    data: vec![dcmnorm_dimse::pdu::PDataValue {
                         presentation_context_id: pc_id,
-                        value_type: dicom_ul::pdu::PDataValueType::Command,
+                        value_type: dcmnorm_dimse::pdu::PDataValueType::Command,
                         is_last: true,
                         data: {
                             let mut buf = Vec::new();
@@ -3119,7 +3121,7 @@ fn move_scu_hard_aborts_immediately_when_cancel_mode_is_abort() {
     let abstract_syntax = uids::STUDY_ROOT_QUERY_RETRIEVE_INFORMATION_MODEL_MOVE;
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
-    let scp = dicom_ul::association::server::ServerAssociationOptions::new()
+    let scp = dcmnorm_dimse::association::server::ServerAssociationOptions::new()
         .ae_title("MOCK-SCP")
         .with_abstract_syntax(abstract_syntax);
 
@@ -3130,7 +3132,7 @@ fn move_scu_hard_aborts_immediately_when_cancel_mode_is_abort() {
         // Never sends any C-MOVE-RSP at all - proves the abort doesn't wait on the peer for
         // anything, unlike the graceful `Release` case.
         let pdu = association.receive().unwrap();
-        assert!(matches!(pdu, dicom_ul::pdu::Pdu::AbortRQ { .. }), "expected AbortRQ, got {pdu:?}");
+        assert!(matches!(pdu, dcmnorm_dimse::pdu::Pdu::AbortRQ { .. }), "expected AbortRQ, got {pdu:?}");
     });
 
     let cancel = CancelSignal::new();
@@ -3175,7 +3177,7 @@ fn find_scu_aborts_on_absolute_timeout_when_peer_never_responds() {
     let abstract_syntax = uids::STUDY_ROOT_QUERY_RETRIEVE_INFORMATION_MODEL_FIND;
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
-    let scp = dicom_ul::association::server::ServerAssociationOptions::new()
+    let scp = dcmnorm_dimse::association::server::ServerAssociationOptions::new()
         .ae_title("MOCK-SCP")
         .with_abstract_syntax(abstract_syntax);
 
@@ -3215,7 +3217,7 @@ fn find_scu_returns_cancelled_error_when_signalled_mid_wait() {
     let abstract_syntax = uids::STUDY_ROOT_QUERY_RETRIEVE_INFORMATION_MODEL_FIND;
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
-    let scp = dicom_ul::association::server::ServerAssociationOptions::new()
+    let scp = dcmnorm_dimse::association::server::ServerAssociationOptions::new()
         .ae_title("MOCK-SCP")
         .with_abstract_syntax(abstract_syntax);
 
@@ -3267,7 +3269,7 @@ fn store_scu_aborts_on_absolute_timeout_when_peer_never_responds() {
 
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
-    let scp = dicom_ul::association::server::ServerAssociationOptions::new()
+    let scp = dcmnorm_dimse::association::server::ServerAssociationOptions::new()
         .ae_title("MOCK-SCP")
         .with_abstract_syntax(sop_class_uid.clone());
 
@@ -3308,7 +3310,7 @@ fn store_scu_returns_cancelled_error_when_signalled_mid_wait() {
 
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
-    let scp = dicom_ul::association::server::ServerAssociationOptions::new()
+    let scp = dcmnorm_dimse::association::server::ServerAssociationOptions::new()
         .ae_title("MOCK-SCP")
         .with_abstract_syntax(sop_class_uid.clone());
 

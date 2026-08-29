@@ -1,0 +1,68 @@
+[package]
+name = "dcmnorm-transcode"
+version = "0.1.0"
+authors = ["Eduardo Pinho <enet4mikeenet@gmail.com>"]
+description = "In-house DICOM transfer-syntax registry, forked from dicom-transfer-syntax-registry 0.9.1. See README.md."
+edition = "2018"
+rust-version = "1.72.0"
+license = "MIT OR Apache-2.0"
+keywords = ["dicom"]
+readme = "README.md"
+
+[features]
+default = []
+
+# deflated transfer syntax reading and writing via flate2
+deflate = ["dep:flate2"]
+# natively implemented image encodings
+native = ["jpeg", "rle"]
+# native JPEG support: decode via the in-house dcmnorm-jpeg, encode via jpeg-encoder
+jpeg = ["dep:dcmnorm-jpeg", "dep:jpeg-encoder"]
+
+# JPEG 2000 support via the OpenJPEG Rust port,
+# works on Linux and a few other platforms
+openjp2 = ["dep:jpeg2k", "jpeg2k/openjp2"]
+# native RLE lossless support
+rle = []
+# enable SIMD operations for JPEG encoding
+simd = ["jpeg-encoder?/simd"]
+
+# JPEG 2000 support via the OpenJPEG native bindings,
+# conflicts with `openjp2`
+openjpeg-sys = ["dep:jpeg2k", "jpeg2k/openjpeg-sys"]
+
+[dependencies]
+dcmnorm-core = { path = "../dcmnorm-core" }
+dcmnorm-encoding = { path = "../dcmnorm-encoding" }
+lazy_static = "1.2.0"
+byteordered = "0.6"
+tracing = "0.1.34"
+
+[dependencies.flate2]
+version = "1.0.28"
+optional = true
+
+[dependencies.jpeg2k]
+version = "0.10"
+optional = true
+default-features = false
+
+[dependencies.dcmnorm-jpeg]
+path = "../dcmnorm-jpeg"
+optional = true
+
+[dependencies.jpeg-encoder]
+version = "0.6"
+optional = true
+
+[package.metadata.docs.rs]
+features = ["native"]
+
+# Upstream's dev-dependencies (dicom-test-files, dicom-object) and their tests/ directory
+# were deliberately not ported - see README.md's "What was left out" section.
+#
+# charls/jpeg-ls, jxl-oxide/zune-jpegxl/JPEG-XL, and the inventory-registry feature were
+# removed entirely (not just left disabled) - none were ever requested by any real build in
+# this workspace (dcmnorm's own JPEG-LS path calls charls directly, bypassing this registry;
+# JPEG XL has no DICOM producer in the wild dcmnorm has ever needed to read). See README.md's
+# "Trimmed to dcmnorm's actual surface" section.

@@ -100,7 +100,7 @@ version = "0.72.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "993776b509cfb49c750f11b8f07a46fa23e0a1386ffc01fb1e7d343efc387895"
 dependencies = [
- "bitflags",
+ "bitflags 2.13.1",
  "cexpr",
  "clang-sys",
  "itertools 0.13.0",
@@ -111,6 +111,12 @@ dependencies = [
  "shlex 1.3.0",
  "syn 2.0.119",
 ]
+
+[[package]]
+name = "bitflags"
+version = "1.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bef38d45163c2f1dde094a7dfd33ccf595c92905c8f8f4fdc18d06fb1037718a"
 
 [[package]]
 name = "bitflags"
@@ -159,12 +165,6 @@ checksum = "bbf2cd9424f5ff404aba1959c835cbc448ee8b689b870a9981c76c0fd46280e6"
 dependencies = [
  "byteorder",
 ]
-
-[[package]]
-name = "bytes"
-version = "1.12.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
 name = "cc"
@@ -370,12 +370,12 @@ dependencies = [
  "base64",
  "cc",
  "charls",
- "dicom-core",
- "dicom-dictionary-std",
- "dicom-encoding",
- "dicom-object",
- "dicom-transfer-syntax-registry",
- "dicom-ul",
+ "dcmnorm-core",
+ "dcmnorm-dictionary",
+ "dcmnorm-dimse",
+ "dcmnorm-encoding",
+ "dcmnorm-object",
+ "dcmnorm-transcode",
  "ffmpeg-next",
  "flate2",
  "image",
@@ -391,51 +391,17 @@ version = "0.2.4"
 dependencies = [
  "clap",
  "dcmnorm",
- "dicom-core",
- "dicom-dictionary-std",
- "dicom-object",
+ "dcmnorm-core",
+ "dcmnorm-dictionary",
+ "dcmnorm-object",
  "flate2",
  "serde_json",
  "sha2",
 ]
 
 [[package]]
-name = "dcmnorm-node"
+name = "dcmnorm-core"
 version = "0.1.0"
-dependencies = [
- "dcmnorm",
- "dicom-core",
- "dicom-object",
- "futures",
- "napi",
- "napi-build",
- "napi-derive",
- "serde_json",
-]
-
-[[package]]
-name = "dcmnorm-python"
-version = "0.1.0"
-dependencies = [
- "dcmnorm",
- "dicom-core",
- "dicom-object",
- "pyo3",
- "serde_json",
-]
-
-[[package]]
-name = "dcmtalk"
-version = "0.2.4"
-dependencies = [
- "clap",
- "dcmnorm",
- "sha2",
-]
-
-[[package]]
-name = "dicom-core"
-version = "0.9.1"
 dependencies = [
  "chrono",
  "either",
@@ -447,71 +413,93 @@ dependencies = [
 ]
 
 [[package]]
-name = "dicom-dictionary-std"
-version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "057250ea38d2e716cfde2f0c211f07c53be307c98b2bc6bf0e4f330f8e506968"
+name = "dcmnorm-dictionary"
+version = "0.1.0"
 dependencies = [
- "dicom-core",
+ "dcmnorm-core",
  "once_cell",
 ]
 
 [[package]]
-name = "dicom-encoding"
-version = "0.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "56549901e22b413185a8d81abf3247bd221e9c61463e549aa425e19192594ad6"
+name = "dcmnorm-dimse"
+version = "0.1.0"
+dependencies = [
+ "dcmnorm-encoding",
+ "dcmnorm-transcode",
+]
+
+[[package]]
+name = "dcmnorm-encoding"
+version = "0.1.0"
 dependencies = [
  "byteordered",
- "dicom-core",
- "dicom-dictionary-std",
+ "dcmnorm-core",
+ "dcmnorm-dictionary",
  "encoding",
  "snafu",
 ]
 
 [[package]]
-name = "dicom-object"
-version = "0.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "856997c674ce9968cb8c8c712121a1234f4e7b135abf82e68976c88a5cd4fa1e"
+name = "dcmnorm-jpeg"
+version = "0.1.0"
+
+[[package]]
+name = "dcmnorm-node"
+version = "0.1.0"
 dependencies = [
- "byteordered",
- "dicom-core",
- "dicom-dictionary-std",
- "dicom-encoding",
- "dicom-parser",
- "dicom-transfer-syntax-registry",
- "itertools 0.14.0",
+ "dcmnorm",
+ "dcmnorm-object",
+ "futures",
+ "napi",
+ "napi-build",
+ "napi-derive",
+ "serde_json",
+]
+
+[[package]]
+name = "dcmnorm-object"
+version = "0.1.0"
+dependencies = [
+ "dcmnorm-core",
+ "dcmnorm-dictionary",
+ "dcmnorm-encoding",
+ "dcmnorm-parser",
+ "dcmnorm-transcode",
+ "smallvec",
+ "snafu",
+]
+
+[[package]]
+name = "dcmnorm-parser"
+version = "0.1.0"
+dependencies = [
+ "dcmnorm-core",
+ "dcmnorm-dictionary",
+ "dcmnorm-encoding",
  "smallvec",
  "snafu",
  "tracing",
 ]
 
 [[package]]
-name = "dicom-parser"
-version = "0.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "00cf850526cebadfc09f436c05131a3b3aca8448e778173baca007f3d9080011"
+name = "dcmnorm-python"
+version = "0.1.0"
 dependencies = [
- "dicom-core",
- "dicom-dictionary-std",
- "dicom-encoding",
- "smallvec",
- "snafu",
- "tracing",
+ "dcmnorm",
+ "dcmnorm-object",
+ "pyo3",
+ "serde_json",
 ]
 
 [[package]]
-name = "dicom-transfer-syntax-registry"
-version = "0.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "791d6e5edc1a12398279ace1dd9f31c11cdb3ce2a7b8c324e656238540320d09"
+name = "dcmnorm-transcode"
+version = "0.1.0"
 dependencies = [
  "byteordered",
- "dicom-core",
- "dicom-encoding",
+ "dcmnorm-core",
+ "dcmnorm-encoding",
+ "dcmnorm-jpeg",
  "flate2",
- "jpeg-decoder",
  "jpeg-encoder",
  "jpeg2k",
  "lazy_static",
@@ -519,18 +507,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "dicom-ul"
-version = "0.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c254c2ab74163e7e76be58887b9b1ed46d58c19063a625bc9832b50f70c47665"
+name = "dcmtalk"
+version = "0.2.4"
 dependencies = [
- "byteordered",
- "bytes",
- "cfg-if",
- "dicom-encoding",
- "dicom-transfer-syntax-registry",
- "snafu",
- "tracing",
+ "clap",
+ "dcmnorm",
+ "sha2",
 ]
 
 [[package]]
@@ -634,7 +616,7 @@ version = "8.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f7c4bd5ab1ac61f29c634df1175d350ded29cf74c3c6d4f7030431a5ae3c7d5d"
 dependencies = [
- "bitflags",
+ "bitflags 2.13.1",
  "ffmpeg-sys-next",
  "libc",
 ]
@@ -912,13 +894,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "jpeg-decoder"
-version = "0.3.2"
-dependencies = [
- "rayon",
-]
-
-[[package]]
 name = "jpeg-encoder"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -932,6 +907,7 @@ checksum = "be2982db6b9f254c9df44d89bcfdc758924d538f576d9649f5b10008150f2a60"
 dependencies = [
  "anyhow",
  "log",
+ "openjp2",
  "openjpeg-sys",
  "thiserror",
 ]
@@ -1064,7 +1040,7 @@ version = "3.12.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "58c5f4d5375213fdb7be2655e152386e82f026f9a5ba36a75556e11359aafe09"
 dependencies = [
- "bitflags",
+ "bitflags 2.13.1",
  "ctor",
  "futures",
  "libc",
@@ -1164,6 +1140,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
+name = "openjp2"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e8940f4ff209130c7b374730e83cc7e31062706520e3960001e7eedc982bc554"
+dependencies = [
+ "bitflags 1.3.2",
+ "byteorder",
+ "log",
+ "smallvec",
+ "sprintf",
+]
+
+[[package]]
 name = "openjpeg-sys"
 version = "1.0.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1191,7 +1180,7 @@ version = "0.18.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "60769b8b31b2a9f263dae2776c37b1b28ae246943cf719eb6946a1db05128a61"
 dependencies = [
- "bitflags",
+ "bitflags 2.13.1",
  "crc32fast",
  "fdeflate",
  "flate2",
@@ -1473,6 +1462,12 @@ dependencies = [
  "quote",
  "syn 2.0.119",
 ]
+
+[[package]]
+name = "sprintf"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c0cdea5a20a06e7c57f627094e7b1618e5665592cd88f2d45fa4014e348db58"
 
 [[package]]
 name = "strsim"

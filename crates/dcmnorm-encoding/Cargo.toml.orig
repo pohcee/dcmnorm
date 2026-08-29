@@ -1,0 +1,18 @@
+[package]
+name = "dcmnorm-encoding"
+version = "0.1.0"
+authors = ["Eduardo Pinho <enet4mikeenet@gmail.com>"]
+description = "In-house DICOM encoding/decoding primitives, forked from dicom-encoding 0.9.1. See README.md."
+edition = "2018"
+rust-version = "1.72.0"
+license = "MIT OR Apache-2.0"
+categories = ["encoding"]
+keywords = ["dicom"]
+readme = "README.md"
+
+[dependencies]
+dcmnorm-core = { path = "../dcmnorm-core" }
+dcmnorm-dictionary = { path = "../dcmnorm-dictionary" }
+encoding = "0.2.33"
+byteordered = "0.6"
+snafu = "0.8"

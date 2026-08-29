@@ -10,9 +10,9 @@ use std::error::Error;
 use std::fmt;
 use std::path::Path;
 
-use dicom_core::{DataElement, PrimitiveValue, Tag, VR};
-use dicom_dictionary_std::{tags, uids};
-use dicom_object::{DefaultDicomObject, FileMetaTableBuilder};
+use dcmnorm_core::{DataElement, PrimitiveValue, Tag, VR};
+use dcmnorm_dictionary::{tags, uids};
+use dcmnorm_object::{DefaultDicomObject, FileMetaTableBuilder};
 
 use super::io::write_dicom_file;
 use super::types::WriteError;

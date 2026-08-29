@@ -1,0 +1,31 @@
+[package]
+name = "dcmnorm-dictionary"
+version = "0.1.0"
+authors = ["Eduardo Pinho <enet4mikeenet@gmail.com>"]
+description = "In-house standard DICOM data dictionary, forked from dicom-dictionary-std 0.9.0. See README.md."
+edition = "2018"
+rust-version = "1.72.0"
+license = "MIT OR Apache-2.0"
+keywords = ["dicom", "dictionary"]
+readme = "README.md"
+
+[features]
+default = []
+
+# run-time deployed DICOM dictionaries
+sop-class = []
+meta-sop-class = []
+transfer-syntax = []
+well-known-sop-instance = []
+dicom-uid-as-coding-scheme = []
+coding-scheme = []
+application-context-name = []
+service-class = []
+application-hosting-model = []
+mapping-resource = []
+ldap-oid = []
+synchronization-frame-of-reference = []
+
+[dependencies]
+dcmnorm-core = { path = "../dcmnorm-core" }
+once_cell = "1.18.0"

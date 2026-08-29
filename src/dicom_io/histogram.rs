@@ -1,4 +1,4 @@
-use dicom_object::DefaultDicomObject;
+use dcmnorm_object::DefaultDicomObject;
 
 use super::render::{decode_frame_grayscale_values, decode_frame_rgb_values, read_render_metadata};
 use super::types::RenderError;

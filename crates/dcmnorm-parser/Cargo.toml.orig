@@ -1,0 +1,19 @@
+[package]
+name = "dcmnorm-parser"
+version = "0.1.0"
+authors = ["Eduardo Pinho <enet4mikeenet@gmail.com>"]
+description = "In-house DICOM dataset streaming reader/writer, forked from dicom-parser 0.9.1. See README.md."
+edition = "2018"
+rust-version = "1.72.0"
+license = "MIT OR Apache-2.0"
+categories = ["parser-implementations"]
+keywords = ["dicom", "parser"]
+readme = "README.md"
+
+[dependencies]
+dcmnorm-core = { path = "../dcmnorm-core" }
+dcmnorm-encoding = { path = "../dcmnorm-encoding" }
+dcmnorm-dictionary = { path = "../dcmnorm-dictionary" }
+smallvec = "1.6.1"
+snafu = "0.8"
+tracing = "0.1.34"

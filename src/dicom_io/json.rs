@@ -1,4 +1,4 @@
-use dicom_object::{DefaultDicomObject, FileMetaTableBuilder, InMemDicomObject};
+use dcmnorm_object::{DefaultDicomObject, FileMetaTableBuilder, InMemDicomObject};
 use serde_json::Value as JsonValue;
 
 use super::flat_json::{read_flat_json_value, write_flat_json_value};

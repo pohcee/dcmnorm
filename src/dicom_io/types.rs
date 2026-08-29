@@ -1,9 +1,9 @@
 use std::error::Error;
 use std::fmt;
 
-use dicom_core::{Tag, VR};
+use dcmnorm_core::{Tag, VR};
 
-pub use dicom_object::{ReadError, WithMetaError, WriteError};
+pub use dcmnorm_object::{ReadError, WithMetaError, WriteError};
 
 pub(super) const ITEM_TAG: Tag = Tag(0xFFFE, 0xE000);
 pub(super) const ITEM_DELIMITATION_TAG: Tag = Tag(0xFFFE, 0xE00D);

@@ -11,7 +11,7 @@ use dcmnorm::dicom_io::{
     apply_filter_to_object, build_volume as dcm_build_volume, echo_scu as dcm_echo_scu,
     find_scu as dcm_find_scu, move_scu as dcm_move_scu, parse_attribute_override,
     parse_filter_requests, parse_tag_key, probe_dicom_file_for_sop_class_uid, read_dicom_bytes,
-    read_dicom_file, read_dicom_json_with_options, read_dicom_object_for_filter,
+    read_dicom_file, read_dicom_json_with_options, read_dcmnorm_object_for_filter,
     compute_frame_histogram as dcm_compute_frame_histogram,
     compute_instance_histograms as dcm_compute_instance_histograms,
     pack_dicom_frame_stack_texture as dcm_pack_dicom_frame_stack_texture,
@@ -111,7 +111,7 @@ impl Task for ReadTagsTask {
         guarded(|| {
             let requests = parse_filter_requests(&self.tags).map_err(to_napi_err)?;
             let mut object =
-                read_dicom_object_for_filter(&self.file_path, &requests).map_err(to_napi_err)?;
+                read_dcmnorm_object_for_filter(&self.file_path, &requests).map_err(to_napi_err)?;
             apply_filter_to_object(&mut object, &requests);
             // bulk_data_mode: Uri needs the *source file bytes* to compute a valid
             // "?offset=..&length=.." reference (see read_json below) - which the
@@ -475,8 +475,8 @@ fn dimse_logger(on_log: Option<ThreadsafeFunction<String>>) -> Option<Box<dyn Di
 // practical equivalent of a shared interface given that constraint.
 pub struct ScuCallState<T> {
     // The error side is a `String`, not `dcmnorm::DimseError` - the latter wraps foreign
-    // non-`Clone` types (`std::io::Error`, `dicom_ul`'s association error, ...), and every waiter
-    // here needs its own owned copy of whichever outcome was recorded first.
+    // non-`Clone` types (`std::io::Error`, `dcmnorm_dimse`'s association error, ...), and every
+    // waiter here needs its own owned copy of whichever outcome was recorded first.
     result: Mutex<Option<std::result::Result<T, String>>>,
     condvar: Condvar,
 }
@@ -1898,7 +1898,7 @@ impl Task for ExportFrameStackTextureTask {
                 .map(|source| read_dicom_file(PathBuf::from(&source.file_path)).map_err(to_napi_err))
                 .collect::<Result<Vec<_>>>()?;
 
-            let mut frame_refs: Vec<(&dicom_object::DefaultDicomObject, usize)> = Vec::new();
+            let mut frame_refs: Vec<(&dcmnorm_object::DefaultDicomObject, usize)> = Vec::new();
             for (source, object) in self.sources.iter().zip(objects.iter()) {
                 let indices = source.frame_indices.clone().unwrap_or_else(|| vec![0]);
                 for index in indices {

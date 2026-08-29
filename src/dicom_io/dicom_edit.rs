@@ -1,10 +1,10 @@
 use std::io::{self, ErrorKind};
 
-use dicom_core::dictionary::{DataDictionary, DataDictionaryEntry};
-use dicom_core::header::Header;
-use dicom_core::{Tag, VR};
-use dicom_dictionary_std::{tags, StandardDataDictionary};
-use dicom_object::{DefaultDicomObject, FileMetaTable};
+use dcmnorm_core::dictionary::{DataDictionary, DataDictionaryEntry};
+use dcmnorm_core::header::Header;
+use dcmnorm_core::{Tag, VR};
+use dcmnorm_dictionary::{tags, StandardDataDictionary};
+use dcmnorm_object::{DefaultDicomObject, FileMetaTable};
 
 /// Remove all private tags from a DICOM object in-place
 pub fn remove_private_tags_inplace(obj: &mut DefaultDicomObject) {

@@ -12,8 +12,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 dcmnorm = { path = "../.." }
-dicom-core = "0.9.1"
-dicom-object = "0.9.1"
+dcmnorm-object = { path = "../../crates/dcmnorm-object" }
 # abi3-py39: one compiled extension works unmodified against any CPython >= 3.9 (stable ABI) -
 # the Python analog of napi-rs's own single-binary-per-platform story (see this crate's
 # README/Packaging section), rather than needing one wheel per Python minor version.

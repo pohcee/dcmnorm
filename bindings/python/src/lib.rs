@@ -13,7 +13,7 @@ use ::dcmnorm::dicom_io::{
     apply_filter_to_object, build_volume as dcm_build_volume, echo_scu as dcm_echo_scu,
     find_scu as dcm_find_scu, move_scu as dcm_move_scu, parse_attribute_override,
     parse_filter_requests, parse_tag_key, probe_dicom_file_for_sop_class_uid, read_dicom_bytes,
-    read_dicom_file, read_dicom_json_with_options, read_dicom_object_for_filter,
+    read_dicom_file, read_dicom_json_with_options, read_dcmnorm_object_for_filter,
     pack_dicom_frame_stack_texture as dcm_pack_dicom_frame_stack_texture,
     pack_dicom_frame_texture as dcm_pack_dicom_frame_texture, pack_volume_texture as dcm_pack_volume_texture,
     reformat_plane as dcm_reformat_plane, remove_attribute, remove_private_tags_inplace,
@@ -193,7 +193,7 @@ fn read_tags(py: Python<'_>, file_path: String, tags: Vec<String>) -> PyResult<S
         guarded(|| {
             let path = PathBuf::from(file_path);
             let requests = parse_filter_requests(&tags).map_err(to_py_err)?;
-            let mut object = read_dicom_object_for_filter(&path, &requests).map_err(to_py_err)?;
+            let mut object = read_dcmnorm_object_for_filter(&path, &requests).map_err(to_py_err)?;
             apply_filter_to_object(&mut object, &requests);
             write_dicom_json_with_options(
                 &object,
@@ -1372,7 +1372,7 @@ fn export_frame_stack_texture(
                 .map(|source| read_dicom_file(PathBuf::from(&source.file_path)).map_err(to_py_err))
                 .collect::<PyResult<Vec<_>>>()?;
 
-            let mut frame_refs: Vec<(&dicom_object::DefaultDicomObject, usize)> = Vec::new();
+            let mut frame_refs: Vec<(&dcmnorm_object::DefaultDicomObject, usize)> = Vec::new();
             for (source, object) in sources.iter().zip(objects.iter()) {
                 let indices = source.frame_indices.clone().unwrap_or_else(|| vec![0]);
                 for index in indices {
