@@ -14,8 +14,8 @@ use dcmnorm_transcode::TransferSyntaxRegistry;
 use crate::error::{ReadError, WithMetaError, WriteError};
 use crate::mem::InMemElement;
 
-const PREAMBLE_LEN: usize = 128;
-const DICM_MAGIC: &[u8; 4] = b"DICM";
+pub(crate) const PREAMBLE_LEN: usize = 128;
+pub(crate) const DICM_MAGIC: &[u8; 4] = b"DICM";
 
 pub(crate) mod tags {
     use dcmnorm_core::header::Tag;

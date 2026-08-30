@@ -10,7 +10,7 @@ use dcmnorm_transcode::TransferSyntaxRegistry;
 
 use crate::error::{ReadError, WriteError};
 use crate::mem::InMemDicomObject;
-use crate::meta::FileMetaTable;
+use crate::meta::{FileMetaTable, DICM_MAGIC, PREAMBLE_LEN};
 
 /// A DICOM object with its accompanying File Meta Information.
 #[derive(Debug, Clone, PartialEq)]
@@ -149,7 +149,30 @@ impl OpenFileOptions {
     }
 
     pub fn from_reader(self, mut source: impl Read) -> Result<DefaultDicomObject, ReadError> {
-        let mut meta = FileMetaTable::read_from(&mut source)?.ok_or(ReadError::NotDicom)?;
+        let mut meta = match self.read_preamble {
+            // Peek-and-detect: falls back to treating `source` as meta-less if the preamble or
+            // "DICM" magic aren't there.
+            ReadPreamble::Auto => FileMetaTable::read_from(&mut source)?.ok_or(ReadError::NotDicom)?,
+            // No detection/fallback: the preamble and magic are required, and their absence (or
+            // mismatch) is a hard error rather than a silent reinterpretation as meta-less -
+            // matching what a caller who explicitly opted out of auto-detection would expect.
+            ReadPreamble::Always => {
+                let mut preamble = [0u8; PREAMBLE_LEN];
+                source.read_exact(&mut preamble).map_err(|source| ReadError::Io {
+                    source,
+                    context: "reading 128-byte preamble",
+                })?;
+                let mut magic = [0u8; 4];
+                source.read_exact(&mut magic).map_err(|source| ReadError::Io {
+                    source,
+                    context: "reading \"DICM\" magic",
+                })?;
+                if &magic != DICM_MAGIC {
+                    return Err(ReadError::NotDicom);
+                }
+                FileMetaTable::read_meta_group(&mut source)?
+            }
+        };
         let ts = meta.transfer_syntax_ts().ok_or_else(|| ReadError::UnsupportedTransferSyntax {
             uid: meta.transfer_syntax.clone(),
         })?;
@@ -211,4 +234,59 @@ pub fn read_dataset_trial_parse(bytes: &[u8]) -> Option<(InMemDicomObject, &'sta
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{OpenFileOptions, ReadPreamble};
+    use dcmnorm_dictionary::tags;
+    use std::path::PathBuf;
+
+    fn fixture(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("test")
+            .join("files")
+            .join(name)
+    }
+
+    #[test]
+    fn read_preamble_always_accepts_a_real_part10_file() {
+        let object = OpenFileOptions::new()
+            .read_preamble(ReadPreamble::Always)
+            .open_file(fixture("mr_small.dcm"))
+            .expect("a real Part 10 file has a preamble and DICM magic");
+        assert_eq!(object.get(tags::MODALITY).and_then(|e| e.to_str().ok()).as_deref(), Some("MR"));
+    }
+
+    #[test]
+    fn read_preamble_always_rejects_a_file_with_no_preamble() {
+        // nometa_explicit_le.dcm is a bare data set: no 128-byte preamble, no "DICM" magic.
+        // ReadPreamble::Always must not silently fall back to auto-detection - it should fail
+        // cleanly instead of misinterpreting the first bytes of the data set as a preamble.
+        let result = OpenFileOptions::new()
+            .read_preamble(ReadPreamble::Always)
+            .open_file(fixture("nometa_explicit_le.dcm"));
+        assert!(result.is_err(), "expected an error, got {result:?}");
+    }
+
+    #[test]
+    fn read_preamble_auto_does_not_fall_back_to_bare_dataset_parsing() {
+        // OpenFileOptions::from_reader/open_file never did meta-less fallback (that's a
+        // separate, explicit opt-in via read_dataset_trial_parse) - Auto only controls whether
+        // detection happens, not whether a failed detection is tolerated.
+        let result = OpenFileOptions::new().open_file(fixture("nometa_explicit_le.dcm"));
+        assert!(result.is_err(), "expected an error, got {result:?}");
+    }
+
+    #[test]
+    fn explicit_vr_big_endian_file_reads_with_correct_values() {
+        let object =
+            OpenFileOptions::new().open_file(fixture("explicit_vr_be.dcm")).expect("should read");
+        assert_eq!(object.meta().transfer_syntax.trim_end_matches('\0'), "1.2.840.10008.1.2.2");
+        assert_eq!(object.get(tags::MODALITY).and_then(|e| e.to_str().ok()).as_deref(), Some("US"));
+    }
 }

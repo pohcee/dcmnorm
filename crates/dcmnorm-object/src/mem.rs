@@ -11,7 +11,7 @@ use std::io::{Read, Write};
 use dcmnorm_core::header::{DataElement, HasLength, Header, Tag};
 use dcmnorm_core::value::{C, DataSetSequence, PixelFragmentSequence, Value};
 use dcmnorm_core::{ops::AttributeOp, PrimitiveValue, VR};
-use dcmnorm_encoding::transfer_syntax::TransferSyntax;
+use dcmnorm_encoding::transfer_syntax::{Codec, TransferSyntax};
 use dcmnorm_parser::dataset::{DataSetReader, DataSetWriter, DataToken};
 
 use crate::error::{ReadError, WriteError};
@@ -193,7 +193,20 @@ impl InMemDicomObject {
 
     /// Read a bare data set (no Part 10 preamble/meta group) from `source`, using the given
     /// transfer syntax.
-    pub fn read_dataset_with_ts<R: Read>(source: R, ts: &TransferSyntax) -> Result<Self, ReadError> {
+    ///
+    /// A dataset-level transfer syntax (currently just Deflated Explicit VR Little Endian) needs
+    /// its own byte-stream transform applied *before* element decoding even starts - unlike a
+    /// pixel-data codec, which only ever touches one element's value. `source` is always boxed
+    /// (not just when a codec applies) so this function has one concrete reader type to build a
+    /// `DataSetReader` over regardless of transfer syntax.
+    pub fn read_dataset_with_ts<'r, R: Read + 'r>(
+        source: R,
+        ts: &TransferSyntax,
+    ) -> Result<Self, ReadError> {
+        let source: Box<dyn Read + 'r> = match ts.codec() {
+            Codec::Dataset(Some(adapter)) => adapter.adapt_reader(Box::new(source)),
+            _ => Box::new(source),
+        };
         let mut reader = DataSetReader::new_with_ts(source, ts)
             .map_err(|source| ReadError::Dataset { source })?;
         build_dataset(&mut reader, false)
@@ -205,8 +218,16 @@ impl InMemDicomObject {
     }
 
     /// Write this object as a bare data set (no Part 10 preamble/meta group) using the given
-    /// transfer syntax.
-    pub fn write_dataset_with_ts<W: Write>(&self, to: W, ts: &TransferSyntax) -> Result<(), WriteError> {
+    /// transfer syntax. See [`Self::read_dataset_with_ts`] for why `to` is always boxed.
+    pub fn write_dataset_with_ts<'w, W: Write + 'w>(
+        &self,
+        to: W,
+        ts: &TransferSyntax,
+    ) -> Result<(), WriteError> {
+        let to: Box<dyn Write + 'w> = match ts.codec() {
+            Codec::Dataset(Some(adapter)) => adapter.adapt_writer(Box::new(to)),
+            _ => Box::new(to),
+        };
         let mut writer =
             DataSetWriter::with_ts(to, ts).map_err(|source| WriteError::Dataset { source })?;
         for element in &self.elements {
@@ -660,5 +681,164 @@ mod tests {
             "expected UnsupportedSelector, got {result:?}"
         );
         assert!(object.is_empty(), "object must be left untouched on error");
+    }
+
+    fn fixture_path(name: &str) -> std::path::PathBuf {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("test")
+            .join("files")
+            .join(name)
+    }
+
+    fn open_fixture(name: &str) -> crate::file::DefaultDicomObject {
+        crate::file::DefaultDicomObject::open_file(fixture_path(name))
+            .unwrap_or_else(|e| panic!("{name} should open: {e}"))
+    }
+
+    // The deflate-wiring regression test lives in the top-level `dcmnorm` crate's test suite
+    // (src/dicom_io), not here: this crate's own Cargo.toml depends on dcmnorm-transcode with
+    // `default-features = false` and no explicit `deflate` feature, so `FlateAdapter` isn't even
+    // compiled in when this crate is tested standalone - only `dcmnorm`'s own build (which does
+    // request the `deflate` feature) actually exercises the fix.
+
+    /// dcmnorm-core has its own fork-specific fix for nonstandard `xs`/`ox` ambiguous-VR
+    /// shorthand bytes (see `dcmnorm-core/src/header.rs`); this exercises that same code path
+    /// end-to-end against a real file that actually contains one, rather than only a synthetic
+    /// byte pattern.
+    #[test]
+    fn nonstandard_vr_shorthand_file_parses_without_desyncing() {
+        let object = open_fixture("bad_vr.dcm");
+        assert!(!object.is_empty());
+    }
+
+    #[test]
+    fn vr_un_element_parses_without_error() {
+        let object = open_fixture("vr_un.dcm");
+        assert!(!object.is_empty());
+    }
+
+    #[test]
+    fn nested_private_sequence_parses_without_error() {
+        let object = open_fixture("nested_private_sq.dcm");
+        assert!(!object.is_empty());
+    }
+
+    #[test]
+    fn private_sequence_parses_without_error() {
+        let object = open_fixture("private_sq.dcm");
+        assert!(!object.is_empty());
+    }
+
+    #[test]
+    fn empty_specific_character_set_parses_without_error() {
+        let object = open_fixture("empty_charset.dcm");
+        assert!(!object.is_empty());
+    }
+
+    /// A malformed/unusual sequence structure must not desync or panic the parser - dcmnorm's
+    /// tolerant parser accepts this particular file rather than erroring, which is itself worth
+    /// pinning down (a future change that makes this start erroring, or panicking, should have
+    /// to touch this assertion deliberately).
+    #[test]
+    fn malformed_sequence_file_parses_tolerantly() {
+        let object = open_fixture("bad_sequence.dcm");
+        assert_eq!(
+            object.get(dcmnorm_dictionary::tags::MODALITY).and_then(|e| e.to_str().ok()).as_deref(),
+            Some("CT")
+        );
+    }
+
+    #[test]
+    fn missing_transfer_syntax_uid_is_a_clean_error_not_a_panic() {
+        let result = crate::file::DefaultDicomObject::open_file(fixture_path("meta_missing_tsyntax.dcm"));
+        assert!(result.is_err(), "expected an error, got {result:?}");
+    }
+
+    #[test]
+    fn missing_meta_group_length_is_a_clean_error_not_a_panic() {
+        let result = crate::file::DefaultDicomObject::open_file(fixture_path("nometa_group_length.dcm"));
+        assert!(result.is_err(), "expected an error, got {result:?}");
+    }
+
+    #[test]
+    fn truncated_pixel_data_is_a_clean_error_not_a_panic() {
+        let result = crate::file::DefaultDicomObject::open_file(fixture_path("mr_truncated.dcm"));
+        assert!(result.is_err(), "expected an error, got {result:?}");
+    }
+
+    #[test]
+    fn truncated_rtplan_is_a_clean_error_not_a_panic() {
+        let result = crate::file::DefaultDicomObject::open_file(fixture_path("rtplan_truncated.dcm"));
+        assert!(result.is_err(), "expected an error, got {result:?}");
+    }
+
+    #[test]
+    fn odd_length_pixel_data_parses_with_correct_dimensions() {
+        let object = open_fixture("sc_odd_length.dcm");
+        assert_eq!(object.get(dcmnorm_dictionary::tags::ROWS).and_then(|e| e.uint16().ok()), Some(3));
+        assert_eq!(object.get(dcmnorm_dictionary::tags::COLUMNS).and_then(|e| e.uint16().ok()), Some(3));
+    }
+
+    #[test]
+    fn odd_length_jpeg_pixel_data_parses_correctly() {
+        let object = open_fixture("sc_odd_length_jpeg.dcm");
+        assert_eq!(object.get(dcmnorm_dictionary::tags::ROWS).and_then(|e| e.uint16().ok()), Some(3));
+    }
+
+    /// Deeply nested sequences (RT Structure Set's ROI Contour -> Contour Sequence -> Contour
+    /// Data, several levels deep) are a good generic-parser stress test distinct from the
+    /// mostly-flat CT/MR/US fixtures the rest of this suite uses. This particular fixture is
+    /// itself a bare Implicit VR LE data set (no 128-byte preamble/"DICM" magic), so it's read
+    /// via `read_dataset_with_ts` rather than `open_file`.
+    #[test]
+    fn rtstruct_with_deeply_nested_sequences_parses_without_error() {
+        let ts = dcmnorm_transcode::TransferSyntaxRegistry
+            .get(dcmnorm_dictionary::uids::IMPLICIT_VR_LITTLE_ENDIAN)
+            .unwrap();
+        let bytes = std::fs::read(fixture_path("rtstruct.dcm")).unwrap();
+        let object = InMemDicomObject::read_dataset_with_ts(std::io::Cursor::new(bytes), ts)
+            .expect("rtstruct.dcm should parse as a bare Implicit VR LE data set");
+        assert_eq!(
+            object.get(dcmnorm_dictionary::tags::MODALITY).and_then(|e| e.to_str().ok()).as_deref(),
+            Some("RTSTRUCT")
+        );
+    }
+
+    #[test]
+    fn rtdose_object_parses_without_error() {
+        let object = open_fixture("rtdose.dcm");
+        assert_eq!(
+            object.get(dcmnorm_dictionary::tags::MODALITY).and_then(|e| e.to_str().ok()).as_deref(),
+            Some("RTDOSE")
+        );
+    }
+
+    /// Matches the upstream `dicom-rs` test this fork deliberately didn't port (see
+    /// `dcmnorm-transcode/README.md`'s "What was left out") - fragment count, offset table, and
+    /// the JPEG2000 codestream's own SOC (0xFF4F)/EOC (0xFFD9) marker bytes at the fragment's
+    /// boundaries, now checked against a real (if tiny) local fixture instead of a network-
+    /// fetched one.
+    #[test]
+    fn jpeg2000_pixel_sequence_has_the_expected_fragment_and_offset_table_shape() {
+        let object = open_fixture("jpeg2000_tiny.dcm");
+        let element = object.element(dcmnorm_dictionary::tags::PIXEL_DATA).unwrap();
+        match element.value() {
+            Value::PixelSequence(seq) => {
+                assert_eq!(seq.offset_table().len(), 0);
+                assert_eq!(seq.fragments().len(), 1);
+                let fragment = &seq.fragments()[0];
+                assert_eq!(fragment[0..2], [0xFF, 0x4F], "fragment should start with the JPEG2000 SOC marker");
+                assert_eq!(
+                    fragment[fragment.len() - 2..],
+                    [0xFF, 0xD9],
+                    "fragment should end with the JPEG2000 EOC marker"
+                );
+            }
+            other => panic!("expected a pixel sequence, got {other:?}"),
+        }
     }
 }

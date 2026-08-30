@@ -1529,7 +1529,8 @@ fn normalize_decoded_pixel_data_attributes(
 
 #[cfg(test)]
 mod tests {
-    use super::is_jpeg2000_transfer_syntax;
+    use super::{is_jpeg2000_transfer_syntax, read_dicom_file, write_dicom_file};
+    use std::path::PathBuf;
 
     #[test]
     fn recognizes_high_throughput_jpeg2000_as_jpeg2000() {
@@ -1544,5 +1545,37 @@ mod tests {
         // JPEG2000 decode-path case.
         assert!(!is_jpeg2000_transfer_syntax("1.2.840.10008.1.2.4.204"));
         assert!(!is_jpeg2000_transfer_syntax("1.2.840.10008.1.2.4.205"));
+    }
+
+    /// Regression test for the deflate wiring fix: Deflated Explicit VR Little Endian
+    /// (1.2.840.10008.1.2.1.99) is registered in the transfer syntax table with a real
+    /// `FlateAdapter`, but until `InMemDicomObject::read_dataset_with_ts`/
+    /// `write_dataset_with_ts` actually applied it, the adapter was dead code - reading a real
+    /// deflated file misinterpreted the still-compressed bytes as plain data set elements. Runs
+    /// in this crate (rather than dcmnorm-object's own test suite) because only here is
+    /// dcmnorm-transcode's `deflate` Cargo feature actually enabled, so `FlateAdapter` is really
+    /// compiled in. Uses a real third-party fixture, not one this codebase wrote itself, so the
+    /// test can't accidentally "pass" against a file built with the same bug.
+    #[test]
+    fn deflated_explicit_vr_little_endian_reads_and_round_trips() {
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test/files/deflated.dcm");
+        let mut object = read_dicom_file(&fixture).expect("deflated.dcm should read");
+        assert_eq!(object.meta().transfer_syntax.trim_end_matches('\0'), "1.2.840.10008.1.2.1.99");
+        assert_eq!(
+            object.get(dcmnorm_dictionary::tags::MODALITY).and_then(|e| e.to_str().ok()).as_deref(),
+            Some("OT")
+        );
+
+        let out = std::env::temp_dir().join(format!(
+            "dcmnorm-deflate-roundtrip-{}.dcm",
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        write_dicom_file(&mut object, &out).expect("writing a deflated object should succeed");
+        let reread = read_dicom_file(&out).expect("re-reading the just-written deflated file should succeed");
+        assert_eq!(
+            reread.get(dcmnorm_dictionary::tags::MODALITY).and_then(|e| e.to_str().ok()).as_deref(),
+            Some("OT")
+        );
+        let _ = std::fs::remove_file(&out);
     }
 }
