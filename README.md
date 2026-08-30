@@ -281,7 +281,7 @@ docker build -f benchmarks/Dockerfile -t dcmnorm-bench .
 docker run --rm --cpus=4 \
   -v "$(pwd)/test/files":/fixtures:ro \
   -v "$(pwd)/benchmarks/results":/results \
-  dcmnorm-bench bash benchmarks/run.sh
+  dcmnorm-bench bash /repo/benchmarks/run.sh
 ```
 
 ### Fixtures
