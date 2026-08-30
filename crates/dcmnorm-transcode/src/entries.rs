@@ -382,8 +382,10 @@ pub const JPEG_LS_LOSSY_IMAGE_COMPRESSION: Ts = create_ts_stub(
 
 // --- JPEG XL support ---
 //
-// No adapter here: no DICOM producer dcmnorm has ever needed to read uses JPEG XL. Stubs only,
-// for registry-completeness.
+// No adapter here: dcmnorm's own JPEG XL decode (src/dicom_io/jpeg_xl.rs) calls jxl-oxide
+// directly and bypasses this registry entirely, the same way JPEG-LS does above - these are
+// registry-completeness stubs only, so `TransferSyntaxRegistry`/`TransferSyntaxIndex` lookups
+// still resolve the UID. No encoder exists yet.
 
 /// **Stub descriptor:** JPEG XL Lossless
 pub const JPEG_XL_LOSSLESS: Ts = create_ts_stub("1.2.840.10008.1.2.4.110", "JPEG XL Lossless");

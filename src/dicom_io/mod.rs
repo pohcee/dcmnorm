@@ -6,6 +6,7 @@ mod flat_json;
 mod histogram;
 mod io;
 mod jpeg_ls;
+mod jpeg_xl;
 mod json;
 mod kakadu;
 mod mpeg;

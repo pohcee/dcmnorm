@@ -55,7 +55,7 @@
 //! | High-Throughput JPEG 2000 with RPCL Options (Lossless Only) | Cargo feature `openjp2` or `openjpeg-sys` | x |
 //! | High-Throughput JPEG 2000     | Cargo feature `openjp2` or `openjpeg-sys` | x |
 //! | JPIP HTJ2K Referenced Deflate | Cargo feature `deflate` | ✓ |
-//! | JPEG XL (Lossless/Recompression/general) | not supported | - |
+//! | JPEG XL (Lossless/Recompression/general) | Cargo feature `jpeg-xl-codec` on the top-level `dcmnorm` crate; see `src/dicom_io/jpeg_xl.rs` | x |
 //! | RLE Lossless                  | Cargo feature `rle` | x |
 //! | Deflated Image Frame          | Cargo feature `deflate` | ✓ |
 //!

@@ -21,6 +21,7 @@ use dcmnorm_transcode::TransferSyntaxRegistry;
 use rayon::prelude::*;
 
 use super::jpeg_ls;
+use super::jpeg_xl;
 use super::kakadu;
 use super::mpeg;
 use super::types::{DicomIoError, ReadError, TranscodeError, TransferSyntaxSupport, WriteError};
@@ -328,6 +329,13 @@ fn is_jpeg_ls_transfer_syntax(uid: &str) -> bool {
     matches!(
         normalize_transfer_syntax_uid(uid),
         "1.2.840.10008.1.2.4.80" | "1.2.840.10008.1.2.4.81"
+    )
+}
+
+fn is_jpeg_xl_transfer_syntax(uid: &str) -> bool {
+    matches!(
+        normalize_transfer_syntax_uid(uid),
+        "1.2.840.10008.1.2.4.110" | "1.2.840.10008.1.2.4.111" | "1.2.840.10008.1.2.4.112"
     )
 }
 
@@ -919,6 +927,7 @@ fn can_decode_pixel_data<D, R, W>(
         || (kakadu_enabled && is_jpeg2000_transfer_syntax(uid))
         || (cfg!(feature = "ffmpeg-codec") && is_mpeg_transfer_syntax(uid))
         || (cfg!(feature = "jpeg-ls-codec") && is_jpeg_ls_transfer_syntax(uid))
+        || (cfg!(feature = "jpeg-xl-codec") && is_jpeg_xl_transfer_syntax(uid))
 }
 
 fn can_encode_pixel_data<D, R, W>(
@@ -1119,6 +1128,29 @@ fn decode_pixel_data(
     // Try JPEG-LS decoding
     if is_jpeg_ls_transfer_syntax(source_ts.uid()) {
         match jpeg_ls::decode_jpeg_ls_pixel_data(object) {
+            Ok(decoded) => {
+                replace_with_native_pixel_data(object, decoded)?;
+                normalize_decoded_pixel_data_attributes(object, source_ts.uid(), jpeg2000_uses_mct);
+                object.meta_mut().set_transfer_syntax(
+                    TransferSyntaxRegistry
+                        .get(uids::EXPLICIT_VR_LITTLE_ENDIAN)
+                        .expect("explicit VR little endian transfer syntax must exist"),
+                );
+                return Ok(());
+            }
+            Err(error) => {
+                return Err(TranscodeError::DecodePixelData {
+                    uid: source_ts.uid().to_owned(),
+                    name: source_ts.name().to_owned(),
+                    message: error,
+                });
+            }
+        }
+    }
+
+    // Try JPEG XL decoding
+    if is_jpeg_xl_transfer_syntax(source_ts.uid()) {
+        match jpeg_xl::decode_jpeg_xl_pixel_data(object) {
             Ok(decoded) => {
                 replace_with_native_pixel_data(object, decoded)?;
                 normalize_decoded_pixel_data_attributes(object, source_ts.uid(), jpeg2000_uses_mct);
