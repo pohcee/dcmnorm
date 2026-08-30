@@ -381,6 +381,7 @@ dependencies = [
  "image",
  "jxl-oxide",
  "lcms2",
+ "openjpeg-sys",
  "openjph-core",
  "rayon",
  "serde_json",

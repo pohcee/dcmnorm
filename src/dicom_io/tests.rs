@@ -1096,15 +1096,82 @@ fn reports_jpeg_2000_transfer_syntax_capabilities() {
         .unwrap();
 
     assert!(jpeg_2000.can_decode_pixel_data);
-    assert!(!jpeg_2000.can_encode_pixel_data);
-    assert!(!jpeg_2000.can_transcode_to());
+    assert!(jpeg_2000.can_encode_pixel_data);
+    assert!(jpeg_2000.can_transcode_to());
 
+    // .91 ("JPEG 2000 Image Compression", as opposed to .90 "Lossless Only") encodes lossy by
+    // default - a real round trip through it should compress (fewer PixelData bytes than a
+    // naive fragment-per-frame codestream would need to be lossless) and should NOT be
+    // byte-identical to the source, which would indicate the "lossy" path was secretly lossless.
     let original = read_dicom_file(fixture_path("dx.dcm")).unwrap();
-    let error = transcode_dcmnorm_object(&original, JPEG_2000_IMAGE_COMPRESSION_UID)
-        .unwrap_err()
-        .to_string();
-    assert!(error.contains(JPEG_2000_IMAGE_COMPRESSION_UID));
-    assert!(error.contains("unsupported target transfer syntax"));
+    let original_bytes = original
+        .element(tags::PIXEL_DATA)
+        .unwrap()
+        .to_bytes()
+        .unwrap()
+        .to_vec();
+
+    let encoded = transcode_dcmnorm_object(&original, JPEG_2000_IMAGE_COMPRESSION_UID)
+        .expect("encoding to JPEG2000 Image Compression should succeed");
+    assert_eq!(
+        encoded.meta().transfer_syntax().trim_end_matches('\0'),
+        JPEG_2000_IMAGE_COMPRESSION_UID
+    );
+
+    let decoded_object =
+        transcode_dcmnorm_object(&encoded, uids::EXPLICIT_VR_LITTLE_ENDIAN).expect("decode should succeed");
+    let decoded_bytes = decoded_object
+        .element(tags::PIXEL_DATA)
+        .unwrap()
+        .to_bytes()
+        .unwrap()
+        .to_vec();
+
+    assert_eq!(decoded_bytes.len(), original_bytes.len());
+    assert_ne!(decoded_bytes, original_bytes, "lossy JPEG2000 output should not be byte-identical");
+
+    let mean_abs_error: f64 = original_bytes
+        .chunks_exact(2)
+        .zip(decoded_bytes.chunks_exact(2))
+        .map(|(a, b)| {
+            let a = u16::from_le_bytes([a[0], a[1]]) as i32;
+            let b = u16::from_le_bytes([b[0], b[1]]) as i32;
+            (a - b).unsigned_abs() as f64
+        })
+        .sum::<f64>()
+        / (original_bytes.len() / 2) as f64;
+    assert!(
+        mean_abs_error < 50.0,
+        "lossy JPEG2000 mean absolute sample error too high: {mean_abs_error}"
+    );
+}
+
+/// `.90` (Lossless Only) must round-trip *exactly*, unlike `.91` above - this is the whole point
+/// of offering a distinct "Lossless Only" transfer syntax.
+#[test]
+fn jpeg_2000_lossless_only_round_trips_exactly() {
+    const JPEG_2000_LOSSLESS_ONLY_UID: &str = "1.2.840.10008.1.2.4.90";
+
+    let original = read_dicom_file(fixture_path("mr_small.dcm")).unwrap();
+    let original_bytes = original
+        .element(tags::PIXEL_DATA)
+        .unwrap()
+        .to_bytes()
+        .unwrap()
+        .to_vec();
+
+    let encoded = transcode_dcmnorm_object(&original, JPEG_2000_LOSSLESS_ONLY_UID)
+        .expect("encoding to JPEG2000 Lossless Only should succeed");
+    let decoded_object =
+        transcode_dcmnorm_object(&encoded, uids::EXPLICIT_VR_LITTLE_ENDIAN).expect("decode should succeed");
+    let decoded_bytes = decoded_object
+        .element(tags::PIXEL_DATA)
+        .unwrap()
+        .to_bytes()
+        .unwrap()
+        .to_vec();
+
+    assert_eq!(decoded_bytes, original_bytes);
 }
 
 #[test]

@@ -22,11 +22,12 @@ members = [
 resolver = "2"
 
 [features]
-default = ["ffmpeg-codec", "jpeg-ls-codec", "jpeg-xl-codec"]
+default = ["ffmpeg-codec", "jpeg-ls-codec", "jpeg-xl-codec", "jpeg2000-openjpeg-encode"]
 kakadu-ffi = []
 ffmpeg-codec = ["dep:ffmpeg-next"]
 jpeg-ls-codec = ["dep:charls"]
 jpeg-xl-codec = ["dep:jxl-oxide"]
+jpeg2000-openjpeg-encode = ["dep:openjpeg-sys"]
 
 [dependencies]
 base64 = "0.22"
@@ -42,6 +43,7 @@ serde_json = "1.0"
 ffmpeg-next = { version = "8.1", optional = true, default-features = false, features = ["codec", "format", "software-resampling", "software-scaling"] }
 charls = { version = "0.4.2", optional = true }
 jxl-oxide = { version = "0.10", optional = true }
+openjpeg-sys = { version = "1.0.12", optional = true, default-features = false }
 rayon = "1.10"
 flate2 = "1.0"
 uuid = { version = "1", features = ["v4"] }

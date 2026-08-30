@@ -20,6 +20,7 @@ use dcmnorm_object::{
 use dcmnorm_transcode::TransferSyntaxRegistry;
 use rayon::prelude::*;
 
+use super::jpeg2000_openjpeg;
 use super::jpeg_ls;
 use super::jpeg_xl;
 use super::kakadu;
@@ -178,6 +179,24 @@ fn is_htj2k_transfer_syntax(uid: &str) -> bool {
         "1.2.840.10008.1.2.4.201" | "1.2.840.10008.1.2.4.202" | "1.2.840.10008.1.2.4.203"
     )
 }
+
+/// Classic JPEG 2000 (Lossless Only / may-be-lossy), the only two JPEG2000-family transfer
+/// syntaxes this build can *encode* - see `encode_jpeg2000_pixel_data`'s doc comment for why
+/// Part 2 multi-component (`.92`/`.93`) and HTJ2K (`.201`-`.203`) aren't included even though
+/// they're all grouped together for *decode* by [`is_jpeg2000_transfer_syntax`].
+fn is_classic_jpeg2000_encode_transfer_syntax(uid: &str) -> bool {
+    matches!(
+        normalize_transfer_syntax_uid(uid),
+        "1.2.840.10008.1.2.4.90" | "1.2.840.10008.1.2.4.91"
+    )
+}
+
+/// DICOM doesn't mandate a specific compression ratio for `.91` (JPEG 2000 Image Compression,
+/// as opposed to `.90` Lossless Only); this picks a conservative, commonly-cited "visually
+/// lossless" target for radiology (see e.g. ACR guidance on lossy JPEG2000 for CT/MR/CR, which
+/// typically cites ratios in the 10:1-15:1 range) rather than an arbitrary value, mirroring
+/// `jpeg_ls::NEAR_LOSSLESS_STEP`'s reasoning for its own default.
+const JPEG2000_LOSSY_COMPRESSION_RATIO: f32 = 10.0;
 
 /// Determines whether the JPEG 2000 codestream for the given frame uses the
 /// Multiple Component Transformation (MCT).
@@ -947,7 +966,10 @@ fn can_encode_pixel_data<D, R, W>(
 ) -> bool {
     let uid = ts.uid();
     if is_jpeg2000_transfer_syntax(uid) {
-        return false;
+        // Only classic JPEG2000 (.90/.91) can be encoded, and only via the OpenJPEG backend -
+        // see `encode_jpeg2000_pixel_data`'s doc comment for why Kakadu and the other
+        // JPEG2000-family transfer syntaxes (.92/.93 Part 2, .201-.203 HTJ2K) aren't included.
+        return cfg!(feature = "jpeg2000-openjpeg-encode") && is_classic_jpeg2000_encode_transfer_syntax(uid);
     }
 
     matches!(ts.codec(), Codec::EncapsulatedPixelData(_, Some(_)))
@@ -957,6 +979,92 @@ fn can_encode_pixel_data<D, R, W>(
 
 fn kakadu_ffi_available_from_backend(backend: &Jpeg2000Backend) -> bool {
     matches!(backend, Jpeg2000Backend::Kakadu { .. }) && kakadu_ffi_enabled()
+}
+
+/// Encodes native pixel data to classic JPEG 2000 (`.90` Lossless Only / `.91`), one fragment
+/// per frame (PS3.5's standard encapsulation convention for JPEG-family codecs, same as
+/// `jpeg_ls::encode_jpeg_ls_pixel_data`).
+///
+/// Always uses the raw-FFI OpenJPEG backend (`jpeg2000_openjpeg::encode_jpeg2000_with_openjpeg`),
+/// never Kakadu, regardless of `jpeg2000_backend()`/`DCMNORM_JPEG2000_CODEC` (which only govern
+/// *decode* preference): a Kakadu encoder exists (`kakadu::encode_jpeg2000`) but was found to
+/// produce incorrect pixel data on the currently-licensed Kakadu v7.8 SDK - see that function's
+/// doc comment. `.92`/`.93` (Part 2 multi-component) and `.201`-`.203` (HTJ2K) aren't handled
+/// here at all: OpenJPEG has never implemented an HT encoder, and Part 2 multi-component encode
+/// was never implemented on either backend.
+fn encode_jpeg2000_pixel_data(
+    object: &DefaultDicomObject,
+    target_uid: &str,
+) -> Result<Vec<Vec<u8>>, String> {
+    let pixel_data = object
+        .element(tags::PIXEL_DATA)
+        .map_err(|e| format!("missing PixelData: {e}"))?
+        .to_bytes()
+        .map_err(|e| format!("failed to access pixel data: {e}"))?
+        .to_vec();
+
+    let rows = object
+        .get(tags::ROWS)
+        .and_then(|e| e.uint16().ok())
+        .ok_or_else(|| "missing Rows attribute".to_owned())?;
+    let cols = object
+        .get(tags::COLUMNS)
+        .and_then(|e| e.uint16().ok())
+        .ok_or_else(|| "missing Columns attribute".to_owned())?;
+    let samples_per_pixel = object.get(tags::SAMPLES_PER_PIXEL).and_then(|e| e.uint16().ok()).unwrap_or(1);
+    let bits_allocated = object
+        .get(tags::BITS_ALLOCATED)
+        .and_then(|e| e.uint16().ok())
+        .ok_or_else(|| "missing BitsAllocated attribute".to_owned())?;
+    let bits_stored = object.get(tags::BITS_STORED).and_then(|e| e.uint16().ok()).unwrap_or(bits_allocated);
+    let is_signed = object
+        .get(tags::PIXEL_REPRESENTATION)
+        .and_then(|e| e.uint16().ok())
+        .unwrap_or(0)
+        != 0;
+    let number_of_frames = object
+        .get(tags::NUMBER_OF_FRAMES)
+        .and_then(|e| e.to_str().ok())
+        .and_then(|s| s.trim().parse::<usize>().ok())
+        .unwrap_or(1)
+        .max(1);
+
+    if bits_allocated != 8 && bits_allocated != 16 {
+        return Err(format!("unsupported BitsAllocated for JPEG2000 encoding: {bits_allocated}"));
+    }
+    let bytes_per_sample = if bits_allocated <= 8 { 1usize } else { 2usize };
+    let frame_len =
+        usize::from(rows) * usize::from(cols) * usize::from(samples_per_pixel) * bytes_per_sample;
+    let expected_len = frame_len * number_of_frames;
+    if pixel_data.len() < expected_len {
+        return Err(format!(
+            "PixelData too short for {number_of_frames} frame(s) of {rows}x{cols}x{samples_per_pixel} \
+             at {bits_allocated} bits allocated: expected at least {expected_len} bytes, got {}",
+            pixel_data.len()
+        ));
+    }
+
+    let lossless = normalize_transfer_syntax_uid(target_uid) == "1.2.840.10008.1.2.4.90";
+
+    let mut fragments = Vec::with_capacity(number_of_frames);
+    for frame_index in 0..number_of_frames {
+        let start = frame_index * frame_len;
+        let frame_bytes = &pixel_data[start..start + frame_len];
+        let encoded = jpeg2000_openjpeg::encode_jpeg2000_with_openjpeg(
+            frame_bytes,
+            u32::from(rows),
+            u32::from(cols),
+            u32::from(samples_per_pixel),
+            u32::from(bits_stored),
+            is_signed,
+            lossless,
+            JPEG2000_LOSSY_COMPRESSION_RATIO,
+        )
+        .map_err(|e| format!("JPEG2000 encode failed for frame {frame_index}: {e}"))?;
+        fragments.push(encoded);
+    }
+
+    Ok(fragments)
 }
 
 fn decode_jpeg2000_with_kakadu(object: &DefaultDicomObject) -> Result<Vec<u8>, String> {
@@ -1358,11 +1466,27 @@ fn encode_pixel_data(
     target_ts: &dcmnorm_encoding::TransferSyntax,
 ) -> Result<(), TranscodeError> {
     let _scope = perf::scope("transcode.encode_pixel_data");
-    if is_jpeg2000_transfer_syntax(target_ts.uid()) {
+    if is_classic_jpeg2000_encode_transfer_syntax(target_ts.uid()) {
+        match encode_jpeg2000_pixel_data(object, target_ts.uid()) {
+            Ok(fragments) => {
+                replace_with_encapsulated_pixel_data(object, vec![0], fragments);
+                return Ok(());
+            }
+            Err(error) => {
+                return Err(TranscodeError::EncodePixelData {
+                    uid: target_ts.uid().to_owned(),
+                    name: target_ts.name().to_owned(),
+                    message: error,
+                });
+            }
+        }
+    } else if is_jpeg2000_transfer_syntax(target_ts.uid()) {
         return Err(TranscodeError::UnsupportedTargetTransferSyntax {
             uid: target_ts.uid().to_owned(),
             name: target_ts.name().to_owned(),
-            reason: "JPEG2000 encoding is disabled in this build".to_owned(),
+            reason: "JPEG2000 Part 2 multi-component and HTJ2K encoding are not supported in \
+                     this build (only classic JPEG2000 .90/.91)"
+                .to_owned(),
         });
     }
 

@@ -5,6 +5,7 @@ mod filter;
 mod flat_json;
 mod histogram;
 mod io;
+mod jpeg2000_openjpeg;
 mod jpeg_ls;
 mod jpeg_xl;
 mod json;
