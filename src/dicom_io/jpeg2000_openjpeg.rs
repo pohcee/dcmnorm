@@ -27,7 +27,7 @@ mod imp {
         user_data: *mut c_void,
     ) -> sys::OPJ_SIZE_T {
         let target = unsafe { &mut *(user_data as *mut MemoryTarget) };
-        let n = num_bytes as usize;
+        let n = num_bytes;
         let src = unsafe { std::slice::from_raw_parts(buffer as *const u8, n) };
         let end = target.pos + n;
         if end > target.buffer.len() {
@@ -107,6 +107,7 @@ mod imp {
     /// lossless, not merely "high quality". `lossless=false` switches to the irreversible 9/7
     /// wavelet and targets `lossy_compression_ratio` (e.g. `10.0` for 10:1), OpenJPEG's own
     /// convention for `tcp_rates` (original-size-to-compressed-size ratio, not a byte count).
+    #[allow(clippy::too_many_arguments)]
     pub fn encode(
         pixel_data: &[u8],
         rows: u32,
