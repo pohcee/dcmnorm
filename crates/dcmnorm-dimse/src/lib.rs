@@ -36,5 +36,8 @@ pub mod association {
     }
 }
 
-pub(crate) const IMPLEMENTATION_CLASS_UID: &str = "2.25.1.dcmnorm.dimse";
+/// UUID-derived UID (PS3.5 Annex B: `2.25.<uuid-as-decimal>`), generated once and fixed forever -
+/// a UID may contain only digits and `.` (PS3.5 6.2), so this can't be a readable "dcmnorm.dimse"
+/// path the way a private enterprise OID root would allow.
+pub(crate) const IMPLEMENTATION_CLASS_UID: &str = "2.25.85489574556154108852299337638623109106";
 pub(crate) const IMPLEMENTATION_VERSION_NAME: &str = concat!("DCMNORM_", env!("CARGO_PKG_VERSION"));

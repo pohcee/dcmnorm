@@ -17,6 +17,8 @@ pub use meta::{FileMetaTable, FileMetaTableBuilder};
 
 /// Fallback implementation class UID used when a [`FileMetaTableBuilder`] doesn't specify one -
 /// matches dicom-object's own convention of stamping an implementation identity into files this
-/// process writes.
-pub const IMPLEMENTATION_CLASS_UID: &str = "2.25.1.dcmnorm";
+/// process writes. UUID-derived (PS3.5 Annex B: `2.25.<uuid-as-decimal>`), generated once and
+/// fixed forever - a UID may contain only digits and `.` (PS3.5 6.2), so this can't be a
+/// readable "dcmnorm" path the way a private enterprise OID root would allow.
+pub const IMPLEMENTATION_CLASS_UID: &str = "2.25.118267540888616781180626367073156920815";
 pub const IMPLEMENTATION_VERSION_NAME: &str = concat!("DCMNORM_", env!("CARGO_PKG_VERSION"));
