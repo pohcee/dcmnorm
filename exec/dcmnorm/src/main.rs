@@ -3065,6 +3065,11 @@ mod tests {
             mpr_projection: None,
             texture_max_dim: None,
             texture_compression: None,
+            histogram: false,
+            histogram_bins: 256,
+            histogram_frame: None,
+            histogram_min: None,
+            histogram_max: None,
         }
     }
 
