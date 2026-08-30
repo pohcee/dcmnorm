@@ -937,8 +937,17 @@ fn render_grayscale_frame(
     }
 
     let mut rendered = if options.apply_voi_lut {
-        let (center, width) = resolve_window(object, options)?;
-        apply_voi_window(&values, center, width)
+        // An explicit user override (--window-center/--window-width) wins over an embedded VOI
+        // LUT Sequence, same as it already wins over the object's own WindowCenter/WindowWidth
+        // in resolve_window - a caller who deliberately overrides display windowing means it for
+        // whichever VOI mechanism the file happens to use.
+        match (options.window_center, read_lut_from_sequence(object, tags::VOILUT_SEQUENCE)) {
+            (None, Some(lut)) => apply_voi_lut(&values, &lut),
+            _ => {
+                let (center, width) = resolve_window(object, options)?;
+                apply_voi_window(&values, center, width)
+            }
+        }
     } else {
         normalize_to_u8(&values)
     };
@@ -1694,7 +1703,85 @@ fn functional_group_numeric_value(
         .or_else(|| lookup(tags::SHARED_FUNCTIONAL_GROUPS_SEQUENCE, 0))
 }
 
+/// A parsed Modality/VOI LUT Sequence item's descriptor + data (PS3.3 C.11.1.1.2 / C.11.2.1.2).
+/// Only the sequence's first item is used - `dcmnorm` doesn't expose a way to pick among
+/// multiple VOI LUT items the way `LUTExplanation`-driven UI pickers do, so the first one (the
+/// object's own default) is what renders.
+struct Lut {
+    entries: usize,
+    first_input_value: i32,
+    bits_per_entry: u16,
+    /// One raw output sample per entry. Per PS3.3, LUT Data for Modality/VOI LUT (unlike Palette
+    /// Color LUT Data, which has a legacy 8-bit-packed form) is always 16-bit words (US/SS/OW),
+    /// regardless of `bits_per_entry`.
+    values: Vec<u16>,
+}
+
+impl Lut {
+    /// Map one input sample through the LUT, per PS3.3 C.11.1.1.2 / C.11.2.1.2: values at or
+    /// below the descriptor's first input value clamp to the first entry, values at or above the
+    /// range clamp to the last entry.
+    fn lookup(&self, input: f64) -> u16 {
+        if self.entries == 0 {
+            return 0;
+        }
+        let offset = input.round() as i64 - i64::from(self.first_input_value);
+        let index = offset.clamp(0, self.entries as i64 - 1) as usize;
+        self.values[index]
+    }
+
+    /// The largest value an entry can hold, per `bits_per_entry` - used to scale LUT output down
+    /// to the 8-bit range `dcmnorm` renders to.
+    fn max_output(&self) -> f64 {
+        ((1u32 << u32::from(self.bits_per_entry.clamp(1, 16))) - 1).max(1) as f64
+    }
+}
+
+/// Read the first item of a Modality/VOI LUT Sequence at `sequence_tag`, if present and
+/// well-formed. `None` (not an error) covers every reason it isn't usable - absent, empty,
+/// missing descriptor/data, or a malformed descriptor - so callers can fall straight through to
+/// their existing Rescale Slope/Intercept or Window Center/Width handling exactly as if the
+/// sequence had never been there.
+fn read_lut_from_sequence(object: &DefaultDicomObject, sequence_tag: Tag) -> Option<Lut> {
+    let element = object.get(sequence_tag)?;
+    let Value::Sequence(sequence) = element.value() else { return None };
+    let item = sequence.items().first()?;
+
+    let descriptor = item.get(tags::LUT_DESCRIPTOR)?.value().to_multi_int::<i32>().ok()?;
+    if descriptor.len() < 3 {
+        return None;
+    }
+    let entries = if descriptor[0] == 0 { 65_536usize } else { descriptor[0].max(0) as usize };
+    let first_input_value = descriptor[1];
+    let bits_per_entry = descriptor[2].clamp(1, 16) as u16;
+    if entries == 0 {
+        return None;
+    }
+
+    let bytes = item.get(tags::LUT_DATA)?.value().to_bytes().ok()?;
+    if bytes.len() < entries * 2 {
+        return None;
+    }
+    let values: Vec<u16> = bytes[..entries * 2]
+        .chunks_exact(2)
+        .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+        .collect();
+
+    Some(Lut { entries, first_input_value, bits_per_entry, values })
+}
+
 fn apply_modality_lut(object: &DefaultDicomObject, frame_index: usize, values: &mut [f64]) {
+    // Modality LUT Sequence takes precedence over Rescale Slope/Intercept when present - PS3.3
+    // C.11.1 requires a conformant file to carry only one of the two, but a real-world file that
+    // (non-conformantly) has both should still prefer the LUT, which is the more specific/
+    // authoritative of the two mechanisms.
+    if let Some(lut) = read_lut_from_sequence(object, tags::MODALITY_LUT_SEQUENCE) {
+        for value in values.iter_mut() {
+            *value = f64::from(lut.lookup(*value));
+        }
+        return;
+    }
+
     let slope = object
         .get(tags::RESCALE_SLOPE)
         .and_then(|element| first_numeric_value(element.to_str().ok().as_deref()))
@@ -1814,6 +1901,16 @@ pub(crate) fn resolve_default_window(object: &DefaultDicomObject, frame_index: u
     }
 
     (center, width)
+}
+
+/// Map already-modality-transformed values through a VOI LUT Sequence item, scaling its
+/// (typically >8-bit) output down to the 8-bit range `dcmnorm` renders to.
+fn apply_voi_lut(values: &[f64], lut: &Lut) -> Vec<u8> {
+    let max_output = lut.max_output();
+    values
+        .iter()
+        .map(|&value| ((f64::from(lut.lookup(value)) / max_output) * 255.0).clamp(0.0, 255.0) as u8)
+        .collect()
 }
 
 // pub(crate): also used by dicom_io::volume to window a reformatted plane's interpolated values.
@@ -2249,8 +2346,10 @@ fn decode_overlay_data_bits(
 #[cfg(test)]
 mod tests {
     use super::{
-        clamped_box, mpeg4_input_pixel_format, mpeg4_muxer_name, mpeg4_video_filter,
-        normalize_decoded_render_attributes, ybr_rct_to_rgb, ybr_to_rgb, BoundingBox, BoxLength,
+        apply_modality_lut, apply_voi_lut, clamped_box, mpeg4_input_pixel_format,
+        mpeg4_muxer_name, mpeg4_video_filter, normalize_decoded_render_attributes,
+        read_lut_from_sequence, render_dicom_frame, ybr_rct_to_rgb, ybr_to_rgb, BoundingBox,
+        BoxLength, Lut, RenderFrameOutput, RenderOutputFormat, RenderPipelineOptions,
     };
     use crate::dicom_io::read_dicom_file;
     use dcmnorm_core::{DataElement, PrimitiveValue, VR};
@@ -2445,6 +2544,245 @@ mod tests {
 
         let error = mpeg4_input_pixel_format(2).unwrap_err().to_string();
         assert!(error.contains("unsupported rendered movie samples-per-pixel value"));
+    }
+
+    fn fixture(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test").join("files").join(name)
+    }
+
+    fn render_raw(name: &str) -> RenderFrameOutput {
+        let object = read_dicom_file(fixture(name)).expect("fixture should be readable");
+        render_dicom_frame(&object, RenderOutputFormat::Raw, &RenderPipelineOptions::default())
+            .expect("fixture should render")
+    }
+
+    /// A deliberately non-linear, non-identity LUT (unlike both real fixtures below, whose
+    /// embedded LUTs happen to be exact linear identity transforms - see
+    /// `voi_lut_sequence_png_output_matches_the_source_bytes_exactly`'s doc comment) so this
+    /// test can't coincidentally pass against a broken lookup/scaling implementation.
+    fn synthetic_lut() -> Lut {
+        Lut { entries: 4, first_input_value: 10, bits_per_entry: 8, values: vec![5, 200, 100, 250] }
+    }
+
+    #[test]
+    fn lut_lookup_indexes_by_first_input_value_and_clamps_out_of_range_inputs() {
+        let lut = synthetic_lut();
+        assert_eq!(lut.lookup(10.0), 5);
+        assert_eq!(lut.lookup(11.0), 200);
+        assert_eq!(lut.lookup(12.0), 100);
+        assert_eq!(lut.lookup(13.0), 250);
+        // below the descriptor's range: clamps to the first entry
+        assert_eq!(lut.lookup(9.0), 5);
+        assert_eq!(lut.lookup(-1000.0), 5);
+        // above the descriptor's range: clamps to the last entry
+        assert_eq!(lut.lookup(14.0), 250);
+        assert_eq!(lut.lookup(1000.0), 250);
+    }
+
+    #[test]
+    fn apply_voi_lut_scales_output_by_bits_per_entry() {
+        let lut = synthetic_lut(); // bits_per_entry: 8, so max_output is exactly 255 - a no-op scale
+        assert_eq!(apply_voi_lut(&[10.0, 11.0, 9.0, 14.0], &lut), vec![5, 200, 5, 250]);
+    }
+
+    #[test]
+    fn apply_voi_lut_scales_a_wider_output_range_down_to_eight_bits() {
+        let lut = Lut { entries: 2, first_input_value: 0, bits_per_entry: 16, values: vec![0, 65535] };
+        // bits_per_entry: 16, so a full-scale 16-bit output must come back scaled to 0/255.
+        assert_eq!(apply_voi_lut(&[0.0, 1.0], &lut), vec![0, 255]);
+    }
+
+    /// Real end-to-end proof the VOI LUT Sequence path actually runs against a real file (not
+    /// just the synthetic `Lut` math above): this fixture's embedded LUT happens to be an exact
+    /// linear identity - `LUT[i] = i * 257`, and `257 * 255 == 65535` exactly, so scaling that
+    /// back down to 8 bits recovers the original sample unchanged. The source data is already
+    /// 8-bit MONOCHROME2, so a correct VOI LUT application reproduces the PNG's decoded pixel
+    /// bytes exactly equal to the object's own raw stored bytes.
+    #[test]
+    fn voi_lut_sequence_png_output_matches_the_source_bytes_exactly() {
+        let object =
+            read_dicom_file(fixture("voi_lut_sequence.dcm")).expect("fixture should be readable");
+        let options = RenderPipelineOptions::default();
+        let raw = render_dicom_frame(&object, RenderOutputFormat::Raw, &options)
+            .expect("fixture should render raw");
+        let png = render_dicom_frame(&object, RenderOutputFormat::Png, &options)
+            .expect("fixture should render png");
+        let decoded = image::load_from_memory(&png.bytes).expect("valid PNG").to_luma8();
+        assert_eq!(decoded.as_raw(), &raw.bytes);
+    }
+
+    /// Same idea as the VOI LUT test above, but calls `apply_modality_lut` directly with
+    /// synthetic input values against the real embedded LUT, which avoids the ambiguity of going
+    /// through PNG rendering's own downstream auto-windowing (a second linear rescale on top of
+    /// a near-linear LUT can coincidentally produce the same final bytes regardless of whether
+    /// the first one even ran - seen firsthand with this exact fixture during development).
+    /// Expected values are this fixture's own real, observed `LUTData` entries (not a formula -
+    /// the LUT is close to but not exactly `i * 16`; it clips at the top of the 16-bit range),
+    /// read directly from its JSON dump rather than assumed.
+    #[test]
+    fn modality_lut_sequence_maps_real_embedded_lut_values_precisely() {
+        let object = read_dicom_file(fixture("modality_lut_sequence.dcm"))
+            .expect("fixture should be readable");
+        let lut = read_lut_from_sequence(&object, tags::MODALITY_LUT_SEQUENCE)
+            .expect("fixture should have a Modality LUT Sequence");
+        assert_eq!((lut.entries, lut.first_input_value, lut.bits_per_entry), (4096, -2048, 16));
+        assert_eq!(lut.values[0], 0);
+        assert_eq!(lut.values[2048], 32776);
+        assert_eq!(lut.values[4095], 65535);
+
+        let mut values = vec![-2048.0, 0.0, 2047.0, -3000.0, 3000.0];
+        apply_modality_lut(&object, 0, &mut values);
+        assert_eq!(values, vec![0.0, 32776.0, 65535.0, 0.0, 65535.0]);
+    }
+
+    #[test]
+    fn renders_jpeg2000_lossless_frame() {
+        let out = render_raw("mr_jpeg2000_lossless.dcm");
+        assert_eq!((out.width, out.height, out.samples_per_pixel), (64, 64, 1));
+    }
+
+    /// Real 12-bit JPEG Extended (Process 2 & 4) file - `dcmnorm-jpeg`'s fast/SIMD 8-bit IDCT
+    /// path (used by JPEG Baseline etc.) can't handle any precision but 8, so this exercises the
+    /// dedicated `HighPrecisionWorker` path added for exactly this case. No uncompressed sibling
+    /// of this particular file is available to compare byte-for-byte (unlike the JPEG-LS
+    /// lossless test above), so this instead pins the decoded value range: real, non-garbage
+    /// 12-bit nuclear medicine pixel data (this file's own actual Modality), not saturated at
+    /// the clamp boundary and not all-zero - either of those would indicate a level-shift or
+    /// clamping bug in the precision generalization instead of a correct decode.
+    #[test]
+    fn renders_real_12_bit_jpeg_extended_frame_with_plausible_values() {
+        let out = render_raw("jpeg_extended_12bit.dcm");
+        assert_eq!((out.width, out.height, out.samples_per_pixel), (256, 1024, 1));
+
+        let values: Vec<u16> =
+            out.bytes.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+        let max_value = *values.iter().max().unwrap();
+        assert!(max_value > 0, "decoded frame should not be all-zero");
+        assert!(
+            max_value < 4095,
+            "decoded max {max_value} is saturated at the 12-bit clamp boundary - suggests a \
+             level-shift/clamping bug rather than real image content"
+        );
+    }
+
+    /// JPEG-LS is lossless here, so a correct decode reproduces the same MR_small reference
+    /// image's pixels exactly - compares against `mr_small.dcm` (the uncompressed encoding of
+    /// the same underlying image) rather than hardcoded pixel values, which also transitively
+    /// exercises `jpeg_ls.rs`'s real charls FFI decode path end to end.
+    #[test]
+    fn renders_jpegls_lossless_frame_byte_identical_to_the_uncompressed_reference() {
+        let reference = render_raw("mr_small.dcm");
+        let out = render_raw("mr_jpegls_lossless.dcm");
+        assert_eq!((out.width, out.height, out.samples_per_pixel), (64, 64, 1));
+        assert_eq!(out.bytes, reference.bytes);
+    }
+
+    #[test]
+    fn renders_rle_lossless_frame() {
+        let out = render_raw("mr_rle.dcm");
+        assert_eq!((out.width, out.height, out.samples_per_pixel), (64, 64, 1));
+    }
+
+    /// Pins dcmnorm's own in-house JPEG decoder against the exact pixel values upstream
+    /// `dicom-rs` verified its own JPEG adapter against (see `dicom-transfer-syntax-registry`'s
+    /// excluded `tests/jpeg.rs`) - same reference fixture, same four sample coordinates, no
+    /// tolerance needed since JPEG Lossless is, as the name says, lossless.
+    #[test]
+    fn renders_jpeg_lossless_with_known_pixel_values() {
+        let out = render_raw("sc_jpeg_lossless.dcm");
+        assert_eq!((out.width, out.height, out.samples_per_pixel), (100, 100, 3));
+
+        let px = |x: usize, y: usize| {
+            let i = (y * out.width as usize + x) * 3;
+            (out.bytes[i], out.bytes[i + 1], out.bytes[i + 2])
+        };
+        assert_eq!(px(0, 0), (255, 0, 0));
+        assert_eq!(px(50, 50), (128, 128, 255));
+        assert_eq!(px(75, 75), (64, 64, 64));
+        assert_eq!(px(16, 49), (0, 0, 255));
+    }
+
+    /// Same reference fixture/coordinates as `renders_jpeg_lossless_with_known_pixel_values`,
+    /// but JPEG Baseline is lossy - matches upstream's own error margin for this exact case.
+    #[test]
+    fn renders_jpeg_baseline_with_known_pixel_values() {
+        let out = render_raw("sc_jpeg_baseline.dcm");
+        assert_eq!((out.width, out.height, out.samples_per_pixel), (100, 100, 3));
+
+        let margin = 7u8;
+        let px = |x: usize, y: usize| {
+            let i = (y * out.width as usize + x) * 3;
+            (out.bytes[i], out.bytes[i + 1], out.bytes[i + 2])
+        };
+        let close = |got: (u8, u8, u8), want: (u8, u8, u8)| {
+            got.0.abs_diff(want.0) <= margin
+                && got.1.abs_diff(want.1) <= margin
+                && got.2.abs_diff(want.2) <= margin
+        };
+        assert!(close(px(0, 0), (254, 0, 0)));
+        assert!(close(px(50, 50), (124, 124, 255)));
+        assert!(close(px(75, 75), (64, 64, 64)));
+        assert!(close(px(16, 49), (4, 4, 226)));
+    }
+
+    /// A truncated/malformed JPEG2000 codestream must fail cleanly, not panic or hang - the same
+    /// robustness bar this codebase already holds its in-house JPEG decoder to (see the restart-
+    /// marker regression test in dcmnorm-jpeg). The truncation here cuts into the encapsulated
+    /// PixelData sequence's own item structure, not just the codestream bytes within an already-
+    /// parsed fragment, so the clean error can surface either while reading the data set or
+    /// while decoding the frame - either is an acceptable place for it, as long as it's an error
+    /// and not a panic.
+    #[test]
+    fn truncated_jpeg2000_codestream_is_a_clean_error_not_a_panic() {
+        let result: Result<(), String> = (|| {
+            let object =
+                read_dicom_file(fixture("jpeg2000_truncated.dcm")).map_err(|e| e.to_string())?;
+            render_dicom_frame(&object, RenderOutputFormat::Raw, &RenderPipelineOptions::default())
+                .map_err(|e| e.to_string())?;
+            Ok(())
+        })();
+        assert!(result.is_err(), "expected a clean error, got {result:?}");
+    }
+
+    /// Six real files from DCMTK's own JPEG encoder, covering distinct YBR chroma-subsampling
+    /// and color-range variants (`+cr`, `+cy+n1/n2/np/s2/s4`) - exactly the kind of "different
+    /// real-world encoder wrote a slightly different bitstream" case that catches decoder bugs a
+    /// synthetic fixture wouldn't.
+    #[test]
+    fn renders_dcmtk_jpeg_ybr_chroma_subsampling_variants() {
+        for name in [
+            "sc_jpeg_dcmtk_cr.dcm",
+            "sc_jpeg_dcmtk_ybr_n1.dcm",
+            "sc_jpeg_dcmtk_ybr_n2.dcm",
+            "sc_jpeg_dcmtk_ybr_np.dcm",
+            "sc_jpeg_dcmtk_ybr_s2.dcm",
+            "sc_jpeg_dcmtk_ybr_s4.dcm",
+        ] {
+            let out = render_raw(name);
+            assert_eq!(
+                (out.width, out.height, out.samples_per_pixel),
+                (100, 100, 3),
+                "{name} decoded to unexpected dimensions"
+            );
+        }
+    }
+
+    /// `PlanarConfiguration` (0 = interleaved, 1 = planar) must not change the rendered image -
+    /// these two fixtures are the same real instance (same SOPInstanceUID/SeriesDescription),
+    /// re-encoded with each layout. Note this specifically exercises PNG output: `Raw` output
+    /// deliberately preserves the source's native storage layout (see `get_frame_bytes`), so
+    /// only the actually-normalizing encode paths (PNG/JPEG) can be expected to agree here.
+    #[test]
+    fn planar_and_interleaved_rgb_render_to_identical_png_bytes() {
+        let planar = read_dicom_file(fixture("rgb_planar.dcm")).expect("fixture should be readable");
+        let interleaved =
+            read_dicom_file(fixture("rgb_interleaved.dcm")).expect("fixture should be readable");
+        let options = RenderPipelineOptions::default();
+        let out_planar = render_dicom_frame(&planar, RenderOutputFormat::Png, &options)
+            .expect("planar fixture should render");
+        let out_interleaved = render_dicom_frame(&interleaved, RenderOutputFormat::Png, &options)
+            .expect("interleaved fixture should render");
+        assert_eq!(out_planar.bytes, out_interleaved.bytes);
     }
 }
 
