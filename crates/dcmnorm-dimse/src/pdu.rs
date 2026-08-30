@@ -722,3 +722,177 @@ fn write_user_variables(out: &mut Vec<u8>, vars: &[UserVariableItem], codec: &dy
         }
     });
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `write_pdu` emits the 6-byte header (type, reserved, u32 body-length) itself; strip it back
+    /// off and hand the body to `parse_pdu_body`, exactly as `conn.rs` does against a real socket.
+    fn roundtrip(pdu: &Pdu) -> Pdu {
+        let mut bytes = Vec::new();
+        write_pdu(&mut bytes, pdu).expect("write_pdu should not fail for an in-memory buffer");
+        let pdu_type = bytes[0];
+        let body = &bytes[PDU_HEADER_SIZE as usize..];
+        parse_pdu_body(pdu_type, body).expect("parse_pdu_body should read back what write_pdu wrote")
+    }
+
+    #[test]
+    fn association_rq_roundtrips_presentation_contexts_and_user_variables() {
+        let rq = AssociationRQ {
+            protocol_version: 1,
+            calling_ae_title: "CALLING_AE".to_owned(),
+            called_ae_title: "CALLED_AE".to_owned(),
+            application_context_name: "1.2.840.10008.3.1.1.1".to_owned(),
+            presentation_contexts: vec![
+                PresentationContextProposed {
+                    id: 1,
+                    abstract_syntax: "1.2.840.10008.1.1".to_owned(),
+                    transfer_syntaxes: vec![
+                        "1.2.840.10008.1.2".to_owned(),
+                        "1.2.840.10008.1.2.1".to_owned(),
+                    ],
+                },
+                PresentationContextProposed {
+                    id: 3,
+                    abstract_syntax: "1.2.840.10008.5.1.4.1.1.1.2".to_owned(),
+                    transfer_syntaxes: vec!["1.2.840.10008.1.2.4.50".to_owned()],
+                },
+            ],
+            user_variables: vec![
+                UserVariableItem::MaxLength(16_384),
+                UserVariableItem::ImplementationClassUID("1.2.3.4.5.6.7".to_owned()),
+                UserVariableItem::ImplementationVersionName("DCMNORM_1_0".to_owned()),
+                // An unmodeled sub-item (e.g. what upstream calls SopClassExtendedNegotiation)
+                // must still round-trip as opaque bytes rather than desyncing the rest of the PDU.
+                UserVariableItem::Other(0x56, vec![1, 2, 3, 4, 5]),
+            ],
+        };
+
+        let Pdu::AssociationRQ(got) = roundtrip(&Pdu::AssociationRQ(rq.clone())) else {
+            panic!("expected AssociationRQ back");
+        };
+        assert_eq!(got, rq);
+    }
+
+    #[test]
+    fn association_ac_roundtrips_every_presentation_context_result_reason() {
+        let ac = AssociationAC {
+            protocol_version: 1,
+            calling_ae_title: "CALLING_AE".to_owned(),
+            called_ae_title: "CALLED_AE".to_owned(),
+            application_context_name: "1.2.840.10008.3.1.1.1".to_owned(),
+            presentation_contexts: vec![
+                PresentationContextResult {
+                    id: 1,
+                    reason: PresentationContextResultReason::Acceptance,
+                    transfer_syntax: "1.2.840.10008.1.2".to_owned(),
+                },
+                PresentationContextResult {
+                    id: 3,
+                    reason: PresentationContextResultReason::AbstractSyntaxNotSupported,
+                    transfer_syntax: String::new(),
+                },
+                PresentationContextResult {
+                    id: 5,
+                    reason: PresentationContextResultReason::TransferSyntaxesNotSupported,
+                    transfer_syntax: String::new(),
+                },
+                PresentationContextResult {
+                    id: 7,
+                    reason: PresentationContextResultReason::UserRejection,
+                    transfer_syntax: String::new(),
+                },
+                PresentationContextResult {
+                    id: 9,
+                    reason: PresentationContextResultReason::NoReason,
+                    transfer_syntax: String::new(),
+                },
+            ],
+            user_variables: vec![UserVariableItem::MaxLength(16_384)],
+        };
+
+        let Pdu::AssociationAC(got) = roundtrip(&Pdu::AssociationAC(ac.clone())) else {
+            panic!("expected AssociationAC back");
+        };
+        assert_eq!(got, ac);
+    }
+
+    #[test]
+    fn association_rj_roundtrips_result_and_raw_source_reason_codes() {
+        let rj = AssociationRJ { result: AssociationRJResult::Permanent, source: 1, reason: 2 };
+        let Pdu::AssociationRJ(got) = roundtrip(&Pdu::AssociationRJ(rj.clone())) else {
+            panic!("expected AssociationRJ back");
+        };
+        assert_eq!(got, rj);
+
+        let rj = AssociationRJ { result: AssociationRJResult::Transient, source: 2, reason: 4 };
+        let Pdu::AssociationRJ(got) = roundtrip(&Pdu::AssociationRJ(rj.clone())) else {
+            panic!("expected AssociationRJ back");
+        };
+        assert_eq!(got, rj);
+    }
+
+    #[test]
+    fn pdata_roundtrips_multiple_command_and_data_pdvs_with_is_last() {
+        let pdu = Pdu::PData {
+            data: vec![
+                PDataValue {
+                    presentation_context_id: 1,
+                    value_type: PDataValueType::Command,
+                    is_last: true,
+                    data: vec![0xde, 0xad, 0xbe, 0xef],
+                },
+                PDataValue {
+                    presentation_context_id: 1,
+                    value_type: PDataValueType::Data,
+                    is_last: false,
+                    data: vec![0; 512],
+                },
+                PDataValue {
+                    presentation_context_id: 1,
+                    value_type: PDataValueType::Data,
+                    is_last: true,
+                    data: vec![1, 2, 3],
+                },
+            ],
+        };
+
+        let Pdu::PData { data: got } = roundtrip(&pdu) else {
+            panic!("expected PData back");
+        };
+        let Pdu::PData { data: want } = pdu else { unreachable!() };
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn release_rq_and_rp_roundtrip() {
+        assert!(matches!(roundtrip(&Pdu::ReleaseRQ), Pdu::ReleaseRQ));
+        assert!(matches!(roundtrip(&Pdu::ReleaseRP), Pdu::ReleaseRP));
+    }
+
+    #[test]
+    fn abort_rq_roundtrips_every_predefined_source() {
+        for source in [
+            AbortRQSource::SERVICE_USER,
+            AbortRQSource::SERVICE_PROVIDER,
+            AbortRQSource::UNEXPECTED_PDU,
+            AbortRQSource::UNRECOGNIZED_PDU,
+        ] {
+            let Pdu::AbortRQ { source: got } = roundtrip(&Pdu::AbortRQ { source }) else {
+                panic!("expected AbortRQ back");
+            };
+            assert_eq!(got, source);
+        }
+    }
+
+    #[test]
+    fn unknown_pdu_type_passes_its_raw_body_through_unmodified() {
+        let pdu = Pdu::Unknown { pdu_type: 0x99, data: vec![1, 2, 3, 4, 5] };
+        let Pdu::Unknown { pdu_type, data } = roundtrip(&pdu) else {
+            panic!("expected Unknown back");
+        };
+        assert_eq!(pdu_type, 0x99);
+        assert_eq!(data, vec![1, 2, 3, 4, 5]);
+    }
+}
