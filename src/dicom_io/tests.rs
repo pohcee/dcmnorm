@@ -18,6 +18,49 @@ fn writes_flat_json_with_source_uri_mode_for_pixeldata_bulkdatauri() {
         uri
     );
 }
+/// Regression test for a real customer file: Deflated Explicit VR Little Endian
+/// (`1.2.840.10008.1.2.1.99`) was listed in `transfer_syntax_from_uid` as "just Explicit VR LE"
+/// for bulk-data-offset scanning purposes, but the dataset bytes after the (never-deflated) file
+/// meta group are compressed - `locate_element_value` was scanning raw deflate bytes as if they
+/// were plain DICOM element headers. This never produced a *wrong* BulkDataURI (the byte
+/// comparison in `value_matches` essentially never coincidentally matches compressed data), so
+/// it silently degraded to InlineBinary for every bulk element in every deflated file - a
+/// correct but confusingly silent fallback, and one that wastefully "scanned" obviously-bogus
+/// pseudo-headers first. `transfer_syntax_from_uid` now deliberately errors on the deflated UID,
+/// which makes the fallback immediate and self-documented instead of accidental. There is no
+/// file-byte-offset that could ever validly address into decompressed content, so InlineBinary
+/// is correct here, not just a workaround - see that function's doc comment for the full
+/// reasoning.
+#[test]
+fn deflated_transfer_syntax_falls_back_to_inline_binary_for_bulk_data() {
+    let source = fixture_bytes(fixture_path("deflated.dcm"));
+    let object = read_dicom_bytes(&source).unwrap();
+    assert_eq!(
+        object.meta().transfer_syntax().trim_end_matches('\0'),
+        "1.2.840.10008.1.2.1.99"
+    );
+
+    let json = write_dicom_json_with_source(&object, &source).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let pixel = &value["PixelData"];
+    assert!(
+        pixel.get("BulkDataURI").is_none(),
+        "a deflated dataset has no valid file-byte-offset for BulkDataURI"
+    );
+    let inline = pixel["InlineBinary"].as_str().expect("PixelData should fall back to InlineBinary");
+
+    use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+    use base64::Engine as _;
+    let decoded = BASE64_STANDARD.decode(inline).unwrap();
+    let expected = object
+        .element(dcmnorm_dictionary::tags::PIXEL_DATA)
+        .unwrap()
+        .to_bytes()
+        .unwrap()
+        .to_vec();
+    assert_eq!(decoded, expected, "InlineBinary must still carry the real pixel data, not garbage");
+}
+
 #[test]
 fn writes_flat_json_with_source_uri_mode_for_large_meta_without_part10_header() {
     let source = fixture_bytes(repo_root_path("nometa.dcm"));

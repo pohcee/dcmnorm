@@ -829,6 +829,16 @@ fn decode_dicom_text(bytes: &[u8]) -> String {
         .to_owned()
 }
 
+/// Deliberately does NOT include Deflated Explicit VR Little Endian
+/// (`1.2.840.10008.1.2.1.99`, `uids::DEFLATED_EXPLICIT_VR_LITTLE_ENDIAN`): this file's whole
+/// scanning approach walks `source` as literal DICOM element bytes at fixed offsets, but for a
+/// deflated dataset those bytes (everything after the never-deflated file meta group) are
+/// compressed - there is no file-byte-offset that identifies a decompressed element's value, so
+/// `BulkDataURI`'s `?offset=..&length=..` addressing is fundamentally inapplicable here, not
+/// just unimplemented. Falling through to the `Err` arm below is intentional: it makes
+/// `locate_element_value` fail once per file (setting `bulk_scan_failed`, see
+/// `bulk_representation`), after which every bulk element in the file inlines cheaply instead of
+/// each independently scanning obviously-compressed bytes as if they were plain element headers.
 fn transfer_syntax_from_uid(uid: &str) -> Result<TransferSyntaxInfo, DicomJsonError> {
     match uid {
         uids::IMPLICIT_VR_LITTLE_ENDIAN => Ok(TransferSyntaxInfo {
@@ -836,7 +846,6 @@ fn transfer_syntax_from_uid(uid: &str) -> Result<TransferSyntaxInfo, DicomJsonEr
             little_endian: true,
         }),
         uids::EXPLICIT_VR_LITTLE_ENDIAN
-        | "1.2.840.10008.1.2.1.99"
         | "1.2.840.10008.1.2.4.90"
         | "1.2.840.10008.1.2.4.91"
         | "1.2.840.10008.1.2.5" => Ok(TransferSyntaxInfo {
