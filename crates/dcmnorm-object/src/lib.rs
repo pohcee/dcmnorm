@@ -1,4 +1,4 @@
-//! This project's own DICOM in-memory object model and Part 10 file I/O, replacing `dicom-object`
+//! dcmnorm's own DICOM in-memory object model and Part 10 file I/O, replacing `dicom-object`
 //! (+ `dicom-parser`'s tree-building layer). See README.md for the design rationale.
 
 mod error;

@@ -1,6 +1,6 @@
 # dcmnorm-dictionary
 
-This project's own fork of the standard DICOM data dictionary (`tags::*`,
+dcmnorm's own fork of the standard DICOM data dictionary (`tags::*`,
 `uids::*`, `StandardDataDictionary`/`.parse_tag()`/`.by_tag()`) that
 `dcmnorm` and `dcmnorm-core` build on.
 
@@ -17,5 +17,5 @@ Originally kept the package/lib name `dicom-dictionary-std`/
 `dicom_dictionary_std` (patched in via `[patch.crates-io]`) because
 `dicom-object`/`dicom-encoding`/`dicom-parser` all still depended on the real
 `dicom-dictionary-std`. Fully renamed to `dcmnorm-dictionary`/
-`dcmnorm_dictionary` once all of those were replaced by their own This project
+`dcmnorm_dictionary` once all of those were replaced by their own dcmnorm
 crates and nothing in the dependency graph needed the original name anymore.

@@ -1,4 +1,4 @@
-//! This project's own DICOM Upper Layer Protocol (PS3.8) implementation - association negotiation
+//! dcmnorm's own DICOM Upper Layer Protocol (PS3.8) implementation - association negotiation
 //! and PDU framing - replacing `dicom-ul`. Purely transport-layer, same as the crate it replaces:
 //! knows about PDUs and presentation-context negotiation, nothing about DIMSE command semantics
 //! (that's `dcmnorm`'s own `dimse.rs`/`scp.rs`, unchanged by this crate).

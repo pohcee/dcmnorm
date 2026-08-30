@@ -1,6 +1,6 @@
 # dcmnorm-parser
 
-This project's own fork of the DICOM dataset streaming reader/writer
+dcmnorm's own fork of the DICOM dataset streaming reader/writer
 (`DataSetReader`, `DataToken`, the stateful value decoder/encoder) that
 `crates/dcmnorm-object` builds its `InMemDicomObject` tree on top of.
 

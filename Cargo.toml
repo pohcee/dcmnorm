@@ -49,7 +49,7 @@ cc = "1.2"
 
 # All seven original dicom-rs dependencies (dicom-core, dicom-dictionary-std, dicom-encoding,
 # dicom-transfer-syntax-registry, dicom-parser, dicom-object, dicom-ul) have been fully
-# replaced by In-house crates under crates/ - see each crate's README for its
+# replaced by in-house crates under crates/ - see each crate's README for its
 # individual history (mechanical fork vs. from-scratch rewrite). All five forked crates were
 # renamed off their original dicom-rs package/lib names once nothing left in the dependency
 # graph needed the original names anymore (Phase 6 of the dicom-rs removal plan), so they're

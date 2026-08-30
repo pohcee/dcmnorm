@@ -1,6 +1,6 @@
 # dcmnorm-transcode
 
-This project's own fork of the DICOM transfer-syntax registry (`TransferSyntaxRegistry`,
+dcmnorm's own fork of the DICOM transfer-syntax registry (`TransferSyntaxRegistry`,
 the table of known transfer syntax UIDs, and the codec adapters for JPEG
 Baseline/Extended/Lossless, JPEG 2000, RLE Lossless, and Deflated pixel data)
 that `dcmnorm` builds on.

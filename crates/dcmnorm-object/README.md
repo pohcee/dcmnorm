@@ -1,6 +1,6 @@
 # dcmnorm-object
 
-This project's own DICOM in-memory object model and Part 10 file I/O
+dcmnorm's own DICOM in-memory object model and Part 10 file I/O
 (`InMemDicomObject`, `FileDicomObject`/`DefaultDicomObject`, `FileMetaTable`/
 `FileMetaTableBuilder`, `OpenFileOptions`), replacing `dicom-object` +
 `dicom-parser`'s tree-building layer.

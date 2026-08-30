@@ -1398,7 +1398,7 @@ mod tests {
         assert_eq!(element.to_str().unwrap(), "256\\0\\16",);
     }
 
-    /// Regression test for the This project fork's fix in `VR::from_nonstandard_shorthand`
+    /// Regression test for this fork's fix in `VR::from_nonstandard_shorthand`
     /// (see its doc comment): dcmjs-style ambiguous-VR placeholder bytes must resolve to a
     /// concrete VR instead of falling through to `None` (which callers turn into VR::UN and
     /// misparse the length field, desyncing the rest of the dataset). This is the first-class

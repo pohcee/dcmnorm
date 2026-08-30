@@ -1,6 +1,6 @@
 # dcmnorm-encoding
 
-This project's own fork of the DICOM encoding/decoding primitives
+dcmnorm's own fork of the DICOM encoding/decoding primitives
 (`TransferSyntax`, `Codec`, `PixelDataReader`/`PixelDataWriter`,
 `EncodeOptions`, plus the Implicit/Explicit VR Little/Big Endian dataset
 encoders and decoders) that `dcmnorm-transcode`, `dcmnorm-parser`, and

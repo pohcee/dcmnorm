@@ -1,6 +1,6 @@
 # dcmnorm-core
 
-This project's own fork of the essential DICOM data structures and mechanisms
+dcmnorm's own fork of the essential DICOM data structures and mechanisms
 (`Tag`, `VR`, `PrimitiveValue`, `Length`, `Value`, `DataElement`,
 `PixelFragmentSequence`, the `DataDictionary` trait, `VirtualVr::relaxed()`,
 `ops::ApplyOp`) that `dcmnorm` builds on.
@@ -16,7 +16,7 @@ via `[patch.crates-io]`) because `dicom-object`/`dicom-encoding`/
 `dicom-dictionary-std`/`dicom-transfer-syntax-registry`/`dicom-ul` all still
 depended on the real `dicom-core`, and a rename would have broken Cargo's
 patch substitution for all of them. Fully renamed to `dcmnorm-core`/
-`dcmnorm_core` once every one of those was replaced by its own This project
+`dcmnorm_core` once every one of those was replaced by its own dcmnorm
 crate (`dcmnorm-dictionary`, `dcmnorm-encoding`, `dcmnorm-transcode`,
 `dcmnorm-parser`, `dcmnorm-object`, `dcmnorm-dimse`) and nothing in the
 dependency graph needed the original name anymore.

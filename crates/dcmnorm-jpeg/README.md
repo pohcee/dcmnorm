@@ -1,6 +1,6 @@
 # dcmnorm-jpeg
 
-This project's own JPEG baseline/extended/lossless decoder, used by
+dcmnorm's own JPEG baseline/extended/lossless decoder, used by
 `crates/dcmnorm-transcode`'s `jpeg` adapter to decode DICOM pixel data in the
 JPEG Baseline, JPEG Extended, and JPEG Lossless (Process 14, including
 Selection Value 1 / first-order prediction) transfer syntaxes.

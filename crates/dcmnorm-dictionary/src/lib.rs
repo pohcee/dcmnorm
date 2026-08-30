@@ -72,7 +72,7 @@ mod tests {
         );
     }
 
-    /// This project regression test (not from upstream dicom-rs): walks every entry in the
+    /// Regression test (not from upstream dicom-rs): walks every entry in the
     /// mechanically-ported tag table and confirms `parse_tag(keyword)` resolves to the
     /// entry's tag, and that looking that tag back up (`by_tag`) returns to the same
     /// alias - i.e. the keyword <-> tag mapping round-trips both directions for the whole

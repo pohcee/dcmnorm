@@ -130,9 +130,10 @@ impl TextureCompression {
     }
 }
 
-/// Mirrors the cross-repo `TextureMeta` JSON contract - see docs/rendering-pipeline-contract.md
-/// at the umbrella repo root for the full pipeline-stage/field list this spans across
-/// dcmnorm, the Node/Python bindings, sb-api's render-server, and sb-website's GPU shaders.
+/// Mirrors a cross-repo `TextureMeta` JSON contract shared with this library's downstream
+/// consumers - see the embedding application's own docs for the full pipeline-stage/field
+/// list this spans across dcmnorm, its Node/Python bindings, and downstream render/display
+/// consumers.
 /// `to_json` is the single source of truth for field names/casing consumed by the CLI sidecar,
 /// the Node/Python bindings, and the render-server's WS response.
 #[derive(Clone, Debug)]
