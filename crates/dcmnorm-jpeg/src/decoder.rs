@@ -245,8 +245,21 @@ impl<R: Read> Decoder<R> {
     fn select_worker(frame: &FrameInfo, worker_preference: PreferWorkerKind) -> PreferWorkerKind {
         const PARALLELISM_THRESHOLD: u64 = 128 * 128;
 
+        // JPEG Extended (Process 2 & 4) at a sample precision other than 8 - see
+        // `HighPrecisionWorker`'s own doc comment for why this is a dedicated, single-threaded
+        // worker kind rather than a size-based Immediate/Multithreaded choice.
+        if frame.precision != 8
+            && frame.coding_process == CodingProcess::DctSequential
+            && frame.components.len() == 1
+        {
+            return PreferWorkerKind::HighPrecision(frame.precision);
+        }
+
         match worker_preference {
             PreferWorkerKind::Immediate => PreferWorkerKind::Immediate,
+            // Never actually requested by either call site below (both always pass
+            // `Multithreaded`) - kept only so this match stays exhaustive as the enum grows.
+            PreferWorkerKind::HighPrecision(precision) => PreferWorkerKind::HighPrecision(precision),
             PreferWorkerKind::Multithreaded => {
                 let width: u64 = frame.output_size.width.into();
                 let height: u64 = frame.output_size.width.into();
@@ -355,7 +368,19 @@ impl<R: Read> Decoder<R> {
                             UnsupportedFeature::ArithmeticEntropyCoding,
                         ));
                     }
-                    if frame.precision != 8 && frame.coding_process != CodingProcess::Lossless {
+                    // Non-8-bit precision is supported for Lossless (any component count) and,
+                    // via `HighPrecisionWorker`, for single-component (grayscale) Sequential DCT
+                    // (JPEG Extended, Process 2 & 4) - real-world DICOM usage of the latter is
+                    // essentially always 12-bit grayscale (CT/mammography). Multi-component
+                    // (color) high-precision Sequential/Progressive DCT stays unsupported: it
+                    // would also need generalizing the 8-bit-only chroma-upsampling/color-
+                    // conversion pipeline, which no real file has justified yet.
+                    let grayscale_sequential_dct =
+                        frame.coding_process == CodingProcess::DctSequential && component_count == 1;
+                    if frame.precision != 8
+                        && frame.coding_process != CodingProcess::Lossless
+                        && !grayscale_sequential_dct
+                    {
                         return Err(Error::Unsupported(UnsupportedFeature::SamplePrecision(
                             frame.precision,
                         )));
@@ -685,6 +710,16 @@ impl<R: Read> Decoder<R> {
 
         if frame.coding_process == CodingProcess::Lossless {
             compute_image_lossless(frame, planes_u16)
+        } else if frame.precision != 8
+            && frame.coding_process == CodingProcess::DctSequential
+            && frame.components.len() == 1
+        {
+            // HighPrecisionWorker::get_result already produced the final image: cropped to
+            // frame.output_size and packed as native-endian u16 bytes (see its own doc comment).
+            // Unlike the 8-bit path, this must not go through compute_image/Upsampler - those
+            // assume uncropped, one-byte-per-sample, block-strided component data, which is
+            // exactly what get_result already resolved away.
+            Ok(mem::take(&mut planes[0]))
         } else {
             compute_image(
                 &frame.components,

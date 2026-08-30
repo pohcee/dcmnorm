@@ -1,3 +1,4 @@
+mod high_precision;
 mod immediate;
 mod multithreaded;
 
@@ -33,6 +34,10 @@ pub trait Worker {
 pub enum PreferWorkerKind {
     Immediate,
     Multithreaded,
+    /// JPEG Extended (Process 2 & 4) at the given sample precision (always != 8) - see
+    /// `HighPrecisionWorker`'s own doc comment for why this needs a dedicated worker kind
+    /// instead of reusing `Immediate`/`Multithreaded`.
+    HighPrecision(u8),
 }
 
 #[derive(Default)]
@@ -44,6 +49,7 @@ enum WorkerScopeInner {
     #[cfg(not(target_arch = "wasm32"))]
     Multithreaded(multithreaded::MpscWorker),
     Immediate(immediate::ImmediateWorker),
+    HighPrecision(high_precision::HighPrecisionWorker),
 }
 
 impl WorkerScope {
@@ -62,6 +68,9 @@ impl WorkerScope {
         let inner = inner.get_or_insert_with(move || match prefer {
             #[cfg(not(target_arch = "wasm32"))]
             PreferWorkerKind::Multithreaded => WorkerScopeInner::Multithreaded(Default::default()),
+            PreferWorkerKind::HighPrecision(precision) => {
+                WorkerScopeInner::HighPrecision(high_precision::HighPrecisionWorker::new(precision))
+            }
             #[allow(unreachable_patterns)]
             _ => WorkerScopeInner::Immediate(Default::default()),
         });
@@ -70,6 +79,7 @@ impl WorkerScope {
             #[cfg(not(target_arch = "wasm32"))]
             WorkerScopeInner::Multithreaded(worker) => worker,
             WorkerScopeInner::Immediate(worker) => worker,
+            WorkerScopeInner::HighPrecision(worker) => worker,
         })
     }
 }

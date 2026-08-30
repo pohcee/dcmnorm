@@ -369,6 +369,118 @@ fn dequantize_and_idct_block_8x8_inner<'a, I>(
     }
 }
 
+/// Full-resolution (no IDCT scale-down), precision-generic 8x8 IDCT for JPEG Extended
+/// (Process 2 & 4) sample precisions other than 8.
+///
+/// The fast/SIMD-accelerated `dequantize_and_idct_block_8x8` above (and its 4x4/2x2/1x1
+/// siblings) are 8-bit-only by construction - their level-shift and output range are baked
+/// directly into the fixed-point constants (`128 << 17` etc.), not threaded through as a
+/// parameter - so generalizing them risks the heavily-used 8-bit path for the sake of a rare
+/// transfer syntax. This is a separate, scalar-only function instead: the *first* pass (the
+/// columns loop) is copied verbatim from `dequantize_and_idct_block_8x8_inner` unchanged (it's
+/// already precision-agnostic - no clamping or level-shift happens until the second pass), and
+/// only the second pass's level-shift/clamp is generalized from the fixed `128`/`0..255` to
+/// `1 << (precision - 1)`/`0..=(1 << precision) - 1`, per the JPEG level-shift convention
+/// (PS3.5/T.81 Annex A.3.1) applied at whatever precision the frame actually declared.
+pub(crate) fn dequantize_and_idct_block_high_precision(
+    coefficients: &[i16; 64],
+    quantization_table: &[u16; 64],
+    precision: u8,
+    output_linestride: usize,
+    output: &mut [u16],
+) {
+    debug_assert!((2..=16).contains(&precision));
+
+    let mut temp = [Wrapping(0); 64];
+
+    // columns - identical to dequantize_and_idct_block_8x8_inner's own first pass.
+    for i in 0..8 {
+        if coefficients[i + 8] == 0
+            && coefficients[i + 16] == 0
+            && coefficients[i + 24] == 0
+            && coefficients[i + 32] == 0
+            && coefficients[i + 40] == 0
+            && coefficients[i + 48] == 0
+            && coefficients[i + 56] == 0
+        {
+            let dcterm = dequantize(coefficients[i], quantization_table[i]) << 2;
+            temp[i] = dcterm;
+            temp[i + 8] = dcterm;
+            temp[i + 16] = dcterm;
+            temp[i + 24] = dcterm;
+            temp[i + 32] = dcterm;
+            temp[i + 40] = dcterm;
+            temp[i + 48] = dcterm;
+            temp[i + 56] = dcterm;
+        } else {
+            let s0 = dequantize(coefficients[i], quantization_table[i]);
+            let s1 = dequantize(coefficients[i + 8], quantization_table[i + 8]);
+            let s2 = dequantize(coefficients[i + 16], quantization_table[i + 16]);
+            let s3 = dequantize(coefficients[i + 24], quantization_table[i + 24]);
+            let s4 = dequantize(coefficients[i + 32], quantization_table[i + 32]);
+            let s5 = dequantize(coefficients[i + 40], quantization_table[i + 40]);
+            let s6 = dequantize(coefficients[i + 48], quantization_table[i + 48]);
+            let s7 = dequantize(coefficients[i + 56], quantization_table[i + 56]);
+
+            let Kernel {
+                xs: [x0, x1, x2, x3],
+                ts: [t0, t1, t2, t3],
+            } = kernel([s0, s1, s2, s3, s4, s5, s6, s7], 512);
+
+            temp[i] = (x0 + t3) >> 10;
+            temp[i + 56] = (x0 - t3) >> 10;
+            temp[i + 8] = (x1 + t2) >> 10;
+            temp[i + 48] = (x1 - t2) >> 10;
+            temp[i + 16] = (x2 + t1) >> 10;
+            temp[i + 40] = (x2 - t1) >> 10;
+            temp[i + 24] = (x3 + t0) >> 10;
+            temp[i + 32] = (x3 - t0) >> 10;
+        }
+    }
+
+    // rows - same structure as dequantize_and_idct_block_8x8_inner's second pass, but the
+    // level-shift/output range scale with `precision` instead of being hardcoded to 128/0..255.
+    let level_shift: i32 = 1 << (precision - 1);
+    let max_value: i32 = (1 << precision) - 1;
+    let x_scale: i32 = 65536 + (level_shift << 17);
+
+    for (chunk, output_chunk) in temp.chunks_exact(8).zip(output.chunks_mut(output_linestride)) {
+        let chunk = <&[_; 8]>::try_from(chunk).unwrap();
+        let output_chunk = &mut output_chunk[..8];
+
+        let (s0, rest) = chunk.split_first().unwrap();
+        if *rest == [Wrapping(0); 7] {
+            let dcterm = clamp_to_precision((stbi_fsh(*s0) + Wrapping(x_scale)) >> 17, max_value);
+            output_chunk[0] = dcterm;
+            output_chunk[1] = dcterm;
+            output_chunk[2] = dcterm;
+            output_chunk[3] = dcterm;
+            output_chunk[4] = dcterm;
+            output_chunk[5] = dcterm;
+            output_chunk[6] = dcterm;
+            output_chunk[7] = dcterm;
+        } else {
+            let Kernel {
+                xs: [x0, x1, x2, x3],
+                ts: [t0, t1, t2, t3],
+            } = kernel(*chunk, x_scale);
+
+            output_chunk[0] = clamp_to_precision((x0 + t3) >> 17, max_value);
+            output_chunk[7] = clamp_to_precision((x0 - t3) >> 17, max_value);
+            output_chunk[1] = clamp_to_precision((x1 + t2) >> 17, max_value);
+            output_chunk[6] = clamp_to_precision((x1 - t2) >> 17, max_value);
+            output_chunk[2] = clamp_to_precision((x2 + t1) >> 17, max_value);
+            output_chunk[5] = clamp_to_precision((x2 - t1) >> 17, max_value);
+            output_chunk[3] = clamp_to_precision((x3 + t0) >> 17, max_value);
+            output_chunk[4] = clamp_to_precision((x3 - t0) >> 17, max_value);
+        }
+    }
+}
+
+fn clamp_to_precision(x: Wrapping<i32>, max_value: i32) -> u16 {
+    x.0.clamp(0, max_value) as u16
+}
+
 struct Kernel {
     xs: [Wrapping<i32>; 4],
     ts: [Wrapping<i32>; 4],
@@ -654,4 +766,63 @@ fn test_dequantize_and_idct_block_8x8_saturated() {
         255, 255, 0, 255, 0, 255, 0, 0
     ];
     assert_eq!(&output[..], &expected[..]);
+}
+
+/// At precision=8, `dequantize_and_idct_block_high_precision` must agree with the proven-correct
+/// `dequantize_and_idct_block_8x8` on the exact same test vector - the columns pass is literally
+/// copied between the two functions, and the rows pass's level-shift/clamp generalization
+/// (`1 << (precision-1)` / `0..=(1<<precision)-1`) must reduce to exactly `128` / `0..=255` when
+/// precision is 8. This is the primary correctness check for the generalization itself,
+/// independent of whether any real 12-bit file decodes right. Tolerates off-by-one, same as this
+/// crate's own `test_dequantize_and_idct_block_8x8` above - `dequantize_and_idct_block_8x8` may
+/// run this platform's SIMD-accelerated path, whose rounding can differ from this function's
+/// scalar-only one by a single count.
+#[test]
+fn test_dequantize_and_idct_block_high_precision_matches_8bit_path_at_precision_8() {
+    #[rustfmt::skip]
+    let coefficients: [i16; 8 * 8] = [
+        -14, -39, 58, -2, 3, 3, 0, 1,
+        11, 27, 4, -3, 3, 0, 1, 0,
+        -6, -13, -9, -1, -2, -1, 0, 0,
+        -4, 0, -1, -2, 0, 0, 0, 0,
+        3, 0, 0, 0, 0, 0, 0, 0,
+        -3, -2, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0
+    ];
+
+    #[rustfmt::skip]
+    let quantization_table: [u16; 8 * 8] = [
+        8, 6, 5, 8, 12, 20, 26, 31,
+        6, 6, 7, 10, 13, 29, 30, 28,
+        7, 7, 8, 12, 20, 29, 35, 28,
+        7, 9, 11, 15, 26, 44, 40, 31,
+        9, 11, 19, 28, 34, 55, 52, 39,
+        12, 18, 28, 32, 41, 52, 57, 46,
+        25, 32, 39, 44, 52, 61, 60, 51,
+        36, 46, 48, 49, 56, 50, 52, 50
+    ];
+
+    let mut expected = [0u8; 8 * 8];
+    dequantize_and_idct_block_8x8(&coefficients, &quantization_table, 8, &mut expected);
+
+    let mut actual = [0u16; 8 * 8];
+    dequantize_and_idct_block_high_precision(&coefficients, &quantization_table, 8, 8, &mut actual);
+
+    for i in 0..64 {
+        let diff = (i32::from(actual[i]) - i32::from(expected[i])).abs();
+        assert!(diff <= 1, "mismatch at index {i}: {} vs {}", actual[i], expected[i]);
+    }
+}
+
+/// At a higher precision (12-bit, as used by real JPEG Extended DICOM files), output must scale
+/// with the level-shift/range instead of clamping to 8-bit's 0..255 - the all-zero-coefficients
+/// case (a flat DC-only block) is the simplest way to pin the level-shift itself: with all-zero
+/// AC and DC coefficients, dequantization contributes nothing, so the output should be exactly
+/// the level-shift constant (2048 at precision 12, the frame's neutral gray), not 128.
+#[test]
+fn test_dequantize_and_idct_block_high_precision_scales_level_shift_with_precision() {
+    let mut output = [0u16; 8 * 8];
+    dequantize_and_idct_block_high_precision(&[0; 8 * 8], &[666; 8 * 8], 12, 8, &mut output);
+    assert_eq!(&output[..], &[2048u16; 8 * 8][..]);
 }
