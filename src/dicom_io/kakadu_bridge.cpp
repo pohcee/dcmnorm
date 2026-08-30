@@ -241,6 +241,24 @@ extern "C" int dcmnorm_kakadu_decode(
   }
 }
 
+extern "C" int dcmnorm_kakadu_supports_htj2k() {
+  // Kakadu only gained HTJ2K (Part-15) support in v8.0. Versions before that don't just fail to
+  // decode an HT-coded codestream cleanly - kdu_codestream::create() can hang indefinitely while
+  // trying to interpret Part-15-only Scod/marker signaling it has no concept of, so callers must
+  // check this *before* ever handing Kakadu an HTJ2K codestream, not rely on catching an error
+  // from the decode attempt itself.
+  const char *version = kdu_get_core_version();
+  if (version == nullptr) {
+    return 0;
+  }
+  const char *digits = version;
+  if (*digits == 'v' || *digits == 'V') {
+    ++digits;
+  }
+  int major = std::atoi(digits);
+  return major >= 8 ? 1 : 0;
+}
+
 extern "C" void dcmnorm_kakadu_free_buffer(uint8_t *buffer, size_t) {
   std::free(buffer);
 }

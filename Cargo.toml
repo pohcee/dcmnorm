@@ -46,6 +46,9 @@ rayon = "1.10"
 flate2 = "1.0"
 uuid = { version = "1", features = ["v4"] }
 
+[dev-dependencies]
+openjph-core = "0.1.0"
+
 [build-dependencies]
 cc = "1.2"
 

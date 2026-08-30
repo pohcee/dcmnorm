@@ -169,6 +169,16 @@ pub(super) fn is_jpeg2000_transfer_syntax(uid: &str) -> bool {
     )
 }
 
+/// The High-Throughput JPEG 2000 (Part-15) subset of [`is_jpeg2000_transfer_syntax`] - see
+/// `kakadu::kakadu_supports_htj2k` for why this needs to be checked separately from classic
+/// JPEG 2000 before ever attempting a Kakadu decode.
+fn is_htj2k_transfer_syntax(uid: &str) -> bool {
+    matches!(
+        normalize_transfer_syntax_uid(uid),
+        "1.2.840.10008.1.2.4.201" | "1.2.840.10008.1.2.4.202" | "1.2.840.10008.1.2.4.203"
+    )
+}
+
 /// Determines whether the JPEG 2000 codestream for the given frame uses the
 /// Multiple Component Transformation (MCT).
 ///
@@ -1065,8 +1075,15 @@ fn decode_pixel_data(
         ));
     }
 
+    // Kakadu only gained HTJ2K (Part-15) support in v8.0 - handing an HT-coded codestream to an
+    // older linked SDK doesn't fail cleanly, it can hang `kdu_codestream::create()` indefinitely
+    // (verified empirically against a real v7.8 build). So this has to be checked *before* ever
+    // attempting the decode, not learned from how the attempt turns out.
+    let kakadu_can_decode = kakadu_ffi_enabled()
+        && (!is_htj2k_transfer_syntax(source_ts.uid()) || kakadu::kakadu_supports_htj2k());
+
     if is_jpeg2000_transfer_syntax(source_ts.uid())
-        && kakadu_ffi_enabled()
+        && kakadu_can_decode
         && codec_preference != Jpeg2000CodecPreference::OpenJpeg
     {
         jpeg2000_debug_log("attempting Kakadu decode");
@@ -1094,8 +1111,23 @@ fn decode_pixel_data(
             }
         }
     } else if is_jpeg2000_transfer_syntax(source_ts.uid()) {
+        if codec_preference == Jpeg2000CodecPreference::Kakadu
+            && kakadu_ffi_enabled()
+            && !kakadu_can_decode
+        {
+            return Err(TranscodeError::DecodePixelData {
+                uid: source_ts.uid().to_owned(),
+                name: source_ts.name().to_owned(),
+                message: "forced kakadu decode failed: the linked Kakadu SDK predates HTJ2K \
+                          (Part-15) support (added in v8.0) and cannot safely attempt this \
+                          transfer syntax"
+                    .to_owned(),
+            });
+        }
         let reason = if codec_preference == Jpeg2000CodecPreference::OpenJpeg {
             "Kakadu decode not attempted because DCMNORM_JPEG2000_CODEC=openjpeg"
+        } else if !kakadu_can_decode && kakadu_ffi_enabled() {
+            "Kakadu decode not attempted because the linked Kakadu SDK predates HTJ2K support"
         } else {
             "Kakadu decode not attempted because kakadu-ffi feature is disabled"
         };
@@ -1577,6 +1609,82 @@ mod tests {
         // JPEG2000 decode-path case.
         assert!(!is_jpeg2000_transfer_syntax("1.2.840.10008.1.2.4.204"));
         assert!(!is_jpeg2000_transfer_syntax("1.2.840.10008.1.2.4.205"));
+    }
+
+    /// Regression test for the Kakadu/HTJ2K hang bug: verified empirically against a real
+    /// Kakadu v7.8 SDK that `decode_jpeg2000_with_kakadu` hangs `kdu_codestream::create()`
+    /// indefinitely when handed a genuine HT-coded (Part-15) codestream, rather than failing
+    /// cleanly - v7.8 predates HTJ2K support entirely (added in v8.0). `kakadu_can_decode`'s
+    /// `kakadu::kakadu_supports_htj2k()` gate exists specifically to keep this dispatch from ever
+    /// reaching that call, falling through to OpenJPEG (which has genuinely supported HTJ2K
+    /// decode since 2.5) instead. This exercises the real end-to-end `transcode_dcmnorm_object`
+    /// path with the default `Auto` codec preference against a real HT codestream (produced by
+    /// `openjph-core`, an independent HTJ2K encoder, not this codebase's own code) - if the gate
+    /// ever regressed, this test would hang rather than fail, which is the correct failure mode
+    /// for a hang bug: a fast, wrong answer would be a worse regression to miss silently.
+    #[cfg(feature = "kakadu-ffi")]
+    #[test]
+    fn htj2k_decode_falls_back_to_openjpeg_when_kakadu_predates_part15() {
+        use dcmnorm_core::value::PixelFragmentSequence;
+        use dcmnorm_core::{DataElement, PrimitiveValue, VR};
+        use dcmnorm_object::{DefaultDicomObject, FileMetaTableBuilder};
+        use openjph_core::codestream::Codestream;
+        use openjph_core::file::MemOutfile;
+        use openjph_core::types::{Point, Size};
+
+        let (width, height) = (16u32, 16u32);
+        let pixels: Vec<i32> = (0..width * height).map(|i| (i % 251) as i32).collect();
+
+        let mut cs = Codestream::new();
+        cs.access_siz_mut().set_image_extent(Point::new(width, height));
+        cs.access_siz_mut().set_num_components(1);
+        cs.access_siz_mut().set_comp_info(0, Point::new(1, 1), 8, false);
+        cs.access_siz_mut().set_tile_size(Size::new(width, height));
+        cs.access_cod_mut().set_num_decomposition(0);
+        cs.access_cod_mut().set_reversible(true);
+        cs.access_cod_mut().set_color_transform(false);
+        cs.set_planar(0);
+
+        let mut outfile = MemOutfile::new();
+        cs.write_headers(&mut outfile, &[]).unwrap();
+        for y in 0..height as usize {
+            let start = y * width as usize;
+            cs.exchange(&pixels[start..start + width as usize], 0).unwrap();
+        }
+        cs.flush(&mut outfile).unwrap();
+        let encoded = outfile.get_data().to_vec();
+
+        let meta = FileMetaTableBuilder::new()
+            .transfer_syntax("1.2.840.10008.1.2.4.201")
+            .build()
+            .unwrap();
+        let mut object = DefaultDicomObject::new_empty_with_meta(meta);
+        for element in [
+            DataElement::new(dcmnorm_dictionary::tags::ROWS, VR::US, PrimitiveValue::from(height as u16)),
+            DataElement::new(dcmnorm_dictionary::tags::COLUMNS, VR::US, PrimitiveValue::from(width as u16)),
+            DataElement::new(dcmnorm_dictionary::tags::SAMPLES_PER_PIXEL, VR::US, PrimitiveValue::from(1u16)),
+            DataElement::new(dcmnorm_dictionary::tags::BITS_ALLOCATED, VR::US, PrimitiveValue::from(8u16)),
+            DataElement::new(dcmnorm_dictionary::tags::BITS_STORED, VR::US, PrimitiveValue::from(8u16)),
+            DataElement::new(dcmnorm_dictionary::tags::HIGH_BIT, VR::US, PrimitiveValue::from(7u16)),
+            DataElement::new(dcmnorm_dictionary::tags::PIXEL_REPRESENTATION, VR::US, PrimitiveValue::from(0u16)),
+            DataElement::new(dcmnorm_dictionary::tags::PHOTOMETRIC_INTERPRETATION, VR::CS, PrimitiveValue::from("MONOCHROME2".to_owned())),
+            DataElement::new(dcmnorm_dictionary::tags::PIXEL_DATA, VR::OB, PixelFragmentSequence::new(vec![0], vec![encoded])),
+        ] {
+            object.put(element);
+        }
+
+        // Default `Auto` preference - the same path a real caller with no special configuration
+        // would take. Must complete (not hang) and must decode correctly via the OpenJPEG
+        // fallback.
+        let transcoded = super::transcode_dcmnorm_object(&object, dcmnorm_dictionary::uids::EXPLICIT_VR_LITTLE_ENDIAN)
+            .expect("HTJ2K decode should succeed via the OpenJPEG fallback");
+        let decoded = transcoded
+            .element(dcmnorm_dictionary::tags::PIXEL_DATA)
+            .unwrap()
+            .to_bytes()
+            .unwrap();
+        let expected: Vec<u8> = (0..width * height).map(|i| (i % 251) as u8).collect();
+        assert_eq!(decoded.as_ref(), expected.as_slice());
     }
 
     /// Regression test for the deflate wiring fix: Deflated Explicit VR Little Endian
