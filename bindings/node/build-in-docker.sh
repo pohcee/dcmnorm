@@ -18,25 +18,37 @@ docker run --rm -v "$SCRIPT_DIR/../..":/repo -w /repo/bindings/node \
     apt-get install -y -qq curl build-essential clang cmake pkg-config libclang-dev \
       > /dev/null
 
-    # ffmpeg-codec (dcmnorm/Cargo.toml, on by default) is the one default feature that
-    # dynamically links against system libraries rather than being self-contained, so it is
-    # the one feature that can fail to build for reasons outside this repo (a Debian point
-    # release renaming/dropping a libav* package, network flakiness, ...). Everything else in
-    # `default` (jpeg-ls-codec, jpeg-xl-codec, jpeg2000-openjpeg-encode) is a plain Rust/static
-    # dependency and always builds. Rather than let a missing ffmpeg-dev hard-fail the whole
-    # release (set -e would abort the script here), probe for it and build without
-    # ffmpeg-codec if unavailable - the resulting addon still works for everything else, and
-    # dcmnorm already reports MPEG transfer syntaxes as unsupported ("no") in
-    # `--list-transfer-syntaxes` and rejects them at runtime with a clear error
-    # (src/dicom_io/mpeg.rs, src/dicom_io/io.rs cfg!(feature = "ffmpeg-codec") checks) rather
-    # than silently misbehaving, so this is a real degrade-gracefully path, not a silent gap.
+    # NOTE: this whole heredoc is inside a single-quoted bash -c argument at the call site
+    # below - never use an apostrophe/single-quote character anywhere in these comments. One
+    # slipping in silently closes that outer quote, and everything after becomes literal
+    # host-shell syntax instead of container script text.
+    #
+    # ffmpeg-codec (dcmnorm/Cargo.toml, on by default) builds FFmpeg from source and statically
+    # links it (ffmpeg-next/ffmpeg-sys-next "build" feature) rather than dynamically linking
+    # whatever FFmpeg happens to be on the machine - a dynamically linked builds exact required
+    # SONAMEs (e.g. libavutil.so.57) only match a different machine (a dev host, or production
+    # container) by coincidence, which is exactly what broke here once already: a bookworm
+    # container built dcmnorm-node addon dlopen-failed on an Ubuntu dev host, and would have in
+    # production too, since Docker.tmpl final image never installed matching runtime libs.
+    # Static linking needs git (ffmpeg-sys-next shallow-clones FFmpeg source) and nasm (x86 asm
+    # optimizations - FFmpeg own ./configure hard-fails without it on x86_64) in addition to the
+    # compiler/pkg-config already installed above. Everything else in default (jpeg-ls-codec,
+    # jpeg-xl-codec, jpeg2000-openjpeg-encode) is a plain Rust/static dependency and always
+    # builds regardless. Rather than let git/nasm being unavailable (or a future Debian point
+    # release dropping/renaming either package) hard-fail the whole release (set -e would abort
+    # the script here), probe for them and build without ffmpeg-codec if unavailable - the
+    # resulting addon still works for everything else, and dcmnorm already reports MPEG transfer
+    # syntaxes as unsupported ("no") in --list-transfer-syntaxes and rejects them at runtime
+    # with a clear error (src/dicom_io/mpeg.rs, src/dicom_io/io.rs cfg feature ffmpeg-codec
+    # checks) rather than silently misbehaving, so this is a real degrade gracefully path,
+    # not a silent gap.
     NAPI_FEATURES=()
-    if ! apt-get install -y -qq \
-      libavutil-dev libavcodec-dev libavformat-dev libswscale-dev libswresample-dev \
-      > /dev/null 2>&1; then
-      echo "WARNING: ffmpeg dev libraries unavailable in this build container - building" >&2
-      echo "WARNING: dcmnorm-node WITHOUT ffmpeg-codec. MPEG transfer syntaxes will report" >&2
-      echo "WARNING: as unsupported (see --list-transfer-syntaxes) in this build." >&2
+    if apt-get install -y -qq git nasm > /dev/null 2>&1; then
+      : # ffmpeg-codec stays in the default feature set
+    else
+      echo "WARNING: git/nasm unavailable in this build container - building dcmnorm-node" >&2
+      echo "WARNING: WITHOUT ffmpeg-codec. MPEG transfer syntaxes will report as unsupported" >&2
+      echo "WARNING: (see --list-transfer-syntaxes) in this build." >&2
       NAPI_FEATURES=(--no-default-features --features "jpeg-ls-codec,jpeg-xl-codec,jpeg2000-openjpeg-encode")
     fi
 

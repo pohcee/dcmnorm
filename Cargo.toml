@@ -40,7 +40,19 @@ dcmnorm-dimse = { path = "crates/dcmnorm-dimse" }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 lcms2 = "6"
 serde_json = "1.0"
-ffmpeg-next = { version = "8.1", optional = true, default-features = false, features = ["codec", "format", "software-resampling", "software-scaling"] }
+# "build" compiles FFmpeg from source (via ffmpeg-sys-next's build.rs: shallow git clone +
+# ./configure + make) and statically links it, instead of dynamically linking whatever FFmpeg
+# happens to be installed on the build machine. Without this, the resulting binary's exact
+# required SONAMEs (e.g. libavutil.so.57) depend on which distro/version built it, and only
+# match a *different* machine (a dev host, or a production container) by coincidence - see the
+# incident this fixed: a bookworm-container-built dcmnorm-node addon dynamically linking
+# libavutil.so.57 dlopen-failed both on an Ubuntu dev host (libavutil.so.58) and would have in
+# production too, since Docker.tmpl's final image never installed matching runtime libs either.
+# Static linking makes the compiled artifact fully portable - host, CI, or production all just
+# work - at the cost of a slower first build (FFmpeg itself compiles from source) and requiring
+# `git` and `nasm` on whatever machine runs `cargo build` with this feature on (see
+# bindings/node/build-in-docker.sh for the container-side install).
+ffmpeg-next = { version = "8.1", optional = true, default-features = false, features = ["codec", "format", "software-resampling", "software-scaling", "build"] }
 charls = { version = "0.4.2", optional = true }
 jxl-oxide = { version = "0.10", optional = true }
 openjpeg-sys = { version = "1.0.12", optional = true, default-features = false }

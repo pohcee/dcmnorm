@@ -7,8 +7,20 @@ publish = false
 [lib]
 crate-type = ["cdylib"]
 
+# Mirrors dcmnorm's own default feature set (Cargo.toml), forwarded explicitly rather than
+# inherited via a plain path dependency, so build-in-docker.sh can opt out of just ffmpeg-codec
+# (--no-default-features --features jpeg-ls-codec,jpeg-xl-codec,jpeg2000-openjpeg-encode) when
+# git/nasm are unavailable in the build container - a plain `dcmnorm = { path = "../.." }`
+# dependency always pulls in dcmnorm's own defaults regardless of flags passed to this package.
+[features]
+default = ["ffmpeg-codec", "jpeg-ls-codec", "jpeg-xl-codec", "jpeg2000-openjpeg-encode"]
+ffmpeg-codec = ["dcmnorm/ffmpeg-codec"]
+jpeg-ls-codec = ["dcmnorm/jpeg-ls-codec"]
+jpeg-xl-codec = ["dcmnorm/jpeg-xl-codec"]
+jpeg2000-openjpeg-encode = ["dcmnorm/jpeg2000-openjpeg-encode"]
+
 [dependencies]
-dcmnorm = { path = "../.." }
+dcmnorm = { path = "../..", default-features = false }
 dcmnorm-object = { path = "../../crates/dcmnorm-object" }
 futures = "0.3"
 napi = { version = "3", default-features = false, features = ["napi4"] }
