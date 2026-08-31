@@ -18,9 +18,11 @@ const wsiFixture = path.join(__dirname, "..", "..", "..", "test", "files", "wsi.
 // has a newer one (2.41). build-in-docker.sh builds inside node:22-slim for exactly this reason,
 // but nothing stops a plain host `npm run build` (e.g. during dev iteration) from silently
 // producing a binary linked against the *host's* (often newer) glibc instead - which then loads
-// fine here but dlopen-fails only once actually deployed. Catch that here, since `npm test` runs
-// unconditionally as part of every release (see package.json's release-it "before:init" hook),
-// regardless of which build script produced the binary.
+// fine here but dlopen-fails only once actually deployed. Catch that here: this file runs
+// unconditionally as part of every release, from inside build-in-docker.sh itself (see
+// package.json's release-it "before:init" hook, which just runs `npm run build:docker`) -
+// not on the host afterward, since the host's own system libraries (e.g. its FFmpeg SONAMEs)
+// have no reason to match this node:22-slim-built binary's, independent of glibc entirely.
 const MAX_ALLOWED_GLIBC = "2.36";
 
 function compareVersions(a, b) {

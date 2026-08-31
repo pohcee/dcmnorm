@@ -33,7 +33,7 @@
       "publish": false
     },
     "hooks": {
-      "before:init": "npm run build:docker && npm test"
+      "before:init": "npm run build:docker"
     }
   },
   "devDependencies": {
