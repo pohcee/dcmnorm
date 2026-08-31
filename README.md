@@ -450,6 +450,7 @@ General:
 - `-V`, `--version`
 - `--list-transfer-syntaxes`
 - `--check-dicom`
+- `--check-dicom-logic` / `--strict`
 - `--jpeg2000-codec <auto|openjpeg|kakadu>`
 - `--verbose`
 - `-I`, `--stdin-paths`
@@ -622,6 +623,39 @@ Behavior:
 - suppresses per-file failure messages
 - returns exit code `0` when all inputs are valid
 - returns exit code `1` if any input is invalid, unreadable, or not a regular file
+
+### Validate DICOM semantics with `--check-dicom-logic`
+
+Checks that a *parseable* DICOM file's metadata is internally consistent - as opposed to
+`--check-dicom`, which only checks that the bytes parse as DICOM at all. Catches the kind of
+mismatch that will break downstream decompress/render/routing but doesn't stop the file from
+parsing: `BitsStored`/`HighBit`/`BitsAllocated` relationships, `SamplesPerPixel` vs
+`PhotometricInterpretation`, native `PixelData` length vs `Rows`/`Columns`/`NumberOfFrames`,
+an encapsulated frame's first bytes not matching what its transfer syntax claims (e.g. a file
+labeled JPEG 2000 whose fragment doesn't start with a JPEG 2000 marker), malformed or
+mismatched UIDs, and (checked but non-fatal by default) suspect geometry/window/CT-rescale
+metadata. No pixel codec ever runs, so it stays cheap enough for a full-archive batch scan.
+
+```bash
+cargo run -p dcmnorm-cli -- --check-dicom-logic --verbose test/files/dx.dcm
+```
+
+Add `--output-type json` for a structured report (NDJSON, one object per line, when combined
+with `-I`/`--stdin-paths`) instead of the one-line-per-file text summary:
+
+```bash
+cargo run -p dcmnorm-cli -- --check-dicom-logic --output-type json test/files/dx.dcm
+```
+
+Behavior:
+
+- prints `OK <path>` / `WARN <path>: N warning(s)` / `FAIL <path>: N error(s), M warning(s)`
+  per file; `--verbose` also prints each finding's rule ID and message
+- findings are `error` (will plausibly break decompress/render/routing) or `warning`
+  (suspicious/non-conformant but usually survivable) severity
+- returns exit code `0` unless any file has an `error`-level finding (or fails to parse);
+  `--strict` also fails on `warning`-only files
+- supports `-I`/`--stdin-paths` for batch scans, same as `--check-dicom`
 
 ### Compute a pixel histogram with `--histogram`
 

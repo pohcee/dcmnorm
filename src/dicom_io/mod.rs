@@ -1,5 +1,6 @@
 mod bulk_data;
 mod common;
+mod consistency;
 mod dimse;
 mod filter;
 mod flat_json;
@@ -46,6 +47,7 @@ pub use json::{
     write_dicom_json_with_source,
 };
 pub use histogram::{compute_frame_histogram, compute_instance_histograms, FrameHistogram, HistogramOptions};
+pub use consistency::{check_dicom_logic, ConsistencyFinding, ConsistencyReport, Severity};
 pub use render::{
     redact_dicom_pixels_to_transfer_syntax, render_all_dicom_frames,
     render_all_dicom_video_frames, render_dicom_frame, render_dicom_frames,

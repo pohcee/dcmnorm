@@ -66,6 +66,20 @@ find /data -type f | dcmnorm -I --check-dicom
 
 `-I` also works for batch conversion/edit operations on many files.
 
+`--check-dicom-logic` goes further: the file parses fine, but does its metadata actually make
+sense (bits/samples/photometric relationships, pixel data length, transfer-syntax-vs-actual-bytes,
+UID sanity, geometry)? Useful for catching a file that will fail or produce garbage output only
+once you try to decompress/render/route it:
+
+```bash
+dcmnorm --check-dicom-logic --verbose file.dcm     # OK/WARN/FAIL + per-finding detail
+dcmnorm --check-dicom-logic --output-type json file.dcm   # structured report
+find /data -type f | dcmnorm -I --check-dicom-logic        # batch, NDJSON with --output-type json
+```
+
+Errors (will plausibly break downstream decompress/render/routing) fail the exit code by default;
+warnings (suspicious but usually survivable) only fail it with `--strict`.
+
 ## Editing / updating DICOM
 
 Set or remove elements (keywords or `GGGG,EEEE` tags, repeatable):

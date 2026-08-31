@@ -14,7 +14,7 @@ use dcmnorm::dicom_io::{
     write_dicom_json_with_options, write_dicom_video, BoundingBox, BoxLength, DicomJsonBulkDataMode, DicomJsonFormat,
     DicomJsonKeyStyle, DicomJsonReadOptions, DicomJsonWriteOptions,
     RenderOutputFormat, RenderPipelineOptions, HistogramOptions, JPEG2000_CODEC_ENV_FLAG, JPEG2000_DEBUG_ENV_FLAG,
-    probe_dicom_file_for_sop_class_uid,
+    probe_dicom_file_for_sop_class_uid, check_dicom_logic, ConsistencyReport, Severity,
     build_volume, canonical_view_basis, generate_uid, reformat_plane, reformat_plane_values, rotate_basis,
     write_nifti, write_nrrd, write_reformatted_dicom_slice,
     pack_dicom_frame_texture, pack_volume_texture,
@@ -89,8 +89,8 @@ struct Cli {
         long,
         action = ArgAction::SetTrue,
         help = "Check whether INPUT is a valid DICOM file and print matching paths",
-        help_heading = "General",
-        display_order = 4
+        help_heading = "Validation",
+        display_order = 80
     )]
     check_dicom: bool,
 
@@ -524,6 +524,24 @@ struct Cli {
         display_order = 74
     )]
     histogram_max: Option<f64>,
+
+    #[arg(
+        long,
+        action = ArgAction::SetTrue,
+        help = "Validate INPUT's DICOM metadata for internal consistency (bits/samples/photometric relationships, pixel data length, transfer-syntax-vs-actual-bytes, UID sanity, geometry) instead of the default DICOM/JSON conversion. Prints OK/WARN/FAIL per file; add --output-type json for a structured report",
+        help_heading = "Validation",
+        display_order = 81
+    )]
+    check_dicom_logic: bool,
+
+    #[arg(
+        long,
+        action = ArgAction::SetTrue,
+        help = "With --check-dicom-logic, also exit non-zero when only warnings (not errors) are found",
+        help_heading = "Validation",
+        display_order = 82
+    )]
+    strict: bool,
 }
 
 impl Cli {
@@ -666,6 +684,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     if cli.check_dicom {
         validate_check_dicom_flags(&cli)?;
         return run_check_dicom(&cli);
+    }
+
+    if cli.check_dicom_logic {
+        validate_check_dicom_logic_flags(&cli)?;
+        return run_check_dicom_logic(&cli);
     }
 
     if cli.histogram {
@@ -851,6 +874,166 @@ fn run_check_dicom(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
         Ok(false) | Err(_) => Err(io::Error::new(ErrorKind::InvalidInput, "").into()),
     }
+}
+
+fn validate_check_dicom_logic_flags(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+    if matches!(cli.output_type, Some(output_type) if output_type != OutputType::Json) {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "--check-dicom-logic only supports --output-type json (omit --output-type for text output)",
+        )
+        .into());
+    }
+
+    if cli.overwrite
+        || cli.input_type.is_some()
+        || cli.transfer_syntax.is_some()
+        || !cli.set.is_empty()
+        || !cli.remove.is_empty()
+        || cli.remove_private_tags
+        || cli.format != JsonFormat::Flat
+        || cli.keys != KeyFormat::Name
+        || cli.bulk_data != BulkDataMode::Uri
+        || cli.bulk_data_source.is_some()
+        || cli.render_frame != 0
+        || cli.render_all_frames
+        || cli.render_fps.is_some()
+        || cli.no_modality_lut
+        || cli.no_voi_lut
+        || cli.no_icc_profile
+        || cli.window_center.is_some()
+        || cli.window_width.is_some()
+        || cli.jpeg_quality != 90
+        || cli.output_width.is_some()
+        || cli.output_height.is_some()
+        || cli.scale_max_size.is_some()
+        || !cli.redact_box.is_empty()
+        || cli.redact_color.is_some()
+        || cli.pad
+        || cli.pad_color.is_some()
+        || cli.no_overlays
+        || cli.overlay_index.is_some()
+        || cli.overlay_color.is_some()
+        || !cli.filter.is_empty()
+    {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "--check-dicom-logic only accepts INPUT (or --stdin-paths), optional OUTPUT, --output-type json, \
+             --strict, and --verbose",
+        )
+        .into());
+    }
+
+    Ok(())
+}
+
+fn run_check_dicom_logic(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+    let json_output = cli.output_type == Some(OutputType::Json);
+    let mut out: Box<dyn Write> = match &cli.output {
+        Some(path) => Box::new(fs::File::create(path)?),
+        None => Box::new(io::stdout()),
+    };
+
+    if cli.stdin_paths {
+        let stdin = io::stdin();
+        let mut any_failure = false;
+        for line in stdin.lock().lines() {
+            let line = line?;
+            let line = line.trim().to_string();
+            if line.is_empty() {
+                continue;
+            }
+            let input_path = PathBuf::from(&line);
+            match check_dicom_logic_one(&input_path) {
+                Ok(report) => {
+                    if report.has_errors() || (cli.strict && report.warning_count() > 0) {
+                        any_failure = true;
+                    }
+                    write_check_dicom_logic_report(&mut out, &input_path, &report, json_output, cli.verbose)?;
+                }
+                Err(error) => {
+                    any_failure = true;
+                    writeln!(out, "FAIL {}: {error}", input_path.display())?;
+                }
+            }
+        }
+        if any_failure {
+            return Err(io::Error::new(ErrorKind::InvalidInput, "").into());
+        }
+        return Ok(());
+    }
+
+    let input_path = cli.input.as_ref().ok_or_else(|| {
+        io::Error::new(ErrorKind::InvalidInput, "an input path is required for --check-dicom-logic")
+    })?;
+
+    let report = check_dicom_logic_one(input_path)?;
+    write_check_dicom_logic_report(&mut out, input_path, &report, json_output, cli.verbose)?;
+
+    if report.has_errors() || (cli.strict && report.warning_count() > 0) {
+        return Err(io::Error::new(ErrorKind::InvalidInput, "").into());
+    }
+    Ok(())
+}
+
+fn check_dicom_logic_one(path: &Path) -> Result<ConsistencyReport, Box<dyn std::error::Error>> {
+    let object = read_dicom_file(path)?;
+    Ok(check_dicom_logic(&object))
+}
+
+fn write_check_dicom_logic_report(
+    out: &mut dyn Write,
+    path: &Path,
+    report: &ConsistencyReport,
+    json_output: bool,
+    verbose: bool,
+) -> io::Result<()> {
+    if json_output {
+        let findings_json: Vec<JsonValue> = report
+            .findings
+            .iter()
+            .map(|finding| {
+                serde_json::json!({
+                    "severity": match finding.severity {
+                        Severity::Error => "error",
+                        Severity::Warning => "warning",
+                    },
+                    "ruleId": finding.rule_id,
+                    "message": finding.message,
+                    "tags": finding.tags.iter().map(|tag| tag.to_string()).collect::<Vec<_>>(),
+                })
+            })
+            .collect();
+        let value = serde_json::json!({
+            "path": path.display().to_string(),
+            "errorCount": report.error_count(),
+            "warningCount": report.warning_count(),
+            "findings": findings_json,
+        });
+        return writeln!(out, "{value}");
+    }
+
+    let error_count = report.error_count();
+    let warning_count = report.warning_count();
+    if error_count == 0 && warning_count == 0 {
+        writeln!(out, "OK {}", path.display())?;
+    } else if error_count == 0 {
+        writeln!(out, "WARN {}: {warning_count} warning(s)", path.display())?;
+    } else {
+        writeln!(out, "FAIL {}: {error_count} error(s), {warning_count} warning(s)", path.display())?;
+    }
+
+    if verbose {
+        for finding in &report.findings {
+            let label = match finding.severity {
+                Severity::Error => "error",
+                Severity::Warning => "warning",
+            };
+            writeln!(out, "  [{label}] {}: {}", finding.rule_id, finding.message)?;
+        }
+    }
+
+    Ok(())
 }
 
 fn infer_direction_for_filter(
@@ -2983,7 +3166,8 @@ mod tests {
         apply_filter_to_object, build_volume, canonical_view_basis, depth_steps, detect_output_kind,
         frame_output_path, infer_direction, parse_attribute_override, parse_depth_spec,
         parse_filter_requests, parse_redact_box, resolve_depths, resolve_mpr_output_kind,
-        run_dicom_to_json_with_object, run_dicom_to_render_with_object, run_mpr, resolve_render_format,
+        run_check_dicom_logic, run_dicom_to_json_with_object, run_dicom_to_render_with_object, run_mpr,
+        resolve_render_format, validate_check_dicom_logic_flags,
         Cli, DepthSpec, Direction, FileKind, MprOutputKind, OutputType, RenderFormat, TextureCompressionArg,
         VolumeFormat,
     };
@@ -3070,6 +3254,8 @@ mod tests {
             histogram_frame: None,
             histogram_min: None,
             histogram_max: None,
+            check_dicom_logic: false,
+            strict: false,
         }
     }
 
@@ -3082,6 +3268,57 @@ mod tests {
 
         assert!(cli.check_dicom);
         assert_eq!(cli.input, Some(PathBuf::from("in.dcm")));
+    }
+
+    #[test]
+    fn parses_check_dicom_logic_flag_with_strict_and_json_output() {
+        let matches = Cli::command()
+            .try_get_matches_from(["dcmnorm", "--check-dicom-logic", "--strict", "--output-type", "json", "in.dcm"])
+            .unwrap();
+        let cli = Cli::from_arg_matches(&matches).unwrap().finalize();
+
+        assert!(cli.check_dicom_logic);
+        assert!(cli.strict);
+        assert_eq!(cli.output_type, Some(OutputType::Json));
+        assert_eq!(cli.input, Some(PathBuf::from("in.dcm")));
+        assert!(validate_check_dicom_logic_flags(&cli).is_ok());
+    }
+
+    #[test]
+    fn check_dicom_logic_rejects_non_json_output_type() {
+        let mut cli = base_cli();
+        cli.check_dicom_logic = true;
+        cli.output_type = Some(OutputType::Png);
+        assert!(validate_check_dicom_logic_flags(&cli).is_err());
+    }
+
+    #[test]
+    fn check_dicom_logic_rejects_conversion_flags() {
+        let mut cli = base_cli();
+        cli.check_dicom_logic = true;
+        cli.remove_private_tags = true;
+        assert!(validate_check_dicom_logic_flags(&cli).is_err());
+    }
+
+    #[test]
+    fn run_check_dicom_logic_reports_ok_for_a_clean_file_and_fails_only_in_strict_mode_on_warnings() {
+        let mut cli = base_cli();
+        cli.check_dicom_logic = true;
+        cli.input = Some(fixture_path("ct.dcm"));
+        cli.output = Some(temp_output_path("check-dicom-logic-ct"));
+        assert!(run_check_dicom_logic(&cli).is_ok(), "ct.dcm only has a warning-level finding");
+
+        cli.strict = true;
+        assert!(run_check_dicom_logic(&cli).is_err(), "--strict should fail on warnings too");
+    }
+
+    #[test]
+    fn run_check_dicom_logic_fails_on_a_file_with_an_error_level_finding() {
+        let mut cli = base_cli();
+        cli.check_dicom_logic = true;
+        cli.input = Some(fixture_path("bad_vr.dcm"));
+        cli.output = Some(temp_output_path("check-dicom-logic-bad-vr"));
+        assert!(run_check_dicom_logic(&cli).is_err());
     }
 
     #[test]
