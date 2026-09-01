@@ -29,11 +29,7 @@ jobs:
             libc6-dev \
             libclang-dev \
             pkg-config \
-            libavutil-dev \
-            libavcodec-dev \
-            libavformat-dev \
-            libswscale-dev \
-            libswresample-dev
+            nasm
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
