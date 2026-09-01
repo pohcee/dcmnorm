@@ -190,7 +190,7 @@ fi
 
 require_clean_tree
 
-git fetch --tags --quiet
+git fetch --tags --force --quiet
 
 latest_tag="$(latest_semver_tag)"
 version_source="git tag"
