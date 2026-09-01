@@ -151,10 +151,12 @@ To install every CLI under `exec/` with one command, use the helper script inste
 
 This script auto-detects Kakadu headers/libraries and enables `kakadu-ffi` when available,
 and verifies the default codec toolchain (`pkg-config`, `clang`, standard C headers, and the
-FFmpeg development packages above) before invoking Cargo. If it detects Claude Code on the
-machine (an existing `~/.claude` directory), it also installs the [`skills/dcmnorm`](skills/dcmnorm/)
-skill to `~/.claude/skills/dcmnorm` — set `DCMNORM_SKIP_SKILL=1` to skip this, or
-`CLAUDE_SKILLS_DIR` to install elsewhere (and to force the install even without `~/.claude`).
+FFmpeg development packages above) before invoking Cargo. If it detects Claude Code and/or
+Gemini CLI on the machine (an existing `~/.claude` and/or `~/.gemini` directory), it also
+installs the [`skills/dcmnorm`](skills/dcmnorm/) skill to `~/.claude/skills/dcmnorm` and/or
+`~/.gemini/skills/dcmnorm` respectively — set `DCMNORM_SKIP_SKILL=1` to skip this, or
+`CLAUDE_SKILLS_DIR`/`GEMINI_SKILLS_DIR` to install elsewhere (and to force the install even
+without the corresponding `~/.claude`/`~/.gemini` directory).
 
 Either method installs into Cargo's bin directory, usually `~/.cargo/bin`. If that isn't on
 your `PATH` yet, add:
@@ -194,9 +196,10 @@ Or, generally:
 curl -sSL pohcee.com/dcmnorm | sh
 ```
 
-This script also installs the `dcmnorm` Claude Code skill (downloaded from this repo's
-`skills/dcmnorm/SKILL.md`) if it detects Claude Code on the machine — same `DCMNORM_SKIP_SKILL`/
-`CLAUDE_SKILLS_DIR` overrides as above.
+This script also installs the `dcmnorm` skill (downloaded from this repo's
+`skills/dcmnorm/SKILL.md`) for any of Claude Code, Gemini CLI, or Codex CLI it detects on the
+machine — same `DCMNORM_SKIP_SKILL`/`CLAUDE_SKILLS_DIR`/`GEMINI_SKILLS_DIR`/`CODEX_SKILLS_DIR`
+overrides as above.
 
 On Debian/Ubuntu (`linux-x86_64` only), pass `--deb` to install a downloaded `.deb` package via
 `apt install` instead of copying binaries into `INSTALL_DIR` — this resolves runtime dependencies
