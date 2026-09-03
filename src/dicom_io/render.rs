@@ -1678,6 +1678,52 @@ pub(crate) fn decode_frame_rgb_values(
     Ok((metadata, rendered.bytes))
 }
 
+/// Decodes one frame to interleaved RGB8 bytes for texture export (`texture_export::
+/// pack_dicom_rgb_frame_texture`), NOT `decode_frame_rgb_values` above - that function is
+/// purpose-built for histogram computation (calls `render_rgb_frame` directly, skips ICC
+/// correction, and never handles PALETTE COLOR since that photometric interpretation has
+/// SamplesPerPixel=1 and `render_rgb_frame` only accepts true RGB/YBR). This one instead calls
+/// `render_single_frame` - the SAME dispatch the classic JPEG/PNG render path uses - so a color
+/// texture matches the JPEG preview exactly: PALETTE COLOR is transparently handled via
+/// `render_single_frame`'s own `render_grayscale_frame` → `render_palette_color_frame` redirect
+/// (SamplesPerPixel=1 routes there, not through `render_rgb_frame`), and an embedded ICC profile
+/// is applied identically to the JPEG path (`render_single_frame` does this internally whenever
+/// `samples_per_pixel == 3`) - without both, "upgrading" a pane from its initial JPEG render to
+/// this texture could visibly shift color, defeating the silent-upgrade contract every other GPU
+/// tier already honors. No VOI-window stripping needed either way - color has no window/level
+/// concept, unlike `decode_frame_grayscale_values`'s modality-LUT step.
+pub(crate) fn decode_frame_texture_rgb_values(
+    object: &DefaultDicomObject,
+    frame_index: usize,
+) -> Result<(RenderMetadata, Vec<u8>), RenderError> {
+    let options = RenderPipelineOptions { frame_index, ..Default::default() };
+
+    if let Some(frame_object) = try_decode_single_frame_object(object, frame_index)? {
+        let metadata = read_render_metadata(&frame_object)?;
+        assert_is_color(&metadata)?;
+        let mut frame_options = options.clone();
+        frame_options.frame_index = 0;
+        let rendered = render_single_frame(&frame_object, &metadata, &frame_options)?;
+        return Ok((metadata, rendered.bytes));
+    }
+
+    let working = ensure_native_render_object(object)?;
+    let metadata = read_render_metadata(working.as_ref())?;
+    assert_is_color(&metadata)?;
+    let rendered = render_single_frame(working.as_ref(), &metadata, &options)?;
+    Ok((metadata, rendered.bytes))
+}
+
+fn assert_is_color(metadata: &RenderMetadata) -> Result<(), RenderError> {
+    let is_color = metadata.samples_per_pixel > 1
+        || metadata.photometric_interpretation.eq_ignore_ascii_case("PALETTE COLOR");
+    if is_color {
+        Ok(())
+    } else {
+        Err(RenderError::UnsupportedSamplesPerPixel(metadata.samples_per_pixel))
+    }
+}
+
 // Enhanced Multi-frame objects (Enhanced CT/MR/PET, etc.) don't carry RescaleSlope/Intercept or
 // WindowCenter/Width at the top level at all - those live inside a functional group item instead:
 // PerFrameFunctionalGroupsSequence[frame_index] if the value varies per frame (e.g. multi-energy
@@ -2348,11 +2394,12 @@ mod tests {
     use super::{
         apply_modality_lut, apply_voi_lut, clamped_box, mpeg4_input_pixel_format,
         mpeg4_muxer_name, mpeg4_video_filter, normalize_decoded_render_attributes,
-        read_lut_from_sequence, render_dicom_frame, ybr_rct_to_rgb, ybr_to_rgb, BoundingBox,
-        BoxLength, Lut, RenderFrameOutput, RenderOutputFormat, RenderPipelineOptions,
+        read_lut_from_sequence, render_dicom_frame, try_extract_passthrough_jpeg_frame,
+        ybr_rct_to_rgb, ybr_to_rgb, BoundingBox, BoxLength, Lut, RenderFrameOutput,
+        RenderOutputFormat, RenderPipelineOptions,
     };
     use crate::dicom_io::read_dicom_file;
-    use dcmnorm_core::{DataElement, PrimitiveValue, VR};
+    use dcmnorm_core::{DataElement, PrimitiveValue, Tag, VR};
     use dcmnorm_dictionary::tags;
     use std::path::PathBuf;
 
@@ -2784,6 +2831,88 @@ mod tests {
             .expect("interleaved fixture should render");
         assert_eq!(out_planar.bytes, out_interleaved.bytes);
     }
+
+    #[test]
+    fn passthrough_jpeg_frame_returns_original_bytes_for_color_jpeg_baseline() {
+        let object = read_dicom_file(fixture("sc_jpeg_baseline.dcm")).expect("fixture should be readable");
+        let expected_bytes = object
+            .element(tags::PIXEL_DATA)
+            .expect("PixelData should be present")
+            .fragments()
+            .expect("JPEG Baseline PixelData should be encapsulated")
+            .first()
+            .expect("should have at least one fragment")
+            .clone();
+
+        let result = try_extract_passthrough_jpeg_frame(&object, 0)
+            .expect("passthrough attempt should not error")
+            .expect("color JPEG Baseline source with no overlay should qualify for passthrough");
+
+        assert_eq!(result.format, RenderOutputFormat::Jpeg);
+        assert_eq!(result.bytes, expected_bytes);
+        assert!(result.overlays.is_empty());
+    }
+
+    #[test]
+    fn passthrough_jpeg_frame_declines_grayscale_source() {
+        // Synthetic minimal grayscale (MONOCHROME2, SamplesPerPixel=1) JPEG Baseline object - no
+        // real fixture in test/files is both grayscale AND JPEG Baseline ("sc_jpeg_dcmtk_cr.dcm"
+        // is DCMTK's "+cr" color-range flag, not "Computed Radiography" - it's YBR color, like its
+        // siblings). Only metadata tags are needed: try_extract_passthrough_jpeg_frame must
+        // return Ok(None) for a grayscale source based on SamplesPerPixel alone, before ever
+        // touching PixelData - passthrough must never apply to grayscale, since it would make
+        // server-side window/level impossible afterward.
+        use dcmnorm_object::{FileMetaTableBuilder, InMemDicomObject};
+
+        let elements = vec![
+            DataElement::new(tags::SOP_CLASS_UID, VR::UI, PrimitiveValue::from("1.2.840.10008.5.1.4.1.1.7")),
+            DataElement::new(tags::SOP_INSTANCE_UID, VR::UI, PrimitiveValue::from("1.2.3.4.5.6")),
+            DataElement::new(tags::ROWS, VR::US, PrimitiveValue::from(2u16)),
+            DataElement::new(tags::COLUMNS, VR::US, PrimitiveValue::from(2u16)),
+            DataElement::new(tags::SAMPLES_PER_PIXEL, VR::US, PrimitiveValue::from(1u16)),
+            DataElement::new(tags::BITS_ALLOCATED, VR::US, PrimitiveValue::from(8u16)),
+            DataElement::new(tags::BITS_STORED, VR::US, PrimitiveValue::from(8u16)),
+            DataElement::new(tags::PIXEL_REPRESENTATION, VR::US, PrimitiveValue::from(0u16)),
+            DataElement::new(tags::PHOTOMETRIC_INTERPRETATION, VR::CS, PrimitiveValue::from("MONOCHROME2")),
+        ];
+        let object = InMemDicomObject::from_element_iter(elements)
+            .with_meta(
+                FileMetaTableBuilder::new()
+                    .media_storage_sop_class_uid("1.2.840.10008.5.1.4.1.1.7")
+                    .media_storage_sop_instance_uid("1.2.3.4.5.6")
+                    .transfer_syntax(dcmnorm_dictionary::uids::JPEG_BASELINE8_BIT),
+            )
+            .unwrap();
+
+        let result = try_extract_passthrough_jpeg_frame(&object, 0).expect("should not error");
+        assert!(result.is_none(), "grayscale source must never be passthrough-eligible");
+    }
+
+    #[test]
+    fn passthrough_jpeg_frame_declines_when_overlay_present() {
+        let mut object =
+            read_dicom_file(fixture("sc_jpeg_baseline.dcm")).expect("fixture should be readable");
+        object.put(DataElement::new(
+            Tag(0x6000, 0x0010),
+            VR::US,
+            PrimitiveValue::from(8u16),
+        ));
+        object.put(DataElement::new(
+            Tag(0x6000, 0x0011),
+            VR::US,
+            PrimitiveValue::from(8u16),
+        ));
+
+        let result = try_extract_passthrough_jpeg_frame(&object, 0).expect("should not error");
+        assert!(result.is_none(), "an overlay-bearing instance must fall through to the decode path");
+    }
+
+    #[test]
+    fn passthrough_jpeg_frame_declines_non_jpeg_baseline_source() {
+        let object = read_dicom_file(fixture("rgb_interleaved.dcm")).expect("fixture should be readable");
+        let result = try_extract_passthrough_jpeg_frame(&object, 0).expect("should not error");
+        assert!(result.is_none(), "an uncompressed source is never passthrough-eligible");
+    }
 }
 
 fn maybe_resize_frame(
@@ -3059,6 +3188,69 @@ fn first_numeric_value(text: Option<&str>) -> Option<f64> {
         .split('\\')
         .next()
         .and_then(|value| value.trim().parse::<f64>().ok())
+}
+
+/// Attempts to serve `frame_index` of `object` directly from its own encapsulated JPEG bytes,
+/// with NO decode/recompress step - only when ALL of:
+///  - transfer syntax is JPEG Baseline (Process 1) (`uids::JPEG_BASELINE8_BIT`)
+///  - the frame is COLOR (SamplesPerPixel > 1, or PALETTE COLOR - checked for completeness even
+///    though PALETTE COLOR is never JPEG Baseline in practice)
+///  - the instance has no DICOM overlay plane (group 60xx) - compositing needs decoded pixels
+///  - PixelData has exactly one fragment per frame (the common case; a frame split across
+///    multiple fragments falls through rather than guessing how to reassemble it)
+///
+/// Returns `Ok(None)` (not an error) whenever any of the above doesn't hold - the caller falls
+/// through to the ordinary decode+encode path. Grayscale is INTENTIONALLY never eligible here:
+/// passthrough ships undecoded bytes, which makes server-side window/level impossible afterward -
+/// grayscale must stay on the decode+re-encode path to keep interactive W/L (see the color-image
+/// plan's Piece 2 doc for the full reasoning).
+pub fn try_extract_passthrough_jpeg_frame(
+    object: &DefaultDicomObject,
+    frame_index: usize,
+) -> Result<Option<RenderFrameOutput>, RenderError> {
+    let source_uid = normalize_transfer_syntax_uid(object.meta().transfer_syntax());
+    if source_uid != uids::JPEG_BASELINE8_BIT {
+        return Ok(None);
+    }
+
+    let metadata = read_render_metadata(object)?;
+    let is_color = metadata.samples_per_pixel > 1
+        || metadata.photometric_interpretation.eq_ignore_ascii_case("PALETTE COLOR");
+    if !is_color {
+        return Ok(None);
+    }
+
+    if !discover_overlays(object).is_empty() {
+        return Ok(None);
+    }
+
+    let Ok(element) = object.element(tags::PIXEL_DATA) else {
+        return Ok(None);
+    };
+    // `None` here means native (non-encapsulated) PixelData - shouldn't happen for a JPEG
+    // Baseline source, but nothing to pass through if it did.
+    let Some(fragments) = element.fragments() else {
+        return Ok(None);
+    };
+    if fragments.len() != metadata.number_of_frames {
+        // Not exactly one fragment per frame - falls through rather than guessing how to
+        // reassemble a frame split across multiple fragments.
+        return Ok(None);
+    }
+    let Some(bytes) = fragments.get(frame_index) else {
+        return Ok(None);
+    };
+
+    Ok(Some(RenderFrameOutput {
+        width: metadata.cols,
+        height: metadata.rows,
+        samples_per_pixel: metadata.samples_per_pixel,
+        bits_allocated: metadata.bits_allocated,
+        format: RenderOutputFormat::Jpeg,
+        bytes: bytes.clone(),
+        overlays: Vec::new(),
+        selected_overlay_index: None,
+    }))
 }
 
 fn ensure_native_render_object<'a>(

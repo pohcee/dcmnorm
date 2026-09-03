@@ -18,7 +18,10 @@ use flate2::write::GzEncoder;
 use flate2::Compression;
 use serde_json::json;
 
-use super::render::{decode_frame_grayscale_values, resolve_default_window, resolve_grayscale_invert};
+use super::render::{
+    decode_frame_grayscale_values, decode_frame_texture_rgb_values, resolve_default_window,
+    resolve_grayscale_invert,
+};
 use super::types::RenderError;
 use super::volume::{resample_volume, Interpolation, Volume};
 
@@ -82,6 +85,10 @@ impl From<RenderError> for TextureExportError {
 pub enum SampleFormat {
     Uint16,
     Int16,
+    /// Interleaved 8-bit-per-channel RGB, 3 bytes/pixel - never quantized (see
+    /// `pack_rgb_frame_texture`'s own doc), used for every color texture (grayscale textures are
+    /// always `Uint16`/`Int16`).
+    Rgb8,
 }
 
 impl SampleFormat {
@@ -89,6 +96,7 @@ impl SampleFormat {
         match self {
             Self::Uint16 => "uint16",
             Self::Int16 => "int16",
+            Self::Rgb8 => "rgb8",
         }
     }
 }
@@ -668,6 +676,215 @@ pub fn pack_dicom_frame_stack_texture(
     pack_frame_stack_texture(&decoded, default_window, compression, invert)
 }
 
+/// RGB analog of `resample_frame_2d` - independent per-channel bilinear box-downsample of an
+/// interleaved RGB8 frame. `u8` in/out (round + clamp to 0-255) rather than a raw `f32`
+/// passthrough - RGB8 has no "physical value" concept beyond the display range, unlike the
+/// grayscale path's physical samples.
+pub fn resample_rgb_frame_2d(rgb: &[u8], width: u32, height: u32, target_max_dim: u32) -> (Vec<u8>, u32, u32) {
+    let native_max = width.max(height);
+    if native_max == 0 || native_max <= target_max_dim.max(1) {
+        return (rgb.to_vec(), width, height);
+    }
+
+    let scale = target_max_dim.max(1) as f64 / native_max as f64;
+    let target_width = ((width as f64 * scale).round() as u32).max(1);
+    let target_height = ((height as f64 * scale).round() as u32).max(1);
+
+    let col_scale = if target_width > 1 { (width as f64 - 1.0) / (target_width as f64 - 1.0) } else { 0.0 };
+    let row_scale = if target_height > 1 { (height as f64 - 1.0) / (target_height as f64 - 1.0) } else { 0.0 };
+
+    let sample_at = |channel: usize, x_f: f64, y_f: f64| -> f64 {
+        let x0 = x_f.floor().clamp(0.0, (width - 1) as f64) as usize;
+        let y0 = y_f.floor().clamp(0.0, (height - 1) as f64) as usize;
+        let x1 = (x0 + 1).min(width as usize - 1);
+        let y1 = (y0 + 1).min(height as usize - 1);
+        let tx = x_f - x0 as f64;
+        let ty = y_f - y0 as f64;
+        let get = |x: usize, y: usize| rgb[(y * width as usize + x) * 3 + channel] as f64;
+        let top = get(x0, y0) * (1.0 - tx) + get(x1, y0) * tx;
+        let bottom = get(x0, y1) * (1.0 - tx) + get(x1, y1) * tx;
+        top * (1.0 - ty) + bottom * ty
+    };
+
+    let mut out = vec![0u8; target_width as usize * target_height as usize * 3];
+    for target_row in 0..target_height {
+        let y_f = if target_height > 1 { target_row as f64 * row_scale } else { (height as f64 - 1.0) / 2.0 };
+        for target_col in 0..target_width {
+            let x_f = if target_width > 1 { target_col as f64 * col_scale } else { (width as f64 - 1.0) / 2.0 };
+            let out_index = (target_row as usize * target_width as usize + target_col as usize) * 3;
+            for channel in 0..3 {
+                out[out_index + channel] = sample_at(channel, x_f, y_f).round().clamp(0.0, 255.0) as u8;
+            }
+        }
+    }
+    (out, target_width, target_height)
+}
+
+/// Packs a single 2D frame's already-decoded interleaved RGB8 bytes (e.g. from
+/// `super::render::decode_frame_texture_rgb_values`) as a depth-1 texture - the color counterpart
+/// to `pack_frame_texture`. Never quantized: RGB8 IS the wire format, so `lossless` is
+/// unconditionally `true` in the quantization-fidelity sense this flag tracks (see
+/// `TextureMeta::lossless`'s own doc) - whether the SOURCE transfer syntax was itself
+/// lossy-compressed is an entirely orthogonal, client-side concern (see js/utils.js's
+/// `sourceIsLossy`), same as it already is for a lossy-source grayscale texture. No window/invert
+/// concept for color - both are grayscale-only ideas (color is never windowed, and MONOCHROME1
+/// inversion has no color analog).
+pub fn pack_rgb_frame_texture(
+    rgb: &[u8],
+    width: u32,
+    height: u32,
+    target_max_dim: Option<u32>,
+    compression: TextureCompression,
+) -> Result<PackedTexture, TextureExportError> {
+    if width == 0 || height == 0 {
+        return Err(TextureExportError::InvalidDimensions);
+    }
+    let expected = width as usize * height as usize * 3;
+    if rgb.len() != expected {
+        return Err(TextureExportError::SampleCountMismatch { expected, found: rgb.len() });
+    }
+    let native_dims = (width, height, 1);
+
+    let (quantized, out_width, out_height, downsampled) = match target_max_dim {
+        Some(max_dim) if width.max(height) > max_dim.max(1) => {
+            let (resampled, w, h) = resample_rgb_frame_2d(rgb, width, height, max_dim);
+            (resampled, w, h, true)
+        }
+        _ => (rgb.to_vec(), width, height, false),
+    };
+
+    let (payload, payload_bytes_raw) = apply_compression(quantized, compression)?;
+    let payload_bytes_stored = payload.len() as u64;
+
+    let meta = TextureMeta {
+        content_kind: ContentKind::Image2D,
+        sample_format: SampleFormat::Rgb8,
+        compression,
+        lossless: true,
+        width: out_width,
+        height: out_height,
+        depth: 1,
+        rescale_slope: 1.0,
+        rescale_intercept: 0.0,
+        row_spacing_mm: 1.0,
+        col_spacing_mm: 1.0,
+        slice_spacing_mm: 0.0,
+        origin: [0.0, 0.0, 0.0],
+        row_dir: [1.0, 0.0, 0.0],
+        col_dir: [0.0, 1.0, 0.0],
+        normal_dir: [0.0, 0.0, 1.0],
+        default_window_center: None,
+        default_window_width: None,
+        invert: false,
+        native_dims,
+        downsampled,
+        payload_bytes_raw,
+        payload_bytes_stored,
+    };
+
+    Ok(PackedTexture { meta, payload })
+}
+
+/// Convenience wrapper: decodes frame `frame_index` of `object` to RGB8 (via
+/// `decode_frame_texture_rgb_values` - PALETTE COLOR-aware, ICC-corrected, matching the classic
+/// JPEG/PNG render exactly) and packs it - the color counterpart to `pack_dicom_frame_texture`.
+pub fn pack_dicom_rgb_frame_texture(
+    object: &dcmnorm_object::DefaultDicomObject,
+    frame_index: usize,
+    target_max_dim: Option<u32>,
+    compression: TextureCompression,
+) -> Result<PackedTexture, TextureExportError> {
+    let (metadata, rgb) = decode_frame_texture_rgb_values(object, frame_index)?;
+    pack_rgb_frame_texture(&rgb, metadata.cols as u32, metadata.rows as u32, target_max_dim, compression)
+}
+
+/// One already-decoded RGB8 frame, as input to `pack_rgb_frame_stack_texture` - the color analog
+/// of `DecodedFrame`.
+#[derive(Clone, Debug)]
+pub struct DecodedRgbFrame {
+    pub bytes: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Packs `frames` as one RGB8 texture array - the color counterpart to `pack_frame_stack_texture`.
+/// Same "no resampling, caller rejects an oversized stack before calling this" contract (see that
+/// function's own doc) and the same `FrameDimensionMismatch` check.
+pub fn pack_rgb_frame_stack_texture(
+    frames: &[DecodedRgbFrame],
+    compression: TextureCompression,
+) -> Result<PackedTexture, TextureExportError> {
+    let Some(first) = frames.first() else {
+        return Err(TextureExportError::InvalidDimensions);
+    };
+    let (width, height) = (first.width, first.height);
+    if width == 0 || height == 0 {
+        return Err(TextureExportError::InvalidDimensions);
+    }
+    let expected_per_frame = width as usize * height as usize * 3;
+
+    let mut concatenated = Vec::with_capacity(expected_per_frame * frames.len());
+    for frame in frames {
+        if frame.width != width || frame.height != height {
+            return Err(TextureExportError::FrameDimensionMismatch {
+                expected: (width, height),
+                found: (frame.width, frame.height),
+            });
+        }
+        if frame.bytes.len() != expected_per_frame {
+            return Err(TextureExportError::SampleCountMismatch { expected: expected_per_frame, found: frame.bytes.len() });
+        }
+        concatenated.extend_from_slice(&frame.bytes);
+    }
+
+    let depth = frames.len() as u32;
+    let native_dims = (width, height, depth);
+    let (payload, payload_bytes_raw) = apply_compression(concatenated, compression)?;
+    let payload_bytes_stored = payload.len() as u64;
+
+    let meta = TextureMeta {
+        content_kind: ContentKind::FrameStack,
+        sample_format: SampleFormat::Rgb8,
+        compression,
+        lossless: true,
+        width,
+        height,
+        depth,
+        rescale_slope: 1.0,
+        rescale_intercept: 0.0,
+        row_spacing_mm: 1.0,
+        col_spacing_mm: 1.0,
+        slice_spacing_mm: 0.0,
+        origin: [0.0, 0.0, 0.0],
+        row_dir: [1.0, 0.0, 0.0],
+        col_dir: [0.0, 1.0, 0.0],
+        normal_dir: [0.0, 0.0, 1.0],
+        default_window_center: None,
+        default_window_width: None,
+        invert: false,
+        native_dims,
+        downsampled: false,
+        payload_bytes_raw,
+        payload_bytes_stored,
+    };
+
+    Ok(PackedTexture { meta, payload })
+}
+
+/// Convenience wrapper mirroring `pack_dicom_frame_stack_texture`: decodes `(object, frame_index)`
+/// for each entry of `sources` to RGB8 and packs the result as a frame stack.
+pub fn pack_dicom_rgb_frame_stack_texture(
+    sources: &[(&dcmnorm_object::DefaultDicomObject, usize)],
+    compression: TextureCompression,
+) -> Result<PackedTexture, TextureExportError> {
+    let mut decoded = Vec::with_capacity(sources.len());
+    for (object, frame_index) in sources.iter() {
+        let (metadata, bytes) = decode_frame_texture_rgb_values(object, *frame_index)?;
+        decoded.push(DecodedRgbFrame { bytes, width: metadata.cols as u32, height: metadata.rows as u32 });
+    }
+    pack_rgb_frame_stack_texture(&decoded, compression)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -953,5 +1170,101 @@ mod tests {
         let packed = pack_frame_stack_texture(&frames, None, TextureCompression::None, false).unwrap();
         assert_eq!(packed.meta.default_window_center, Some((0.0 + 203.0) / 2.0));
         assert_eq!(packed.meta.default_window_width, Some(203.0));
+    }
+
+    fn fixture(name: &str) -> std::path::PathBuf {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test/files").join(name)
+    }
+
+    fn rgb_ramp(width: u32, height: u32, base: u8) -> DecodedRgbFrame {
+        let bytes = (0..width * height * 3)
+            .map(|index| base.wrapping_add((index % 251) as u8))
+            .collect();
+        DecodedRgbFrame { bytes, width, height }
+    }
+
+    #[test]
+    fn pack_rgb_frame_texture_is_unconditionally_lossless_and_rgb8() {
+        let rgb = vec![10u8, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120]; // 2x2 RGB8
+        let packed = pack_rgb_frame_texture(&rgb, 2, 2, None, TextureCompression::None).unwrap();
+        assert_eq!(packed.meta.sample_format, SampleFormat::Rgb8);
+        assert!(packed.meta.lossless);
+        assert_eq!((packed.meta.width, packed.meta.height, packed.meta.depth), (2, 2, 1));
+        assert_eq!(packed.payload, rgb);
+        assert_eq!(packed.meta.default_window_center, None, "color has no window/level concept");
+        assert!(!packed.meta.invert, "color has no MONOCHROME1 invert concept");
+    }
+
+    #[test]
+    fn pack_rgb_frame_texture_rejects_wrong_byte_count() {
+        let error = pack_rgb_frame_texture(&[1, 2, 3], 2, 2, None, TextureCompression::None).unwrap_err();
+        assert!(matches!(error, TextureExportError::SampleCountMismatch { expected: 12, found: 3 }));
+    }
+
+    #[test]
+    fn pack_rgb_frame_texture_rejects_zero_dimensions() {
+        let error = pack_rgb_frame_texture(&[], 0, 4, None, TextureCompression::None).unwrap_err();
+        assert!(matches!(error, TextureExportError::InvalidDimensions));
+    }
+
+    #[test]
+    fn pack_rgb_frame_texture_downsamples_when_over_target_max_dim() {
+        let rgb = vec![128u8; 16 * 16 * 3];
+        let packed = pack_rgb_frame_texture(&rgb, 16, 16, Some(8), TextureCompression::None).unwrap();
+        assert!(packed.meta.downsampled);
+        assert_eq!((packed.meta.width, packed.meta.height), (8, 8));
+        assert_eq!(packed.meta.native_dims, (16, 16, 1));
+        assert_eq!(packed.payload.len(), 8 * 8 * 3);
+    }
+
+    #[test]
+    fn pack_rgb_frame_stack_texture_concatenates_layers_in_source_order() {
+        let frames = vec![rgb_ramp(2, 2, 0), rgb_ramp(2, 2, 100), rgb_ramp(2, 2, 200)];
+        let packed = pack_rgb_frame_stack_texture(&frames, TextureCompression::None).unwrap();
+        assert_eq!(packed.meta.content_kind, ContentKind::FrameStack);
+        assert_eq!(packed.meta.sample_format, SampleFormat::Rgb8);
+        assert_eq!((packed.meta.width, packed.meta.height, packed.meta.depth), (2, 2, 3));
+        assert!(packed.meta.lossless);
+        let bytes_per_layer = 2 * 2 * 3;
+        assert_eq!(&packed.payload[0..bytes_per_layer], &frames[0].bytes[..]);
+        assert_eq!(&packed.payload[bytes_per_layer..bytes_per_layer * 2], &frames[1].bytes[..]);
+    }
+
+    #[test]
+    fn pack_rgb_frame_stack_texture_rejects_mismatched_frame_dimensions() {
+        let frames = vec![rgb_ramp(2, 2, 0), rgb_ramp(3, 2, 0)];
+        let error = pack_rgb_frame_stack_texture(&frames, TextureCompression::None).unwrap_err();
+        assert!(matches!(
+            error,
+            TextureExportError::FrameDimensionMismatch { expected: (2, 2), found: (3, 2) }
+        ));
+    }
+
+    #[test]
+    fn pack_rgb_frame_stack_texture_rejects_an_empty_stack() {
+        let error = pack_rgb_frame_stack_texture(&[], TextureCompression::None).unwrap_err();
+        assert!(matches!(error, TextureExportError::InvalidDimensions));
+    }
+
+    #[test]
+    fn pack_dicom_rgb_frame_texture_packs_a_real_uncompressed_rgb_fixture() {
+        let object = crate::dicom_io::read_dicom_file(fixture("rgb_interleaved.dcm")).expect("fixture should be readable");
+        let packed = pack_dicom_rgb_frame_texture(&object, 0, None, TextureCompression::None).unwrap();
+        assert_eq!(packed.meta.sample_format, SampleFormat::Rgb8);
+        assert!(packed.meta.lossless);
+        assert_eq!(packed.payload.len(), packed.meta.width as usize * packed.meta.height as usize * 3);
+    }
+
+    #[test]
+    fn pack_dicom_rgb_frame_stack_texture_packs_two_real_instances() {
+        let planar = crate::dicom_io::read_dicom_file(fixture("rgb_planar.dcm")).expect("fixture should be readable");
+        let interleaved = crate::dicom_io::read_dicom_file(fixture("rgb_interleaved.dcm")).expect("fixture should be readable");
+        // Same real instance re-encoded two ways (see render.rs's own
+        // planar_and_interleaved_rgb_render_to_identical_png_bytes test) - same dimensions, so a
+        // legitimate (if synthetic) 2-frame stack.
+        let sources: Vec<(&dcmnorm_object::DefaultDicomObject, usize)> = vec![(&planar, 0), (&interleaved, 0)];
+        let packed = pack_dicom_rgb_frame_stack_texture(&sources, TextureCompression::None).unwrap();
+        assert_eq!(packed.meta.depth, 2);
+        assert_eq!(packed.meta.sample_format, SampleFormat::Rgb8);
     }
 }

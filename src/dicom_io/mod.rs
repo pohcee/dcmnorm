@@ -51,8 +51,9 @@ pub use consistency::{check_dicom_logic, ConsistencyFinding, ConsistencyReport, 
 pub use render::{
     redact_dicom_pixels_to_transfer_syntax, render_all_dicom_frames,
     render_all_dicom_video_frames, render_dicom_frame, render_dicom_frames,
-    render_dicom_to_recompressed_object, write_dicom_video, BoundingBox, BoxLength,
-    OverlaySummary, RenderFrameOutput, RenderOutputFormat, RenderPipelineOptions,
+    render_dicom_to_recompressed_object, try_extract_passthrough_jpeg_frame, write_dicom_video,
+    BoundingBox, BoxLength, OverlaySummary, RenderFrameOutput, RenderOutputFormat,
+    RenderPipelineOptions,
 };
 pub use types::{
     DicomIoError, DicomJsonBulkDataMode, DicomJsonError, DicomJsonFormat, DicomJsonKeyStyle,
@@ -65,9 +66,11 @@ pub use volume::{
 };
 pub use volume_export::{generate_uid, write_nifti, write_nrrd, VolumeExportError, VolumeGeometry};
 pub use texture_export::{
-    pack_dicom_frame_stack_texture, pack_dicom_frame_texture, pack_frame_stack_texture, pack_frame_texture,
-    pack_volume_texture, quantize_samples, resample_frame_2d, ContentKind, DecodedFrame, PackedTexture,
-    SampleFormat, TextureCompression, TextureExportError, TextureMeta,
+    pack_dicom_frame_stack_texture, pack_dicom_frame_texture, pack_dicom_rgb_frame_stack_texture,
+    pack_dicom_rgb_frame_texture, pack_frame_stack_texture, pack_frame_texture, pack_rgb_frame_stack_texture,
+    pack_rgb_frame_texture, pack_volume_texture, quantize_samples, resample_frame_2d, resample_rgb_frame_2d,
+    ContentKind, DecodedFrame, DecodedRgbFrame, PackedTexture, SampleFormat, TextureCompression,
+    TextureExportError, TextureMeta,
 };
 pub use secondary_capture::{write_reformatted_dicom_slice, SecondaryCaptureError, SliceGeometry};
 pub mod dicom_edit;

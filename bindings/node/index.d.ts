@@ -180,6 +180,17 @@ export interface ExportFrameStackTextureOptions {
 }
 
 /**
+ * Color counterpart to `exportFrameStackTexture` - packs several independent color frames as one
+ * `rgb8` texture-array upload. Same options/result shape (minus window, which color never has).
+ */
+export declare function exportFrameStackTextureRgb(sources: Array<FrameStackSource>, options?: ExportFrameStackTextureRgbOptions | undefined | null): Promise<unknown>
+
+export interface ExportFrameStackTextureRgbOptions {
+  /** 'gzip' (default) or 'none'. */
+  compression?: string
+}
+
+/**
  * Packs a single frame's raw (unwindowed) physical values as a depth-1 "1-slice volume" texture
  * - lets a large diagnostic 2D image (e.g. DX/CR/mammography) reuse the exact same client GPU
  * texture/shader pipeline as an MPR volume, instead of the lossy zoomed-JPEG path `renderFrame`
@@ -195,6 +206,21 @@ export interface ExportFrameTextureOptions {
   compression?: string
   windowCenter?: number
   windowWidth?: number
+}
+
+/**
+ * Color counterpart to `exportFrameTexture` - packs a single color frame (RGB/YBR variants, or
+ * PALETTE COLOR) as an `rgb8` depth-1 texture instead of a quantized grayscale one. Same
+ * result shape (`TextureExportResult`), no window options (color is never windowed).
+ */
+export declare function exportFrameTextureRgb(filePath: string, options?: ExportFrameTextureRgbOptions | undefined | null): Promise<unknown>
+
+export interface ExportFrameTextureRgbOptions {
+  /** Zero-based frame index for a multi-frame file. Defaults to 0. */
+  frameIndex?: number
+  targetMaxDim?: number
+  /** 'gzip' (default) or 'none'. */
+  compression?: string
 }
 
 export interface ExportVolumeTextureOptions {
@@ -404,6 +430,12 @@ export interface RenderedFrame {
   overlays: Array<OverlaySummary>
   /** Which overlay (by `OverlaySummary.index`) was actually composited into `data`, if any. */
   selectedOverlayIndex?: number
+  /**
+   * `true` when `data` is the frame's own original bytes, delivered untouched (see
+   * `RenderFrameOptions.passthrough`) - `false` for the ordinary decode/re-encode path,
+   * including whenever `passthrough` was requested but the frame didn't qualify.
+   */
+  passthrough: boolean
 }
 
 export interface RenderedMovie {
@@ -438,6 +470,16 @@ export interface RenderFrameOptions {
   overlayIndex?: number
   /** Fill color for rendered overlay pixels, as `"#RRGGBB"` or `"R,G,B"`. Defaults to green. */
   overlayColor?: string
+  /**
+   * When `true`, attempts to serve the frame's own original JPEG Baseline bytes untouched
+   * (no decode/re-encode) instead of the usual render pipeline - see
+   * `try_extract_passthrough_jpeg_frame`'s own doc for the exact eligibility conditions
+   * (color, JPEG Baseline source, no overlay, one fragment per frame). Falls through
+   * transparently to the ordinary render when any condition isn't met - `RenderedFrame.
+   * passthrough` tells the caller which path was actually taken. Defaults to `false`
+   * (unset/omitted callers get byte-for-byte identical behavior to before this option existed).
+   */
+  passthrough?: boolean
 }
 
 /**
@@ -527,9 +569,13 @@ export interface StoreScuResult {
 }
 
 export interface TextureExportResult {
-  /** 'volume' or 'image2d'. */
+  /** 'volume', 'image2d', or 'framestack'. */
   contentKind: string
-  /** 'int16' or 'uint16'. */
+  /**
+   * 'int16' or 'uint16' for a grayscale texture, 'rgb8' for a color texture (see
+   * `exportFrameTextureRgb`/`exportFrameStackTextureRgb`) - `data` is interleaved 8-bit-per-
+   * channel RGB in that case, never quantized (`lossless` is unconditionally `true`).
+   */
   sampleFormat: string
   /** 'none' or 'gzip' - matches how `data` below is actually encoded. */
   compression: string

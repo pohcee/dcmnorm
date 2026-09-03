@@ -15,9 +15,14 @@ use dcmnorm::dicom_io::{
     compute_frame_histogram as dcm_compute_frame_histogram,
     compute_instance_histograms as dcm_compute_instance_histograms,
     pack_dicom_frame_stack_texture as dcm_pack_dicom_frame_stack_texture,
-    pack_dicom_frame_texture as dcm_pack_dicom_frame_texture, pack_volume_texture as dcm_pack_volume_texture,
+    pack_dicom_frame_texture as dcm_pack_dicom_frame_texture,
+    pack_dicom_rgb_frame_stack_texture as dcm_pack_dicom_rgb_frame_stack_texture,
+    pack_dicom_rgb_frame_texture as dcm_pack_dicom_rgb_frame_texture,
+    pack_volume_texture as dcm_pack_volume_texture,
     reformat_plane as dcm_reformat_plane, remove_attribute, remove_private_tags_inplace,
-    render_dicom_frame as dcm_render_dicom_frame, set_attribute, start_scp as dcm_start_scp,
+    render_dicom_frame as dcm_render_dicom_frame,
+    try_extract_passthrough_jpeg_frame as dcm_try_extract_passthrough_jpeg_frame,
+    set_attribute, start_scp as dcm_start_scp,
     store_scu as dcm_store_scu, transcode_dicom_file, write_dicom_file,
     write_dicom_json_with_options, write_dicom_video as dcm_write_dicom_video, CancelMode as DcmCancelMode,
     CancelSignal, DicomJsonBulkDataMode, DicomJsonFormat, DicomJsonKeyStyle, DicomJsonReadOptions,
@@ -1091,6 +1096,14 @@ pub struct RenderFrameOptions {
     pub overlay_index: Option<u32>,
     /// Fill color for rendered overlay pixels, as `"#RRGGBB"` or `"R,G,B"`. Defaults to green.
     pub overlay_color: Option<String>,
+    /// When `true`, attempts to serve the frame's own original JPEG Baseline bytes untouched
+    /// (no decode/re-encode) instead of the usual render pipeline - see
+    /// `try_extract_passthrough_jpeg_frame`'s own doc for the exact eligibility conditions
+    /// (color, JPEG Baseline source, no overlay, one fragment per frame). Falls through
+    /// transparently to the ordinary render when any condition isn't met - `RenderedFrame.
+    /// passthrough` tells the caller which path was actually taken. Defaults to `false`
+    /// (unset/omitted callers get byte-for-byte identical behavior to before this option existed).
+    pub passthrough: Option<bool>,
 }
 
 /// Mirrors `dcmnorm::dicom_io::OverlaySummary` for the JS side.
@@ -1128,6 +1141,10 @@ pub struct RenderedFrame {
     pub overlays: Vec<OverlaySummary>,
     /// Which overlay (by `OverlaySummary.index`) was actually composited into `data`, if any.
     pub selected_overlay_index: Option<u32>,
+    /// `true` when `data` is the frame's own original bytes, delivered untouched (see
+    /// `RenderFrameOptions.passthrough`) - `false` for the ordinary decode/re-encode path,
+    /// including whenever `passthrough` was requested but the frame didn't qualify.
+    pub passthrough: bool,
 }
 
 fn parse_render_output_format(value: Option<&str>) -> Result<(DcmRenderOutputFormat, &'static str)> {
@@ -1207,8 +1224,26 @@ impl Task for RenderFrameTask {
                 self.options.overlay_color.as_deref(),
             )?;
             let object = read_dicom_file(&self.file_path).map_err(to_napi_err)?;
+            let frame_index = self.options.frame_index.unwrap_or(0) as usize;
+
+            if self.options.passthrough.unwrap_or(false) {
+                if let Some(frame) =
+                    dcm_try_extract_passthrough_jpeg_frame(&object, frame_index).map_err(to_napi_err)?
+                {
+                    return Ok(RenderedFrame {
+                        mime_type: "image/jpeg".to_owned(),
+                        width: frame.width as u32,
+                        height: frame.height as u32,
+                        data: frame.bytes.into(),
+                        overlays: frame.overlays.into_iter().map(OverlaySummary::from).collect(),
+                        selected_overlay_index: frame.selected_overlay_index.map(|value| value as u32),
+                        passthrough: true,
+                    });
+                }
+            }
+
             let pipeline_options = DcmRenderPipelineOptions {
-                frame_index: self.options.frame_index.unwrap_or(0) as usize,
+                frame_index,
                 window_center: self.options.window_center,
                 window_width: self.options.window_width,
                 output_width: self.options.output_width,
@@ -1227,6 +1262,7 @@ impl Task for RenderFrameTask {
                 data: rendered.bytes.into(),
                 overlays: rendered.overlays.into_iter().map(OverlaySummary::from).collect(),
                 selected_overlay_index: rendered.selected_overlay_index.map(|value| value as u32),
+                passthrough: false,
             })
         })
     }
@@ -1552,6 +1588,7 @@ impl Task for ReformatPlaneTask {
                 data: rendered.bytes.into(),
                 overlays: Vec::new(),
                 selected_overlay_index: None,
+                passthrough: false,
             })
         })
     }
@@ -1671,9 +1708,11 @@ pub struct ExportFrameTextureOptions {
 
 #[napi(object)]
 pub struct TextureExportResult {
-    /// 'volume' or 'image2d'.
+    /// 'volume', 'image2d', or 'framestack'.
     pub content_kind: String,
-    /// 'int16' or 'uint16'.
+    /// 'int16' or 'uint16' for a grayscale texture, 'rgb8' for a color texture (see
+    /// `exportFrameTextureRgb`/`exportFrameStackTextureRgb`) - `data` is interleaved 8-bit-per-
+    /// channel RGB in that case, never quantized (`lossless` is unconditionally `true`).
     pub sample_format: String,
     /// 'none' or 'gzip' - matches how `data` below is actually encoded.
     pub compression: String,
@@ -1736,6 +1775,7 @@ fn texture_export_result(meta: &DcmTextureMeta, payload: Vec<u8>) -> TextureExpo
         match meta.sample_format {
             dcmnorm::dicom_io::SampleFormat::Int16 => "int16",
             dcmnorm::dicom_io::SampleFormat::Uint16 => "uint16",
+            dcmnorm::dicom_io::SampleFormat::Rgb8 => "rgb8",
         },
         match meta.compression {
             DcmTextureCompression::None => "none",
@@ -1845,6 +1885,61 @@ pub fn export_frame_texture(file_path: String, options: Option<ExportFrameTextur
     })
 }
 
+#[napi(object)]
+#[derive(Default)]
+pub struct ExportFrameTextureRgbOptions {
+    /// Zero-based frame index for a multi-frame file. Defaults to 0.
+    pub frame_index: Option<u32>,
+    pub target_max_dim: Option<u32>,
+    /// 'gzip' (default) or 'none'.
+    pub compression: Option<String>,
+    // No windowCenter/windowWidth - color has no window/level concept (see
+    // dcmnorm::dicom_io::pack_rgb_frame_texture's own doc).
+}
+
+pub struct ExportFrameTextureRgbTask {
+    file_path: PathBuf,
+    options: ExportFrameTextureRgbOptions,
+}
+
+impl Task for ExportFrameTextureRgbTask {
+    type Output = TextureExportResult;
+    type JsValue = TextureExportResult;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        guarded(|| {
+            let compression = parse_texture_compression(self.options.compression.as_deref())?;
+            let object = read_dicom_file(&self.file_path).map_err(to_napi_err)?;
+            let packed = dcm_pack_dicom_rgb_frame_texture(
+                &object,
+                self.options.frame_index.unwrap_or(0) as usize,
+                self.options.target_max_dim,
+                compression,
+            )
+            .map_err(to_napi_err)?;
+            Ok(texture_export_result(&packed.meta, packed.payload))
+        })
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(output)
+    }
+}
+
+/// Color counterpart to `exportFrameTexture` - packs a single color frame (RGB/YBR variants, or
+/// PALETTE COLOR) as an `rgb8` depth-1 texture instead of a quantized grayscale one. Same
+/// result shape (`TextureExportResult`), no window options (color is never windowed).
+#[napi]
+pub fn export_frame_texture_rgb(
+    file_path: String,
+    options: Option<ExportFrameTextureRgbOptions>,
+) -> AsyncTask<ExportFrameTextureRgbTask> {
+    AsyncTask::new(ExportFrameTextureRgbTask {
+        file_path: PathBuf::from(file_path),
+        options: options.unwrap_or_default(),
+    })
+}
+
 // ---------------------------------------------------------------------------------------------
 // Texture export: exportFrameStackTexture
 // ---------------------------------------------------------------------------------------------
@@ -1926,6 +2021,61 @@ pub fn export_frame_stack_texture(
     options: Option<ExportFrameStackTextureOptions>,
 ) -> AsyncTask<ExportFrameStackTextureTask> {
     AsyncTask::new(ExportFrameStackTextureTask { sources, options: options.unwrap_or_default() })
+}
+
+#[napi(object)]
+#[derive(Default)]
+pub struct ExportFrameStackTextureRgbOptions {
+    /// 'gzip' (default) or 'none'.
+    pub compression: Option<String>,
+    // No windowCenter/windowWidth - color has no window/level concept.
+}
+
+pub struct ExportFrameStackTextureRgbTask {
+    sources: Vec<FrameStackSource>,
+    options: ExportFrameStackTextureRgbOptions,
+}
+
+impl Task for ExportFrameStackTextureRgbTask {
+    type Output = TextureExportResult;
+    type JsValue = TextureExportResult;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        guarded(|| {
+            let compression = parse_texture_compression(self.options.compression.as_deref())?;
+
+            let objects = self
+                .sources
+                .iter()
+                .map(|source| read_dicom_file(PathBuf::from(&source.file_path)).map_err(to_napi_err))
+                .collect::<Result<Vec<_>>>()?;
+
+            let mut frame_refs: Vec<(&dcmnorm_object::DefaultDicomObject, usize)> = Vec::new();
+            for (source, object) in self.sources.iter().zip(objects.iter()) {
+                let indices = source.frame_indices.clone().unwrap_or_else(|| vec![0]);
+                for index in indices {
+                    frame_refs.push((object, index as usize));
+                }
+            }
+
+            let packed = dcm_pack_dicom_rgb_frame_stack_texture(&frame_refs, compression).map_err(to_napi_err)?;
+            Ok(texture_export_result(&packed.meta, packed.payload))
+        })
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(output)
+    }
+}
+
+/// Color counterpart to `exportFrameStackTexture` - packs several independent color frames as one
+/// `rgb8` texture-array upload. Same options/result shape (minus window, which color never has).
+#[napi]
+pub fn export_frame_stack_texture_rgb(
+    sources: Vec<FrameStackSource>,
+    options: Option<ExportFrameStackTextureRgbOptions>,
+) -> AsyncTask<ExportFrameStackTextureRgbTask> {
+    AsyncTask::new(ExportFrameStackTextureRgbTask { sources, options: options.unwrap_or_default() })
 }
 
 // ---------------------------------------------------------------------------------------------
