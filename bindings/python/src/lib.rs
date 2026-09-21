@@ -1251,6 +1251,7 @@ fn texture_export_result(py: Python<'_>, meta: &DcmTextureMeta, payload: Vec<u8>
         match meta.sample_format {
             ::dcmnorm::dicom_io::SampleFormat::Int16 => "int16",
             ::dcmnorm::dicom_io::SampleFormat::Uint16 => "uint16",
+            ::dcmnorm::dicom_io::SampleFormat::Rgb8 => "rgb8",
         },
         match meta.compression {
             DcmTextureCompression::None => "none",
