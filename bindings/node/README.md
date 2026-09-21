@@ -5,6 +5,16 @@ straight into the `dcmnorm` lib crate in-process (no CLI subprocess, no stdio/JS
 round trip) with the blocking work offloaded to libuv's threadpool so it doesn't
 block the JS event loop.
 
+## Demo / test website
+
+**Live demo: https://dcmnorm-test-website-spzcbrdjlq-uc.a.run.app**
+
+`examples/test-website` is a small Express app that exercises these bindings end to end through
+a browser UI: upload a `.dcm` file (or pick one of five bundled samples) and it renders the
+file's JSON metadata, a JPEG of every frame, and per-step timings back on the page. See
+[`examples/test-website/README.md`](examples/test-website/README.md) for how to run it locally,
+build its Docker image, and deploy it to Cloud Run.
+
 ## Build
 
 ```sh

@@ -1,0 +1,298 @@
+:root {
+  color-scheme: light dark;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+
+  --bg: #ffffff;
+  --fg: #1a1a1a;
+  --muted: #666666;
+  --border: rgba(0, 0, 0, 0.18);
+  --surface: rgba(0, 0, 0, 0.06);
+  --error: #c0392b;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #16181c;
+    --fg: #e8e8e8;
+    --muted: #a3a3a3;
+    --border: rgba(255, 255, 255, 0.2);
+    --surface: rgba(255, 255, 255, 0.08);
+    --error: #ff7a68;
+  }
+}
+
+body {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 1.5rem;
+  line-height: 1.5;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+header p {
+  color: var(--muted);
+}
+
+.header-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0.5rem 1rem;
+}
+
+.header-top h1 {
+  margin-bottom: 0;
+}
+
+.github-link {
+  font-size: 0.9rem;
+  white-space: nowrap;
+}
+
+.version-line {
+  font-size: 0.8rem;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  color: var(--muted);
+  margin-top: -0.5rem;
+}
+
+#tabs {
+  display: flex;
+  gap: 0.5rem;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 1.5rem;
+}
+
+.tab-btn {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  padding: 0.5rem 0.25rem;
+  font-size: 1rem;
+  cursor: pointer;
+  color: inherit;
+}
+
+.tab-btn.active {
+  border-bottom-color: currentColor;
+  font-weight: 600;
+}
+
+#tab-about p {
+  max-width: 680px;
+}
+
+code {
+  background: var(--surface);
+  padding: 0.1rem 0.3rem;
+  border-radius: 3px;
+}
+
+#upload-form {
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+button {
+  padding: 0.5rem 1rem;
+  cursor: pointer;
+}
+
+#status {
+  min-height: 1.5rem;
+  font-weight: 600;
+}
+
+#status.error {
+  color: var(--error);
+}
+
+#samples-section {
+  margin-top: 1.5rem;
+}
+
+#samples-section p {
+  color: var(--muted);
+}
+
+#samples-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 0.75rem;
+}
+
+.sample-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.6rem 0.85rem;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+}
+
+.sample-row:hover:not(:disabled) {
+  border-color: currentColor;
+}
+
+.sample-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 0.5rem;
+}
+
+.sample-name {
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.sample-size {
+  font-size: 0.75rem;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.sample-description {
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+table#timings-table {
+  border-collapse: collapse;
+  margin-bottom: 1.5rem;
+}
+
+table#timings-table td {
+  padding: 0.25rem 0.75rem;
+  border-bottom: 1px solid var(--border);
+}
+
+table#timings-table td:first-child {
+  font-weight: 600;
+}
+
+.frames-hint {
+  font-size: 0.85rem;
+  color: var(--muted);
+  margin-top: -0.5rem;
+}
+
+#truncated-note {
+  color: var(--error);
+}
+
+#frames-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 200px));
+  justify-content: start;
+  gap: 1rem;
+  margin-bottom: 1.5rem;
+}
+
+.frame-card {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.5rem;
+  text-align: center;
+}
+
+.frame-thumb-btn {
+  display: block;
+  width: 100%;
+  /* aspect-ratio is set inline per-frame (real rendered width/height), so the box is never
+     stretched or squashed relative to the image it holds - see app.js. */
+  border: none;
+  border-radius: 4px;
+  padding: 0;
+  margin: 0 auto;
+  background: #000;
+  cursor: zoom-in;
+  overflow: hidden;
+}
+
+.frame-thumb-btn img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.frame-card .frame-meta {
+  font-size: 0.8rem;
+  color: var(--muted);
+  margin-top: 0.35rem;
+}
+
+pre#metadata-json {
+  background: var(--surface);
+  padding: 1rem;
+  border-radius: 6px;
+  overflow-x: auto;
+  max-height: 500px;
+  overflow-y: auto;
+  font-size: 0.85rem;
+}
+
+.lightbox {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.85);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2rem;
+  z-index: 1000;
+}
+
+/* Our own `display: flex` above has the same specificity as the UA stylesheet's
+   `[hidden] { display: none }` and comes later, so it would otherwise win and force the
+   lightbox to render even while the `hidden` attribute is set - this rule's higher
+   specificity (an added attribute selector) restores the expected hidden behavior. */
+.lightbox[hidden] {
+  display: none;
+}
+
+.lightbox-content {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.75rem;
+  max-width: 100%;
+  max-height: 100%;
+}
+
+.lightbox-content img {
+  max-width: min(90vw, 1024px);
+  max-height: 80vh;
+  object-fit: contain;
+  background: #000;
+  border-radius: 4px;
+}
+
+.lightbox-content p {
+  color: #ddd;
+  font-size: 0.85rem;
+  text-align: center;
+}
+
+.lightbox-close {
+  position: absolute;
+  top: 1rem;
+  right: 1.5rem;
+  background: none;
+  border: none;
+  color: #fff;
+  font-size: 2rem;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0.25rem 0.5rem;
+}

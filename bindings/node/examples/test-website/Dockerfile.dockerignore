@@ -1,0 +1,9 @@
+# Overrides the repo-root .dockerignore for this specific Dockerfile (Docker looks for
+# "<dockerfile-name>.dockerignore" next to the Dockerfile before falling back to the root one -
+# see https://docs.docker.com/build/concepts/context/#filename-and-location). The root
+# .dockerignore is tuned for the Rust CLI build (excludes test/, *.json, *.dcm - none of which it
+# needs) and would otherwise strip out exactly what this Dockerfile needs to copy: the node
+# binding's package.json, the test-website's own package.json, and the test/files/*.dcm samples.
+target/
+.git/
+**/node_modules/

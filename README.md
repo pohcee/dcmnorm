@@ -2,12 +2,17 @@
 
 Rust workspace for reading, writing, transcoding, and converting DICOM data.
 
+**🔗 Live demo:** try the Node bindings in your browser — upload a `.dcm` file (or pick a bundled
+sample) and see its JSON metadata, a JPEG of every frame, and per-step timings — at
+**https://dcmnorm-test-website-spzcbrdjlq-uc.a.run.app**
+
 This repository contains:
 
 - [`dcmnorm`](src/): a library crate with DICOM file, memory, JSON conversion, and DIMSE network helpers
 - [`exec/dcmnorm`](exec/dcmnorm/): a CLI for converting between DICOM, transcoded DICOM, JSON, and rendered images/raw frames
 - [`exec/dcmtalk`](exec/dcmtalk/): a DIMSE network CLI (C-ECHO/C-STORE/C-FIND/C-MOVE SCU plus a storage SCP), covering the same ground as [dcmtk](https://dcmtk.org/)'s `echoscu`/`storescu`/`findscu`/`movescu`/`storescp`
 - [`bindings/node`](bindings/node/): Node.js bindings (`@pohcee/dcmnorm-node`) that call the library in-process via napi-rs — see that package's own README for its API
+  - [`bindings/node/examples/test-website`](bindings/node/examples/test-website/): the source for the live demo above — also runnable locally, in Docker, or deployed to your own Cloud Run project
 - [`bindings/python`](bindings/python/): Python bindings (`dcmnorm-python`) that call the library in-process via PyO3 — see that package's own README for its API
 
 ## Contents
