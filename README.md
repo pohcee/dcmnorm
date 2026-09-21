@@ -2,9 +2,8 @@
 
 Rust workspace for reading, writing, transcoding, and converting DICOM data.
 
-**🔗 Live demo:** try the Node bindings in your browser — upload a `.dcm` file (or pick a bundled
-sample) and see its JSON metadata, a JPEG of every frame, and per-step timings — at
-**https://dcmnorm-test-website-spzcbrdjlq-uc.a.run.app**
+**🔗 Live demo:** try the Node bindings in your [browser](https://dcmnorm-test-website-spzcbrdjlq-uc.a.run.app) — upload a `.dcm` file (or pick a bundled
+sample) and see its JSON metadata, a JPEG of every frame, and per-step timings.
 
 This repository contains:
 
