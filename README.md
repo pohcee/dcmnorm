@@ -303,17 +303,17 @@ docker run --rm --cpus=4 \
 
 ### Results (mean ± stddev, milliseconds; lower is better)
 
-Run 2026-10-04 (dcmnorm 0.3.2 + the single-frame/zero-copy read path, dcmtk 3.6.7, dcm4che 5.35.1).
+Run 2026-10-04 (dcmnorm 0.3.3 + deferred bulk data reads for JSON, dcmtk 3.6.7, dcm4che 5.35.1).
 
 **Parse** (`dcm2json` / `dcm2json` / `dcmnorm <file>`)
 
 | Fixture | dcmtk | dcm4che | dcmnorm |
 |---|---|---|---|
-| mr.dcm | 16.8 ± 1.5 | 213.5 ± 4.2 | **3.2 ± 0.5** |
-| us2.dcm | 285.9 ± 6.6¹ | 213.6 ± 4.6 | **28.4 ± 2.9** |
-| wsi.dcm | n/a¹ | 232.8 ± 6.2 | **5.1 ± 0.7** |
-| ct.dcm | n/a¹ | 215.5 ± 4.9 | **3.0 ± 0.6** |
-| dx2.dcm | n/a¹ | 215.4 ± 6.5 | **7.7 ± 1.0** |
+| mr.dcm | 17.5 ± 1.5 | 215.0 ± 3.7 | **2.9 ± 0.6** |
+| us2.dcm | 290.2 ± 6.4¹ | 225.5 ± 12.2 | **2.7 ± 0.5** |
+| wsi.dcm | n/a¹ | 257.4 ± 13.7 | **3.2 ± 0.6** |
+| ct.dcm | n/a¹ | 260.3 ± 24.4 | **3.2 ± 0.6** |
+| dx2.dcm | n/a¹ | 222.7 ± 4.7 | **3.0 ± 0.6** |
 
 **Render one frame** (`dcmj2pnm +F N --write-png` / `dcm2jpg --frame N -F png` / `dcmnorm <file> <out.png> --render-frame N-1`)
 
@@ -323,21 +323,21 @@ dcmtk's and dcmnorm's decoded pixels for that frame were checked to be byte-iden
 
 | Fixture | dcmtk | dcm4che | dcmnorm |
 |---|---|---|---|
-| mr.dcm | 29.3 ± 2.5 | 314.8 ± 12.6 | **5.8 ± 1.0** |
-| us2.dcm | 18.4 ± 1.6 | 309.5 ± 17.8 | **4.1 ± 0.7** |
-| wsi.dcm | 18.1 ± 1.5 | 332.5 ± 9.1 | **5.8 ± 0.8** |
-| ct.dcm | n/a² | 335.7 ± 9.2 | **18.5 ± 1.8** |
-| dx2.dcm | n/a² | 485.6 ± 21.8 | **440.2 ± 8.2** |
+| mr.dcm | 29.4 ± 2.6 | 327.2 ± 22.1 | **6.2 ± 0.9** |
+| us2.dcm | 18.5 ± 2.0 | 324.0 ± 12.5 | **4.2 ± 0.9** |
+| wsi.dcm | 20.1 ± 3.0 | 334.6 ± 6.6 | **6.1 ± 0.8** |
+| ct.dcm | n/a² | 393.1 ± 18.2 | **19.7 ± 2.3** |
+| dx2.dcm | n/a² | 510.3 ± 19.6 | **451.7 ± 9.8** |
 
 **Transcode → Explicit VR LE** (`dcmconv +te` / `dcmdjpeg`³ / `dcm2dcm -t ...` / `dcmnorm <in> <out> --transfer-syntax ...`)
 
 | Fixture | dcmtk | dcm4che | dcmnorm |
 |---|---|---|---|
-| mr.dcm | 12.5 ± 1.5 | 255.2 ± 8.1 | **4.7 ± 0.8** |
-| us2.dcm | 36.6 ± 3.2 | 304.7 ± 16.3 | **26.6 ± 2.4** |
-| wsi.dcm | 60.0 ± 2.4 | 440.7 ± 20.9 | **36.7 ± 1.9** |
-| ct.dcm | n/a² | 319.8 ± 25.9 | **18.1 ± 1.4** |
-| dx2.dcm | n/a² | 463.4 ± 13.3 | **430.7 ± 6.7** |
+| mr.dcm | 12.5 ± 1.6 | 257.8 ± 7.5 | **4.8 ± 1.0** |
+| us2.dcm | 37.1 ± 3.4 | 323.2 ± 17.2 | **26.6 ± 2.8** |
+| wsi.dcm | 61.6 ± 2.9 | 455.6 ± 25.9 | **40.6 ± 4.0** |
+| ct.dcm | n/a² | 332.6 ± 12.4 | **18.0 ± 1.5** |
+| dx2.dcm | n/a² | 499.7 ± 42.9 | **431.9 ± 8.7** |
 
 ¹ dcmtk's `dcm2json` (this build) has no bulk-data-by-reference/exclude option
 — unlike dcm4che's `-B`/`--no-bulkdata` or dcmnorm's default `bulkData: uri`
@@ -378,6 +378,14 @@ tool can't "win" by failing fast (e.g. a dcmtk built without libpng rejects
     reference;
   - single-frame render read all 227 frames to render one — it now reads
     just the requested frame, as dcmtk's `dcmj2pnm` does.
+- **Parse (DICOM → JSON) no longer depends on file size** — ~3ms for every
+  fixture, from a 90KB CT to the 29MB cine. JSON references bulk values
+  (PixelData etc.) by `BulkDataURI` offset/length rather than embedding
+  them, so the parser now seeks past them and records where they were,
+  instead of reading the whole file, parsing a copy of each value, and then
+  re-scanning the raw bytes to find (and byte-compare) its offset. It reads
+  ~2KB of `us2.dcm` instead of 29MB — which matters even more for a file
+  that isn't already in the page cache.
 - **dcm4che's numbers are dominated by JVM cold-start** (~200-300ms of every
   single-invocation timing here is the JVM spinning up, not DICOM work) — this
   benchmark reflects a CLI invoked once per file, not a long-running server
