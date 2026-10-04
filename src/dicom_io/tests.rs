@@ -281,7 +281,7 @@ use super::{
     detect_jpeg2000_backend_from_search_path, echo_scu, find_scu, kakadu_ffi_enabled,
     list_transfer_syntax_support, move_scu, parse_attribute_override,
     probe_dicom_file_for_sop_class_uid, read_dicom_bytes,
-    read_dicom_file, read_dicom_file_for_frame, read_dicom_json, read_dicom_json_full, read_dicom_json_full_with_source,
+    dicom_file_to_json, read_dicom_file, read_dicom_file_deferring_bulk_data, read_dicom_file_for_frame, read_dicom_json, read_dicom_json_full, read_dicom_json_full_with_source,
     read_dicom_json_with_options, read_dicom_json_with_source,
     redact_dicom_pixels_to_transfer_syntax, remove_attribute, render_all_dicom_video_frames, render_dicom_frame,
     set_attribute, start_scp, store_scu, transcode_dcmnorm_object, write_dataset_as_dicom_file, write_dicom_bytes, write_dicom_file,
@@ -4141,4 +4141,157 @@ fn read_dicom_file_for_frame_declines_what_it_cannot_read_partially() {
     // A PixelData declaring more bytes than the file holds must take the full read too, so the
     // truncation error is the full read's, not a silently zero-filled frame.
     assert!(read_dicom_file_for_frame(fixture_path("mr_truncated.dcm"), 0).map(|object| object.is_none()).unwrap_or(true));
+}
+
+/// The pre-deferral way to write URI-mode JSON for a file: read it whole, then let the writer
+/// scan those bytes for each bulk value's offset. `dicom_file_to_json` must match it exactly.
+fn json_via_full_read_and_scan(path: &Path, format: DicomJsonFormat) -> String {
+    let bytes = fs::read(path).unwrap();
+    let object = read_dicom_bytes(&bytes).unwrap();
+    let bulk_scan_failed = std::cell::Cell::new(false);
+    let bulk_scan_cursor = std::cell::Cell::new(0usize);
+    write_dicom_json_with_options(
+        &object,
+        DicomJsonWriteOptions {
+            format,
+            bulk_data_mode: DicomJsonBulkDataMode::Uri,
+            bulk_data_source: Some(&bytes),
+            bulk_scan_failed: Some(&bulk_scan_failed),
+            bulk_scan_cursor: Some(&bulk_scan_cursor),
+            ..Default::default()
+        },
+    )
+    .unwrap()
+}
+
+fn json_via_deferred_read(path: &Path, format: DicomJsonFormat) -> String {
+    let options = DicomJsonWriteOptions { format, bulk_data_mode: DicomJsonBulkDataMode::Uri, ..Default::default() };
+    dicom_file_to_json(path, options).unwrap()
+}
+
+/// Every BulkDataURI in `json` (at any depth), as (offset, length).
+fn bulk_data_uris(json: &JsonValue, out: &mut Vec<(usize, usize)>) {
+    match json {
+        JsonValue::Object(map) => {
+            if let Some(JsonValue::String(uri)) = map.get("BulkDataURI") {
+                let query = uri.split_once('?').unwrap().1;
+                let field = |name: &str| {
+                    query.split('&').find_map(|pair| pair.strip_prefix(name)).unwrap().parse::<usize>().unwrap()
+                };
+                out.push((field("offset="), field("length=")));
+            }
+            map.values().for_each(|value| bulk_data_uris(value, out));
+        }
+        JsonValue::Array(items) => items.iter().for_each(|value| bulk_data_uris(value, out)),
+        _ => {}
+    }
+}
+
+#[test]
+fn deferred_bulk_data_json_matches_full_read_and_scan_for_every_fixture() {
+    let mut deferred_files = 0;
+    for entry in fs::read_dir(fixture_path("")).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("dcm") || read_dicom_file(&path).is_err() {
+            continue;
+        }
+        if matches!(read_dicom_file_deferring_bulk_data(&path), Ok(Some(_))) {
+            deferred_files += 1;
+        }
+        for format in [DicomJsonFormat::Flat, DicomJsonFormat::Standard] {
+            let Ok(expected) = std::panic::catch_unwind(|| json_via_full_read_and_scan(&path, format)) else {
+                continue; // not expressible as JSON at all - nothing to compare
+            };
+            let actual = json_via_deferred_read(&path, format);
+            assert_eq!(expected, actual, "{} ({format:?}): deferred JSON differs", path.display());
+        }
+    }
+    assert!(deferred_files > 20, "only {deferred_files} fixtures took the deferred path");
+}
+
+/// Hand-built Explicit VR LE data set exercising the parser bookkeeping a deferred skip must
+/// keep exact: bulk values inside DEFINED-length sequence items (whose end is detected by
+/// byte count), followed by more elements in the same item, the same tag deferred in several
+/// items, the 32-byte inline threshold, and elements after PixelData.
+#[test]
+fn deferred_bulk_data_json_handles_defined_length_items_and_thresholds() {
+    fn element(group: u16, elem: u16, vr: &[u8; 2], value: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&group.to_le_bytes());
+        out.extend_from_slice(&elem.to_le_bytes());
+        out.extend_from_slice(vr);
+        if matches!(vr, b"OB" | b"OW" | b"SQ" | b"UN") {
+            out.extend_from_slice(&[0, 0]);
+            out.extend_from_slice(&(value.len() as u32).to_le_bytes());
+        } else {
+            out.extend_from_slice(&(value.len() as u16).to_le_bytes());
+        }
+        out.extend_from_slice(value);
+        out
+    }
+    fn item(content: &[u8]) -> Vec<u8> {
+        let mut out = vec![0xFE, 0xFF, 0x00, 0xE0];
+        out.extend_from_slice(&(content.len() as u32).to_le_bytes());
+        out.extend_from_slice(content);
+        out
+    }
+    let pattern = |seed: u8, len: usize| (0..len).map(|i| (i as u8).wrapping_mul(31).wrapping_add(seed)).collect::<Vec<u8>>();
+
+    let items: Vec<u8> = (0..3u8)
+        .flat_map(|i| {
+            let mut content = element(0x0029, 0x1011, b"OB", &pattern(i, 100));
+            content.extend(element(0x0029, 0x1012, b"US", &u16::from(i).to_le_bytes()));
+            item(&content)
+        })
+        .collect();
+    let mut tail = element(0x0029, 0x0010, b"LO", b"TESTCREATOR ");
+    tail.extend(element(0x0029, 0x1010, b"SQ", &items));
+    tail.extend(element(0x0029, 0x1020, b"OB", &pattern(7, 32))); // at the threshold: inline
+    tail.extend(element(0x0029, 0x1021, b"OB", &pattern(8, 34))); // just over: deferred
+    tail.extend(element(0x0029, 0x1022, b"OW", &pattern(9, 64)));
+    tail.extend(element(0x7FE0, 0x0010, b"OB", &pattern(10, 300)));
+    tail.extend(element(0xFFFC, 0xFFFC, b"OB", &[0; 8])); // trailing padding after PixelData
+
+    let path = temp_file_path("dcmnorm-deferred-json");
+    let dataset = InMemDicomObject::from_element_iter([
+        DataElement::new(tags::SOP_CLASS_UID, VR::UI, PrimitiveValue::from("1.2.840.10008.5.1.4.1.1.7")),
+        DataElement::new(tags::SOP_INSTANCE_UID, VR::UI, PrimitiveValue::from("1.2.3.4.5.6.8")),
+    ]);
+    write_dataset_as_dicom_file(dataset, &path, uids::EXPLICIT_VR_LITTLE_ENDIAN).unwrap();
+    let mut bytes = fs::read(&path).unwrap();
+    bytes.extend(tail);
+    fs::write(&path, &bytes).unwrap();
+
+    let (_, deferred) = read_dicom_file_deferring_bulk_data(&path).unwrap().expect("deferred path");
+    assert!(deferred.value(Tag(0x0029, 0x1020)).is_none(), "32-byte value must stay inline");
+    assert!(deferred.value(Tag(0x0029, 0x1021)).is_some());
+    for index in 0..3 {
+        assert!(deferred.item(Tag(0x0029, 0x1010), index).unwrap().value(Tag(0x0029, 0x1011)).is_some());
+    }
+
+    let full = read_dicom_file(&path).unwrap();
+    for format in [DicomJsonFormat::Flat, DicomJsonFormat::Standard] {
+        let actual = json_via_deferred_read(&path, format);
+        assert_eq!(json_via_full_read_and_scan(&path, format), actual, "{format:?}");
+
+        // and every URI really points at that element's bytes in the file
+        let mut uris = Vec::new();
+        bulk_data_uris(&serde_json::from_str(&actual).unwrap(), &mut uris);
+        assert_eq!(uris.len(), 6, "{format:?}: 3 nested OB + 2 top-level + PixelData");
+        let mut expected_values: Vec<Vec<u8>> = vec![
+            pattern(8, 34),
+            pattern(9, 64),
+            pattern(10, 300),
+        ];
+        expected_values.extend((0..3u8).map(|i| pattern(i, 100)));
+        for (offset, length) in uris {
+            let referenced = &bytes[offset..offset + length];
+            assert!(expected_values.iter().any(|value| value == referenced), "URI {offset}+{length} points at the wrong bytes");
+        }
+    }
+    // the deferred read kept everything after the skipped values, including past PixelData
+    assert_eq!(full.element(Tag(0x0029, 0x0010)).unwrap().to_str().unwrap().trim(), "TESTCREATOR");
+    let deferred_json = json_via_deferred_read(&path, DicomJsonFormat::Standard);
+    assert!(deferred_json.contains("FFFCFFFC"), "trailing element after PixelData was dropped");
+    fs::remove_file(&path).ok();
 }

@@ -491,6 +491,165 @@ pub(crate) fn read_dataset_until_pixel_data_header<'r>(
     Ok((InMemDicomObject { elements }, pixel_data_header))
 }
 
+/// Where a value that was skipped instead of read lives in the source file (absolute byte
+/// offset of its first byte, and its length) - see [`DeferredValues`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeferredValueLocation {
+    pub offset: u64,
+    pub length: u64,
+}
+
+/// The values a deferring read (`OpenFileOptions::open_file_deferring`) skipped rather than
+/// loaded, mirroring the data set's shape: one entry per top-level tag that was either deferred
+/// itself or is a sequence with deferred values somewhere inside its items.
+///
+/// A deferred element is still present in the object, with an empty placeholder value of the
+/// same kind (an empty `U8` for a primitive value, an empty fragment sequence for encapsulated
+/// pixel data) - so it is listed, filtered and removed like any other element, but its value
+/// must be taken from here (e.g. as a DICOM JSON BulkDataURI), never from the object.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DeferredValues {
+    entries: std::collections::BTreeMap<Tag, DeferredEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DeferredEntry {
+    Value(DeferredValueLocation),
+    /// One scope per item of the sequence, in item order.
+    Items(Vec<DeferredValues>),
+}
+
+impl DeferredValues {
+    /// The location of `tag`'s value at this level, if it was deferred.
+    pub fn value(&self, tag: Tag) -> Option<DeferredValueLocation> {
+        match self.entries.get(&tag) {
+            Some(DeferredEntry::Value(location)) => Some(*location),
+            _ => None,
+        }
+    }
+
+    /// The deferred values inside item `index` of sequence `tag`, if it has any.
+    pub fn item(&self, tag: Tag, index: usize) -> Option<&DeferredValues> {
+        match self.entries.get(&tag) {
+            Some(DeferredEntry::Items(items)) => items.get(index).filter(|item| !item.is_empty()),
+            _ => None,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// The end offset of the furthest deferred value, at any depth - lets a caller confirm the
+    /// file really holds every deferred range (skipping by seeking can't detect truncation).
+    pub fn max_end(&self) -> u64 {
+        self.entries
+            .values()
+            .map(|entry| match entry {
+                DeferredEntry::Value(location) => location.offset + location.length,
+                DeferredEntry::Items(items) => items.iter().map(DeferredValues::max_end).max().unwrap_or(0),
+            })
+            .max()
+            .unwrap_or(0)
+    }
+}
+
+/// Like [`build_dataset`], but skips (seeks past) every primitive value `defer` accepts and,
+/// when `defer_pixel_sequences` is set, every encapsulated pixel data value - recording where
+/// each one was in [`DeferredValues`] instead. `base_offset` is the data set's offset in the
+/// file, turning the reader's data-set-relative positions into absolute file offsets.
+pub(crate) fn build_dataset_deferring<R: Read + std::io::Seek>(
+    reader: &mut DataSetReader<dcmnorm_parser::stateful::decode::DynStatefulDecoder<R>>,
+    in_item: bool,
+    defer: &dyn Fn(&dcmnorm_core::header::DataElementHeader) -> bool,
+    defer_pixel_sequences: bool,
+    base_offset: u64,
+) -> Result<(InMemDicomObject, DeferredValues), ReadError> {
+    let mut elements = Vec::new();
+    let mut deferred = DeferredValues::default();
+    let to_location = |skipped: dcmnorm_parser::dataset::read::SkippedValue| DeferredValueLocation {
+        offset: base_offset + skipped.position,
+        length: skipped.length,
+    };
+
+    loop {
+        let Some(token) = reader.next() else {
+            if in_item {
+                return Err(ReadError::UnexpectedToken { context: "expected ItemEnd, got end of stream" });
+            }
+            break;
+        };
+
+        match token? {
+            DataToken::ItemEnd if in_item => break,
+
+            DataToken::ElementHeader(header) if header.len.is_defined() && defer(&header) => {
+                let skipped = reader.skip_value()?;
+                deferred.entries.insert(header.tag, DeferredEntry::Value(to_location(skipped)));
+                elements.push(DataElement::new(header.tag, header.vr, PrimitiveValue::U8(C::new())));
+            }
+
+            DataToken::ElementHeader(header) => {
+                let value = expect_primitive_value(reader)?;
+                elements.push(DataElement::new(header.tag, header.vr, value));
+            }
+
+            DataToken::SequenceStart { tag, len } => {
+                let mut items: C<InMemDicomObject> = C::new();
+                let mut item_scopes = Vec::new();
+                loop {
+                    match next_required(reader)? {
+                        DataToken::ItemStart { .. } => {
+                            let (item, scope) = build_dataset_deferring(
+                                reader,
+                                true,
+                                defer,
+                                defer_pixel_sequences,
+                                base_offset,
+                            )?;
+                            items.push(item);
+                            item_scopes.push(scope);
+                        }
+                        DataToken::SequenceEnd => break,
+                        _ => {
+                            return Err(ReadError::UnexpectedToken {
+                                context: "expected ItemStart or SequenceEnd in sequence",
+                            })
+                        }
+                    }
+                }
+                if item_scopes.iter().any(|scope| !scope.is_empty()) {
+                    deferred.entries.insert(tag, DeferredEntry::Items(item_scopes));
+                }
+                let value = Value::Sequence(DataSetSequence::new(items, len));
+                elements.push(DataElement::new(tag, VR::SQ, value));
+            }
+
+            DataToken::PixelSequenceStart if defer_pixel_sequences => {
+                let skipped = reader.skip_pixel_sequence()?;
+                let tag = Tag(0x7FE0, 0x0010);
+                deferred.entries.insert(tag, DeferredEntry::Value(to_location(skipped)));
+                let placeholder = PixelFragmentSequence::new(C::<u32>::new(), C::<InMemFragment>::new());
+                elements.push(DataElement::new(tag, VR::OB, Value::PixelSequence(placeholder)));
+            }
+
+            DataToken::PixelSequenceStart => {
+                let value = read_pixel_sequence(reader)?;
+                elements.push(DataElement::new(Tag(0x7FE0, 0x0010), VR::OB, value));
+            }
+
+            _ => {
+                return Err(ReadError::UnexpectedToken {
+                    context: "unexpected token at data set top level",
+                })
+            }
+        }
+    }
+
+    elements.sort_by_key(|e| e.tag());
+    Ok((InMemDicomObject { elements }, deferred))
+}
+
 /// Read the token sequence following a `PixelSequenceStart` token (already consumed by the
 /// caller). Per `dcmnorm_parser::dataset::read::DataSetReader`'s actual protocol (confirmed
 /// against its own test fixtures): the offset table is itself framed as the *first item* -

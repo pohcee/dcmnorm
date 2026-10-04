@@ -199,6 +199,55 @@ impl OpenFileOptions {
         )))
     }
 
+    /// Read `path` in full except for the large values `defer` picks out - plus, when
+    /// `defer_pixel_sequences` is set, encapsulated pixel data - which are skipped by seeking
+    /// past them and returned as file locations in [`DeferredValues`] instead (e.g. to emit as
+    /// DICOM JSON BulkDataURIs without ever reading them). Deferred elements stay in the object
+    /// with an empty placeholder value; see [`DeferredValues`].
+    ///
+    /// Returns `Ok(None)` when byte offsets in the file can't be relied on, so the caller should
+    /// read in full instead: a dataset-compressed (deflated) transfer syntax, a data set that
+    /// isn't a seekable Part 10 file, or a deferred range that runs past the end of the file
+    /// (truncation - a full read reports that properly). `read_until` is ignored.
+    pub fn open_file_deferring(
+        self,
+        path: impl AsRef<Path>,
+        defer: &dyn Fn(&dcmnorm_core::header::DataElementHeader) -> bool,
+        defer_pixel_sequences: bool,
+    ) -> Result<Option<(DefaultDicomObject, crate::mem::DeferredValues)>, ReadError> {
+        use std::io::Seek;
+
+        let file = File::open(path.as_ref()).map_err(|source| ReadError::Io {
+            source,
+            context: "opening file",
+        })?;
+        let file_len = file
+            .metadata()
+            .map_err(|source| ReadError::Io { source, context: "reading file metadata" })?
+            .len();
+        let mut source = BufReader::new(file);
+        let mut meta = self.read_meta(&mut source)?;
+        let ts = meta.transfer_syntax_ts().ok_or_else(|| ReadError::UnsupportedTransferSyntax {
+            uid: meta.transfer_syntax.clone(),
+        })?;
+        if matches!(ts.codec(), dcmnorm_encoding::transfer_syntax::Codec::Dataset(_)) {
+            return Ok(None);
+        }
+        let base_offset = source
+            .stream_position()
+            .map_err(|source| ReadError::Io { source, context: "locating data set" })?;
+
+        let mut reader = dcmnorm_parser::dataset::DataSetReader::new_with_ts(source, ts)
+            .map_err(|source| ReadError::Dataset { source })?;
+        let (object, deferred) =
+            crate::mem::build_dataset_deferring(&mut reader, false, defer, defer_pixel_sequences, base_offset)?;
+        if deferred.max_end() > file_len {
+            return Ok(None);
+        }
+        backfill_media_storage_uids(&mut meta, &object);
+        Ok(Some((FileDicomObject { meta, object }, deferred)))
+    }
+
     fn read_meta(&self, mut source: impl Read) -> Result<FileMetaTable, ReadError> {
         Ok(match self.read_preamble {
             // Peek-and-detect: falls back to treating `source` as meta-less if the preamble or

@@ -45,6 +45,21 @@ pub(super) fn bulk_representation<I, P>(
 where
     P: AsRef<[u8]>,
 {
+    if let Some(location) = options.deferred_bulk_data.and_then(|deferred| deferred.value(tag)) {
+        // Never loaded, so it can only be referenced: the location came from the parser
+        // itself, so unlike a bulk_data_source scan there is nothing to locate or verify.
+        if options.bulk_data_mode != DicomJsonBulkDataMode::Uri {
+            return Err(DicomJsonError::InvalidBulkDataUri(format!(
+                "{tag} was deferred (not loaded) but must be written inline"
+            )));
+        }
+        let uri = match options.bulk_data_uri_base {
+            Some(base) => format!("{}?offset={}&length={}", base, location.offset, location.length),
+            None => format!("?offset={}&length={}", location.offset, location.length),
+        };
+        return Ok(BulkRepresentation::Uri(uri));
+    }
+
     let raw_bytes = raw_value_bytes(tag, vr, value, None)?;
     let expected_bytes_for_lookup = match value {
         DicomValue::PixelSequence(_) => None,

@@ -8,9 +8,10 @@ use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
 use dcmnorm::dicom_io::{
+    dicom_file_to_json,
     apply_filter_to_object, build_volume as dcm_build_volume, echo_scu as dcm_echo_scu,
     find_scu as dcm_find_scu, move_scu as dcm_move_scu, parse_attribute_override,
-    parse_filter_requests, parse_tag_key, probe_dicom_file_for_sop_class_uid, read_dicom_bytes,
+    parse_filter_requests, parse_tag_key, probe_dicom_file_for_sop_class_uid,
     read_dicom_file, read_dicom_json_with_options, read_dcmnorm_object_for_filter,
     compute_frame_histogram as dcm_compute_frame_histogram,
     compute_instance_histograms as dcm_compute_instance_histograms,
@@ -176,36 +177,15 @@ impl Task for ReadJsonTask {
 
     fn compute(&mut self) -> Result<Self::Output> {
         guarded(|| {
-            // Uri mode needs the source bytes to compute a valid "?offset=..&length=.."
-            // reference for bulk-data elements (PixelData etc.) - mirrors exactly how
-            // the CLI itself does this (see run_dicom_to_json_with_object in main.rs:
-            // `bulk_data_source: if bulk_data_mode == Uri { input_bytes } else { None }`).
-            // Without it, write_dicom_json_with_options silently falls back to
-            // base64-inlining those elements instead - ~1000x larger output for a
-            // typical image, confirmed empirically against the CLI's actual output.
-            let (object, file_bytes) = if self.bulk_data_mode == DicomJsonBulkDataMode::Uri {
-                let bytes = std::fs::read(&self.file_path).map_err(|e| to_napi_err(e))?;
-                let object = read_dicom_bytes(&bytes).map_err(to_napi_err)?;
-                (object, Some(bytes))
-            } else {
-                (read_dicom_file(&self.file_path).map_err(to_napi_err)?, None)
-            };
-            // Shared across every bulk-eligible element of THIS file's write pass - see
-            // DicomJsonWriteOptions::bulk_scan_failed's own doc comment for why this matters
-            // (without it, one element the hand-rolled offset scanner can't parse means every
-            // later one, including PixelData, independently pays the same doomed multi-second
-            // scan instead of just the first).
-            let bulk_scan_failed = std::cell::Cell::new(false);
-            let bulk_scan_cursor = std::cell::Cell::new(0usize);
-            write_dicom_json_with_options(
-                &object,
+            // dicom_file_to_json mirrors the CLI: in Uri mode bulk values (PixelData etc.) are
+            // skipped while reading and referenced by where the parser found them, instead of
+            // reading the whole file and scanning it for their offsets.
+            dicom_file_to_json(
+                &self.file_path,
                 DicomJsonWriteOptions {
                     format: self.format,
                     key_style: self.key_style,
                     bulk_data_mode: self.bulk_data_mode,
-                    bulk_data_source: file_bytes.as_deref(),
-                    bulk_scan_failed: Some(&bulk_scan_failed),
-                    bulk_scan_cursor: Some(&bulk_scan_cursor),
                     ..Default::default()
                 },
             )

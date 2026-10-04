@@ -13,7 +13,7 @@ use dcmnorm_encoding::text::SpecificCharacterSet;
 use dcmnorm_encoding::transfer_syntax::TransferSyntax;
 use snafu::{Backtrace, ResultExt, Snafu};
 use std::cmp::Ordering;
-use std::io::Read;
+use std::io::{Read, Seek};
 
 use super::{DataToken, SeqTokenType};
 
@@ -80,6 +80,15 @@ pub enum Error {
     InvalidElementLength { tag: Tag, len: u32, bytes_read: u64 },
     /// Invalid sequence item length {len:04X} at {bytes_read:#x}
     InvalidItemLength { len: u32, bytes_read: u64 },
+    /// Cannot skip here: {context}
+    SkipNotApplicable { context: &'static str },
+    #[snafu(display("Could not skip {} value bytes for element tagged {}", len, tag))]
+    SkipValue {
+        len: u64,
+        tag: Tag,
+        #[snafu(backtrace)]
+        source: DecoderError,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -621,6 +630,98 @@ where
                 }
             }
         }
+    }
+}
+
+/// Where a skipped value sat in the data set: `position` is the value's first byte, relative
+/// to where this reader started reading (add the data set's own offset in the file for an
+/// absolute file offset), and `length` its byte length.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SkippedValue {
+    pub position: u64,
+    pub length: u64,
+}
+
+impl<S> DataSetReader<S>
+where
+    S: StatefulDecode,
+    S::Reader: Seek,
+{
+    /// Skip the value of the element whose `ElementHeader` token was just returned, seeking past
+    /// it instead of reading it - the alternative to taking the next (`PrimitiveValue`) token.
+    /// Leaves the reader in the same state as reading the value would, so iteration continues
+    /// with the next element. Only valid for a defined-length, non-sequence value.
+    ///
+    /// Seeking past the end of the source is not an error here (the reader then sees a clean
+    /// end of stream), so callers must check the returned range against the source's length.
+    pub fn skip_value(&mut self) -> Result<SkippedValue> {
+        let header = match (self.peek.as_ref(), self.last_header) {
+            (None, Some(header)) if !header.is_encapsulated_pixeldata() && !self.in_sequence => header,
+            _ => return SkipNotApplicableSnafu { context: "no element value is next" }.fail(),
+        };
+        let Some(length) = header.len.get() else {
+            return SkipNotApplicableSnafu { context: "undefined-length value" }.fail();
+        };
+        let position = self.parser.position();
+        let result = self.parser.skip_bytes_seek(u64::from(length));
+        self.last_header = None;
+        if let Err(source) = result {
+            self.hard_break = true;
+            return Err(source).context(SkipValueSnafu { len: u64::from(length), tag: header.tag });
+        }
+        // as after reading a value: sequences/items can end after this element
+        self.delimiter_check_pending = true;
+        Ok(SkippedValue { position, length: u64::from(length) })
+    }
+
+    /// Skip a whole encapsulated pixel data value, right after its `PixelSequenceStart` token
+    /// was returned: walks the fragment item headers and seeks past each fragment's bytes,
+    /// through the closing sequence delimiter. Leaves the reader as if the matching
+    /// `SequenceEnd` token had just been taken.
+    ///
+    /// The returned range covers the value as a DICOM JSON BulkDataURI references it: from the
+    /// first item header (the basic offset table item) up to, not including, the sequence
+    /// delimitation item. As with [`Self::skip_value`], callers must check that range against
+    /// the source's length.
+    pub fn skip_pixel_sequence(&mut self) -> Result<SkippedValue> {
+        match (self.peek.as_ref(), self.last_header) {
+            (None, Some(header)) if header.is_encapsulated_pixeldata() => {}
+            _ => return SkipNotApplicableSnafu { context: "no encapsulated pixel data is next" }.fail(),
+        }
+        self.last_header = None;
+        let position = self.parser.position();
+        loop {
+            let item = self.parser.decode_item_header();
+            let item = match item {
+                Ok(item) => item,
+                Err(source) => {
+                    self.hard_break = true;
+                    return Err(source).context(ReadItemHeaderSnafu);
+                }
+            };
+            match item {
+                SequenceItemHeader::Item { len } => {
+                    let Some(len) = len.get() else {
+                        self.hard_break = true;
+                        return UndefinedItemLengthSnafu.fail();
+                    };
+                    if let Err(source) = self.parser.skip_bytes_seek(u64::from(len)) {
+                        self.hard_break = true;
+                        return Err(source).context(ReadItemValueSnafu { len });
+                    }
+                }
+                SequenceItemHeader::SequenceDelimiter => break,
+                other => {
+                    self.hard_break = true;
+                    return UnexpectedItemTagSnafu { tag: other.tag() }.fail();
+                }
+            }
+        }
+        // the delimiter itself (a bare 8-byte item header) is not part of the value
+        let length = self.parser.position() - 8 - position;
+        // as after a pixel sequence's SequenceEnd: enclosing items can end here
+        self.delimiter_check_pending = true;
+        Ok(SkippedValue { position, length })
     }
 }
 

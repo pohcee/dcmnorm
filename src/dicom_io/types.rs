@@ -357,6 +357,25 @@ pub struct DicomJsonWriteOptions<'a> {
     /// the true start, so this can never cause a lookup to wrongly miss an element that exists.
     /// `None` (the default) means "always scan from the start", same as before this existed.
     pub bulk_scan_cursor: Option<&'a std::cell::Cell<usize>>,
+    /// Bulk values a deferring read skipped instead of loading (see
+    /// `read_dicom_file_deferring_bulk_data`), scoped to the data set level being written: the
+    /// whole data set at the top, narrowed to each sequence item's own scope while writing that
+    /// item. In `Uri` mode a deferred element is written straight from its recorded file
+    /// location - no `bulk_data_source` scan needed, since its value was never in memory.
+    pub deferred_bulk_data: Option<&'a dcmnorm_object::DeferredValues>,
+}
+
+impl<'a> DicomJsonWriteOptions<'a> {
+    /// These options for writing item `index` of sequence `tag` - identical except that
+    /// `deferred_bulk_data` narrows to that item's scope (or `None` if nothing in it was
+    /// deferred), so a nested element can never pick up a same-tagged location from an
+    /// enclosing level.
+    pub(crate) fn for_sequence_item(self, tag: dcmnorm_core::Tag, index: usize) -> Self {
+        Self {
+            deferred_bulk_data: self.deferred_bulk_data.and_then(|scope| scope.item(tag, index)),
+            ..self
+        }
+    }
 }
 
 impl Default for DicomJsonWriteOptions<'_> {
@@ -369,6 +388,7 @@ impl Default for DicomJsonWriteOptions<'_> {
             bulk_data_uri_base: None,
             bulk_scan_failed: None,
             bulk_scan_cursor: None,
+            deferred_bulk_data: None,
         }
     }
 }

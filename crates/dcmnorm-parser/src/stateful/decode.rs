@@ -201,6 +201,14 @@ pub trait StatefulDecode {
     where
         Self::Reader: Seek;
 
+    /// Skip the following `length` bytes by seeking past them rather than reading them,
+    /// counting them as if they were read (the same position bookkeeping as `skip_bytes`, which
+    /// defined-length sequence/item tracking relies on). Seeking past the end of the source is
+    /// not detected here - callers that need that must check the resulting range themselves.
+    fn skip_bytes_seek(&mut self, length: u64) -> Result<()>
+    where
+        Self::Reader: Seek;
+
     /// Retrieve the known position of the inner reader source.
     /// If the stateful decoder was constructed at the beginning of the reader,
     /// this equals to the number of bytes read so far.
@@ -960,6 +968,13 @@ where
     {
         (**self).seek(position)
     }
+
+    fn skip_bytes_seek(&mut self, length: u64) -> Result<()>
+    where
+        Self::Reader: Seek,
+    {
+        (**self).skip_bytes_seek(length)
+    }
 }
 
 impl<D, S, BD> StatefulDecode for StatefulDecoder<D, S, BD>
@@ -1148,6 +1163,21 @@ where
                 new_position: position,
             })
             .map(|_| ())
+    }
+
+    fn skip_bytes_seek(&mut self, length: u64) -> Result<()>
+    where
+        Self::Reader: Seek,
+    {
+        let offset = <i64 as std::convert::TryFrom<u64>>::try_from(length).map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput));
+        offset
+            .and_then(|offset| self.from.seek(SeekFrom::Current(offset)))
+            .context(SeekReaderSnafu {
+                position: self.position,
+                new_position: self.position + length,
+            })?;
+        self.position += length;
+        Ok(())
     }
 }
 

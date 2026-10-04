@@ -134,7 +134,10 @@ where
             let items = sequence
                 .items()
                 .iter()
-                .map(|item| item.to_standard_json(options).map(JsonValue::Object))
+                .enumerate()
+                .map(|(index, item)| {
+                    item.to_standard_json(options.for_sequence_item(tag, index)).map(JsonValue::Object)
+                })
                 .collect::<Result<Vec<_>, DicomJsonError>>()?;
             object.insert("Value".to_owned(), JsonValue::Array(items));
         }

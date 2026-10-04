@@ -10,9 +10,10 @@ use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
 use ::dcmnorm::dicom_io::{
+    dicom_file_to_json,
     apply_filter_to_object, build_volume as dcm_build_volume, echo_scu as dcm_echo_scu,
     find_scu as dcm_find_scu, move_scu as dcm_move_scu, parse_attribute_override,
-    parse_filter_requests, parse_tag_key, probe_dicom_file_for_sop_class_uid, read_dicom_bytes,
+    parse_filter_requests, parse_tag_key, probe_dicom_file_for_sop_class_uid,
     read_dicom_file, read_dicom_json_with_options, read_dcmnorm_object_for_filter,
     pack_dicom_frame_stack_texture as dcm_pack_dicom_frame_stack_texture,
     pack_dicom_frame_texture as dcm_pack_dicom_frame_texture, pack_volume_texture as dcm_pack_volume_texture,
@@ -230,26 +231,9 @@ fn read_json(
     py.allow_threads(|| {
         guarded(|| {
             let path = PathBuf::from(file_path);
-            let (object, file_bytes) = if bulk_data_mode == DicomJsonBulkDataMode::Uri {
-                let bytes = std::fs::read(&path).map_err(to_py_err)?;
-                let object = read_dicom_bytes(&bytes).map_err(to_py_err)?;
-                (object, Some(bytes))
-            } else {
-                (read_dicom_file(&path).map_err(to_py_err)?, None)
-            };
-            let bulk_scan_failed = std::cell::Cell::new(false);
-            let bulk_scan_cursor = std::cell::Cell::new(0usize);
-            write_dicom_json_with_options(
-                &object,
-                DicomJsonWriteOptions {
-                    format,
-                    key_style,
-                    bulk_data_mode,
-                    bulk_data_source: file_bytes.as_deref(),
-                    bulk_scan_failed: Some(&bulk_scan_failed),
-                    bulk_scan_cursor: Some(&bulk_scan_cursor),
-                    ..Default::default()
-                },
+            dicom_file_to_json(
+                &path,
+                DicomJsonWriteOptions { format, key_style, bulk_data_mode, ..Default::default() },
             )
             .map_err(to_py_err)
         })

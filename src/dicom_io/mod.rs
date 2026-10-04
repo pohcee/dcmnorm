@@ -35,12 +35,12 @@ pub use filter::{
 pub use io::{
     can_encode_transfer_syntax, detect_jpeg2000_backend_from_search_path, jpeg2000_backend, jpeg2000_backend_name,
     kakadu_ffi_enabled, list_transfer_syntax_support, probe_dicom_file_for_sop_class_uid,
-    read_dicom_bytes, read_dicom_file, transcode_dicom_bytes, transcode_dicom_file, transcode_dcmnorm_object, transcode_dcmnorm_object_owned,
+    read_dicom_bytes, read_dicom_file, read_dicom_file_deferring_bulk_data, transcode_dicom_bytes, transcode_dicom_file, transcode_dcmnorm_object, transcode_dcmnorm_object_owned,
     write_dataset_as_dicom_bytes, write_dataset_as_dicom_file, write_dicom_bytes, write_dicom_file,
     Jpeg2000Backend, JPEG2000_CODEC_ENV_FLAG, JPEG2000_DEBUG_ENV_FLAG,
 };
 pub use json::{
-    read_dicom_json, read_dicom_json_full, read_dicom_json_full_with_source,
+    dicom_file_to_json, read_dicom_json, read_dicom_json_full, read_dicom_json_full_with_source,
     read_dicom_json_with_options, read_dicom_json_with_source, write_dataset_as_dicom_json,
     write_dataset_as_dicom_json_full, write_dataset_as_dicom_json_with_options, write_dicom_json,
     write_dicom_json_full, write_dicom_json_full_with_source, write_dicom_json_with_options,

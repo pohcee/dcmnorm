@@ -15,7 +15,7 @@ use dcmnorm_encoding::adapters::EncodeOptions;
 use dcmnorm_encoding::transfer_syntax::{Codec, TransferSyntaxIndex};
 use dcmnorm_object::ReadPreamble;
 use dcmnorm_object::{
-    DefaultDicomObject, FileMetaTableBuilder, InMemDicomObject, OpenFileOptions,
+    DefaultDicomObject, DeferredValues, FileMetaTableBuilder, InMemDicomObject, OpenFileOptions,
 };
 use dcmnorm_transcode::TransferSyntaxRegistry;
 use rayon::prelude::*;
@@ -425,6 +425,63 @@ pub fn read_dicom_bytes(bytes: impl AsRef<[u8]>) -> Result<DefaultDicomObject, R
         .read_preamble(ReadPreamble::Always)
         .from_reader(Cursor::new(bytes))
         .or_else(|error| read_dicom_dataset_without_meta(bytes).ok_or(error))
+}
+
+/// Read `path` for writing DICOM JSON with `BulkDataURI` references, without reading the bulk
+/// values themselves: every value that would be written as a `BulkDataURI` anyway - PixelData
+/// (native or encapsulated), and any other bulk-VR value (OB/OW/OF/OD/OL/OV/UN) larger than
+/// the inline threshold, at any depth - is skipped by seeking past it, and its file location
+/// returned in [`DeferredValues`]. Pass that as `DicomJsonWriteOptions::deferred_bulk_data`
+/// (with `bulk_data_mode: Uri`) to write the same JSON a full read + `bulk_data_source` scan
+/// produces, at a cost independent of the bulk data's size: a 29MB multi-frame ultrasound
+/// reads ~2KB instead of 29MB (three times over: file buffer, parsed copy, verifying scan).
+///
+/// The returned object's deferred elements hold empty placeholders (see [`DeferredValues`]):
+/// it is only fit for writing that JSON, not for rendering, transcoding or writing DICOM.
+///
+/// Returns `Ok(None)` when the shortcut doesn't apply - Explicit VR Big Endian (its bulk bytes
+/// in the file aren't the little-endian bytes a URI consumer reads back), a deflated data set,
+/// or a file too short for the ranges it declares - and the caller should read in full.
+pub fn read_dicom_file_deferring_bulk_data<P>(
+    path: P,
+) -> Result<Option<(DefaultDicomObject, DeferredValues)>, ReadError>
+where
+    P: AsRef<Path>,
+{
+    let path = path.as_ref();
+    let _scope = perf::scope("io.read_dicom_file_deferring_bulk_data");
+    let mut file = std::io::BufReader::new(std::fs::File::open(path).map_err(|source| ReadError::Io {
+        source,
+        context: "opening file",
+    })?);
+    let Some(meta) = dcmnorm_object::FileMetaTable::read_from(&mut file)? else {
+        return Ok(None);
+    };
+    if normalize_transfer_syntax_uid(&meta.transfer_syntax) == "1.2.840.10008.1.2.2" {
+        return Ok(None);
+    }
+
+    // Exactly the values the JSON writer would emit as a BulkDataURI: a bulk VR (WaveformData
+    // excepted - always inlined), more than INLINE_BINARY_URI_THRESHOLD bytes, and a whole
+    // number of that VR's elements (a value with a trailing partial element doesn't parse to
+    // its file bytes, so a scan of the source never referenced it either).
+    let defer = |header: &dcmnorm_core::header::DataElementHeader| {
+        let Some(length) = header.len.get() else { return false };
+        let element_size = match header.vr {
+            VR::OB | VR::UN => 1,
+            VR::OW => 2,
+            VR::OF | VR::OL => 4,
+            VR::OD | VR::OV => 8,
+            _ => return false,
+        };
+        header.tag != tags::WAVEFORM_DATA
+            && length as usize > super::bulk_data::INLINE_BINARY_URI_THRESHOLD
+            && length % element_size == 0
+    };
+
+    OpenFileOptions::new()
+        .read_preamble(ReadPreamble::Always)
+        .open_file_deferring(path, &defer, true)
 }
 
 pub fn probe_dicom_file_for_sop_class_uid<P>(path: P) -> Result<bool, std::io::Error>

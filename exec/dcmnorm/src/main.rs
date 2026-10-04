@@ -8,7 +8,7 @@ use dcmnorm::dicom_io::{
     apply_filter_to_object, compute_frame_histogram, compute_instance_histograms, jpeg2000_backend_name,
     kakadu_ffi_enabled, list_transfer_syntax_support,
     parse_attribute_override, parse_filter_requests, parse_tag_key, read_dicom_bytes, read_dicom_file,
-    read_dicom_file_for_frame, read_dicom_json_with_options, read_dcmnorm_object_for_filter,
+    read_dicom_file_deferring_bulk_data, read_dicom_file_for_frame, read_dicom_json_with_options, read_dcmnorm_object_for_filter,
     redact_dicom_pixels_to_transfer_syntax, remove_attribute, render_all_dicom_frames,
     render_dicom_frame, set_attribute, transcode_dcmnorm_object_owned, write_dicom_file,
     write_dicom_json_with_options, write_dicom_video, BoundingBox, BoxLength, DicomJsonBulkDataMode, DicomJsonFormat,
@@ -1167,9 +1167,22 @@ fn process_one(cli: &Cli, input_path: &Path) -> Result<(), Box<dyn std::error::E
     // into a whole-file buffer and then copied out of it again. Anything a prefix can't settle
     // (e.g. a meta-less, extensionless dump) falls through to the original whole-file path.
     let prefix = read_file_prefix(input_path, INPUT_SNIFF_PREFIX_LEN)?;
-    if let Ok(direction @ (Direction::DicomToDicom | Direction::DicomToRender)) =
-        infer_direction(cli, input_path, &prefix)
+    let prefix_direction = infer_direction(cli, input_path, &prefix);
+
+    // DICOM -> JSON with BulkDataURIs never needs the bulk values themselves - only where they
+    // are in the file, which the parser knows as it reads. Skip them instead of reading the
+    // whole file and then scanning it for each value's offset. --set could replace a bulk value,
+    // which must then be written from the object, so that case takes the full read below.
+    if matches!(prefix_direction, Ok(Direction::DicomToJson))
+        && cli.bulk_data == BulkDataMode::Uri
+        && cli.set.is_empty()
     {
+        if let Ok(Some((object, deferred))) = read_dicom_file_deferring_bulk_data(input_path) {
+            return run_dicom_to_json_with_deferred(cli, input_path, None, Some(&deferred), object);
+        }
+    }
+
+    if let Ok(direction @ (Direction::DicomToDicom | Direction::DicomToRender)) = prefix_direction {
         // Rendering one frame of a native multi-frame object only needs that frame's bytes (see
         // read_dicom_file_for_frame), the way dcmtk's dcmj2pnm reads it. Anything the shortcut
         // doesn't cover - or any error from it - falls back to the full read below.
@@ -1369,6 +1382,19 @@ fn run_dicom_to_json_with_object(
     cli: &Cli,
     input_path: &Path,
     input_bytes: Option<&[u8]>,
+    object: dcmnorm_object::DefaultDicomObject,
+) -> Result<(), Box<dyn std::error::Error>> {
+    run_dicom_to_json_with_deferred(cli, input_path, input_bytes, None, object)
+}
+
+/// `deferred`: the bulk values `read_dicom_file_deferring_bulk_data` skipped, written as
+/// BulkDataURIs straight from their recorded locations (`input_bytes` is then `None` - there is
+/// no whole-file buffer to scan).
+fn run_dicom_to_json_with_deferred(
+    cli: &Cli,
+    input_path: &Path,
+    input_bytes: Option<&[u8]>,
+    deferred: Option<&dcmnorm_object::DeferredValues>,
     mut object: dcmnorm_object::DefaultDicomObject,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let _scope = perf::scope("cli.run_dicom_to_json");
@@ -1442,6 +1468,7 @@ fn run_dicom_to_json_with_object(
             bulk_data_uri_base: uri_base_owned.as_deref(),
             bulk_scan_failed: Some(&bulk_scan_failed),
             bulk_scan_cursor: Some(&bulk_scan_cursor),
+            deferred_bulk_data: deferred,
         },
     )?
     };

@@ -153,3 +153,52 @@ pub fn write_dataset_as_dicom_json_with_options(
 
     write_dicom_json_with_options(&file_object, options)
 }
+
+/// Convert the DICOM file at `path` to JSON - the library form of plain `dcmnorm file.dcm`, used
+/// by the language bindings. Only `format`, `key_style`, `bulk_data_mode` and
+/// `bulk_data_uri_base` of `options` are honored; the bulk-data plumbing is filled in here.
+///
+/// In `Uri` mode, bulk values are skipped while reading and referenced from where the parser
+/// found them (see `read_dicom_file_deferring_bulk_data`), so the cost doesn't grow with the
+/// size of PixelData. Files that can't be read that way fall back to reading the whole file and
+/// scanning it for each bulk value's offset - same output, just slower.
+pub fn dicom_file_to_json(
+    path: impl AsRef<std::path::Path>,
+    options: DicomJsonWriteOptions<'_>,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let path = path.as_ref();
+    let options = DicomJsonWriteOptions {
+        bulk_data_source: None,
+        bulk_scan_failed: None,
+        bulk_scan_cursor: None,
+        deferred_bulk_data: None,
+        ..options
+    };
+    if options.bulk_data_mode != DicomJsonBulkDataMode::Uri {
+        let object = super::io::read_dicom_file(path)?;
+        return Ok(write_dicom_json_with_options(&object, options)?);
+    }
+
+    if let Ok(Some((object, deferred))) = super::io::read_dicom_file_deferring_bulk_data(path) {
+        return Ok(write_dicom_json_with_options(
+            &object,
+            DicomJsonWriteOptions { deferred_bulk_data: Some(&deferred), ..options },
+        )?);
+    }
+
+    let bytes = std::fs::read(path)?;
+    let object = super::io::read_dicom_bytes(&bytes)?;
+    // Shared across every bulk-eligible element of this file's write pass - see
+    // DicomJsonWriteOptions::bulk_scan_failed / bulk_scan_cursor.
+    let bulk_scan_failed = std::cell::Cell::new(false);
+    let bulk_scan_cursor = std::cell::Cell::new(0usize);
+    Ok(write_dicom_json_with_options(
+        &object,
+        DicomJsonWriteOptions {
+            bulk_data_source: Some(&bytes),
+            bulk_scan_failed: Some(&bulk_scan_failed),
+            bulk_scan_cursor: Some(&bulk_scan_cursor),
+            ..options
+        },
+    )?)
+}

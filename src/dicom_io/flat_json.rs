@@ -143,7 +143,8 @@ where
             sequence
                 .items()
                 .iter()
-                .map(|item| item.to_flat_json(options))
+                .enumerate()
+                .map(|(index, item)| item.to_flat_json(options.for_sequence_item(tag, index)))
                 .map(JsonValue::Object)
                 .collect(),
         )),
