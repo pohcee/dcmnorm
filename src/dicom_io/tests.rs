@@ -123,6 +123,65 @@ fn writes_flat_json_with_source_uri_mode_for_nested_bulk_value() {
     );
 }
 
+/// Regression: a nested bulk value larger than the byte-content fallback's needle cap
+/// (`MAX_MATCH_NEEDLE_LEN`, 64 KiB) - e.g. a whole-slide image's ~140 KB ICCProfile inside
+/// OpticalPathSequence - was only ever findable by that fallback, since the tag scan never
+/// descended into sequence items, so it silently degraded to InlineBinary.
+#[test]
+fn writes_flat_json_with_source_uri_mode_for_large_nested_bulk_value() {
+    let mut source = fixture_bytes(fixture_path("dx.dcm"));
+    let nested_payload: Vec<u8> = (0..150_000u32).map(|i| (i % 251) as u8).collect();
+    append_nested_icc_profile_sequence(&mut source, &nested_payload);
+
+    let object = read_dicom_bytes(&source).unwrap();
+    let json = write_dicom_json_with_source(&object, &source).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+    let icc = &value["OpticalPathSequence"][0]["ICCProfile"];
+    assert!(
+        icc["InlineBinary"].is_null(),
+        "large nested ICCProfile should not fallback to InlineBinary"
+    );
+    let uri = icc["BulkDataURI"]
+        .as_str()
+        .expect("large nested ICCProfile should emit BulkDataURI");
+    let (offset, length) = parse_offset_length(uri);
+    assert_eq!(&source[offset..offset + length], nested_payload.as_slice());
+
+    // Top-level bulk data is unaffected.
+    let (pixel_offset, pixel_length) =
+        parse_offset_length(value["PixelData"]["BulkDataURI"].as_str().unwrap());
+    assert!(pixel_offset + pixel_length <= source.len());
+}
+
+/// Same as above, against a real whole-slide image whose OpticalPathSequence carries a
+/// ~142 KB ICCProfile in a defined-length sequence.
+#[test]
+fn writes_flat_json_with_source_uri_mode_for_wsi_nested_icc_profile() {
+    let source = fixture_bytes(fixture_path("wsi.dcm"));
+    let object = read_dicom_bytes(&source).unwrap();
+    let json = write_dicom_json_with_source(&object, &source).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+    let icc = &value["OpticalPathSequence"][0]["ICCProfile"];
+    assert!(icc["InlineBinary"].is_null(), "wsi ICCProfile fell back to InlineBinary");
+    let (offset, length) = parse_offset_length(icc["BulkDataURI"].as_str().unwrap());
+    assert!(length > 64 * 1024, "expected a large ICC profile, got {length} bytes");
+    // An ICC profile header carries the "acsp" signature at byte 36.
+    assert_eq!(&source[offset + 36..offset + 40], b"acsp");
+}
+
+fn parse_offset_length(uri: &str) -> (usize, usize) {
+    let param = |name: &str| -> usize {
+        uri.split(['?', '&'])
+            .find_map(|kv| kv.strip_prefix(name)?.strip_prefix('='))
+            .unwrap_or_else(|| panic!("missing {name} in URI: {uri}"))
+            .parse()
+            .unwrap()
+    };
+    (param("offset"), param("length"))
+}
+
 #[test]
 fn reads_element_with_nonstandard_ambiguous_vr_shorthand_as_unsigned_short() {
     // Some vendor DICOM writers emit their own internal "ambiguous VR"

@@ -500,6 +500,26 @@ fn locate_element_value(
         return Ok(Some(location));
     }
 
+    // Not a top-level element - walk into sequence items. Only reached after the top-level scan
+    // misses, so top-level lookups (PixelData etc.) never pay for descending into large
+    // sequences such as per-frame functional groups. Errors (e.g. an exhausted step budget on a
+    // construct the scanner doesn't model) just mean "not found here": the byte-content fallback
+    // below still gets its chance, exactly as before this pass existed.
+    let mut steps = MAX_SCAN_STEPS;
+    if let Ok(Some(location)) = locate_tag_in_nested_dataset(
+        source,
+        dataset_start,
+        source.len(),
+        target,
+        syntax.explicit_vr,
+        syntax.little_endian,
+        expected_bytes,
+        &mut steps,
+        0,
+    ) {
+        return Ok(Some(location));
+    }
+
     if let Some(expected) = expected_bytes {
         return locate_element_value_by_matching_bytes(
             source,
@@ -541,6 +561,146 @@ fn locate_tag_in_dataset(
                 offset: value_offset,
                 length,
             }));
+        }
+
+        position = next_position;
+    }
+
+    Ok(None)
+}
+
+const MAX_NESTED_SCAN_DEPTH: usize = 16;
+
+/// Like `locate_tag_in_dataset`, but bounded to `[position, end)` and descending into the items
+/// of every sequence it passes, so it can find elements nested at any depth (e.g. ICCProfile
+/// inside OpticalPathSequence). Without this, a nested bulk value was only findable by the
+/// byte-content fallback, which caps its needle at `MAX_MATCH_NEEDLE_LEN` - so a large nested
+/// value (a whole-slide image's ~140 KB ICC profile) silently degraded to InlineBinary.
+#[allow(clippy::too_many_arguments)]
+fn locate_tag_in_nested_dataset(
+    source: &[u8],
+    mut position: usize,
+    end: usize,
+    target: Tag,
+    explicit_vr: bool,
+    little_endian: bool,
+    expected_bytes: Option<&[u8]>,
+    steps: &mut usize,
+    depth: usize,
+) -> Result<Option<ElementLocation>, DicomJsonError> {
+    let end = end.min(source.len());
+    while position + 8 <= end {
+        take_scan_step(steps)?;
+        let tag = read_tag(source, position, little_endian)?;
+        if tag == ITEM_DELIMITATION_TAG || tag == SEQUENCE_DELIMITATION_TAG {
+            return Ok(None);
+        }
+
+        let header = parse_element_header(source, position, explicit_vr, little_endian)?;
+        let value_offset = position + header.header_length;
+        let (length, next_position) = if let Some(length) = header.length {
+            (length, value_offset + length)
+        } else {
+            let end_position =
+                skip_undefined_length_value(source, value_offset, explicit_vr, little_endian, steps)?;
+            (end_position.saturating_sub(value_offset), end_position + 8)
+        };
+
+        if header.tag == target && value_matches(source, value_offset, length, expected_bytes) {
+            return Ok(Some(ElementLocation {
+                offset: value_offset,
+                length,
+            }));
+        }
+
+        if depth < MAX_NESTED_SCAN_DEPTH
+            && is_sequence_value(source, position, header.tag, value_offset, explicit_vr, little_endian)
+        {
+            if let Some(location) = locate_tag_in_sequence_items(
+                source,
+                value_offset,
+                value_offset + length,
+                target,
+                explicit_vr,
+                little_endian,
+                expected_bytes,
+                steps,
+                depth + 1,
+            )? {
+                return Ok(Some(location));
+            }
+        }
+
+        position = next_position;
+    }
+
+    Ok(None)
+}
+
+/// Whether the element whose header starts at `position` holds a sequence of items. Explicit VR
+/// says so directly; implicit VR has no VR on the wire, so a value that opens with an Item tag is
+/// taken as a sequence. Encapsulated PixelData is item-structured too but holds fragments, not
+/// datasets, so it is excluded. Undefined-length explicit-VR UN values (whose nested content is
+/// implicit VR, PS3.5 6.2.2) are not descended into - this scanner doesn't model the switch.
+fn is_sequence_value(
+    source: &[u8],
+    position: usize,
+    tag: Tag,
+    value_offset: usize,
+    explicit_vr: bool,
+    little_endian: bool,
+) -> bool {
+    if tag == tags::PIXEL_DATA {
+        return false;
+    }
+    if explicit_vr {
+        source.get(position + 4..position + 6) == Some(b"SQ".as_slice())
+    } else {
+        matches!(read_tag(source, value_offset, little_endian), Ok(t) if t == ITEM_TAG)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn locate_tag_in_sequence_items(
+    source: &[u8],
+    mut position: usize,
+    end: usize,
+    target: Tag,
+    explicit_vr: bool,
+    little_endian: bool,
+    expected_bytes: Option<&[u8]>,
+    steps: &mut usize,
+    depth: usize,
+) -> Result<Option<ElementLocation>, DicomJsonError> {
+    let end = end.min(source.len());
+    while position + 8 <= end {
+        take_scan_step(steps)?;
+        if read_tag(source, position, little_endian)? != ITEM_TAG {
+            break;
+        }
+        let item_length = read_u32(source, position + 4, little_endian)?;
+        let item_start = position + 8;
+        let (item_end, next_position) = if item_length == u32::MAX {
+            let item_end =
+                skip_undefined_length_value(source, item_start, explicit_vr, little_endian, steps)?;
+            (item_end, item_end + 8)
+        } else {
+            let item_end = item_start + item_length as usize;
+            (item_end, item_end)
+        };
+
+        if let Some(location) = locate_tag_in_nested_dataset(
+            source,
+            item_start,
+            item_end,
+            target,
+            explicit_vr,
+            little_endian,
+            expected_bytes,
+            steps,
+            depth,
+        )? {
+            return Ok(Some(location));
         }
 
         position = next_position;
