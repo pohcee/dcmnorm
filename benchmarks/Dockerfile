@@ -6,13 +6,13 @@ FROM debian:bookworm-slim
 ENV DEBIAN_FRONTEND=noninteractive
 
 # dcmtk: apt package. openjdk: dcm4che runtime. build deps: match dcmnorm's own
-# build-in-docker.sh apt list exactly, for the same reason it uses them (ffmpeg-next,
-# charls-sys, openjpeg-sys, lcms2-sys all compile native code).
+# bindings/node/build-in-docker.sh apt list (charls-sys, openjpeg-sys, lcms2-sys all compile
+# native code), plus git + nasm because ffmpeg-next's "build" feature shallow-clones and
+# compiles FFmpeg from source to link it statically.
 RUN apt-get update -qq && apt-get install -y -qq \
     dcmtk \
     openjdk-17-jre-headless \
-    curl unzip build-essential clang cmake pkg-config libclang-dev \
-    libavutil-dev libavcodec-dev libavformat-dev libswscale-dev libswresample-dev \
+    curl unzip build-essential clang cmake pkg-config libclang-dev git nasm \
     hyperfine jq \
     > /dev/null && rm -rf /var/lib/apt/lists/*
 
