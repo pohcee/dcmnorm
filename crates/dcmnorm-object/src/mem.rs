@@ -432,6 +432,65 @@ pub(crate) fn read_dataset_until<'r>(
     Ok(InMemDicomObject { elements })
 }
 
+/// Like [`read_dataset_until`], but stops right after reading a top-level native PixelData
+/// element's *header*, leaving its value unread on `source` - see
+/// `OpenFileOptions::open_file_until_pixel_data`. Returns `None` for the header when the data
+/// set has no top-level native PixelData (absent, encapsulated, or an element past it was
+/// reached first); the returned object is then incomplete and only useful as a signal to fall
+/// back to a full read. The caller is responsible for not using this with a dataset-level codec
+/// (deflate), whose byte positions don't correspond to the file's.
+pub(crate) fn read_dataset_until_pixel_data_header<'r>(
+    source: impl Read + 'r,
+    ts: &TransferSyntax,
+) -> Result<(InMemDicomObject, Option<dcmnorm_core::header::DataElementHeader>), ReadError> {
+    const PIXEL_DATA: Tag = Tag(0x7FE0, 0x0010);
+    let mut reader =
+        DataSetReader::new_with_ts(source, ts).map_err(|source| ReadError::Dataset { source })?;
+    let mut elements = Vec::new();
+    let mut pixel_data_header = None;
+
+    while let Some(token) = reader.next() {
+        match token? {
+            DataToken::ElementHeader(header) if header.tag == PIXEL_DATA => {
+                pixel_data_header = Some(header);
+                break;
+            }
+            DataToken::ElementHeader(header) if header.tag > PIXEL_DATA => break,
+            DataToken::ElementHeader(header) => {
+                let value = expect_primitive_value(&mut reader)?;
+                elements.push(DataElement::new(header.tag, header.vr, value));
+            }
+            DataToken::SequenceStart { tag, len } => {
+                let mut items: C<InMemDicomObject> = C::new();
+                loop {
+                    match next_required(&mut reader)? {
+                        DataToken::ItemStart { .. } => items.push(build_dataset(&mut reader, true)?),
+                        DataToken::SequenceEnd => break,
+                        _ => {
+                            return Err(ReadError::UnexpectedToken {
+                                context: "expected ItemStart or SequenceEnd in sequence",
+                            })
+                        }
+                    }
+                }
+                elements.push(DataElement::new(tag, VR::SQ, Value::Sequence(DataSetSequence::new(items, len))));
+                if tag > PIXEL_DATA {
+                    break;
+                }
+            }
+            DataToken::PixelSequenceStart => break,
+            _ => {
+                return Err(ReadError::UnexpectedToken {
+                    context: "unexpected token at data set top level",
+                })
+            }
+        }
+    }
+
+    elements.sort_by_key(|e| e.tag());
+    Ok((InMemDicomObject { elements }, pixel_data_header))
+}
+
 /// Read the token sequence following a `PixelSequenceStart` token (already consumed by the
 /// caller). Per `dcmnorm_parser::dataset::read::DataSetReader`'s actual protocol (confirmed
 /// against its own test fixtures): the offset table is itself framed as the *first item* -
@@ -525,18 +584,16 @@ pub(crate) fn write_element_tokens<W: Write>(
 ) -> Result<(), WriteError> {
     match element.value() {
         Value::Primitive(pv) => {
+            let header = dcmnorm_core::header::DataElementHeader::new(
+                element.tag(),
+                element.vr(),
+                dcmnorm_core::header::Length::defined({
+                    let len = pv.calculate_byte_len() as u32;
+                    len + (len % 2)
+                }),
+            );
             writer
-                .write_sequence([
-                    DataToken::ElementHeader(dcmnorm_core::header::DataElementHeader::new(
-                        element.tag(),
-                        element.vr(),
-                        dcmnorm_core::header::Length::defined({
-                            let len = pv.calculate_byte_len() as u32;
-                            len + (len % 2)
-                        }),
-                    )),
-                    DataToken::PrimitiveValue(pv.clone()),
-                ])
+                .write_primitive_element(header, pv)
                 .map_err(|source| WriteError::Dataset { source })?;
         }
         Value::Sequence(seq) => {
@@ -578,7 +635,7 @@ pub(crate) fn write_element_tokens<W: Write>(
                     .write(DataToken::ItemStart { len: dcmnorm_core::header::Length::defined(fragment.len() as u32) })
                     .map_err(|source| WriteError::Dataset { source })?;
                 writer
-                    .write(DataToken::ItemValue(fragment.clone()))
+                    .write_item_value(fragment)
                     .map_err(|source| WriteError::Dataset { source })?;
                 writer.write(DataToken::ItemEnd).map_err(|source| WriteError::Dataset { source })?;
             }

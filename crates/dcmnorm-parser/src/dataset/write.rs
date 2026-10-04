@@ -376,6 +376,28 @@ where
         }
     }
 
+    /// Write a whole primitive element from a borrowed value - equivalent to feeding
+    /// `DataToken::ElementHeader(header)` then `DataToken::PrimitiveValue(value)`, without
+    /// requiring an owned (cloned) value. Writing a native multi-frame object through the token
+    /// API otherwise deep-copies its entire PixelData just to serialize it.
+    pub fn write_primitive_element(
+        &mut self,
+        header: DataElementHeader,
+        value: &dcmnorm_core::value::PrimitiveValue,
+    ) -> Result<()> {
+        self.printer
+            .encode_primitive_element(&header, value)
+            .context(WriteValueSnafu)?;
+        self.last_de = None;
+        Ok(())
+    }
+
+    /// Write an item's raw value (e.g. an encapsulated pixel data fragment) from a borrowed
+    /// slice - equivalent to feeding `DataToken::ItemValue(data.to_vec())` without the copy.
+    pub fn write_item_value(&mut self, data: &[u8]) -> Result<()> {
+        self.printer.write_bytes(data).context(WriteValueSnafu)
+    }
+
     fn write_impl(&mut self, token: &DataToken) -> Result<()> {
         match token {
             DataToken::ElementHeader(header) => {

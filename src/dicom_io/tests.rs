@@ -281,10 +281,10 @@ use super::{
     detect_jpeg2000_backend_from_search_path, echo_scu, find_scu, kakadu_ffi_enabled,
     list_transfer_syntax_support, move_scu, parse_attribute_override,
     probe_dicom_file_for_sop_class_uid, read_dicom_bytes,
-    read_dicom_file, read_dicom_json, read_dicom_json_full, read_dicom_json_full_with_source,
+    read_dicom_file, read_dicom_file_for_frame, read_dicom_json, read_dicom_json_full, read_dicom_json_full_with_source,
     read_dicom_json_with_options, read_dicom_json_with_source,
     redact_dicom_pixels_to_transfer_syntax, remove_attribute, render_all_dicom_video_frames, render_dicom_frame,
-    set_attribute, start_scp, store_scu, transcode_dcmnorm_object, write_dicom_bytes, write_dicom_file,
+    set_attribute, start_scp, store_scu, transcode_dcmnorm_object, write_dataset_as_dicom_file, write_dicom_bytes, write_dicom_file,
     write_dicom_json, write_dicom_json_full, write_dicom_json_full_with_source,
     write_dicom_json_with_options, write_dicom_json_with_source, BoundingBox, BoxLength,
     DicomJsonBulkDataMode, DicomJsonFormat, DicomJsonKeyStyle, DicomJsonReadOptions,
@@ -4065,4 +4065,80 @@ fn pack_dicom_frame_stack_texture_fails_closed_if_any_source_is_a_color_instance
         matches!(result, Err(TextureExportError::Render(RenderError::UnsupportedSamplesPerPixel(3)))),
         "expected UnsupportedSamplesPerPixel(3), got {result:?}"
     );
+}
+
+/// Renders `frame_index` of `path` both from a full read and from `read_dicom_file_for_frame`'s
+/// single-frame object, asserting the fast path was taken and both outputs are byte-identical
+/// (raw frame bytes and the fully windowed PNG).
+fn assert_single_frame_read_matches_full_read(path: &Path, frame_index: usize) {
+    let full = read_dicom_file(path).unwrap();
+    let single = read_dicom_file_for_frame(path, frame_index)
+        .unwrap()
+        .unwrap_or_else(|| panic!("{} frame {frame_index}: expected the single-frame fast path", path.display()));
+    let options = RenderPipelineOptions { frame_index, ..Default::default() };
+    for format in [RenderOutputFormat::Raw, RenderOutputFormat::Png] {
+        let expected = render_dicom_frame(&full, format, &options).unwrap();
+        let actual = render_dicom_frame(&single, format, &options).unwrap();
+        assert_eq!(
+            expected.bytes,
+            actual.bytes,
+            "{} frame {frame_index} {format:?}: single-frame read rendered differently",
+            path.display()
+        );
+    }
+}
+
+#[test]
+fn read_dicom_file_for_frame_renders_identically_to_full_read_for_native_multi_frame() {
+    let us2 = fixture_path("us2.dcm");
+    for frame_index in [0, 1, 113, 226] {
+        assert_single_frame_read_matches_full_read(&us2, frame_index);
+    }
+    assert_single_frame_read_matches_full_read(&fixture_path("mr.dcm"), 0);
+}
+
+#[test]
+fn read_dicom_file_for_frame_decodes_16_bit_ow_frames_in_each_native_byte_order() {
+    const ROWS: u16 = 4;
+    const COLS: u16 = 3;
+    const FRAMES: usize = 5;
+    let samples = usize::from(ROWS) * usize::from(COLS);
+    // Distinct, frame-dependent 12-bit values, so reading the wrong frame or swapping bytes in
+    // the wrong order would show up in the rendered output.
+    let pixels: Vec<u16> = (0..samples * FRAMES).map(|i| ((i * 97 + 13) % 4096) as u16).collect();
+
+    for ts in [uids::IMPLICIT_VR_LITTLE_ENDIAN, uids::EXPLICIT_VR_LITTLE_ENDIAN, "1.2.840.10008.1.2.2"] {
+        let dataset = InMemDicomObject::from_element_iter([
+            DataElement::new(tags::SOP_CLASS_UID, VR::UI, PrimitiveValue::from("1.2.840.10008.5.1.4.1.1.7")),
+            DataElement::new(tags::SOP_INSTANCE_UID, VR::UI, PrimitiveValue::from("1.2.3.4.5.6.7")),
+            DataElement::new(tags::SAMPLES_PER_PIXEL, VR::US, dicom_value!(U16, [1])),
+            DataElement::new(tags::PHOTOMETRIC_INTERPRETATION, VR::CS, PrimitiveValue::from("MONOCHROME2")),
+            DataElement::new(tags::NUMBER_OF_FRAMES, VR::IS, PrimitiveValue::from(FRAMES.to_string())),
+            DataElement::new(tags::ROWS, VR::US, dicom_value!(U16, [ROWS])),
+            DataElement::new(tags::COLUMNS, VR::US, dicom_value!(U16, [COLS])),
+            DataElement::new(tags::BITS_ALLOCATED, VR::US, dicom_value!(U16, [16])),
+            DataElement::new(tags::BITS_STORED, VR::US, dicom_value!(U16, [12])),
+            DataElement::new(tags::HIGH_BIT, VR::US, dicom_value!(U16, [11])),
+            DataElement::new(tags::PIXEL_REPRESENTATION, VR::US, dicom_value!(U16, [0])),
+            DataElement::new(tags::PIXEL_DATA, VR::OW, PrimitiveValue::U16(pixels.clone().into())),
+        ]);
+        let path = temp_file_path("dcmnorm-single-frame-ow");
+        write_dataset_as_dicom_file(dataset, &path, ts).unwrap();
+        for frame_index in 0..FRAMES {
+            assert_single_frame_read_matches_full_read(&path, frame_index);
+        }
+        fs::remove_file(&path).ok();
+    }
+}
+
+#[test]
+fn read_dicom_file_for_frame_declines_what_it_cannot_read_partially() {
+    // Encapsulated (JPEG 2000), dataset-compressed (deflated), and out-of-range frames all fall
+    // back to a full read rather than guessing at byte offsets.
+    assert!(read_dicom_file_for_frame(fixture_path("ct.dcm"), 0).unwrap().is_none());
+    assert!(read_dicom_file_for_frame(fixture_path("deflated.dcm"), 0).unwrap().is_none());
+    assert!(read_dicom_file_for_frame(fixture_path("us2.dcm"), 227).unwrap().is_none());
+    // A PixelData declaring more bytes than the file holds must take the full read too, so the
+    // truncation error is the full read's, not a silently zero-filled frame.
+    assert!(read_dicom_file_for_frame(fixture_path("mr_truncated.dcm"), 0).map(|object| object.is_none()).unwrap_or(true));
 }

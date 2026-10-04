@@ -872,12 +872,23 @@ pub fn transcode_dcmnorm_object(
     object: &DefaultDicomObject,
     target_transfer_syntax_uid: &str,
 ) -> Result<DefaultDicomObject, TranscodeError> {
+    transcode_dcmnorm_object_owned(object.clone(), target_transfer_syntax_uid)
+}
+
+/// [`transcode_dcmnorm_object`], taking ownership of `object` so callers that don't need the
+/// source afterwards skip a deep clone of it - for a native multi-frame object that clone is a
+/// full copy of PixelData (e.g. ~29MB for a 227-frame ultrasound cine), and when the source
+/// already has the target transfer syntax it's the only work there is to do.
+pub fn transcode_dcmnorm_object_owned(
+    object: DefaultDicomObject,
+    target_transfer_syntax_uid: &str,
+) -> Result<DefaultDicomObject, TranscodeError> {
     let _scope = perf::scope("transcode.transcode_dcmnorm_object");
     let source_uid = normalize_transfer_syntax_uid(object.meta().transfer_syntax());
     let target_uid = normalize_transfer_syntax_uid(target_transfer_syntax_uid);
 
     if source_uid == target_uid {
-        return Ok(object.clone());
+        return Ok(object);
     }
 
     let source_ts = TransferSyntaxRegistry
@@ -887,8 +898,8 @@ pub fn transcode_dcmnorm_object(
         .get(target_uid)
         .ok_or_else(|| TranscodeError::UnknownTransferSyntax(target_uid.to_owned()))?;
 
-    let mut transcoded = object.clone();
-    let pixel_representation = pixel_data_representation(object);
+    let pixel_representation = pixel_data_representation(&object);
+    let mut transcoded = object;
 
     match pixel_representation {
         PixelDataRepresentation::Absent => {}
@@ -915,7 +926,7 @@ pub fn transcode_dicom_bytes(
     target_transfer_syntax_uid: &str,
 ) -> Result<Vec<u8>, TranscodeError> {
     let object = read_dicom_bytes(bytes)?;
-    let mut transcoded = transcode_dcmnorm_object(&object, target_transfer_syntax_uid)?;
+    let mut transcoded = transcode_dcmnorm_object_owned(object, target_transfer_syntax_uid)?;
     Ok(write_dicom_bytes(&mut transcoded)?)
 }
 
@@ -929,7 +940,7 @@ where
     Q: AsRef<Path>,
 {
     let object = read_dicom_file(input_path)?;
-    let mut transcoded = transcode_dcmnorm_object(&object, target_transfer_syntax_uid)?;
+    let mut transcoded = transcode_dcmnorm_object_owned(object, target_transfer_syntax_uid)?;
     write_dicom_file(&mut transcoded, output_path)?;
     Ok(())
 }

@@ -10,7 +10,7 @@ mod pixel;
 pub use error::{ReadError, WithMetaError, WriteError};
 pub use file::{
     read_dataset_trial_parse, with_meta_from_bare_dataset, DefaultDicomObject, FileDicomObject,
-    OpenFileOptions, ReadPreamble,
+    OpenFileOptions, PixelDataValueLocation, ReadPreamble,
 };
 pub use mem::{ApplyOpError, InMemDicomObject, InMemElement, InMemFragment, MissingElementError};
 pub use meta::{FileMetaTable, FileMetaTableBuilder};

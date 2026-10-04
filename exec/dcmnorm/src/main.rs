@@ -8,9 +8,9 @@ use dcmnorm::dicom_io::{
     apply_filter_to_object, compute_frame_histogram, compute_instance_histograms, jpeg2000_backend_name,
     kakadu_ffi_enabled, list_transfer_syntax_support,
     parse_attribute_override, parse_filter_requests, parse_tag_key, read_dicom_bytes, read_dicom_file,
-    read_dicom_json_with_options, read_dcmnorm_object_for_filter,
+    read_dicom_file_for_frame, read_dicom_json_with_options, read_dcmnorm_object_for_filter,
     redact_dicom_pixels_to_transfer_syntax, remove_attribute, render_all_dicom_frames,
-    render_dicom_frame, set_attribute, transcode_dcmnorm_object, write_dicom_file,
+    render_dicom_frame, set_attribute, transcode_dcmnorm_object_owned, write_dicom_file,
     write_dicom_json_with_options, write_dicom_video, BoundingBox, BoxLength, DicomJsonBulkDataMode, DicomJsonFormat,
     DicomJsonKeyStyle, DicomJsonReadOptions, DicomJsonWriteOptions,
     RenderOutputFormat, RenderPipelineOptions, HistogramOptions, JPEG2000_CODEC_ENV_FLAG, JPEG2000_DEBUG_ENV_FLAG,
@@ -652,9 +652,16 @@ fn main() {
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let _scope = perf::scope("cli.run");
-    let version_with_hash = cli_version_with_binary_hash();
-    let version_static: &'static str = Box::leak(version_with_hash.into_boxed_str());
-    let matches = Cli::command().version(version_static).get_matches();
+    // Hashing the running binary means reading all of it (~34MB with FFmpeg statically linked),
+    // which used to cost ~30ms on every invocation - only pay that when the version is actually
+    // being printed.
+    let version_requested = std::env::args_os().skip(1).any(|arg| arg == "--version" || arg == "-V");
+    let version: &'static str = if version_requested {
+        Box::leak(cli_version_with_binary_hash().into_boxed_str())
+    } else {
+        env!("CARGO_PKG_VERSION")
+    };
+    let matches = Cli::command().version(version).get_matches();
     let cli = Cli::from_arg_matches(&matches).expect("clap generated invalid matches").finalize();
 
     if cli.jpeg2000_codec == Jpeg2000Codec::Kakadu && !kakadu_ffi_enabled() {
@@ -1155,6 +1162,35 @@ fn process_one(cli: &Cli, input_path: &Path) -> Result<(), Box<dyn std::error::E
         };
     }
 
+    // Sniff the direction from a prefix first: render and DICOM->DICOM can then parse straight
+    // from the file, so PixelData is copied once (kernel -> element value) instead of being read
+    // into a whole-file buffer and then copied out of it again. Anything a prefix can't settle
+    // (e.g. a meta-less, extensionless dump) falls through to the original whole-file path.
+    let prefix = read_file_prefix(input_path, INPUT_SNIFF_PREFIX_LEN)?;
+    if let Ok(direction @ (Direction::DicomToDicom | Direction::DicomToRender)) =
+        infer_direction(cli, input_path, &prefix)
+    {
+        // Rendering one frame of a native multi-frame object only needs that frame's bytes (see
+        // read_dicom_file_for_frame), the way dcmtk's dcmj2pnm reads it. Anything the shortcut
+        // doesn't cover - or any error from it - falls back to the full read below.
+        let single_frame = if direction == Direction::DicomToRender && renders_single_frame_as_read(cli) {
+            read_dicom_file_for_frame(input_path, cli.render_frame).ok().flatten()
+        } else {
+            None
+        };
+        let object = match single_frame {
+            Some(object) => object,
+            None => {
+                let _parse_scope = perf::scope("cli.read_dicom_file");
+                read_dicom_file(input_path)?
+            }
+        };
+        return match direction {
+            Direction::DicomToDicom => run_dicom_to_dicom_with_object(cli, input_path, object),
+            _ => run_dicom_to_render_with_object(cli, object),
+        };
+    }
+
     let input_bytes = fs::read(input_path)?;
     let direction = infer_direction(cli, input_path, &input_bytes)?;
 
@@ -1164,6 +1200,26 @@ fn process_one(cli: &Cli, input_path: &Path) -> Result<(), Box<dyn std::error::E
         Direction::DicomToRender => run_dicom_to_render(cli, &input_bytes),
         Direction::JsonToDicom => run_json_to_dicom(cli, &input_bytes),
     }
+}
+
+/// Whether this render invocation consumes exactly frame `--render-frame` of the object as it
+/// was read - the precondition for `read_dicom_file_for_frame`'s single-frame object. Rules out
+/// multi-frame outputs (all frames, MPEG4) and attribute overrides, which could change the frame
+/// geometry (Rows, NumberOfFrames, ...) the frame was located with.
+fn renders_single_frame_as_read(cli: &Cli) -> bool {
+    if cli.render_all_frames || !cli.set.is_empty() || !cli.remove.is_empty() {
+        return false;
+    }
+    let Some(output_path) = cli.output.as_deref() else { return false };
+    matches!(resolve_render_format(cli, output_path), Ok(format) if format != RenderFormat::Mpeg4)
+}
+
+const INPUT_SNIFF_PREFIX_LEN: usize = 64 * 1024;
+
+fn read_file_prefix(path: &Path, max_len: usize) -> io::Result<Vec<u8>> {
+    let mut prefix = Vec::with_capacity(max_len);
+    fs::File::open(path)?.take(max_len as u64).read_to_end(&mut prefix)?;
+    Ok(prefix)
 }
 
 fn cli_version_with_binary_hash() -> String {
@@ -1568,7 +1624,7 @@ fn run_dicom_to_dicom_with_object(
         );
         let mut transcoded = {
             let _transcode_scope = perf::scope("cli.dicom_to_dicom.transcode");
-            transcode_dcmnorm_object(&object, target_transfer_syntax)?
+            transcode_dcmnorm_object_owned(object, target_transfer_syntax)?
         };
         write_dicom_file(&mut transcoded, output_path)?;
     } else {
@@ -3147,13 +3203,10 @@ fn numeric_values_tag(
 }
 
 fn looks_like_json(input_bytes: &[u8]) -> bool {
-    let trimmed = input_bytes
-        .iter()
-        .copied()
-        .skip_while(u8::is_ascii_whitespace)
-        .collect::<Vec<_>>();
-
-    matches!(trimmed.first(), Some(b'{') | Some(b'['))
+    matches!(
+        input_bytes.iter().find(|byte| !byte.is_ascii_whitespace()),
+        Some(b'{') | Some(b'[')
+    )
 }
 
 fn looks_like_dicom(input_bytes: &[u8]) -> bool {

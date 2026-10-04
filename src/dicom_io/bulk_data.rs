@@ -48,7 +48,7 @@ where
     let raw_bytes = raw_value_bytes(tag, vr, value, None)?;
     let expected_bytes_for_lookup = match value {
         DicomValue::PixelSequence(_) => None,
-        _ => Some(raw_bytes.as_slice()),
+        _ => Some(raw_bytes.as_ref()),
     };
 
     if options.bulk_data_mode == DicomJsonBulkDataMode::Uri {
@@ -131,24 +131,26 @@ where
     ))
 }
 
-pub(super) fn raw_value_bytes<I, P>(
+pub(super) fn raw_value_bytes<'a, I, P>(
     tag: Tag,
     vr: VR,
-    value: &DicomValue<I, P>,
-    bulk_data_source: Option<&[u8]>,
-) -> Result<Vec<u8>, DicomJsonError>
+    value: &'a DicomValue<I, P>,
+    bulk_data_source: Option<&'a [u8]>,
+) -> Result<std::borrow::Cow<'a, [u8]>, DicomJsonError>
 where
     P: AsRef<[u8]>,
 {
+    // Borrowed wherever possible: for native byte data (e.g. a multi-frame PixelData) an owned
+    // copy here was a whole-value memcpy just to compare/encode it.
     if let Some(source) = bulk_data_source {
         if let Some(location) = locate_element_value(source, tag, None, 0)? {
-            return Ok(source[location.offset..location.offset + location.length].to_vec());
+            return Ok(std::borrow::Cow::Borrowed(&source[location.offset..location.offset + location.length]));
         }
     }
 
     match value {
-        DicomValue::Primitive(primitive) => Ok(primitive.to_bytes().into_owned()),
-        DicomValue::PixelSequence(pixel_sequence) => Ok(pixel_sequence_to_bytes(pixel_sequence)),
+        DicomValue::Primitive(primitive) => Ok(primitive.to_bytes()),
+        DicomValue::PixelSequence(pixel_sequence) => Ok(std::borrow::Cow::Owned(pixel_sequence_to_bytes(pixel_sequence))),
         DicomValue::Sequence(_) => Err(DicomJsonError::UnsupportedBulkDataVr { tag, vr }),
     }
 }

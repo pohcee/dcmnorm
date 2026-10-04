@@ -516,13 +516,34 @@ where
         // (pixel sequence detection needs to be done by the caller)
         let len = self.require_known_length(header)?;
 
-        // sequence of 8-bit integers (or arbitrary byte data). Read through the bounded
-        // `read_into_buffer` helper (see its doc comment) rather than `smallvec![0u8; len]`
-        // directly, since `len` is untrusted and file-controlled.
-        self.read_into_buffer(len)?;
-        let buf = smallvec::SmallVec::from_slice(&self.buffer);
+        // sequence of 8-bit integers (or arbitrary byte data). This is the PixelData path for
+        // every native 8-bit image, so read straight into the value's own allocation (handed to
+        // the SmallVec without a copy) rather than via `self.buffer` + `SmallVec::from_slice`,
+        // which copied and page-faulted the whole value twice. `len` is untrusted and
+        // file-controlled, so the upfront reservation is capped and fallible (see
+        // `read_into_buffer`'s doc comment): a lying length can at most reserve
+        // `MAX_VALUE_PREALLOC` of untouched address space before the read itself fails.
+        const MAX_VALUE_PREALLOC: usize = 256 << 20;
+        let mut buf = Vec::new();
+        let _ = buf.try_reserve_exact(len.min(MAX_VALUE_PREALLOC));
+        (&mut self.from)
+            .take(len as u64)
+            .read_to_end(&mut buf)
+            .context(ReadValueDataSnafu {
+                position: self.position,
+            })?;
+        if buf.len() != len {
+            let actual = buf.len();
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                format!("declared value length {len} exceeds available data ({actual} bytes read)"),
+            ))
+            .context(ReadValueDataSnafu {
+                position: self.position,
+            });
+        }
         self.position += len as u64;
-        Ok(PrimitiveValue::U8(buf))
+        Ok(PrimitiveValue::U8(smallvec::SmallVec::from_vec(buf)))
     }
 
     fn read_value_strs(&mut self, header: &DataElementHeader) -> Result<PrimitiveValue> {

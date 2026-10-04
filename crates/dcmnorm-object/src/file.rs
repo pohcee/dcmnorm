@@ -149,7 +149,58 @@ impl OpenFileOptions {
     }
 
     pub fn from_reader(self, mut source: impl Read) -> Result<DefaultDicomObject, ReadError> {
-        let mut meta = match self.read_preamble {
+        let mut meta = self.read_meta(&mut source)?;
+        let ts = meta.transfer_syntax_ts().ok_or_else(|| ReadError::UnsupportedTransferSyntax {
+            uid: meta.transfer_syntax.clone(),
+        })?;
+
+        let object = if let Some(stop_tag) = self.read_until {
+            crate::mem::read_dataset_until(source, ts, stop_tag)?
+        } else {
+            InMemDicomObject::read_dataset_with_ts(source, ts)?
+        };
+        backfill_media_storage_uids(&mut meta, &object);
+        Ok(FileDicomObject { meta, object })
+    }
+
+    /// Read everything in `path` up to (not including) a native PixelData value, and report
+    /// where that value sits in the file instead of loading it - the building block for reading
+    /// one frame of a large multi-frame object (seek to it) without paying for all the others.
+    ///
+    /// Returns `Ok(None)` whenever this shortcut doesn't apply and the caller should do a full
+    /// read instead: an encapsulated or dataset-compressed (deflated) transfer syntax (no
+    /// stable byte offsets into native pixels), or no top-level, defined-length PixelData.
+    /// `read_until` is ignored. Elements after PixelData (trailing padding, digital signatures)
+    /// are not read.
+    pub fn open_file_until_pixel_data(
+        self,
+        path: impl AsRef<Path>,
+    ) -> Result<Option<(DefaultDicomObject, PixelDataValueLocation)>, ReadError> {
+        let file = File::open(path.as_ref()).map_err(|source| ReadError::Io {
+            source,
+            context: "opening file",
+        })?;
+        let mut source = CountingReader { inner: BufReader::new(file), count: 0 };
+        let mut meta = self.read_meta(&mut source)?;
+        let ts = meta.transfer_syntax_ts().ok_or_else(|| ReadError::UnsupportedTransferSyntax {
+            uid: meta.transfer_syntax.clone(),
+        })?;
+        if ts.is_encapsulated_pixel_data() || !matches!(ts.codec(), dcmnorm_encoding::transfer_syntax::Codec::None) {
+            return Ok(None);
+        }
+
+        let (object, header) = crate::mem::read_dataset_until_pixel_data_header(&mut source, ts)?;
+        let Some(header) = header else { return Ok(None) };
+        let Some(length) = header.len.get() else { return Ok(None) };
+        backfill_media_storage_uids(&mut meta, &object);
+        Ok(Some((
+            FileDicomObject { meta, object },
+            PixelDataValueLocation { vr: header.vr, length, offset: source.count },
+        )))
+    }
+
+    fn read_meta(&self, mut source: impl Read) -> Result<FileMetaTable, ReadError> {
+        Ok(match self.read_preamble {
             // Peek-and-detect: falls back to treating `source` as meta-less if the preamble or
             // "DICM" magic aren't there.
             ReadPreamble::Auto => FileMetaTable::read_from(&mut source)?.ok_or(ReadError::NotDicom)?,
@@ -172,18 +223,33 @@ impl OpenFileOptions {
                 }
                 FileMetaTable::read_meta_group(&mut source)?
             }
-        };
-        let ts = meta.transfer_syntax_ts().ok_or_else(|| ReadError::UnsupportedTransferSyntax {
-            uid: meta.transfer_syntax.clone(),
-        })?;
+        })
+    }
+}
 
-        let object = if let Some(stop_tag) = self.read_until {
-            crate::mem::read_dataset_until(source, ts, stop_tag)?
-        } else {
-            InMemDicomObject::read_dataset_with_ts(source, ts)?
-        };
-        backfill_media_storage_uids(&mut meta, &object);
-        Ok(FileDicomObject { meta, object })
+/// Where a native PixelData value sits in a file, as found by
+/// [`OpenFileOptions::open_file_until_pixel_data`]: its declared VR and byte length, and the
+/// absolute byte offset of its first value byte.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PixelDataValueLocation {
+    pub vr: dcmnorm_core::VR,
+    pub length: u32,
+    pub offset: u64,
+}
+
+/// Counts bytes handed to the parser. Both the meta reader and the data set reader consume
+/// exactly what they parse (no read-ahead past the element in hand), so the count after
+/// stopping at PixelData's header is the file offset of its value.
+struct CountingReader<R> {
+    inner: R,
+    count: u64,
+}
+
+impl<R: Read> Read for CountingReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let read = self.inner.read(buf)?;
+        self.count += read as u64;
+        Ok(read)
     }
 }
 

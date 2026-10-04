@@ -35,7 +35,7 @@ pub use filter::{
 pub use io::{
     can_encode_transfer_syntax, detect_jpeg2000_backend_from_search_path, jpeg2000_backend, jpeg2000_backend_name,
     kakadu_ffi_enabled, list_transfer_syntax_support, probe_dicom_file_for_sop_class_uid,
-    read_dicom_bytes, read_dicom_file, transcode_dicom_bytes, transcode_dicom_file, transcode_dcmnorm_object,
+    read_dicom_bytes, read_dicom_file, transcode_dicom_bytes, transcode_dicom_file, transcode_dcmnorm_object, transcode_dcmnorm_object_owned,
     write_dataset_as_dicom_bytes, write_dataset_as_dicom_file, write_dicom_bytes, write_dicom_file,
     Jpeg2000Backend, JPEG2000_CODEC_ENV_FLAG, JPEG2000_DEBUG_ENV_FLAG,
 };
@@ -51,7 +51,8 @@ pub use consistency::{check_dicom_logic, ConsistencyFinding, ConsistencyReport, 
 pub use render::{
     redact_dicom_pixels_to_transfer_syntax, render_all_dicom_frames,
     render_all_dicom_video_frames, render_dicom_frame, render_dicom_frames,
-    render_dicom_to_recompressed_object, try_extract_passthrough_jpeg_frame, write_dicom_video,
+    read_dicom_file_for_frame, render_dicom_to_recompressed_object, try_extract_passthrough_jpeg_frame,
+    write_dicom_video,
     BoundingBox, BoxLength, OverlaySummary, RenderFrameOutput, RenderOutputFormat,
     RenderPipelineOptions,
 };

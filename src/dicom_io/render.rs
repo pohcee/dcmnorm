@@ -1445,16 +1445,10 @@ fn required_u16(
         .ok_or(RenderError::MissingImageAttribute(name))
 }
 
-fn get_frame_bytes(
-    object: &DefaultDicomObject,
-    metadata: &RenderMetadata,
-    frame_index: usize,
-) -> Result<Vec<u8>, RenderError> {
-    let _scope = perf::scope("render.get_frame_bytes");
-    let pixel_data = object
-        .element(tags::PIXEL_DATA)
-        .map_err(|_| RenderError::MissingImageAttribute("PixelData"))?;
-
+/// Samples and bytes per native frame - the one place both `get_frame_bytes` and
+/// `read_dicom_file_for_frame` derive frame boundaries from, so the frame the latter loads is
+/// exactly the byte range the former slices out.
+fn frame_layout(metadata: &RenderMetadata) -> Result<(usize, usize), RenderError> {
     let samples_per_pixel = if metadata.photometric_interpretation == "YBR_FULL_422" {
         2
     } else {
@@ -1470,6 +1464,101 @@ fn get_frame_bytes(
         16 => samples_per_frame * 2,
         other => return Err(RenderError::UnsupportedBitsAllocated(other)),
     };
+    Ok((samples_per_frame, frame_len))
+}
+
+/// Read `path` for rendering just frame `frame_index`, without reading any other frame's pixel
+/// data - the dcmtk `dcmj2pnm`-style partial read that makes single-frame render cost O(one
+/// frame) rather than O(file) on large native multi-frame objects (e.g. a 227-frame, 29MB
+/// ultrasound cine reads ~130KB instead of 29MB).
+///
+/// The returned object is complete except for PixelData's content: PixelData keeps its full
+/// declared length - so NumberOfFrames, per-frame functional groups and overlay frame indexing
+/// all stay exactly as in a full read - but only `frame_index`'s bytes are real. Every other
+/// frame reads as zero, backed by a zeroed allocation that the OS maps lazily, so it costs
+/// neither I/O nor memory. It is therefore ONLY valid for rendering that one frame (single-frame
+/// `render_dicom_frame` / texture export with the same `frame_index`), and must not be written
+/// out, transcoded, or rendered at any other frame.
+///
+/// Returns `Ok(None)` when the shortcut doesn't apply (encapsulated/deflated transfer syntax,
+/// no top-level native PixelData, 1-bit data, out-of-range frame, a file shorter than PixelData's
+/// declared length, ...) - callers should then do a normal full read, which also produces the
+/// canonical error for anything malformed.
+pub fn read_dicom_file_for_frame(
+    path: impl AsRef<std::path::Path>,
+    frame_index: usize,
+) -> Result<Option<DefaultDicomObject>, super::types::ReadError> {
+    use std::io::{Read, Seek, SeekFrom};
+    use super::types::ReadError;
+
+    let _scope = perf::scope("render.read_dicom_file_for_frame");
+    let path = path.as_ref();
+    let Some((mut object, location)) = dcmnorm_object::OpenFileOptions::new()
+        .read_preamble(dcmnorm_object::ReadPreamble::Always)
+        .open_file_until_pixel_data(path)?
+    else {
+        return Ok(None);
+    };
+
+    let Ok(metadata) = read_render_metadata(&object) else { return Ok(None) };
+    if metadata.bits_allocated == 1 || frame_index >= metadata.number_of_frames {
+        return Ok(None);
+    }
+    let Ok((_, frame_len)) = frame_layout(&metadata) else { return Ok(None) };
+    let start = frame_index * frame_len;
+    let end = start + frame_len;
+    let length = location.length as usize;
+    if end > length {
+        return Ok(None);
+    }
+
+    let io_error = |source, context| ReadError::Io { source, context };
+    let mut file = std::fs::File::open(path).map_err(|e| io_error(e, "opening file"))?;
+    let file_len = file.metadata().map_err(|e| io_error(e, "reading file metadata"))?.len();
+    if location.offset + u64::from(location.length) > file_len {
+        // A full read would fail on the truncated value - let it, so the error is the same.
+        return Ok(None);
+    }
+    file.seek(SeekFrom::Start(location.offset + start as u64))
+        .map_err(|e| io_error(e, "seeking to frame"))?;
+
+    // Same value shapes the parser produces for a full read: OB/UN -> U8 of `length` bytes,
+    // OW -> U16 of `length / 2` words decoded with the transfer syntax's byte order.
+    let value = match location.vr {
+        VR::OB | VR::UN => {
+            let mut bytes = vec![0u8; length];
+            file.read_exact(&mut bytes[start..end]).map_err(|e| io_error(e, "reading frame"))?;
+            PrimitiveValue::U8(bytes.into())
+        }
+        VR::OW if start % 2 == 0 && frame_len % 2 == 0 => {
+            let big_endian =
+                normalize_transfer_syntax_uid(object.meta().transfer_syntax()) == "1.2.840.10008.1.2.2";
+            let mut frame = vec![0u8; frame_len];
+            file.read_exact(&mut frame).map_err(|e| io_error(e, "reading frame"))?;
+            let mut words = vec![0u16; length / 2];
+            for (word, pair) in words[start / 2..end / 2].iter_mut().zip(frame.chunks_exact(2)) {
+                let pair = [pair[0], pair[1]];
+                *word = if big_endian { u16::from_be_bytes(pair) } else { u16::from_le_bytes(pair) };
+            }
+            PrimitiveValue::U16(words.into())
+        }
+        _ => return Ok(None),
+    };
+    object.put(DataElement::new(tags::PIXEL_DATA, location.vr, value));
+    Ok(Some(object))
+}
+
+fn get_frame_bytes(
+    object: &DefaultDicomObject,
+    metadata: &RenderMetadata,
+    frame_index: usize,
+) -> Result<Vec<u8>, RenderError> {
+    let _scope = perf::scope("render.get_frame_bytes");
+    let pixel_data = object
+        .element(tags::PIXEL_DATA)
+        .map_err(|_| RenderError::MissingImageAttribute("PixelData"))?;
+
+    let (samples_per_frame, frame_len) = frame_layout(metadata)?;
     let start = frame_index * frame_len;
     let expected = (frame_index + 1) * frame_len;
 
@@ -3256,13 +3345,17 @@ pub fn try_extract_passthrough_jpeg_frame(
 fn ensure_native_render_object<'a>(
     object: &'a DefaultDicomObject,
 ) -> Result<Cow<'a, DefaultDicomObject>, RenderError> {
-    let source_uid = normalize_transfer_syntax_uid(object.meta().transfer_syntax());
     let has_native_pixel_data = object
         .get(tags::PIXEL_DATA)
         .map(|element| matches!(element.value(), Value::Primitive(_)))
         .unwrap_or(false);
 
-    if source_uid == uids::EXPLICIT_VR_LITTLE_ENDIAN && has_native_pixel_data {
+    // Once parsed, native pixel data is already decoded into host-order values whatever the
+    // source transfer syntax was (Implicit VR LE, Explicit VR BE, deflated, ...), and
+    // `transcode_dcmnorm_object` to Explicit VR LE would only deep-clone it and relabel the meta
+    // - nothing downstream reads the label. Borrow instead of copying all of PixelData (and, for
+    // a `read_dicom_file_for_frame` object, faulting in every lazily-zeroed frame).
+    if has_native_pixel_data {
         return Ok(Cow::Borrowed(object));
     }
 
