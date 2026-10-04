@@ -362,11 +362,21 @@ fn build_dataset(
 /// reads (`dcmnorm`'s `--filter` CLI flag) that don't need the rest of the data set. Doesn't
 /// attempt early-stop *inside* nested sequences (real `--filter` usage targets top-level
 /// tags), so a stop tag inside a sequence just falls back to reading that whole sequence.
-pub(crate) fn read_dataset_until(
-    source: impl Read,
+///
+/// Applies the same dataset-level codec as `read_dataset_with_ts`. Without it, a Deflated
+/// Explicit VR Little Endian file's still-compressed bytes got decoded as element headers: the
+/// first bogus "tag" was usually past `stop_tag`, so the read stopped "successfully" with an
+/// empty data set - edge insert's `readTags` then saw no SOPInstanceUID ("Missing attribute:
+/// T00080018") on every deflated DOC/SR a RamSoft PACS sent, and those studies never archived.
+pub(crate) fn read_dataset_until<'r>(
+    source: impl Read + 'r,
     ts: &TransferSyntax,
     stop_tag: Tag,
 ) -> Result<InMemDicomObject, ReadError> {
+    let source: Box<dyn Read + 'r> = match ts.codec() {
+        Codec::Dataset(Some(adapter)) => adapter.adapt_reader(Box::new(source)),
+        _ => Box::new(source),
+    };
     let mut reader =
         DataSetReader::new_with_ts(source, ts).map_err(|source| ReadError::Dataset { source })?;
     let mut elements = Vec::new();

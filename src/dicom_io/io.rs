@@ -1842,4 +1842,23 @@ mod tests {
         );
         let _ = std::fs::remove_file(&out);
     }
+
+    /// Regression test for the same wiring gap on the `read_until` fast path (behind
+    /// `readTags`/`--filter`): `read_dataset_until` didn't apply the deflate adapter, so a
+    /// deflated file came back with an empty data set or an error. Calls `OpenFileOptions`
+    /// directly - `read_dcmnorm_object_for_filter`'s full-read fallback on error would hide a
+    /// failure with this fixture (real customer files instead stopped early with no error).
+    #[test]
+    fn deflated_explicit_vr_little_endian_reads_until_stop_tag() {
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test/files/deflated.dcm");
+        let object = super::OpenFileOptions::new()
+            .read_preamble(super::ReadPreamble::Always)
+            .read_until(dcmnorm_core::Tag(0x0020, 0x000F))
+            .open_file(&fixture)
+            .expect("deflated.dcm should read up to the stop tag");
+        assert!(object.get(dcmnorm_dictionary::tags::SOP_INSTANCE_UID).is_some());
+        assert!(object.get(dcmnorm_dictionary::tags::STUDY_INSTANCE_UID).is_some());
+        assert!(object.get(dcmnorm_dictionary::tags::SERIES_INSTANCE_UID).is_some());
+        assert!(object.get(dcmnorm_dictionary::tags::PIXEL_DATA).is_none(), "should stop before PixelData");
+    }
 }
