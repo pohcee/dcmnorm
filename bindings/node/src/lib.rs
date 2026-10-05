@@ -12,7 +12,7 @@ use dcmnorm::dicom_io::{
     apply_filter_to_object, build_volume as dcm_build_volume, echo_scu as dcm_echo_scu,
     find_scu as dcm_find_scu, move_scu as dcm_move_scu, parse_attribute_override,
     parse_filter_requests, parse_tag_key, probe_dicom_file_for_sop_class_uid,
-    read_dicom_file, read_dicom_json_with_options, read_dcmnorm_object_for_filter,
+    read_dicom_file, read_dicom_file_for_frame, read_dicom_json_with_options, read_dcmnorm_object_for_filter,
     compute_frame_histogram as dcm_compute_frame_histogram,
     compute_instance_histograms as dcm_compute_instance_histograms,
     pack_dicom_frame_stack_texture as dcm_pack_dicom_frame_stack_texture,
@@ -38,6 +38,18 @@ use dcmnorm::dicom_io::{
     TextureMeta as DcmTextureMeta, Volume as DcmVolume,
 };
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
+
+/// Read `path` to render (or texture-export) frame `frame_index` and nothing else: for a native
+/// multi-frame file, only that frame's bytes are read (see dcmnorm's `read_dicom_file_for_frame`)
+/// - e.g. ~130KB of a 29MB, 227-frame ultrasound cine instead of all of it. Anything that
+/// shortcut doesn't cover (compressed, deflated, out-of-range frame, malformed, ...) falls back
+/// to a normal full read, which also produces the usual error for a bad file.
+fn read_dicom_file_for_single_frame(path: &std::path::Path, frame_index: usize) -> Result<dcmnorm_object::DefaultDicomObject> {
+    match read_dicom_file_for_frame(path, frame_index) {
+        Ok(Some(object)) => Ok(object),
+        _ => read_dicom_file(path).map_err(to_napi_err),
+    }
+}
 
 fn to_napi_err(err: impl std::fmt::Display) -> Error {
     Error::from_reason(err.to_string())
@@ -1203,8 +1215,8 @@ impl Task for RenderFrameTask {
                 self.options.overlay_index,
                 self.options.overlay_color.as_deref(),
             )?;
-            let object = read_dicom_file(&self.file_path).map_err(to_napi_err)?;
             let frame_index = self.options.frame_index.unwrap_or(0) as usize;
+            let object = read_dicom_file_for_single_frame(&self.file_path, frame_index)?;
 
             if self.options.passthrough.unwrap_or(false) {
                 if let Some(frame) =
@@ -1835,10 +1847,11 @@ impl Task for ExportFrameTextureTask {
                 (Some(center), Some(width)) => Some((center, width)),
                 _ => None,
             };
-            let object = read_dicom_file(&self.file_path).map_err(to_napi_err)?;
+            let frame_index = self.options.frame_index.unwrap_or(0) as usize;
+            let object = read_dicom_file_for_single_frame(&self.file_path, frame_index)?;
             let packed = dcm_pack_dicom_frame_texture(
                 &object,
-                self.options.frame_index.unwrap_or(0) as usize,
+                frame_index,
                 self.options.target_max_dim,
                 default_window,
                 compression,
@@ -1889,10 +1902,11 @@ impl Task for ExportFrameTextureRgbTask {
     fn compute(&mut self) -> Result<Self::Output> {
         guarded(|| {
             let compression = parse_texture_compression(self.options.compression.as_deref())?;
-            let object = read_dicom_file(&self.file_path).map_err(to_napi_err)?;
+            let frame_index = self.options.frame_index.unwrap_or(0) as usize;
+            let object = read_dicom_file_for_single_frame(&self.file_path, frame_index)?;
             let packed = dcm_pack_dicom_rgb_frame_texture(
                 &object,
-                self.options.frame_index.unwrap_or(0) as usize,
+                frame_index,
                 self.options.target_max_dim,
                 compression,
             )
