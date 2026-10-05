@@ -245,8 +245,11 @@ fn gzip_bytes(bytes: &[u8]) -> Result<Vec<u8>, TextureExportError> {
 /// - **Exact** (the common case: CT/MR samples are always derived from an integer stored value):
 ///   if every sample round-trips through an `i16` lattice with zero error, store `int16` with an
 ///   identity slope/intercept (`1.0`/`0.0`) - genuinely lossless, no requantization at all.
-/// - **Bounded-error fallback** (fractional-valued modalities, or a range that doesn't fit
-///   `i16`): quantize to `uint16` via a slope/intercept spanning `[min, max]`; error is bounded by
+/// - **Exact, offset `uint16`**: integer samples outside `i16` but whose span `max - min` still
+///   fits in 16 bits (e.g. 16-bit unsigned DX/MG/CR with values above 32767) - store
+///   `value - min` as `uint16` with slope `1.0` and intercept `min`. Still genuinely lossless.
+/// - **Bounded-error fallback** (fractional-valued modalities, or an integer span wider than
+///   16 bits): quantize to `uint16` via a slope/intercept spanning `[min, max]`; error is bounded by
 ///   `±0.5 * slope` and `lossless` is reported as `false` - callers must not claim losslessness
 ///   this path took.
 ///
@@ -274,6 +277,15 @@ pub fn quantize_samples(raw: &[f32]) -> (Vec<u8>, SampleFormat, f64, f64, bool) 
             bytes.extend_from_slice(&(sample.round() as i16).to_le_bytes());
         }
         return (bytes, SampleFormat::Int16, 1.0, 0.0, true);
+    }
+
+    if all_integral && max - min <= u16::MAX as f64 {
+        let intercept = min.round();
+        let mut bytes = Vec::with_capacity(raw.len() * 2);
+        for &sample in raw {
+            bytes.extend_from_slice(&((sample as f64 - intercept).round() as u16).to_le_bytes());
+        }
+        return (bytes, SampleFormat::Uint16, 1.0, intercept, true);
     }
 
     let range = (max - min).max(1e-6);
@@ -941,7 +953,23 @@ mod tests {
     }
 
     #[test]
+    fn quantize_samples_of_unsigned_16_bit_integer_values_is_exact_offset_uint16() {
+        // 16-bit unsigned DX/MG/CR: above i16::MAX, but the span still fits uint16 exactly.
+        let raw = vec![1000.0f32, 28876.0, 56990.0, 65535.0];
+        let (bytes, format, slope, intercept, lossless) = quantize_samples(&raw);
+        assert_eq!(format, SampleFormat::Uint16);
+        assert_eq!(slope, 1.0);
+        assert_eq!(intercept, 1000.0);
+        assert!(lossless);
+        for (index, &expected) in raw.iter().enumerate() {
+            let stored = u16::from_le_bytes(bytes[index * 2..index * 2 + 2].try_into().unwrap());
+            assert_eq!(stored as f64 * slope + intercept, expected as f64);
+        }
+    }
+
+    #[test]
     fn quantize_samples_of_out_of_i16_range_values_falls_back_to_bounded_error_uint16() {
+        // Integer, but the span (80000) is wider than uint16 can hold exactly.
         let raw = vec![-40000.0f32, 0.0, 40000.0];
         let (_, format, _, _, lossless) = quantize_samples(&raw);
         assert_eq!(format, SampleFormat::Uint16);
