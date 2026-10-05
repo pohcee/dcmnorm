@@ -278,7 +278,7 @@ impl PixelDataWriter for JpegAdapter {
         let color_type = match samples_per_pixel {
             1 => ColorType::Luma,
             3 => ColorType::Rgb,
-            _ => whatever!("Unsupported samples per pixel: {}", samples_per_pixel),
+            _ => { whatever!("Unsupported samples per pixel: {}", samples_per_pixel) }
         };
 
         // record dst length before encoding to know full jpeg size
@@ -381,6 +381,6 @@ fn narrow_8bit(frame_data: &[u8], bits_stored: u16) -> EncodeResult<Cow<'_, [u8]
             }
             Ok(Cow::Owned(v))
         }
-        b => whatever!("Unsupported Bits Stored {}", b),
+        b => { whatever!("Unsupported Bits Stored {}", b) }
     }
 }
