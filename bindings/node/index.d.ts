@@ -618,6 +618,14 @@ export interface TextureExportResult {
    * default). Always `false` for `contentKind: 'volume'` - see `TextureMeta::invert`'s own doc.
    */
   invert: boolean
+  /**
+   * `framestack` only (empty otherwise): each layer's own default window and invert decision,
+   * index-aligned with the layers - see `TextureMeta::layer_default_windows`. Prefer these over
+   * the stack-wide `default_window_*`/`invert` whenever present.
+   */
+  layerWindowCenters: Array<number>
+  layerWindowWidths: Array<number>
+  layerInvert: Array<boolean>
   nativeWidth: number
   nativeHeight: number
   nativeDepth: number
