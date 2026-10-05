@@ -4052,6 +4052,39 @@ fn pack_dicom_frame_stack_texture_packs_multiple_sources_as_layers_in_order() {
 }
 
 #[test]
+fn pack_dicom_frame_stack_texture_carries_each_layers_own_default_window_and_invert() {
+    // A multi-image series can mix instances with different value ranges/photometrics (16-bit
+    // fluoro frames plus an 8-bit dose-sheet secondary capture) - each layer must keep its own
+    // window/invert instead of inheriting the first source's.
+    let tagged = read_dicom_bytes(&fixture_bytes(fixture_path("dx.dcm"))).unwrap();
+    let mut untagged_inverted = tagged.clone();
+    untagged_inverted.put(DataElement::new(tags::WINDOW_CENTER, VR::DS, PrimitiveValue::from("123")));
+    untagged_inverted.put(DataElement::new(tags::WINDOW_WIDTH, VR::DS, PrimitiveValue::from("456")));
+    untagged_inverted.put(DataElement::new(tags::PHOTOMETRIC_INTERPRETATION, VR::CS, PrimitiveValue::from("MONOCHROME1")));
+    untagged_inverted.remove_element(tags::PRESENTATION_LUT_SHAPE);
+    let mut untagged = tagged.clone();
+    untagged.remove_element(tags::WINDOW_CENTER);
+    untagged.remove_element(tags::WINDOW_WIDTH);
+    let sources = [(&tagged, 0usize), (&untagged_inverted, 0usize), (&untagged, 0usize)];
+
+    let packed = pack_dicom_frame_stack_texture(&sources, None, TextureCompression::None).unwrap();
+    let windows = &packed.meta.layer_default_windows;
+    assert_eq!(windows.len(), 3);
+    assert_eq!(windows[1], (123.0, 456.0));
+    // Untagged layer falls back to its own min/max span, never the first layer's tags.
+    let (stack_center, stack_width) = (packed.meta.default_window_center.unwrap(), packed.meta.default_window_width.unwrap());
+    assert_eq!(windows[0], (stack_center, stack_width), "first layer still speaks for the stack-wide default");
+    assert!(windows[2].1 >= 1.0);
+    assert_eq!(packed.meta.layer_invert.len(), 3);
+    assert_ne!(packed.meta.layer_invert[0], packed.meta.layer_invert[1]);
+
+    let json = packed.meta.to_json();
+    assert_eq!(json["layerWindowCenters"][1], 123.0);
+    assert_eq!(json["layerWindowWidths"][1], 456.0);
+    assert_eq!(json["layerInvert"].as_array().unwrap().len(), 3);
+}
+
+#[test]
 fn pack_dicom_frame_stack_texture_fails_closed_if_any_source_is_a_color_instance() {
     // A stack with one grayscale source and one RGB source (us.dcm, SamplesPerPixel=3) must
     // reject the WHOLE stack, not silently drop just the color frame - matching

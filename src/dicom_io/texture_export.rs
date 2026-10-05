@@ -178,6 +178,14 @@ pub struct TextureMeta {
     /// MONOCHROME1/2-derived default). Always `false` for `ContentKind::Volume`: `pack_volume_texture`
     /// only has voxel samples, not a source DICOM object, to resolve this from - see its own doc.
     pub invert: bool,
+    /// `ContentKind::FrameStack` only (empty otherwise): each layer's OWN default window and
+    /// invert decision, index-aligned with the layers. A multi-image series can mix instances with
+    /// different value ranges/photometrics (e.g. 16-bit fluoro frames plus an 8-bit secondary
+    /// capture dose sheet) - the stack-wide `default_window_*`/`invert` above come from one
+    /// representative layer and would render every other kind of layer unreadable. Clients should
+    /// prefer these over the stack-wide fields whenever they're present.
+    pub layer_default_windows: Vec<(f64, f64)>,
+    pub layer_invert: Vec<bool>,
     /// `(width, height, depth)` before any capability/progressive-driven downsampling.
     pub native_dims: (u32, u32, u32),
     pub downsampled: bool,
@@ -208,6 +216,9 @@ impl TextureMeta {
             "defaultWindowCenter": self.default_window_center,
             "defaultWindowWidth": self.default_window_width,
             "invert": self.invert,
+            "layerWindowCenters": self.layer_default_windows.iter().map(|(center, _)| *center).collect::<Vec<_>>(),
+            "layerWindowWidths": self.layer_default_windows.iter().map(|(_, width)| *width).collect::<Vec<_>>(),
+            "layerInvert": self.layer_invert,
             "nativeDims": [self.native_dims.0, self.native_dims.1, self.native_dims.2],
             "downsampled": self.downsampled,
             "payloadBytesRaw": self.payload_bytes_raw,
@@ -400,6 +411,8 @@ pub fn pack_volume_texture(
         // PresentationLUTShape/PhotometricInterpretation from (deliberately - same reasoning as
         // the per-frame VOI/rescale fix that left this MPR volume path alone).
         invert: false,
+        layer_default_windows: Vec::new(),
+        layer_invert: Vec::new(),
         native_dims,
         downsampled,
         payload_bytes_raw,
@@ -517,6 +530,8 @@ pub fn pack_frame_texture(
         default_window_center: default_window.map(|(center, _)| center),
         default_window_width: default_window.map(|(_, width)| width),
         invert,
+        layer_default_windows: Vec::new(),
+        layer_invert: Vec::new(),
         native_dims,
         downsampled,
         payload_bytes_raw,
@@ -640,6 +655,8 @@ pub fn pack_frame_stack_texture(
         default_window_center: default_window.map(|(center, _)| center),
         default_window_width: default_window.map(|(_, width)| width),
         invert,
+        layer_default_windows: Vec::new(),
+        layer_invert: Vec::new(),
         native_dims,
         downsampled: false,
         payload_bytes_raw,
@@ -676,6 +693,7 @@ pub fn pack_dicom_frame_stack_texture(
     // (independently-selected instances, but in practice never mixing MONOCHROME1 and
     // MONOCHROME2 members within one series).
     let mut invert = false;
+    let mut layer_invert = Vec::with_capacity(sources.len());
     let mut decoded = Vec::with_capacity(sources.len());
     for (index, (object, frame_index)) in sources.iter().enumerate() {
         let (metadata, values) = decode_frame_grayscale_values(object, *frame_index)?;
@@ -684,8 +702,45 @@ pub fn pack_dicom_frame_stack_texture(
         }
         let raw: Vec<f32> = values.into_iter().map(|value| value as f32).collect();
         decoded.push(DecodedFrame { values: raw, width: metadata.cols as u32, height: metadata.rows as u32 });
+        layer_invert.push(resolve_grayscale_invert(object, &metadata.photometric_interpretation));
     }
-    pack_frame_stack_texture(&decoded, default_window, compression, invert)
+
+    // Per-layer defaults (see `TextureMeta::layer_default_windows`): a layer's own
+    // WindowCenter/Width (per-frame for Enhanced Multi-frame, via resolve_default_window), else a
+    // min/max span over ALL of its source object's frames in the stack - per object rather than
+    // per frame, so an untagged cine loop keeps one stable window instead of flickering
+    // frame-to-frame.
+    let mut object_min_max: Vec<(*const dcmnorm_object::DefaultDicomObject, (f64, f64))> = Vec::new();
+    let mut layer_default_windows = Vec::with_capacity(sources.len());
+    for (object, frame_index) in sources {
+        let (center, width) = resolve_default_window(object, *frame_index);
+        let window = match center.zip(width) {
+            Some(window) => window,
+            None => {
+                let key: *const dcmnorm_object::DefaultDicomObject = *object;
+                match object_min_max.iter().find(|(cached, _)| *cached == key) {
+                    Some((_, window)) => *window,
+                    None => {
+                        let object_values: Vec<f32> = sources
+                            .iter()
+                            .zip(decoded.iter())
+                            .filter(|((other, _), _)| std::ptr::eq(*other, *object))
+                            .flat_map(|(_, frame)| frame.values.iter().copied())
+                            .collect();
+                        let window = min_max_window(&object_values);
+                        object_min_max.push((key, window));
+                        window
+                    }
+                }
+            }
+        };
+        layer_default_windows.push(window);
+    }
+
+    let mut packed = pack_frame_stack_texture(&decoded, default_window, compression, invert)?;
+    packed.meta.layer_default_windows = layer_default_windows;
+    packed.meta.layer_invert = layer_invert;
+    Ok(packed)
 }
 
 /// RGB analog of `resample_frame_2d` - independent per-channel bilinear box-downsample of an
@@ -788,6 +843,8 @@ pub fn pack_rgb_frame_texture(
         default_window_center: None,
         default_window_width: None,
         invert: false,
+        layer_default_windows: Vec::new(),
+        layer_invert: Vec::new(),
         native_dims,
         downsampled,
         payload_bytes_raw,
@@ -874,6 +931,8 @@ pub fn pack_rgb_frame_stack_texture(
         default_window_center: None,
         default_window_width: None,
         invert: false,
+        layer_default_windows: Vec::new(),
+        layer_invert: Vec::new(),
         native_dims,
         downsampled: false,
         payload_bytes_raw,

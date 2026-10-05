@@ -1734,6 +1734,12 @@ pub struct TextureExportResult {
     /// makes (PresentationLUTShape overriding PhotometricInterpretation's MONOCHROME1/2-derived
     /// default). Always `false` for `contentKind: 'volume'` - see `TextureMeta::invert`'s own doc.
     pub invert: bool,
+    /// `framestack` only (empty otherwise): each layer's own default window and invert decision,
+    /// index-aligned with the layers - see `TextureMeta::layer_default_windows`. Prefer these over
+    /// the stack-wide `default_window_*`/`invert` whenever present.
+    pub layer_window_centers: Vec<f64>,
+    pub layer_window_widths: Vec<f64>,
+    pub layer_invert: Vec<bool>,
     pub native_width: u32,
     pub native_height: u32,
     pub native_depth: u32,
@@ -1794,6 +1800,9 @@ fn texture_export_result(meta: &DcmTextureMeta, payload: Vec<u8>) -> TextureExpo
         default_window_center: meta.default_window_center,
         default_window_width: meta.default_window_width,
         invert: meta.invert,
+        layer_window_centers: meta.layer_default_windows.iter().map(|(center, _)| *center).collect(),
+        layer_window_widths: meta.layer_default_windows.iter().map(|(_, width)| *width).collect(),
+        layer_invert: meta.layer_invert.clone(),
         native_width: meta.native_dims.0,
         native_height: meta.native_dims.1,
         native_depth: meta.native_dims.2,
