@@ -1,11 +1,45 @@
 # dcmnorm
 
-Rust workspace for reading, writing, transcoding, and converting DICOM data.
+Fast, open-source DICOM toolkit in Rust: parse, render, transcode, reformat, and network.
+Ships as a CLI, a Rust library, and Node.js/Python bindings.
+
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![Latest release](https://img.shields.io/github/v/release/pohcee/dcmnorm)](https://github.com/pohcee/dcmnorm/releases/latest)
+[![Live demo](https://img.shields.io/badge/live%20demo-try%20it-brightgreen)](https://dcmnorm-test-website-spzcbrdjlq-uc.a.run.app)
+
+<!-- TODO: add a hero image, e.g. a rendered WSI tile next to an MPR reformat:
+<p align="center"><img src="docs/images/hero.png" alt="dcmnorm renders: WSI tile and coronal MPR" width="800"></p>
+-->
 
 **🔗 Live demo:** try the Node bindings in your [browser](https://dcmnorm-test-website-spzcbrdjlq-uc.a.run.app) — upload a `.dcm` file (or pick a bundled
 sample) and see its JSON metadata, a JPEG of every frame, and per-step timings.
 
-This repository contains:
+## Quick start
+
+```bash
+# install the latest release (Linux x86_64)
+curl -sSL pohcee.com/dcmnorm | sh
+
+dcmnorm scan.dcm                                                   # DICOM → JSON
+dcmnorm scan.dcm frame.png                                         # render a frame
+dcmnorm scan.dcm out.dcm --transfer-syntax 1.2.840.10008.1.2.1     # transcode to Explicit VR LE
+dcmnorm cine.dcm cine.mp4                                          # multi-frame → MP4
+dcmnorm --mpr coronal series/*.dcm coronal.png                     # multiplanar reformat
+dcmtalk echoscu somepacs.example.com:11112                         # verify a PACS connection
+```
+
+See [Install](#install) for other options (Cargo, `.deb`, Docker, build from source).
+
+## Why dcmnorm
+
+- **Fast:** fastest of dcmtk, dcm4che, and dcmnorm in every parse, render, and transcode benchmark; DICOM → JSON takes ~3 ms whether the file is 90 KB or 29 MB ([benchmarks](#benchmarks))
+- **Broad:** renders most DICOM imaging SOP classes, including WSI, with modality/VOI LUTs, windowing, and overlays; cine → MP4; MPR reformats; NIfTI/NRRD volume export
+- **Networked:** `dcmtalk` covers C-ECHO/C-STORE/C-FIND/C-MOVE plus a storage SCP, with no dcmtk dependency
+- **Embeddable:** in-process Node.js and Python bindings, plus a Rust library crate
+- **Agent-ready:** ships with a skill for popular AI coding assistants
+- **Powers [dcm2bq](https://github.com/GoogleCloudPlatform/dcm2bq):** an open-source DICOM-to-BigQuery project under GoogleCloudPlatform
+
+## What's in this repository
 
 - [`dcmnorm`](src/): a library crate with DICOM file, memory, JSON conversion, and DIMSE network helpers
 - [`exec/dcmnorm`](exec/dcmnorm/): a CLI for converting between DICOM, transcoded DICOM, JSON, and rendered images/raw frames
@@ -16,130 +50,22 @@ This repository contains:
 
 ## Contents
 
-- [Workspace Layout](#workspace-layout)
-- [Build](#build)
 - [Install](#install)
-- [Docker](#docker)
-- [Test](#test)
-- [Benchmarks](#benchmarks)
-- [Releasing](#releasing)
 - [dcmnorm CLI Usage](#dcmnorm-cli-usage)
 - [dcmtalk CLI Usage](#dcmtalk-cli-usage)
+- [Benchmarks](#benchmarks)
+- [Workspace Layout](#workspace-layout)
+- [Build](#build)
+- [Docker](#docker)
+- [Test](#test)
+- [Releasing](#releasing)
+- [Contributing](#contributing)
 - [Thanks](#thanks)
-
-## Workspace Layout
-
-```text
-.
-├── Cargo.toml
-├── src/               # dcmnorm library crate
-├── exec/
-│   ├── dcmnorm/       # dcmnorm-cli package (the `dcmnorm` binary)
-│   └── dcmtalk/       # dcmtalk package (the `dcmtalk` binary)
-├── bindings/
-│   ├── node/          # @pohcee/dcmnorm-node napi-rs bindings
-│   └── python/        # dcmnorm-python PyO3 bindings
-├── scripts/           # install / release helper scripts
-└── test/
-    └── files/         # sample DICOM fixtures used by docs and tests
-```
-
-## Build
-
-### Prerequisites
-
-Default builds enable the MPEG and JPEG-LS codec features. Native prerequisites for the
-default build on Debian or Ubuntu are:
-
-- `build-essential`
-- `clang`
-- `cmake`
-- `libc6-dev`
-- `libclang-dev`
-- `pkg-config`
-- `libavutil-dev`
-- `libavcodec-dev`
-- `libavformat-dev`
-- `libswscale-dev`
-- `libswresample-dev`
-
-The FFmpeg integration is built with a reduced `ffmpeg-next` feature set, so
-`libavfilter-dev` and `libavdevice-dev` are not required for the current build.
-
-Example install command:
-
-```bash
-sudo apt-get update
-sudo apt-get install -y \
-    build-essential \
-    clang \
-    cmake \
-    libc6-dev \
-    libclang-dev \
-    pkg-config \
-    libavutil-dev \
-    libavcodec-dev \
-    libavformat-dev \
-    libswscale-dev \
-    libswresample-dev
-```
-
-### Building the workspace
-
-```bash
-# whole workspace, debug
-cargo build --workspace
-
-# whole workspace, release
-cargo build --workspace --release
-
-# without the default MPEG and JPEG-LS codec features
-cargo build --workspace --no-default-features
-```
-
-Release binaries are written to `target/release/`.
-
-### Building a single crate
-
-```bash
-# just dcmnorm
-cargo build -p dcmnorm-cli
-
-# just dcmtalk
-cargo build -p dcmtalk
-
-# both, release mode
-cargo build -p dcmnorm-cli -p dcmtalk --release
-```
-
-### Kakadu FFI (JPEG 2000)
-
-By default, JPEG 2000 decoding uses the bundled OpenJPEG path. To enable the optional
-Kakadu FFI bridge instead:
-
-```bash
-cargo build --workspace --features kakadu-ffi
-```
-
-This requires Kakadu headers in a normal include location (`~/.local/include/kakadu`,
-`/usr/local/include/kakadu`, or `/usr/include/kakadu`) so the C++ bridge can compile
-automatically. If your headers live elsewhere, point the build at them explicitly:
-
-```bash
-KAKADU_INCLUDE_DIR=$HOME/.local/include/kakadu \
-KAKADU_LIB_DIR=$HOME/.local/lib \
-cargo build --workspace --features kakadu-ffi
-```
-
-Build-time environment variables for this feature:
-
-- `KAKADU_INCLUDE_DIR` — explicit include directory containing Kakadu headers
-- `KAKADU_LIB_DIR` — explicit library directory containing `libkdu*.so`
-- `KAKADU_LIB_NAME` — optional Kakadu library base name override for linker configuration
-
-See [JPEG 2000 codec selection](#jpeg-2000-codec-selection) for the corresponding runtime behavior.
+- [License](#license)
 
 ## Install
+
+Pre-built release binaries are currently published for **Linux x86_64**. On macOS or Windows, use [Docker](#docker) or [build from source](#build).
 
 ### From source with Cargo
 
@@ -155,7 +81,7 @@ To install every CLI under `exec/` with one command, use the helper script inste
 
 This script auto-detects Kakadu headers/libraries and enables `kakadu-ffi` when available,
 and verifies the default codec toolchain (`pkg-config`, `clang`, standard C headers, and the
-FFmpeg development packages above) before invoking Cargo. If it detects Claude Code and/or
+FFmpeg development packages listed under [Build](#build)) before invoking Cargo. If it detects Claude Code and/or
 Gemini CLI on the machine (an existing `~/.claude` and/or `~/.gemini` directory), it also
 installs the [`skills/dcmnorm`](skills/dcmnorm/) skill to `~/.claude/skills/dcmnorm` and/or
 `~/.gemini/skills/dcmnorm` respectively — set `DCMNORM_SKIP_SKILL=1` to skip this, or
@@ -215,227 +141,9 @@ already running as root):
 ./scripts/install-release.sh 0.2.1 --deb
 ```
 
-## Docker
-
-This repository includes a multi-stage Dockerfile that builds `dcmnorm` and `dcmtalk` in a
-toolchain stage and copies only the release binaries into a slim runtime stage. The final
-runtime image installs `ca-certificates`, `ffmpeg`, and `libstdc++6`; build-only dependencies
-(`clang`, `cmake`, `pkg-config`, FFmpeg `-dev` packages) stay in the builder stage.
-
-Kakadu is not included in the image — see [JPEG 2000 codec selection](#jpeg-2000-codec-selection)
-if you need Kakadu support and are willing to provide the headers/libraries yourself.
-
-Build the image:
-
-```bash
-docker build -t dcmnorm .
-```
-
-Run the CLI (the image's default entrypoint is `dcmnorm`):
-
-```bash
-docker run --rm dcmnorm
-```
-
-Convert a file from a bind-mounted working directory:
-
-```bash
-docker run --rm \
-    -v "$PWD":/work \
-    -w /work \
-    dcmnorm \
-    test/files/dx.dcm
-```
-
-Run `dcmtalk` instead by overriding the entrypoint:
-
-```bash
-docker run --rm --entrypoint dcmtalk dcmnorm echoscu somepacs.example.com:11112
-
-# storescp needs its listening port published
-docker run --rm --entrypoint dcmtalk -p 11112:11112 \
-    -v "$PWD/received":/data \
-    dcmnorm storescp 11112 --cache-path /data
-```
-
-## Test
-
-```bash
-cargo test --workspace
-```
-
-## Benchmarks
-
-`benchmarks/` compares `dcmnorm` against [dcmtk](https://dcmtk.org/) 3.6.7 and
-[dcm4che](https://www.dcm4che.org/) 5.35.1 on parsing (DICOM → JSON), rendering
-(pixel data → PNG), and transcoding (→ Explicit VR Little Endian, decompressing
-JPEG/JPEG2000 sources along the way).
-
-### Methodology
-
-All three tools run inside the same Docker container
-(`benchmarks/Dockerfile`: `debian:bookworm-slim`, dcmtk from apt, dcm4che's
-official binary distribution, `dcmnorm` built from this source tree) so the
-comparison isn't skewed by different host installs, library versions, or
-filesystems. The container is capped to 4 CPUs (`docker run --cpus=4`) for a
-consistent, resource-isolated run. Each (operation, fixture, tool) combination
-is timed with [hyperfine](https://github.com/sharkdp/hyperfine) (2 warmup runs
-+ at least 8 measured runs, reporting mean/stddev/median/min/max wall time).
-Reproduce with:
-
-```bash
-docker build -f benchmarks/Dockerfile -t dcmnorm-bench .
-docker run --rm --cpus=4 \
-  -v "$(pwd)/test/files":/fixtures:ro \
-  -v "$(pwd)/benchmarks/results":/results \
-  dcmnorm-bench bash /repo/benchmarks/run.sh
-```
-
-### Fixtures
-
-| File | Transfer syntax | Dimensions | Size |
-|---|---|---|---|
-| `mr.dcm` | Explicit VR LE (uncompressed) | 512×512, 1 frame | 526 KB |
-| `us2.dcm` | Explicit VR LE (uncompressed) | 360×360, 227 frames | 29.4 MB |
-| `wsi.dcm` | JPEG Baseline | 240×240, 96 frames | 1.5 MB |
-| `ct.dcm` | JPEG 2000 | 512×512, 1 frame | 90 KB |
-| `dx2.dcm` | JPEG 2000 (Lossless-only) | 1736×2022, 1 frame | 3.6 MB |
-
-### Results (mean ± stddev, milliseconds; lower is better)
-
-Run 2026-10-04 (dcmnorm 0.3.3 + deferred bulk data reads for JSON, dcmtk 3.6.7, dcm4che 5.35.1).
-
-**Parse** (`dcm2json` / `dcm2json` / `dcmnorm <file>`)
-
-| Fixture | dcmtk | dcm4che | dcmnorm |
-|---|---|---|---|
-| mr.dcm | 17.5 ± 1.5 | 215.0 ± 3.7 | **2.9 ± 0.6** |
-| us2.dcm | 290.2 ± 6.4¹ | 225.5 ± 12.2 | **2.7 ± 0.5** |
-| wsi.dcm | n/a¹ | 257.4 ± 13.7 | **3.2 ± 0.6** |
-| ct.dcm | n/a¹ | 260.3 ± 24.4 | **3.2 ± 0.6** |
-| dx2.dcm | n/a¹ | 222.7 ± 4.7 | **3.0 ± 0.6** |
-
-**Render one frame** (`dcmj2pnm +F N --write-png` / `dcm2jpg --frame N -F png` / `dcmnorm <file> <out.png> --render-frame N-1`)
-
-Every tool renders exactly one frame, the same one: the middle frame of the multi-frame fixtures
-(`us2.dcm` frame 114 of 227, `wsi.dcm` frame 49 of 96), else the only frame. For `us2.dcm`,
-dcmtk's and dcmnorm's decoded pixels for that frame were checked to be byte-identical.
-
-| Fixture | dcmtk | dcm4che | dcmnorm |
-|---|---|---|---|
-| mr.dcm | 29.4 ± 2.6 | 327.2 ± 22.1 | **6.2 ± 0.9** |
-| us2.dcm | 18.5 ± 2.0 | 324.0 ± 12.5 | **4.2 ± 0.9** |
-| wsi.dcm | 20.1 ± 3.0 | 334.6 ± 6.6 | **6.1 ± 0.8** |
-| ct.dcm | n/a² | 393.1 ± 18.2 | **19.7 ± 2.3** |
-| dx2.dcm | n/a² | 510.3 ± 19.6 | **451.7 ± 9.8** |
-
-**Transcode → Explicit VR LE** (`dcmconv +te` / `dcmdjpeg`³ / `dcm2dcm -t ...` / `dcmnorm <in> <out> --transfer-syntax ...`)
-
-| Fixture | dcmtk | dcm4che | dcmnorm |
-|---|---|---|---|
-| mr.dcm | 12.5 ± 1.6 | 257.8 ± 7.5 | **4.8 ± 1.0** |
-| us2.dcm | 37.1 ± 3.4 | 323.2 ± 17.2 | **26.6 ± 2.8** |
-| wsi.dcm | 61.6 ± 2.9 | 455.6 ± 25.9 | **40.6 ± 4.0** |
-| ct.dcm | n/a² | 332.6 ± 12.4 | **18.0 ± 1.5** |
-| dx2.dcm | n/a² | 499.7 ± 42.9 | **431.9 ± 8.7** |
-
-¹ dcmtk's `dcm2json` (this build) has no bulk-data-by-reference/exclude option
-— unlike dcm4che's `-B`/`--no-bulkdata` or dcmnorm's default `bulkData: uri`
-mode, it always inlines `PixelData` as base64, and fails outright
-("JSON InlineBinary encoding not supported for compressed pixel data") on any
-compressed source. Confirmed by running it directly outside the benchmark
-harness, not a harness bug. Its `us2.dcm` parse is therefore not like-for-like:
-it's the only tool base64-encoding all 29MB of pixel data inline, where dcmnorm
-and dcm4che both emit a reference instead.
-
-² dcmtk's apt-packaged build (`dcmdjp2k` is not installed alongside `dcmtk`,
-and `dcmj2pnm`/`dcmconv` have no JPEG2000 codec registered) cannot decode or
-transcode JPEG2000 at all — confirmed via `dcmconv +te` on `ct.dcm`:
-`E: Pixel representation cannot be changed`.
-
-³ `wsi.dcm` (JPEG Baseline) uses dcmtk's dedicated `dcmdjpeg` decompressor
-rather than `dcmconv +te`, matching how dcmtk itself expects JPEG sources to
-be decompressed; `dcm2dcm` and `dcmnorm --transfer-syntax` handle both the
-plain VR/endian conversion and JPEG/JPEG2000 decompression through the same
-one invocation.
-
-`run.sh` discards any timing whose command didn't produce its output file, so a
-tool can't "win" by failing fast (e.g. a dcmtk built without libpng rejects
-`--write-png` immediately, which would otherwise time as a ~4ms render).
-
-### Takeaways
-
-- **dcmnorm is fastest in every row** — including `us2.dcm`, a 227-frame,
-  29MB native ultrasound cine, where the previous run (2026-08-29) had it
-  losing to dcmtk on render (52.6 vs 18.1ms) and transcode (104.4 vs 61.9ms).
-  That gap was never the DICOM work itself (decode + window + PNG for one
-  frame is ~1ms); it was overhead that grew with file size, fixed since:
-  - every invocation SHA-256'd the whole (statically linked, ~30MB) binary
-    to build its `--version` string — now only done for `--version`;
-  - PixelData was copied 3-4 times between `fs::read`, the parser's scratch
-    buffer, a same-transfer-syntax "transcode" clone, and the writer
-    cloning each value to serialize it — now read once and written by
-    reference;
-  - single-frame render read all 227 frames to render one — it now reads
-    just the requested frame, as dcmtk's `dcmj2pnm` does.
-- **Parse (DICOM → JSON) no longer depends on file size** — ~3ms for every
-  fixture, from a 90KB CT to the 29MB cine. JSON references bulk values
-  (PixelData etc.) by `BulkDataURI` offset/length rather than embedding
-  them, so the parser now seeks past them and records where they were,
-  instead of reading the whole file, parsing a copy of each value, and then
-  re-scanning the raw bytes to find (and byte-compare) its offset. It reads
-  ~2KB of `us2.dcm` instead of 29MB — which matters even more for a file
-  that isn't already in the page cache.
-- **dcm4che's numbers are dominated by JVM cold-start** (~200-300ms of every
-  single-invocation timing here is the JVM spinning up, not DICOM work) — this
-  benchmark reflects a CLI invoked once per file, not a long-running server
-  reusing a warm JVM, which would look very different. Not a fair "dcm4che the
-  library is slow" conclusion; it's specifically a CLI-cold-start cost.
-- **`dx2.dcm` (1736×2022 JPEG 2000) is decode-bound** (~430ms in OpenJPEG for
-  both render and transcode); it's the one fixture where dcmnorm's lead over
-  dcm4che is narrow, since the codec dominates both.
-- **dcmtk's apt-packaged build has real capability gaps**: no
-  bulk-data-reference JSON mode, no JPEG2000 support at all. Both are almost
-  certainly build-configuration choices (dcmtk itself supports JPEG2000 when
-  compiled with the right codec module) rather than fundamental limitations
-  of the toolkit — but they're what ships via `apt`, which is what most
-  deployments actually run.
-
-## Releasing
-
-This repository uses two GitHub Actions workflows for SemVer-based CLI releases:
-
-- `.github/workflows/semver-tag.yml`: manually creates and pushes the next `vX.Y.Z` tag from the latest existing `v*` tag
-- `.github/workflows/release.yml`: runs on pushed version tags, builds the CLI, and creates a GitHub Release with artifacts
-
-Release flow:
-
-1. Run the **SemVer Tag** workflow from the Actions tab and choose `patch`, `minor`, or `major`.
-2. The workflow pushes a new version tag (for example `v0.1.1`).
-3. The **Build and Release CLIs** workflow is triggered by that tag and publishes, for each of `dcmnorm` and `dcmtalk`:
-    - `<name>-<tag>-linux-x86_64.tar.gz` (+ `.sha256`)
-    - `<name>-<tag>-linux-x86_64.deb` (+ `.sha256`) — built with [`cargo-deb`](https://github.com/kornelski/cargo-deb) from each exec crate's `[package.metadata.deb]`, `Depends:` on `ffmpeg`/`ca-certificates` plus whatever `cargo-deb`'s `$auto` detects from the linked shared libraries
-    - `<name>-linux-x86_64.tar.gz` / `.deb` + `.sha256` (rolling "latest" aliases, overwritten each release)
-
-Prereleases are supported in the SemVer tag workflow via the `prerelease` input.
-
-### Local tag + release trigger
-
-If you prefer not to manually run the tag workflow in GitHub, use the local helper script:
-
-```bash
-./scripts/release-tag.sh patch          # bump types: patch, minor, major
-./scripts/release-tag.sh minor --prerelease rc
-./scripts/release-tag.sh patch --dry-run  # preview the computed next tag only
-```
-
-The script updates versions in `Cargo.toml`, `exec/dcmnorm/Cargo.toml`, and
-`exec/dcmtalk/Cargo.toml`, then creates a release commit and pushes both the commit and the
-version tag to `origin`. The pushed tag triggers `.github/workflows/release.yml` automatically.
-If no `v*` tags exist yet, the script uses the root `Cargo.toml` `package.version` as the
-baseline for computing the next version.
-
 ## dcmnorm CLI Usage
+
+Examples use the sample fixtures in [`test/files/`](test/files/). When working from a source checkout without installing, substitute `cargo run -p dcmnorm-cli --` for `dcmnorm`.
 
 Get the full option reference from either help form:
 
@@ -575,25 +283,25 @@ JSON to DICOM defaults to:
 Convert a DICOM file to flattened JSON using named keys:
 
 ```bash
-cargo run -p dcmnorm-cli -- test/files/dx.dcm
+dcmnorm test/files/dx.dcm
 ```
 
 Convert a DICOM file to standard JSON with hex keys and write to a file:
 
 ```bash
-cargo run -p dcmnorm-cli -- test/files/dx.dcm out.json --format standard --keys hex
+dcmnorm test/files/dx.dcm out.json --format standard --keys hex
 ```
 
 Convert JSON back to a DICOM file:
 
 ```bash
-cargo run -p dcmnorm-cli -- out.json out.dcm
+dcmnorm out.json out.dcm
 ```
 
 Convert JSON with `BulkDataURI` references back to DICOM using a source file:
 
 ```bash
-cargo run -p dcmnorm-cli -- out.json out.dcm --bulk-data-source test/files/dx.dcm
+dcmnorm out.json out.dcm --bulk-data-source test/files/dx.dcm
 ```
 
 ### Filter attributes
@@ -601,13 +309,13 @@ cargo run -p dcmnorm-cli -- out.json out.dcm --bulk-data-source test/files/dx.dc
 Filter DICOM attributes before conversion (only filtered tags are parsed and emitted):
 
 ```bash
-cargo run -p dcmnorm-cli -- test/files/dx.dcm --filter StudyInstanceUID
+dcmnorm test/files/dx.dcm --filter StudyInstanceUID
 ```
 
 Use multiple filters (repeat `--filter` or comma-separate values):
 
 ```bash
-cargo run -p dcmnorm-cli -- test/files/dx.dcm out.json --filter StudyInstanceUID,PatientID
+dcmnorm test/files/dx.dcm out.json --filter StudyInstanceUID,PatientID
 ```
 
 `--filter` applies only to DICOM input. The parser reads until the requested attributes are
@@ -623,7 +331,7 @@ when converting DICOM to JSON, and values of 32 bytes or less are automatically 
 To embed absolute `file://` URIs in `BulkDataURI`, pass `--bulk-data-source` without a value:
 
 ```bash
-cargo run -p dcmnorm-cli -- test/files/dx.dcm --bulk-data uri --bulk-data-source
+dcmnorm test/files/dx.dcm --bulk-data uri --bulk-data-source
 ```
 
 ### Validate files with `--check-dicom`
@@ -634,7 +342,7 @@ for streams without file meta.
 Single file:
 
 ```bash
-cargo run -p dcmnorm-cli -- --check-dicom test/files/dx.dcm
+dcmnorm --check-dicom test/files/dx.dcm
 ```
 
 Read paths from stdin (`-I` / `--stdin-paths`) and print only valid DICOM paths:
@@ -663,14 +371,14 @@ mismatched UIDs, and (checked but non-fatal by default) suspect geometry/window/
 metadata. No pixel codec ever runs, so it stays cheap enough for a full-archive batch scan.
 
 ```bash
-cargo run -p dcmnorm-cli -- --check-dicom-logic --verbose test/files/dx.dcm
+dcmnorm --check-dicom-logic --verbose test/files/dx.dcm
 ```
 
 Add `--output-type json` for a structured report (NDJSON, one object per line, when combined
 with `-I`/`--stdin-paths`) instead of the one-line-per-file text summary:
 
 ```bash
-cargo run -p dcmnorm-cli -- --check-dicom-logic --output-type json test/files/dx.dcm
+dcmnorm --check-dicom-logic --output-type json test/files/dx.dcm
 ```
 
 Behavior:
@@ -700,13 +408,13 @@ comparable. A grayscale frame's entry has `channel: null`.
 Every frame in the instance:
 
 ```bash
-cargo run -p dcmnorm-cli -- --histogram test/files/ct.dcm
+dcmnorm --histogram test/files/ct.dcm
 ```
 
 One frame, with a custom bin count, written to a file:
 
 ```bash
-cargo run -p dcmnorm-cli -- --histogram --histogram-frame 0 --histogram-bins 64 test/files/ct.dcm histogram.json
+dcmnorm --histogram --histogram-frame 0 --histogram-bins 64 test/files/ct.dcm histogram.json
 ```
 
 Output shape (`{"frames": [...]}`, one entry per computed frame - or three, for an RGB/color
@@ -740,16 +448,16 @@ Useful for files with no extension or a misleading one. Supported `--output-type
 
 ```bash
 # Convert a DICOM file with no extension to JSON
-cargo run -p dcmnorm-cli -- dicom_data --input-type dicom
+dcmnorm dicom_data --input-type dicom
 
 # Write DICOM output without an extension
-cargo run -p dcmnorm-cli -- input.json output --output-type dicom
+dcmnorm input.json output --output-type dicom
 
 # Render a DICOM file to an arbitrary extension as PNG
-cargo run -p dcmnorm-cli -- test/files/dx.dcm frame.img --output-type png
+dcmnorm test/files/dx.dcm frame.img --output-type png
 
 # Render a DICOM file as MPEG4 without a recognized extension
-cargo run -p dcmnorm-cli -- test/files/ct.dcm output.video --output-type mpeg4 --render-fps 24
+dcmnorm test/files/ct.dcm output.video --output-type mpeg4 --render-fps 24
 ```
 
 ### Edit DICOM elements with `--set`
@@ -759,13 +467,13 @@ can be a DICOM keyword (for example, `SOPClassUID`) or a tag expression (for exa
 `(0008,0016)`):
 
 ```bash
-cargo run -p dcmnorm-cli -- test/files/dx.dcm out.dcm --transfer-syntax 1.2.840.10008.1.2.1 --set SOPClassUID=1.2.840.10008.5.1.4.1.1.2 --set StudyDescription=Normalized
+dcmnorm test/files/dx.dcm out.dcm --transfer-syntax 1.2.840.10008.1.2.1 --set SOPClassUID=1.2.840.10008.5.1.4.1.1.2 --set StudyDescription=Normalized
 ```
 
 Use `--overwrite` to write DICOM output back to the input path — useful for in-place edits:
 
 ```bash
-cargo run -p dcmnorm-cli -- test/files/dx.dcm --set SOPClassUID=1.2.840.10008.5.1.4.1.1.2 --overwrite
+dcmnorm test/files/dx.dcm --set SOPClassUID=1.2.840.10008.5.1.4.1.1.2 --overwrite
 ```
 
 ### Render frames
@@ -773,31 +481,31 @@ cargo run -p dcmnorm-cli -- test/files/dx.dcm --set SOPClassUID=1.2.840.10008.5.
 Render the first frame of a DICOM file to PNG:
 
 ```bash
-cargo run -p dcmnorm-cli -- test/files/dx.dcm out.png
+dcmnorm test/files/dx.dcm out.png
 ```
 
 Render frame 2 to JPEG with explicit quality:
 
 ```bash
-cargo run -p dcmnorm-cli -- test/files/ct.dcm out.jpg --render-frame 1 --jpeg-quality 95
+dcmnorm test/files/ct.dcm out.jpg --render-frame 1 --jpeg-quality 95
 ```
 
 Render to raw 8-bit frame bytes:
 
 ```bash
-cargo run -p dcmnorm-cli -- test/files/dx.dcm out.raw
+dcmnorm test/files/dx.dcm out.raw
 ```
 
 Render all frames from a multiframe dataset to numbered PNG files (`out_000001.png`, `out_000002.png`, ...):
 
 ```bash
-cargo run -p dcmnorm-cli -- test/files/ct.dcm out.png --render-all-frames
+dcmnorm test/files/ct.dcm out.png --render-all-frames
 ```
 
 Render all frames from a multiframe dataset to a single `.mp4` video:
 
 ```bash
-cargo run -p dcmnorm-cli -- test/files/ct.dcm out.mp4 --render-fps 24
+dcmnorm test/files/ct.dcm out.mp4 --render-fps 24
 ```
 
 If `--render-fps` is omitted for `.mp4` output, `dcmnorm` uses frame-rate metadata from the
@@ -836,13 +544,13 @@ sidecar rather than assuming gzip - `--texture-compression none` disables it per
 Export a single frame as a depth-1 texture:
 
 ```bash
-cargo run -p dcmnorm-cli -- test/files/dx.dcm frame.gputex
+dcmnorm test/files/dx.dcm frame.gputex
 ```
 
 Export a specific frame with an explicit default window, capping the longest axis at 1024 samples:
 
 ```bash
-cargo run -p dcmnorm-cli -- test/files/ct.dcm frame.gputex --render-frame 1 --window-center 40 --window-width 400 --texture-max-dim 1024
+dcmnorm test/files/ct.dcm frame.gputex --render-frame 1 --window-center 40 --window-width 400 --texture-max-dim 1024
 ```
 
 Export a whole CT/MR series as one volume texture (its own native voxel lattice, not a reformatted
@@ -1038,22 +746,22 @@ If an instance has one or more overlays, the first available overlay (ascending 
 renders by default:
 
 ```bash
-cargo run -p dcmnorm-cli -- test/files/overlay.dcm out.png
+dcmnorm test/files/overlay.dcm out.png
 ```
 
 Select a different overlay by its 0-based index (ordinal among the overlays present, not the raw
 DICOM group), or disable overlay rendering entirely:
 
 ```bash
-cargo run -p dcmnorm-cli -- test/files/overlay_multi.dcm out.png --overlay-index 1
-cargo run -p dcmnorm-cli -- test/files/overlay.dcm out.png --no-overlays
+dcmnorm test/files/overlay_multi.dcm out.png --overlay-index 1
+dcmnorm test/files/overlay.dcm out.png --no-overlays
 ```
 
 Overlay pixels render in a fill color, `R,G,B` (0-255 each) or `#RRGGBB` hex, defaulting to
 green (`0,255,0`):
 
 ```bash
-cargo run -p dcmnorm-cli -- test/files/overlay.dcm out.png --overlay-color 255,0,0
+dcmnorm test/files/overlay.dcm out.png --overlay-color 255,0,0
 ```
 
 `--overlay-index`/`--overlay-color` require overlays to be enabled (they conflict with
@@ -1121,14 +829,14 @@ find . -name "*.dcm" | dcmnorm -I --bulk-data uri --bulk-data-source
 Transcode a DICOM file to Explicit VR Big Endian:
 
 ```bash
-cargo run -p dcmnorm-cli -- test/files/dx.dcm out.dcm --transfer-syntax 1.2.840.10008.1.2.2
+dcmnorm test/files/dx.dcm out.dcm --transfer-syntax 1.2.840.10008.1.2.2
 ```
 
 List the transfer syntaxes known to the current build and whether dataset read/write and
 pixel decode/encode are available:
 
 ```bash
-cargo run -p dcmnorm-cli -- --list-transfer-syntaxes
+dcmnorm --list-transfer-syntaxes
 ```
 
 Transfer-syntax support is build-specific. The default build in this repository enables the
@@ -1235,6 +943,343 @@ Use port `0` to bind an ephemeral port (useful for tests):
 dcmtalk storescp 0 --verbose
 ```
 
+## Benchmarks
+
+`benchmarks/` compares `dcmnorm` against [dcmtk](https://dcmtk.org/) 3.6.7 and
+[dcm4che](https://www.dcm4che.org/) 5.35.1 on parsing (DICOM → JSON), rendering
+(pixel data → PNG), and transcoding (→ Explicit VR Little Endian, decompressing
+JPEG/JPEG2000 sources along the way).
+
+### Methodology
+
+All three tools run inside the same Docker container
+(`benchmarks/Dockerfile`: `debian:bookworm-slim`, dcmtk from apt, dcm4che's
+official binary distribution, `dcmnorm` built from this source tree) so the
+comparison isn't skewed by different host installs, library versions, or
+filesystems. The container is capped to 4 CPUs (`docker run --cpus=4`) for a
+consistent, resource-isolated run. Each (operation, fixture, tool) combination
+is timed with [hyperfine](https://github.com/sharkdp/hyperfine) (2 warmup runs
++ at least 8 measured runs, reporting mean/stddev/median/min/max wall time).
+Reproduce with:
+
+```bash
+docker build -f benchmarks/Dockerfile -t dcmnorm-bench .
+docker run --rm --cpus=4 \
+  -v "$(pwd)/test/files":/fixtures:ro \
+  -v "$(pwd)/benchmarks/results":/results \
+  dcmnorm-bench bash /repo/benchmarks/run.sh
+```
+
+### Fixtures
+
+| File | Transfer syntax | Dimensions | Size |
+|---|---|---|---|
+| `mr.dcm` | Explicit VR LE (uncompressed) | 512×512, 1 frame | 526 KB |
+| `us2.dcm` | Explicit VR LE (uncompressed) | 360×360, 227 frames | 29.4 MB |
+| `wsi.dcm` | JPEG Baseline | 240×240, 96 frames | 1.5 MB |
+| `ct.dcm` | JPEG 2000 | 512×512, 1 frame | 90 KB |
+| `dx2.dcm` | JPEG 2000 (Lossless-only) | 1736×2022, 1 frame | 3.6 MB |
+
+### Results (mean ± stddev, milliseconds; lower is better)
+
+Run 2026-10-04 (dcmnorm 0.3.3 + deferred bulk data reads for JSON, dcmtk 3.6.7, dcm4che 5.35.1).
+
+**Parse** (`dcm2json` / `dcm2json` / `dcmnorm <file>`)
+
+| Fixture | dcmtk | dcm4che | dcmnorm |
+|---|---|---|---|
+| mr.dcm | 17.5 ± 1.5 | 215.0 ± 3.7 | **2.9 ± 0.6** |
+| us2.dcm | 290.2 ± 6.4¹ | 225.5 ± 12.2 | **2.7 ± 0.5** |
+| wsi.dcm | n/a¹ | 257.4 ± 13.7 | **3.2 ± 0.6** |
+| ct.dcm | n/a¹ | 260.3 ± 24.4 | **3.2 ± 0.6** |
+| dx2.dcm | n/a¹ | 222.7 ± 4.7 | **3.0 ± 0.6** |
+
+**Render one frame** (`dcmj2pnm +F N --write-png` / `dcm2jpg --frame N -F png` / `dcmnorm <file> <out.png> --render-frame N-1`)
+
+Every tool renders exactly one frame, the same one: the middle frame of the multi-frame fixtures
+(`us2.dcm` frame 114 of 227, `wsi.dcm` frame 49 of 96), else the only frame. For `us2.dcm`,
+dcmtk's and dcmnorm's decoded pixels for that frame were checked to be byte-identical.
+
+| Fixture | dcmtk | dcm4che | dcmnorm |
+|---|---|---|---|
+| mr.dcm | 29.4 ± 2.6 | 327.2 ± 22.1 | **6.2 ± 0.9** |
+| us2.dcm | 18.5 ± 2.0 | 324.0 ± 12.5 | **4.2 ± 0.9** |
+| wsi.dcm | 20.1 ± 3.0 | 334.6 ± 6.6 | **6.1 ± 0.8** |
+| ct.dcm | n/a² | 393.1 ± 18.2 | **19.7 ± 2.3** |
+| dx2.dcm | n/a² | 510.3 ± 19.6 | **451.7 ± 9.8** |
+
+**Transcode → Explicit VR LE** (`dcmconv +te` / `dcmdjpeg`³ / `dcm2dcm -t ...` / `dcmnorm <in> <out> --transfer-syntax ...`)
+
+| Fixture | dcmtk | dcm4che | dcmnorm |
+|---|---|---|---|
+| mr.dcm | 12.5 ± 1.6 | 257.8 ± 7.5 | **4.8 ± 1.0** |
+| us2.dcm | 37.1 ± 3.4 | 323.2 ± 17.2 | **26.6 ± 2.8** |
+| wsi.dcm | 61.6 ± 2.9 | 455.6 ± 25.9 | **40.6 ± 4.0** |
+| ct.dcm | n/a² | 332.6 ± 12.4 | **18.0 ± 1.5** |
+| dx2.dcm | n/a² | 499.7 ± 42.9 | **431.9 ± 8.7** |
+
+¹ dcmtk's `dcm2json` (this build) has no bulk-data-by-reference/exclude option
+— unlike dcm4che's `-B`/`--no-bulkdata` or dcmnorm's default `bulkData: uri`
+mode, it always inlines `PixelData` as base64, and fails outright
+("JSON InlineBinary encoding not supported for compressed pixel data") on any
+compressed source. Confirmed by running it directly outside the benchmark
+harness, not a harness bug. Its `us2.dcm` parse is therefore not like-for-like:
+it's the only tool base64-encoding all 29MB of pixel data inline, where dcmnorm
+and dcm4che both emit a reference instead.
+
+² dcmtk's apt-packaged build (`dcmdjp2k` is not installed alongside `dcmtk`,
+and `dcmj2pnm`/`dcmconv` have no JPEG2000 codec registered) cannot decode or
+transcode JPEG2000 at all — confirmed via `dcmconv +te` on `ct.dcm`:
+`E: Pixel representation cannot be changed`.
+
+³ `wsi.dcm` (JPEG Baseline) uses dcmtk's dedicated `dcmdjpeg` decompressor
+rather than `dcmconv +te`, matching how dcmtk itself expects JPEG sources to
+be decompressed; `dcm2dcm` and `dcmnorm --transfer-syntax` handle both the
+plain VR/endian conversion and JPEG/JPEG2000 decompression through the same
+one invocation.
+
+`run.sh` discards any timing whose command didn't produce its output file, so a
+tool can't "win" by failing fast (e.g. a dcmtk built without libpng rejects
+`--write-png` immediately, which would otherwise time as a ~4ms render).
+
+### Takeaways
+
+- **dcmnorm is fastest in every row** — including `us2.dcm`, a 227-frame,
+  29MB native ultrasound cine, where the previous run (2026-08-29) had it
+  losing to dcmtk on render (52.6 vs 18.1ms) and transcode (104.4 vs 61.9ms).
+  That gap was never the DICOM work itself (decode + window + PNG for one
+  frame is ~1ms); it was overhead that grew with file size, fixed since:
+  - every invocation SHA-256'd the whole (statically linked, ~30MB) binary
+    to build its `--version` string — now only done for `--version`;
+  - PixelData was copied 3-4 times between `fs::read`, the parser's scratch
+    buffer, a same-transfer-syntax "transcode" clone, and the writer
+    cloning each value to serialize it — now read once and written by
+    reference;
+  - single-frame render read all 227 frames to render one — it now reads
+    just the requested frame, as dcmtk's `dcmj2pnm` does.
+- **Parse (DICOM → JSON) no longer depends on file size** — ~3ms for every
+  fixture, from a 90KB CT to the 29MB cine. JSON references bulk values
+  (PixelData etc.) by `BulkDataURI` offset/length rather than embedding
+  them, so the parser now seeks past them and records where they were,
+  instead of reading the whole file, parsing a copy of each value, and then
+  re-scanning the raw bytes to find (and byte-compare) its offset. It reads
+  ~2KB of `us2.dcm` instead of 29MB — which matters even more for a file
+  that isn't already in the page cache.
+- **dcm4che's numbers are dominated by JVM cold-start** (~200-300ms of every
+  single-invocation timing here is the JVM spinning up, not DICOM work) — this
+  benchmark reflects a CLI invoked once per file, not a long-running server
+  reusing a warm JVM, which would look very different. Not a fair "dcm4che the
+  library is slow" conclusion; it's specifically a CLI-cold-start cost.
+- **`dx2.dcm` (1736×2022 JPEG 2000) is decode-bound** (~430ms in OpenJPEG for
+  both render and transcode); it's the one fixture where dcmnorm's lead over
+  dcm4che is narrow, since the codec dominates both.
+- **dcmtk's apt-packaged build has real capability gaps**: no
+  bulk-data-reference JSON mode, no JPEG2000 support at all. Both are almost
+  certainly build-configuration choices (dcmtk itself supports JPEG2000 when
+  compiled with the right codec module) rather than fundamental limitations
+  of the toolkit — but they're what ships via `apt`, which is what most
+  deployments actually run.
+
+## Workspace Layout
+
+```text
+.
+├── Cargo.toml
+├── src/               # dcmnorm library crate
+├── exec/
+│   ├── dcmnorm/       # dcmnorm-cli package (the `dcmnorm` binary)
+│   └── dcmtalk/       # dcmtalk package (the `dcmtalk` binary)
+├── bindings/
+│   ├── node/          # @pohcee/dcmnorm-node napi-rs bindings
+│   └── python/        # dcmnorm-python PyO3 bindings
+├── scripts/           # install / release helper scripts
+└── test/
+    └── files/         # sample DICOM fixtures used by docs and tests
+```
+
+## Build
+
+### Prerequisites
+
+Default builds enable the MPEG and JPEG-LS codec features. Native prerequisites for the
+default build on Debian or Ubuntu are:
+
+- `build-essential`
+- `clang`
+- `cmake`
+- `libc6-dev`
+- `libclang-dev`
+- `pkg-config`
+- `libavutil-dev`
+- `libavcodec-dev`
+- `libavformat-dev`
+- `libswscale-dev`
+- `libswresample-dev`
+
+The FFmpeg integration is built with a reduced `ffmpeg-next` feature set, so
+`libavfilter-dev` and `libavdevice-dev` are not required for the current build.
+
+Example install command:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y \
+    build-essential \
+    clang \
+    cmake \
+    libc6-dev \
+    libclang-dev \
+    pkg-config \
+    libavutil-dev \
+    libavcodec-dev \
+    libavformat-dev \
+    libswscale-dev \
+    libswresample-dev
+```
+
+### Building the workspace
+
+```bash
+# whole workspace, debug
+cargo build --workspace
+
+# whole workspace, release
+cargo build --workspace --release
+
+# without the default MPEG and JPEG-LS codec features
+cargo build --workspace --no-default-features
+```
+
+Release binaries are written to `target/release/`.
+
+### Building a single crate
+
+```bash
+# just dcmnorm
+cargo build -p dcmnorm-cli
+
+# just dcmtalk
+cargo build -p dcmtalk
+
+# both, release mode
+cargo build -p dcmnorm-cli -p dcmtalk --release
+```
+
+### Kakadu FFI (JPEG 2000)
+
+By default, JPEG 2000 decoding uses the bundled OpenJPEG path. To enable the optional
+Kakadu FFI bridge instead:
+
+```bash
+cargo build --workspace --features kakadu-ffi
+```
+
+This requires Kakadu headers in a normal include location (`~/.local/include/kakadu`,
+`/usr/local/include/kakadu`, or `/usr/include/kakadu`) so the C++ bridge can compile
+automatically. If your headers live elsewhere, point the build at them explicitly:
+
+```bash
+KAKADU_INCLUDE_DIR=$HOME/.local/include/kakadu \
+KAKADU_LIB_DIR=$HOME/.local/lib \
+cargo build --workspace --features kakadu-ffi
+```
+
+Build-time environment variables for this feature:
+
+- `KAKADU_INCLUDE_DIR` — explicit include directory containing Kakadu headers
+- `KAKADU_LIB_DIR` — explicit library directory containing `libkdu*.so`
+- `KAKADU_LIB_NAME` — optional Kakadu library base name override for linker configuration
+
+See [JPEG 2000 codec selection](#jpeg-2000-codec-selection) for the corresponding runtime behavior.
+
+## Docker
+
+This repository includes a multi-stage Dockerfile that builds `dcmnorm` and `dcmtalk` in a
+toolchain stage and copies only the release binaries into a slim runtime stage. The final
+runtime image installs `ca-certificates`, `ffmpeg`, and `libstdc++6`; build-only dependencies
+(`clang`, `cmake`, `pkg-config`, FFmpeg `-dev` packages) stay in the builder stage.
+
+Kakadu is not included in the image — see [JPEG 2000 codec selection](#jpeg-2000-codec-selection)
+if you need Kakadu support and are willing to provide the headers/libraries yourself.
+
+Build the image:
+
+```bash
+docker build -t dcmnorm .
+```
+
+Run the CLI (the image's default entrypoint is `dcmnorm`):
+
+```bash
+docker run --rm dcmnorm
+```
+
+Convert a file from a bind-mounted working directory:
+
+```bash
+docker run --rm \
+    -v "$PWD":/work \
+    -w /work \
+    dcmnorm \
+    test/files/dx.dcm
+```
+
+Run `dcmtalk` instead by overriding the entrypoint:
+
+```bash
+docker run --rm --entrypoint dcmtalk dcmnorm echoscu somepacs.example.com:11112
+
+# storescp needs its listening port published
+docker run --rm --entrypoint dcmtalk -p 11112:11112 \
+    -v "$PWD/received":/data \
+    dcmnorm storescp 11112 --cache-path /data
+```
+
+## Test
+
+```bash
+cargo test --workspace
+```
+
+## Releasing
+
+This repository uses two GitHub Actions workflows for SemVer-based CLI releases:
+
+- `.github/workflows/semver-tag.yml`: manually creates and pushes the next `vX.Y.Z` tag from the latest existing `v*` tag
+- `.github/workflows/release.yml`: runs on pushed version tags, builds the CLI, and creates a GitHub Release with artifacts
+
+Release flow:
+
+1. Run the **SemVer Tag** workflow from the Actions tab and choose `patch`, `minor`, or `major`.
+2. The workflow pushes a new version tag (for example `v0.1.1`).
+3. The **Build and Release CLIs** workflow is triggered by that tag and publishes, for each of `dcmnorm` and `dcmtalk`:
+    - `<name>-<tag>-linux-x86_64.tar.gz` (+ `.sha256`)
+    - `<name>-<tag>-linux-x86_64.deb` (+ `.sha256`) — built with [`cargo-deb`](https://github.com/kornelski/cargo-deb) from each exec crate's `[package.metadata.deb]`, `Depends:` on `ffmpeg`/`ca-certificates` plus whatever `cargo-deb`'s `$auto` detects from the linked shared libraries
+    - `<name>-linux-x86_64.tar.gz` / `.deb` + `.sha256` (rolling "latest" aliases, overwritten each release)
+
+Prereleases are supported in the SemVer tag workflow via the `prerelease` input.
+
+### Local tag + release trigger
+
+If you prefer not to manually run the tag workflow in GitHub, use the local helper script:
+
+```bash
+./scripts/release-tag.sh patch          # bump types: patch, minor, major
+./scripts/release-tag.sh minor --prerelease rc
+./scripts/release-tag.sh patch --dry-run  # preview the computed next tag only
+```
+
+The script updates versions in `Cargo.toml`, `exec/dcmnorm/Cargo.toml`, and
+`exec/dcmtalk/Cargo.toml`, then creates a release commit and pushes both the commit and the
+version tag to `origin`. The pushed tag triggers `.github/workflows/release.yml` automatically.
+If no `v*` tags exist yet, the script uses the root `Cargo.toml` `package.version` as the
+baseline for computing the next version.
+
+## Contributing
+
+Issues and pull requests are welcome! Bug reports with a sample file (de-identified, please) are
+especially helpful. If dcmnorm is useful to you, a ⭐ helps others find it.
+
 ## Thanks
 
 This workspace is built on the [DICOM-rs](https://github.com/Enet4/dicom-rs) project's Rust
@@ -1246,3 +1291,7 @@ naming and behavior established by [DCMTK](https://dcmtk.org/), the long-standin
 DICOM toolkit.
 
 Thanks to both projects and their maintainers.
+
+## License
+
+Licensed under the [Apache License, Version 2.0](LICENSE).
