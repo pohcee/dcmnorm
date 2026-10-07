@@ -55,6 +55,29 @@ mod tests {
         assert_eq!(STATUS, Tag(0x0000, 0x0900));
     }
 
+    /// Spot check of tags added by the upstream dicom-rs 62347f24 dictionary update: they resolve
+    /// by keyword and by tag, with their VR.
+    #[test]
+    fn tags_from_upstream_2026_dictionary_update_are_known() {
+        use crate::data_element::StandardDataDictionary;
+        use crate::tags::*;
+        use dcmnorm_core::dictionary::{DataDictionary, DataDictionaryEntry, VirtualVr};
+        use dcmnorm_core::VR;
+
+        let dict = StandardDataDictionary;
+        for (tag, alias, vr) in [
+            (SENSITIVE_CONTENT_CODE_SEQUENCE, "SensitiveContentCodeSequence", VR::SQ),
+            (METAL_ARTIFACT_REDUCTION_SEQUENCE, "MetalArtifactReductionSequence", VR::SQ),
+            (METAL_ARTIFACT_REDUCTION_APPLIED, "MetalArtifactReductionApplied", VR::CS),
+        ] {
+            assert_eq!(dict.parse_tag(alias), Some(tag), "{}", alias);
+            let entry = dict.by_tag(tag).unwrap_or_else(|| panic!("{} not in the dictionary", alias));
+            assert_eq!(entry.alias(), alias);
+            assert_eq!(entry.vr(), VirtualVr::Exact(vr), "{}", alias);
+        }
+        assert_eq!(SENSITIVE_CONTENT_CODE_SEQUENCE, Tag(0x0008, 0x001D));
+    }
+
     /// tests for the presence of a few UID constants
     #[test]
     fn uids_constants_available() {

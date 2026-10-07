@@ -9,7 +9,10 @@ Forked from [dicom-rs](https://github.com/Enet4/dicom-rs)'s
 (`tags.rs`/`uids.rs`/`data_element.rs`/`sop_class.rs`/`lib.rs` are unmodified
 from upstream) — this is ~4000 entries of DICOM Part 6/7 data, not
 hand-written logic, so the port deliberately does not touch the generated
-content. Long-term direction: regenerate this from NEMA's own machine-readable
+content. `tags.rs` has since been refreshed from upstream's own regenerated
+table (dicom-rs 62347f24, released in dicom-dictionary-std 0.10.0: 16 new
+attributes, e.g. SensitiveContentCodeSequence and the Metal Artifact
+Reduction attributes), again verbatim. Long-term direction: regenerate this from NEMA's own machine-readable
 PS3.6/PS3.7 registry so new tag revisions don't wait on any upstream refresh;
 not done yet.
 
