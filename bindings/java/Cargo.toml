@@ -1,0 +1,32 @@
+[package]
+name = "dcmnorm-java"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+# `System.loadLibrary("dcmnorm_java")` looks for `libdcmnorm_java.so` (Linux naming convention) -
+# this name is the one thing Java-side (NativeLoader) and Cargo must agree on.
+name = "dcmnorm_java"
+crate-type = ["cdylib"]
+
+# Mirrors dcmnorm's own default feature set (Cargo.toml) and bindings/node's own copy of this same
+# comment - forwarded explicitly rather than inherited via a plain path dependency, so
+# build-in-docker.sh can opt out of just ffmpeg-codec when git/nasm are unavailable in the build
+# container, the same way bindings/node/build-in-docker.sh already does.
+[features]
+default = ["ffmpeg-codec", "jpeg-ls-codec", "jpeg-xl-codec", "jpeg2000-openjpeg-encode"]
+ffmpeg-codec = ["dcmnorm/ffmpeg-codec"]
+jpeg-ls-codec = ["dcmnorm/jpeg-ls-codec"]
+jpeg-xl-codec = ["dcmnorm/jpeg-xl-codec"]
+jpeg2000-openjpeg-encode = ["dcmnorm/jpeg2000-openjpeg-encode"]
+
+[dependencies]
+dcmnorm = { path = "../..", default-features = false }
+dcmnorm-object = { path = "../../crates/dcmnorm-object" }
+# default-features = false: drops jni's own "invocation" feature (embedding/launching a JVM from
+# Rust), which this crate never does - it's always loaded INTO an already-running JVM via
+# System.load/loadLibrary, the reverse direction.
+jni = { version = "0.21", default-features = false }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"

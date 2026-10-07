@@ -1,7 +1,7 @@
 # dcmnorm
 
 Fast, open-source DICOM toolkit in Rust: parse, render, transcode, reformat, and network.
-Ships as a CLI, a Rust library, and Node.js/Python bindings.
+Ships as a CLI, a Rust library, and Node.js/Python/Java bindings.
 
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Latest release](https://img.shields.io/github/v/release/pohcee/dcmnorm)](https://github.com/pohcee/dcmnorm/releases/latest)
@@ -35,7 +35,7 @@ See [Install](#install) for other options (Cargo, `.deb`, Docker, build from sou
 - **Fast:** fastest of dcmtk, dcm4che, and dcmnorm in every parse, render, and transcode benchmark; DICOM → JSON takes ~3 ms whether the file is 90 KB or 29 MB ([benchmarks](#benchmarks))
 - **Broad:** renders most DICOM imaging SOP classes, including WSI, with modality/VOI LUTs, windowing, and overlays; cine → MP4; MPR reformats; NIfTI/NRRD volume export
 - **Networked:** `dcmtalk` covers C-ECHO/C-STORE/C-FIND/C-MOVE plus a storage SCP, with no dcmtk dependency
-- **Embeddable:** in-process Node.js and Python bindings, plus a Rust library crate
+- **Embeddable:** in-process Node.js, Python, and Java bindings, plus a Rust library crate
 - **Agent-ready:** ships with a skill for popular AI coding assistants
 - **Powers [dcm2bq](https://github.com/GoogleCloudPlatform/dcm2bq):** an open-source DICOM-to-BigQuery project under GoogleCloudPlatform
 
@@ -47,6 +47,7 @@ See [Install](#install) for other options (Cargo, `.deb`, Docker, build from sou
 - [`bindings/node`](bindings/node/): Node.js bindings (`@pohcee/dcmnorm-node`) that call the library in-process via napi-rs — see that package's own README for its API
   - [`bindings/node/examples/test-website`](bindings/node/examples/test-website/): the source for the live demo above — also runnable locally, in Docker, or deployed to your own Cloud Run project
 - [`bindings/python`](bindings/python/): Python bindings (`dcmnorm-python`) that call the library in-process via PyO3 — see that package's own README for its API
+- [`bindings/java`](bindings/java/): Java bindings (`com.pohcee:dcmnorm-java`) that call the library in-process via the [jni](https://docs.rs/jni) crate — see that package's own README for its API
 
 ## Contents
 
@@ -1091,7 +1092,8 @@ tool can't "win" by failing fast (e.g. a dcmtk built without libpng rejects
 │   └── dcmtalk/       # dcmtalk package (the `dcmtalk` binary)
 ├── bindings/
 │   ├── node/          # @pohcee/dcmnorm-node napi-rs bindings
-│   └── python/        # dcmnorm-python PyO3 bindings
+│   ├── python/        # dcmnorm-python PyO3 bindings
+│   └── java/          # dcmnorm-java jni bindings
 ├── scripts/           # install / release helper scripts
 └── test/
     └── files/         # sample DICOM fixtures used by docs and tests

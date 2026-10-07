@@ -18,6 +18,7 @@ members = [
 	"exec/dcmtalk",
 	"bindings/node",
 	"bindings/python",
+	"bindings/java",
 ]
 resolver = "2"
 

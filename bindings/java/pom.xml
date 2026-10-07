@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Builds only the Java side (src/main/java -> target/classes -> target/dcmnorm-java-0.1.0.jar).
+  The native library (src/lib.rs) is a separate Cargo crate, built with `cargo build -p
+  dcmnorm-java` (see build.sh/build-in-docker.sh in this directory) - Maven never invokes Cargo
+  itself. This mirrors how bindings/python keeps Cargo (PyO3/maturin) and bindings/node keeps
+  Cargo (napi-rs) as the sole build driver for their own native artifact; here the two toolchains
+  (Cargo for the .so, Maven for the .jar) are just driven side by side instead of one wrapping
+  the other, since there's no Java-ecosystem equivalent of maturin/napi-rs that drives Cargo for
+  you.
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>com.pohcee</groupId>
+  <artifactId>dcmnorm-java</artifactId>
+  <version>0.1.0</version>
+  <packaging>jar</packaging>
+
+  <name>dcmnorm-java</name>
+  <description>Native Java bindings for dcmnorm (in-process, no CLI subprocess)</description>
+
+  <properties>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <maven.compiler.release>11</maven.compiler.release>
+  </properties>
+
+  <build>
+    <finalName>dcmnorm-java-${project.version}</finalName>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <version>3.13.0</version>
+      </plugin>
+      <plugin>
+        <!-- Smoke.java (src/test/java) has a plain main() - like test/smoke.js and
+             test/smoke.py in the other two bindings, it is a standalone script, not a JUnit
+             suite, run manually via build.sh after packaging (see that script and this
+             directory's README). surefire is skipped so `mvn test`/`mvn package` doesn't try to
+             run it as a JUnit test class and fail for lack of a test framework/the native
+             library not yet being on java.library.path. -->
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <version>3.2.5</version>
+        <configuration>
+          <skip>true</skip>
+        </configuration>
+      </plugin>
+    </plugins>
+  </build>
+</project>
