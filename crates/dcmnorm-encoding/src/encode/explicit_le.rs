@@ -694,7 +694,7 @@ mod tests {
         );
         assert!(
             matches!(result, Err(crate::encode::Error::WriteHeaderTooLong { length: 0x1_0000, .. })),
-            "expected WriteHeaderTooLong, got {result:?}"
+            "expected WriteHeaderTooLong, got {:?}", result
         );
         assert!(out.is_empty(), "nothing should be written for a rejected header");
 
