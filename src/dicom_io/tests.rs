@@ -284,7 +284,7 @@ use super::{
     dicom_file_to_json, read_dicom_file, read_dicom_file_deferring_bulk_data, read_dicom_file_for_frame, read_dicom_json, read_dicom_json_full, read_dicom_json_full_with_source,
     read_dicom_json_with_options, read_dicom_json_with_source,
     redact_dicom_pixels_to_transfer_syntax, remove_attribute, render_all_dicom_video_frames, render_dicom_frame,
-    set_attribute, start_scp, store_scu, transcode_dcmnorm_object, write_dataset_as_dicom_file, write_dicom_bytes, write_dicom_file,
+    set_attribute, start_scp, store_scu, transcode_dcmnorm_object, transcode_dicom_bytes, write_dataset_as_dicom_file, write_dicom_bytes, write_dicom_file,
     write_dicom_json, write_dicom_json_full, write_dicom_json_full_with_source,
     write_dicom_json_with_options, write_dicom_json_with_source, BoundingBox, BoxLength,
     DicomJsonBulkDataMode, DicomJsonFormat, DicomJsonKeyStyle, DicomJsonReadOptions,
@@ -4349,4 +4349,53 @@ fn writing_a_short_form_vr_value_longer_than_16_bits_fails_instead_of_corrupting
     let bytes = write_dicom_bytes(&mut object).unwrap();
     let roundtrip = read_dicom_bytes(&bytes).unwrap();
     assert_eq!(roundtrip.element(tags::STUDY_DESCRIPTION).unwrap().to_str().unwrap().len(), 70_000);
+}
+
+/// Walk the encapsulated Pixel Data of a written Explicit VR Little Endian file, returning its
+/// Basic Offset Table and the actual offset of every fragment item header, measured the way the
+/// table is (from the first byte of the first fragment's item header, PS3.5 A.4).
+fn encapsulated_offset_table_and_fragment_offsets(bytes: &[u8]) -> (Vec<u32>, Vec<u32>) {
+    let header: &[u8] = &[0xE0, 0x7F, 0x10, 0x00, b'O', b'B', 0, 0, 0xFF, 0xFF, 0xFF, 0xFF];
+    let start = bytes
+        .windows(header.len())
+        .rposition(|w| w == header)
+        .expect("written file should have undefined-length encapsulated Pixel Data")
+        + header.len();
+    let item = |at: usize| -> Option<usize> {
+        (bytes.get(at..at + 4)? == [0xFE, 0xFF, 0x00, 0xE0])
+            .then(|| u32::from_le_bytes(bytes[at + 4..at + 8].try_into().unwrap()) as usize)
+    };
+    let bot_len = item(start).expect("Pixel Data should start with the offset table item");
+    let bot = bytes[start + 8..start + 8 + bot_len]
+        .chunks_exact(4)
+        .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+        .collect();
+    let first = start + 8 + bot_len;
+    let mut fragments = Vec::new();
+    let mut at = first;
+    while let Some(len) = item(at) {
+        fragments.push((at - first) as u32);
+        at += 8 + len;
+    }
+    (bot, fragments)
+}
+
+#[test]
+fn transcoding_a_multi_frame_object_to_jpeg_baseline_writes_a_correct_basic_offset_table() {
+    // us2.dcm: 227 frames of 8-bit ultrasound. The JPEG frames come out at odd lengths often
+    // enough to also exercise the padding byte each odd fragment gets when written.
+    let source = std::fs::read(fixture_path("us2.dcm")).unwrap();
+    let bytes = transcode_dicom_bytes(&source, "1.2.840.10008.1.2.4.50").unwrap();
+
+    let (bot, fragment_offsets) = encapsulated_offset_table_and_fragment_offsets(&bytes);
+    assert_eq!(fragment_offsets.len(), 227, "one fragment per frame");
+    assert_eq!(bot, fragment_offsets, "every Basic Offset Table entry must point at its frame's fragment");
+
+    // and the result still decodes back to native pixel data, every frame
+    let native = transcode_dicom_bytes(&bytes, "1.2.840.10008.1.2.1").unwrap();
+    let object = read_dicom_bytes(&native).unwrap();
+    let rows = object.element(tags::ROWS).unwrap().to_int::<usize>().unwrap();
+    let cols = object.element(tags::COLUMNS).unwrap().to_int::<usize>().unwrap();
+    let pixels = object.element(tags::PIXEL_DATA).unwrap().to_bytes().unwrap();
+    assert_eq!(pixels.len(), 227 * rows * cols);
 }
