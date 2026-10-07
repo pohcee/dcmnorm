@@ -96,7 +96,14 @@ impl PixelDataReader for RleLosslessAdapter {
                     decoder
                         .take(rows as u64 * cols as u64)
                         .read_to_end(&mut decoded_segment)
-                        .unwrap();
+                        .whatever_context("Failed to decode RLE segment")?;
+                    // a corrupt segment can decode short, which the interleaving below would overrun
+                    ensure_whatever!(
+                        decoded_segment.len() == rows as usize * cols as usize,
+                        "RLE segment decoded to {} bytes, expected {}",
+                        decoded_segment.len(),
+                        rows as usize * cols as usize
+                    );
 
                     // Interleave pixels as described in the example above.
                     // in 16-bit, this is:
@@ -213,7 +220,14 @@ impl PixelDataReader for RleLosslessAdapter {
                 decoder
                     .take(rows as u64 * cols as u64)
                     .read_to_end(&mut decoded_segment)
-                    .unwrap();
+                    .whatever_context("Failed to decode RLE segment")?;
+                // a corrupt segment can decode short, which the interleaving below would overrun
+                ensure_whatever!(
+                    decoded_segment.len() == rows as usize * cols as usize,
+                    "RLE segment decoded to {} bytes, expected {}",
+                    decoded_segment.len(),
+                    rows as usize * cols as usize
+                );
 
                 // Interleave pixels as described in the example above.
                 let start = if samples_per_pixel == 3 {
@@ -440,6 +454,18 @@ mod test {
             for result in decode_both(&image) {
                 assert!(result.is_err(), "{}: expected an error, got {:?}", name, result);
             }
+        }
+    }
+
+    /// A segment that decodes to fewer bytes than the frame needs used to overrun the
+    /// interleaving loop (an index-out-of-bounds panic, found by mutating mr_rle.dcm).
+    #[test]
+    fn a_segment_that_decodes_short_is_an_error_not_a_panic() {
+        let mut fragment = rle_header(&[64]);
+        fragment.extend_from_slice(&[0x00, 0x2A]); // literal run of 1 byte, for a 2x2 image
+        let image = RleImage { rows: 2, cols: 2, bits_allocated: 8, fragment };
+        for result in decode_both(&image) {
+            assert!(result.is_err(), "expected an error, got {:?}", result);
         }
     }
 

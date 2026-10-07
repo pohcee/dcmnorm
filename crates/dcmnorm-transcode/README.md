@@ -109,7 +109,8 @@ upstream commit):
   allocation guards against implausible compression ratios (upstream
   10f9b6db). The ratio limit is 64:1, PackBits' actual maximum, rather than
   upstream's 32:1, which refuses valid mostly-blank images; and the RLE header
-  itself is validated (64 bytes, at most 15 segments), which upstream doesn't.
+  itself is validated (64 bytes, at most 15 segments), as is each segment's decoded
+  length, neither of which upstream checks.
 - `adapters/jpeg.rs`: color JPEG Baseline output is labeled `YBR_FULL_422`
   (upstream 636ae060), or `YBR_FULL` when `jpeg-encoder` doesn't subsample
   chroma, instead of `RGB`.
