@@ -12,6 +12,7 @@ use dcmnorm_core::header::{DataElement, HasLength, Header, Tag};
 use dcmnorm_core::value::{C, DataSetSequence, PixelFragmentSequence, Value};
 use dcmnorm_core::{ops::AttributeOp, PrimitiveValue, VR};
 use dcmnorm_encoding::transfer_syntax::{Codec, TransferSyntax};
+use dcmnorm_parser::dataset::read::DataSetReaderOptions;
 use dcmnorm_parser::dataset::{DataSetReader, DataSetWriter, DataToken};
 
 use crate::error::{ReadError, WriteError};
@@ -203,11 +204,21 @@ impl InMemDicomObject {
         source: R,
         ts: &TransferSyntax,
     ) -> Result<Self, ReadError> {
+        Self::read_dataset_with_ts_options(source, ts, DataSetReaderOptions::default())
+    }
+
+    /// [`Self::read_dataset_with_ts`] with explicit reader options, e.g.
+    /// [`DataSetReaderOptions::flexible_decoding`].
+    pub fn read_dataset_with_ts_options<'r, R: Read + 'r>(
+        source: R,
+        ts: &TransferSyntax,
+        options: DataSetReaderOptions,
+    ) -> Result<Self, ReadError> {
         let source: Box<dyn Read + 'r> = match ts.codec() {
             Codec::Dataset(Some(adapter)) => adapter.adapt_reader(Box::new(source)),
             _ => Box::new(source),
         };
-        let mut reader = DataSetReader::new_with_ts(source, ts)
+        let mut reader = DataSetReader::new_with_ts_options(source, ts, options)
             .map_err(|source| ReadError::Dataset { source })?;
         build_dataset(&mut reader, false)
     }
@@ -372,13 +383,14 @@ pub(crate) fn read_dataset_until<'r>(
     source: impl Read + 'r,
     ts: &TransferSyntax,
     stop_tag: Tag,
+    options: DataSetReaderOptions,
 ) -> Result<InMemDicomObject, ReadError> {
     let source: Box<dyn Read + 'r> = match ts.codec() {
         Codec::Dataset(Some(adapter)) => adapter.adapt_reader(Box::new(source)),
         _ => Box::new(source),
     };
-    let mut reader =
-        DataSetReader::new_with_ts(source, ts).map_err(|source| ReadError::Dataset { source })?;
+    let mut reader = DataSetReader::new_with_ts_options(source, ts, options)
+        .map_err(|source| ReadError::Dataset { source })?;
     let mut elements = Vec::new();
 
     loop {

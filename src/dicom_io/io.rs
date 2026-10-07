@@ -403,15 +403,22 @@ fn read_dicom_dataset_without_meta(bytes: &[u8]) -> Option<DefaultDicomObject> {
     None
 }
 
+// Both readers fall back in turn when a strict read fails, keeping the strict read's error if
+// every fallback fails too: first to detecting explicit vs implicit VR from the data set itself
+// (`flexible_decoding`, for files that declare Explicit VR Little Endian but write Implicit VR -
+// a strict read of those fails at the first element), then to a data set without a meta group.
+// A file the strict read accepts is never reinterpreted.
 pub fn read_dicom_file<P>(path: P) -> Result<DefaultDicomObject, ReadError>
 where
     P: AsRef<Path>,
 {
     let path_ref = path.as_ref();
+    let options = OpenFileOptions::new().read_preamble(ReadPreamble::Always);
 
-    OpenFileOptions::new()
-        .read_preamble(ReadPreamble::Always)
+    options
+        .clone()
         .open_file(path_ref)
+        .or_else(|error| options.flexible_decoding(true).open_file(path_ref).map_err(|_| error))
         .or_else(|error| match std::fs::read(path_ref) {
             Ok(bytes) => read_dicom_dataset_without_meta(&bytes).ok_or(error),
             Err(_) => Err(error),
@@ -420,10 +427,12 @@ where
 
 pub fn read_dicom_bytes(bytes: impl AsRef<[u8]>) -> Result<DefaultDicomObject, ReadError> {
     let bytes = bytes.as_ref();
+    let options = OpenFileOptions::new().read_preamble(ReadPreamble::Always);
 
-    OpenFileOptions::new()
-        .read_preamble(ReadPreamble::Always)
+    options
+        .clone()
         .from_reader(Cursor::new(bytes))
+        .or_else(|error| options.flexible_decoding(true).from_reader(Cursor::new(bytes)).map_err(|_| error))
         .or_else(|error| read_dicom_dataset_without_meta(bytes).ok_or(error))
 }
 

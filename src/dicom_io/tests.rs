@@ -4446,3 +4446,85 @@ fn transcoding_rgb_to_jpeg_baseline_labels_it_ybr_and_round_trips_the_colors() {
         / reference.as_raw().len() as f64;
     assert!(render_error < 4.0, "rendered JPEG drifted from the source render: mean |error| = {render_error:.2}");
 }
+
+/// `sr.dcm` (Implicit VR Little Endian) with only its declared transfer syntax rewritten to
+/// Explicit VR Little Endian - the non-conformant shape some writers produce.
+fn implicit_vr_file_declaring_explicit_vr() -> Vec<u8> {
+    let mut bytes = std::fs::read(fixture_path("sr.dcm")).unwrap();
+    assert_eq!(&bytes[128..132], b"DICM");
+    assert_eq!(&bytes[132..138], b"\x02\x00\x00\x00UL", "expected (0002,0000) first");
+    let group_length = u32::from_le_bytes(bytes[140..144].try_into().unwrap()) as usize;
+    let at = (144..144 + group_length)
+        .find(|&i| bytes[i..].starts_with(b"\x02\x00\x10\x00UI"))
+        .expect("TransferSyntaxUID in the meta group");
+    let old_len = u16::from_le_bytes(bytes[at + 6..at + 8].try_into().unwrap()) as usize;
+    assert_eq!(&bytes[at + 8..at + 8 + old_len], b"1.2.840.10008.1.2\0");
+    let new_value = b"1.2.840.10008.1.2.1\0";
+    let mut replacement = (new_value.len() as u16).to_le_bytes().to_vec();
+    replacement.extend_from_slice(new_value);
+    bytes.splice(at + 6..at + 8 + old_len, replacement);
+    let new_group_length = (group_length + new_value.len() - old_len) as u32;
+    bytes[140..144].copy_from_slice(&new_group_length.to_le_bytes());
+    bytes
+}
+
+/// A data set's content in a canonical byte form, for comparing objects: `InMemDicomObject`'s
+/// `PartialEq` can't, since an undefined `Length` never equals anything (not even itself), and
+/// re-written sequences get undefined lengths.
+fn canonical_dataset_bytes(object: &dcmnorm_object::InMemDicomObject) -> Vec<u8> {
+    use dcmnorm_encoding::TransferSyntaxIndex;
+    let ts = dcmnorm_transcode::TransferSyntaxRegistry.get(uids::EXPLICIT_VR_LITTLE_ENDIAN).unwrap();
+    let mut bytes = Vec::new();
+    object.write_dataset_with_ts(&mut bytes, ts).unwrap();
+    bytes
+}
+
+#[test]
+fn reads_a_file_declaring_explicit_vr_that_is_encoded_implicit() {
+    // Ported upstream dicom-rs e5e2a99a (AdaptiveVRLittleEndianDecoder): a strict read fails at
+    // the first data set element, so dcmnorm retries detecting the VR encoding from the data.
+    let mismatched = implicit_vr_file_declaring_explicit_vr();
+    assert!(
+        dcmnorm_object::OpenFileOptions::new().read_preamble(dcmnorm_object::ReadPreamble::Always).from_reader(mismatched.as_slice()).is_err(),
+        "the strict read should reject this file, or the fallback is not what's being tested"
+    );
+
+    let reference = read_dicom_file(fixture_path("sr.dcm")).unwrap();
+    let object = read_dicom_bytes(&mismatched).unwrap();
+    assert_eq!(object.meta().transfer_syntax().trim_end_matches('\0'), uids::EXPLICIT_VR_LITTLE_ENDIAN);
+    assert_eq!(
+        canonical_dataset_bytes(&object),
+        canonical_dataset_bytes(&reference),
+        "the data set should read exactly as the correctly-labeled file"
+    );
+
+    // the same through the path-based reader
+    let path = temp_file_path("dcmnorm-mismatched-ts");
+    std::fs::write(&path, &mismatched).unwrap();
+    let from_path = read_dicom_file(&path);
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(canonical_dataset_bytes(&from_path.unwrap()), canonical_dataset_bytes(&reference));
+
+    // writing it back produces a conformant Explicit VR file that strictly reads the same
+    let mut object = object;
+    let written = write_dicom_bytes(&mut object).unwrap();
+    let reread = dcmnorm_object::OpenFileOptions::new().read_preamble(dcmnorm_object::ReadPreamble::Always).from_reader(written.as_slice()).unwrap();
+    assert_eq!(canonical_dataset_bytes(&reread), canonical_dataset_bytes(&reference));
+}
+
+#[test]
+fn flexible_decoding_reads_conformant_files_unchanged() {
+    // The fallback only runs after a strict failure, but the option itself must also be harmless
+    // on conformant files of either VR encoding (and on Big Endian, which it leaves alone).
+    let mut compared = 0;
+    for entry in std::fs::read_dir(fixture_path("")).unwrap() {
+        let path = entry.unwrap().path();
+        let Ok(strict) = dcmnorm_object::OpenFileOptions::new().open_file(&path) else { continue };
+        let flexible = dcmnorm_object::OpenFileOptions::new().flexible_decoding(true).open_file(&path);
+        let flexible = flexible.unwrap_or_else(|e| panic!("{}: strict read succeeded, flexible failed: {e}", path.display()));
+        assert_eq!(canonical_dataset_bytes(&flexible), canonical_dataset_bytes(&strict), "{}", path.display());
+        compared += 1;
+    }
+    assert!(compared > 40, "expected to compare most fixtures, compared {compared}");
+}
+

@@ -6,6 +6,7 @@ use std::io::{BufReader, Cursor, Read, Write};
 use std::path::Path;
 
 use dcmnorm_encoding::transfer_syntax::TransferSyntaxIndex;
+use dcmnorm_parser::dataset::read::DataSetReaderOptions;
 use dcmnorm_transcode::TransferSyntaxRegistry;
 
 use crate::error::{ReadError, WriteError};
@@ -120,6 +121,7 @@ pub enum ReadPreamble {
 pub struct OpenFileOptions {
     read_preamble: ReadPreamble,
     read_until: Option<dcmnorm_core::Tag>,
+    flexible_decoding: bool,
 }
 
 impl OpenFileOptions {
@@ -140,6 +142,16 @@ impl OpenFileOptions {
         self
     }
 
+    /// Detect from the data set itself whether a Little Endian file is encoded with explicit or
+    /// implicit VRs, instead of trusting its declared transfer syntax - for non-conformant files
+    /// that declare Explicit VR Little Endian but write Implicit VR (see
+    /// `DataSetReaderOptions::flexible_decoding`). Applies to [`Self::open_file`] and
+    /// [`Self::from_reader`]. Off by default.
+    pub fn flexible_decoding(mut self, flexible_decoding: bool) -> Self {
+        self.flexible_decoding = flexible_decoding;
+        self
+    }
+
     pub fn open_file(self, path: impl AsRef<Path>) -> Result<DefaultDicomObject, ReadError> {
         let file = File::open(path.as_ref()).map_err(|source| ReadError::Io {
             source,
@@ -154,10 +166,11 @@ impl OpenFileOptions {
             uid: meta.transfer_syntax.clone(),
         })?;
 
+        let options = DataSetReaderOptions::default().flexible_decoding(self.flexible_decoding);
         let object = if let Some(stop_tag) = self.read_until {
-            crate::mem::read_dataset_until(source, ts, stop_tag)?
+            crate::mem::read_dataset_until(source, ts, stop_tag, options)?
         } else {
-            InMemDicomObject::read_dataset_with_ts(source, ts)?
+            InMemDicomObject::read_dataset_with_ts_options(source, ts, options)?
         };
         backfill_media_storage_uids(&mut meta, &object);
         Ok(FileDicomObject { meta, object })
