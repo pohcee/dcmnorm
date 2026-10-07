@@ -4399,3 +4399,50 @@ fn transcoding_a_multi_frame_object_to_jpeg_baseline_writes_a_correct_basic_offs
     let pixels = object.element(tags::PIXEL_DATA).unwrap().to_bytes().unwrap();
     assert_eq!(pixels.len(), 227 * rows * cols);
 }
+
+#[test]
+fn transcoding_rgb_to_jpeg_baseline_labels_it_ybr_and_round_trips_the_colors() {
+    // JPEG Baseline stores YCbCr, so an RGB source must come out labeled YBR_FULL_422 (chroma is
+    // subsampled at the default quality), per PS3.5 8.2.1. Decoding must not then apply a second
+    // YCbCr->RGB conversion: both decoding back to native and rendering must match the source.
+    let source = read_dicom_file(fixture_path("us.dcm")).unwrap();
+    assert_eq!(source.element(tags::PHOTOMETRIC_INTERPRETATION).unwrap().to_str().unwrap(), "RGB");
+    let jpeg = transcode_dcmnorm_object(&source, "1.2.840.10008.1.2.4.50").unwrap();
+    assert_eq!(
+        jpeg.element(tags::PHOTOMETRIC_INTERPRETATION).unwrap().to_str().unwrap(),
+        "YBR_FULL_422"
+    );
+
+    // re-read from bytes, as a consumer of the written file would
+    let jpeg = read_dicom_bytes(write_dicom_bytes(&mut jpeg.clone()).unwrap()).unwrap();
+
+    let native = transcode_dcmnorm_object(&jpeg, uids::EXPLICIT_VR_LITTLE_ENDIAN).unwrap();
+    assert_eq!(native.element(tags::PHOTOMETRIC_INTERPRETATION).unwrap().to_str().unwrap(), "RGB");
+    let original = source.element(tags::PIXEL_DATA).unwrap().to_bytes().unwrap();
+    let decoded = native.element(tags::PIXEL_DATA).unwrap().to_bytes().unwrap();
+    assert_eq!(decoded.len(), original.len());
+    let mean_abs_error = original
+        .iter()
+        .zip(decoded.iter())
+        .map(|(a, b)| (i32::from(*a) - i32::from(*b)).unsigned_abs() as u64)
+        .sum::<u64>() as f64
+        / original.len() as f64;
+    // lossy at quality 85 with 4:2:0 chroma: a few levels on average. A double color conversion
+    // shifts every pixel by tens of levels.
+    assert!(mean_abs_error < 4.0, "decoded samples drifted from the source: mean |error| = {mean_abs_error:.2}");
+
+    let render = |object: &dcmnorm_object::DefaultDicomObject| {
+        let rendered = render_dicom_frame(object, RenderOutputFormat::Png, &RenderPipelineOptions::default()).unwrap();
+        image::load_from_memory(&rendered.bytes).unwrap().to_rgb8()
+    };
+    let (reference, rendered) = (render(&source), render(&jpeg));
+    assert_eq!(reference.dimensions(), rendered.dimensions());
+    let render_error = reference
+        .as_raw()
+        .iter()
+        .zip(rendered.as_raw())
+        .map(|(a, b)| (i32::from(*a) - i32::from(*b)).unsigned_abs() as u64)
+        .sum::<u64>() as f64
+        / reference.as_raw().len() as f64;
+    assert!(render_error < 4.0, "rendered JPEG drifted from the source render: mean |error| = {render_error:.2}");
+}
