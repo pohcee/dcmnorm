@@ -4328,3 +4328,25 @@ fn deferred_bulk_data_json_handles_defined_length_items_and_thresholds() {
     assert!(deferred_json.contains("FFFCFFFC"), "trailing element after PixelData was dropped");
     fs::remove_file(&path).ok();
 }
+
+#[test]
+fn writing_a_short_form_vr_value_longer_than_16_bits_fails_instead_of_corrupting_the_file() {
+    // Explicit VR short-form VRs (LO, PN, CS, ...) carry a 16-bit length field. A value longer
+    // than 65535 bytes used to be written with its length silently truncated, producing a file
+    // whose remaining elements are misparsed from the middle of that value. It must fail.
+    let mut object = read_dicom_file(fixture_path("mr_small.dcm")).unwrap();
+    object.put_str(tags::STUDY_DESCRIPTION, dcmnorm_core::VR::LO, "X".repeat(70_000));
+    let error = write_dicom_bytes(&mut object)
+        .expect_err("a 70000-byte LO cannot be written in Explicit VR Little Endian");
+    assert!(
+        error.to_string().contains("16-bit length") || format!("{error:?}").contains("WriteHeaderTooLong"),
+        "unexpected error: {error} ({error:?})"
+    );
+
+    // the same value fits in Implicit VR (32-bit lengths), so writing that still succeeds
+    let mut object = read_dicom_file(fixture_path("sr.dcm")).unwrap();
+    object.put_str(tags::STUDY_DESCRIPTION, dcmnorm_core::VR::LO, "X".repeat(70_000));
+    let bytes = write_dicom_bytes(&mut object).unwrap();
+    let roundtrip = read_dicom_bytes(&bytes).unwrap();
+    assert_eq!(roundtrip.element(tags::STUDY_DESCRIPTION).unwrap().to_str().unwrap().len(), 70_000);
+}

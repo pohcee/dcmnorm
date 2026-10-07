@@ -2,8 +2,8 @@
 
 use crate::encode::basic::BigEndianBasicEncoder;
 use crate::encode::{
-    BasicEncode, Encode, Result, WriteHeaderSnafu, WriteItemDelimiterSnafu, WriteItemHeaderSnafu,
-    WriteOffsetTableSnafu, WriteSequenceDelimiterSnafu, WriteTagSnafu,
+    BasicEncode, Encode, Result, WriteHeaderSnafu, WriteHeaderTooLongSnafu, WriteItemDelimiterSnafu,
+    WriteItemHeaderSnafu, WriteOffsetTableSnafu, WriteSequenceDelimiterSnafu, WriteTagSnafu,
 };
 
 use byteordered::byteorder::{BigEndian, ByteOrder};
@@ -124,13 +124,19 @@ impl Encode for ExplicitVRBigEndianEncoder {
             | VR::UI
             | VR::UL
             | VR::US => {
+                let length = de.length().0;
+                if length > u16::MAX as u32 {
+                    return WriteHeaderTooLongSnafu {
+                        length,
+                    }.fail();
+                }
                 let mut buf = [0u8; 8];
                 BigEndian::write_u16(&mut buf[0..], de.tag().group());
                 BigEndian::write_u16(&mut buf[2..], de.tag().element());
                 let vr_bytes = de.vr().to_bytes();
                 buf[4] = vr_bytes[0];
                 buf[5] = vr_bytes[1];
-                BigEndian::write_u16(&mut buf[6..], de.length().0 as u16);
+                BigEndian::write_u16(&mut buf[6..], length as u16);
                 to.write_all(&buf).context(WriteHeaderSnafu)?;
 
                 Ok(8)
@@ -674,5 +680,36 @@ mod tests {
         assert_eq!(&out[..], RAW_SEQUENCE_ITEMS);
 
         Ok(())
+    }
+
+    /// Regression test for upstream dicom-rs bff112e6 (OVF_6 of Enet4/dicom-rs#768): a short-form
+    /// VR has only a 16-bit length field, so a longer value used to have its length silently
+    /// truncated (`as u16`), writing a header that disagrees with the bytes that follow and
+    /// corrupting the rest of the file. It must be rejected instead.
+    #[test]
+    fn short_form_vr_header_rejects_lengths_over_16_bits() {
+        let enc = ExplicitVRBigEndianEncoder::default();
+
+        let mut out = Vec::new();
+        let result = enc.encode_element_header(
+            &mut out,
+            DataElementHeader::new(Tag(0x0010, 0x0010), VR::PN, Length(0x1_0000)),
+        );
+        assert!(
+            matches!(result, Err(crate::encode::Error::WriteHeaderTooLong { length: 0x1_0000, .. })),
+            "expected WriteHeaderTooLong, got {result:?}"
+        );
+        assert!(out.is_empty(), "nothing should be written for a rejected header");
+
+        // the largest length that still fits is written as-is
+        let mut out = Vec::new();
+        let written = enc
+            .encode_element_header(
+                &mut out,
+                DataElementHeader::new(Tag(0x0010, 0x0010), VR::PN, Length(0xFFFF)),
+            )
+            .expect("a 16-bit length should encode");
+        assert_eq!(written, 8);
+        assert_eq!(out.len(), 8);
     }
 }
