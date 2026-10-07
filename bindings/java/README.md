@@ -248,11 +248,18 @@ arbitrary host risks a `GLIBC_X.XX not found` failure that only surfaces once de
 (plain host build) is for fast local iteration only - don't commit its output; only the
 `.so`/jar `build-in-docker.sh` produces is meant to be committed.
 
+The [`Build Bindings`](../../.github/workflows/build-bindings.yml) GitHub Actions workflow runs
+`build-in-docker.sh` (for all three bindings) and commits whatever changed, on every push to
+`main` that touches the core library or this binding's own source, as well as on manual dispatch -
+this is what actually produces and commits `src/main/resources/native/linux-x64/
+libdcmnorm_java.so` in practice, rather than a maintainer needing to run the script by hand from a
+machine with Docker.
+
 **Note on the state of this packaging step:** `build-in-docker.sh` has been written to the same
-pattern as the other two bindings' own scripts but, unlike theirs, has not actually been run
-against a real Docker daemon as part of adding this binding (the environment this was developed
-in has no Docker daemon available) - `build.sh` (the plain host build) and the full smoke test
-*have* been run and pass. Running `build-in-docker.sh` once, from an environment with Docker
-available, to produce and commit the first real `src/main/resources/native/linux-x64/
-libdcmnorm_java.so` is the one remaining step before this binding is actually consumable as a
-jar rather than built from source.
+pattern as the other two bindings' own scripts but, unlike theirs, had not been run against a
+real Docker daemon as of this binding's own first version (the environment it was developed in
+had no Docker daemon available) - `build.sh` (the plain host build) and the full smoke test *did*
+run and pass there. The first real run of the `Build Bindings` workflow after this lands on `main`
+is effectively that validation - if it fails, the `build-java` job's log is the place to start
+(most likely culprit: an apt package name that's moved since this was written, or a step that
+assumed something about the container beyond what `debian:bookworm-slim` actually provides).

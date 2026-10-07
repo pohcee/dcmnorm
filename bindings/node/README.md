@@ -175,3 +175,8 @@ followed by `npm test`, so cutting a release always ships a binary that's
 actually safe for the deploy target — you don't need to remember to do this
 by hand. `build`/`build:debug` (plain host builds) are for fast local
 iteration only; don't commit their output.
+
+The [`Build Bindings`](../../.github/workflows/build-bindings.yml) GitHub Actions workflow also
+runs `build-in-docker.sh` (for all three bindings) and commits whatever changed, on every push to
+`main` that touches the core library or this binding's own source — so the committed `.node` file
+stays in sync automatically between releases too, not just when `npm run release` is run by hand.

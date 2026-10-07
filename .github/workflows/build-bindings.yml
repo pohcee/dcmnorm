@@ -1,0 +1,162 @@
+name: Build Bindings
+
+# Rebuilds each binding's committed native artifact (see each binding's own README's "Packaging"
+# section for why these are committed rather than built at a consumer's Docker-image time) and
+# pushes a commit with whatever changed. This is a straight invocation of each binding's own
+# build-in-docker.sh - GitHub's hosted ubuntu-latest runners come with a working Docker daemon,
+# so these scripts (designed for a human running `docker run` from their own machine) run here
+# completely unmodified, bind-mounting the actual checkout instead of a local clone.
+#
+# Triggers on a push to main that touches anything that could change a binding's compiled output
+# (the core library, a binding's own Rust source, or its build script), plus workflow_dispatch for
+# an on-demand rebuild (e.g. after changing something this path list doesn't cover, or to recover
+# from a failed run). The three builds run as independent jobs so one binding failing doesn't
+# block seeing the other two's results, but committing only happens if all three succeed - a
+# partial rebuild is never pushed silently.
+#
+# This workflow's own commit touches only the compiled artifacts (the .node file, the wheel, the
+# .so), never the paths the trigger below watches - so it cannot re-trigger itself.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "bindings/node/src/**"
+      - "bindings/node/Cargo.toml"
+      - "bindings/node/build-in-docker.sh"
+      - "bindings/python/src/**"
+      - "bindings/python/Cargo.toml"
+      - "bindings/python/pyproject.toml"
+      - "bindings/python/build-in-docker.sh"
+      - "bindings/java/src/**"
+      - "bindings/java/Cargo.toml"
+      - "bindings/java/pom.xml"
+      - "bindings/java/build-in-docker.sh"
+  workflow_dispatch: {}
+
+concurrency:
+  group: build-bindings-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-node:
+    name: Build Node bindings
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run build-in-docker.sh
+        run: bindings/node/build-in-docker.sh
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dcmnorm-node-binary
+          path: bindings/node/dcmnorm-node.linux-x64-gnu.node
+          if-no-files-found: error
+
+  build-python:
+    name: Build Python bindings
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Remove the previously committed wheel
+        # build-in-docker.sh itself only ever ADDS a file to dist/ (maturin's --out doesn't
+        # clear it first) - without this, a fresh checkout's already-committed wheel would still
+        # be sitting in dist/ right alongside the new one, and the artifact upload below would
+        # pick up both.
+        run: rm -f bindings/python/dist/*.whl
+
+      - name: Run build-in-docker.sh
+        run: bindings/python/build-in-docker.sh
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dcmnorm-python-wheel
+          path: bindings/python/dist/*.whl
+          if-no-files-found: error
+
+  build-java:
+    name: Build Java bindings
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run build-in-docker.sh
+        run: bindings/java/build-in-docker.sh
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dcmnorm-java-native
+          path: bindings/java/src/main/resources/native/linux-x64/libdcmnorm_java.so
+          if-no-files-found: error
+
+  commit:
+    name: Commit rebuilt artifacts
+    needs: [build-node, build-python, build-java]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download Node artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: dcmnorm-node-binary
+          path: bindings/node/
+
+      - name: Download Python artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: dcmnorm-python-wheel
+          path: bindings/python/dist-new/
+
+      - name: Download Java artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: dcmnorm-java-native
+          path: bindings/java/src/main/resources/native/linux-x64/
+
+      - name: Replace the committed wheel
+        # The wheel's filename encodes both the package version and the glibc-derived manylinux
+        # tag (see bindings/python/build-in-docker.sh's own comment on why that tag is
+        # auto-detected, not fixed) - a rebuild without a version bump can still legitimately
+        # produce a differently-named file. Clear the old one(s) out first so dist/ never ends up
+        # tracking more than the one wheel this run actually produced.
+        run: |
+          set -euo pipefail
+          rm -f bindings/python/dist/*.whl
+          mv bindings/python/dist-new/*.whl bindings/python/dist/
+          rmdir bindings/python/dist-new
+
+      - name: Commit and push
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add bindings/node/dcmnorm-node.linux-x64-gnu.node
+          git add bindings/python/dist
+          git add bindings/java/src/main/resources/native
+
+          if git diff --cached --quiet; then
+            echo "No binary changes to commit"
+            exit 0
+          fi
+
+          git commit \
+            -m "chore(bindings): rebuild native artifacts" \
+            -m "Rebuilt by the Build Bindings workflow (run ${{ github.run_id }}) from ${{ github.sha }}."
+          git push origin "HEAD:${{ github.ref_name }}"

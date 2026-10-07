@@ -230,3 +230,8 @@ whatever glibc symbol versions the compiled `.so` actually references, auto-dete
 not something to hardcode or rely on staying the same across builds) works unmodified against any
 CPython >= 3.9, rather than needing one wheel per Python minor version - the Python analog of `bindings/node`
 committing a single `.node` binary per platform/arch rather than per Node version.
+
+The [`Build Bindings`](../../.github/workflows/build-bindings.yml) GitHub Actions workflow also
+runs `build-in-docker.sh` (for all three bindings) and commits whatever changed, on every push to
+`main` that touches the core library or this binding's own source - so the committed wheel stays
+in sync automatically rather than relying on a maintainer to remember to re-run this script.
