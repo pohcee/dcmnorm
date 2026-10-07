@@ -399,7 +399,7 @@ mod tests {
     #[test]
     fn adaptive_reads_explicit_vr() {
         let reader = AdaptiveVRLittleEndianDecoder::with_std_dict();
-        let mut cursor = Cursor::new(RAW_EXPLICIT.as_ref());
+        let mut cursor = Cursor::new(RAW_EXPLICIT);
         {
             let (elem, bytes_read) = reader
                 .decode_header(&mut cursor)
@@ -448,7 +448,7 @@ mod tests {
     #[test]
     fn adaptive_reads_implicit_vr() {
         let reader = AdaptiveVRLittleEndianDecoder::with_dict(DICT);
-        let mut cursor = Cursor::new(RAW_IMPLICIT.as_ref());
+        let mut cursor = Cursor::new(RAW_IMPLICIT);
         {
             let (elem, bytes_read) = reader
                 .decode_header(&mut cursor)
@@ -473,7 +473,7 @@ mod tests {
     #[test]
     fn adaptive_reads_implicit_with_standard_dict() {
         let reader = AdaptiveVRLittleEndianDecoder::with_std_dict();
-        let mut cursor = Cursor::new(RAW_IMPLICIT.as_ref());
+        let mut cursor = Cursor::new(RAW_IMPLICIT);
         {
             let (elem, _) = reader
                 .decode_header(&mut cursor)
@@ -507,7 +507,7 @@ mod tests {
     #[test]
     fn adaptive_reads_delimiters() {
         let reader = AdaptiveVRLittleEndianDecoder::with_std_dict();
-        let mut cursor = Cursor::new(RAW_DELIMITERS.as_ref());
+        let mut cursor = Cursor::new(RAW_DELIMITERS);
         {
             let (elem, bytes_read) = reader
                 .decode_header(&mut cursor)
@@ -564,7 +564,7 @@ mod tests {
     #[test]
     fn adaptive_rejects_false_positive_vr() {
         let reader = AdaptiveVRLittleEndianDecoder::with_std_dict();
-        let mut cursor = Cursor::new(RAW_IMPLICIT_VR_COLLISION.as_ref());
+        let mut cursor = Cursor::new(RAW_IMPLICIT_VR_COLLISION);
         let (elem, bytes_read) = reader
             .decode_header(&mut cursor)
             .expect("should find an element");
@@ -605,7 +605,7 @@ mod tests {
     #[test]
     fn adaptive_explicit_then_delimiter() {
         let reader = AdaptiveVRLittleEndianDecoder::with_std_dict();
-        let mut cursor = Cursor::new(RAW_EXPLICIT_THEN_DELIMITER.as_ref());
+        let mut cursor = Cursor::new(RAW_EXPLICIT_THEN_DELIMITER);
         {
             let (elem, _) = reader
                 .decode_header(&mut cursor)

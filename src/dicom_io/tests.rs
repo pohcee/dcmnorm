@@ -4366,10 +4366,8 @@ fn encapsulated_offset_table_and_fragment_offsets(bytes: &[u8]) -> (Vec<u32>, Ve
             .then(|| u32::from_le_bytes(bytes[at + 4..at + 8].try_into().unwrap()) as usize)
     };
     let bot_len = item(start).expect("Pixel Data should start with the offset table item");
-    let bot = bytes[start + 8..start + 8 + bot_len]
-        .chunks_exact(4)
-        .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
-        .collect();
+    let (bot, _) = bytes[start + 8..start + 8 + bot_len].as_chunks::<4>();
+    let bot = bot.iter().map(|c| u32::from_le_bytes(*c)).collect();
     let first = start + 8 + bot_len;
     let mut fragments = Vec::new();
     let mut at = first;
