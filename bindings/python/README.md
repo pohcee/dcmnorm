@@ -232,6 +232,8 @@ CPython >= 3.9, rather than needing one wheel per Python minor version - the Pyt
 committing a single `.node` binary per platform/arch rather than per Node version.
 
 The [`Build Bindings`](../../.github/workflows/build-bindings.yml) GitHub Actions workflow also
-runs `build-in-docker.sh` (for all three bindings) and commits whatever changed, on every push to
-`main` that touches the core library or this binding's own source - so the committed wheel stays
-in sync automatically rather than relying on a maintainer to remember to re-run this script.
+runs `build-in-docker.sh` (for all three bindings) and commits whatever changed - triggered the
+same way [`release.yml`](../../.github/workflows/release.yml) is, by a pushed `v*.*.*` tag (i.e.
+whenever [`semver-tag.yml`](../../.github/workflows/semver-tag.yml) cuts a new version) - so the
+committed wheel is rebuilt as part of cutting a release rather than relying on a maintainer to
+remember to re-run this script by hand.

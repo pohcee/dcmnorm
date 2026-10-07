@@ -249,17 +249,19 @@ arbitrary host risks a `GLIBC_X.XX not found` failure that only surfaces once de
 `.so`/jar `build-in-docker.sh` produces is meant to be committed.
 
 The [`Build Bindings`](../../.github/workflows/build-bindings.yml) GitHub Actions workflow runs
-`build-in-docker.sh` (for all three bindings) and commits whatever changed, on every push to
-`main` that touches the core library or this binding's own source, as well as on manual dispatch -
-this is what actually produces and commits `src/main/resources/native/linux-x64/
-libdcmnorm_java.so` in practice, rather than a maintainer needing to run the script by hand from a
-machine with Docker.
+`build-in-docker.sh` (for all three bindings) and commits whatever changed - triggered the same
+way [`release.yml`](../../.github/workflows/release.yml) is, by a pushed `v*.*.*` tag (i.e.
+whenever [`semver-tag.yml`](../../.github/workflows/semver-tag.yml) cuts a new version), as well
+as on manual dispatch - this is what actually produces and commits
+`src/main/resources/native/linux-x64/libdcmnorm_java.so` in practice, rather than a maintainer
+needing to run the script by hand from a machine with Docker.
 
 **Note on the state of this packaging step:** `build-in-docker.sh` has been written to the same
 pattern as the other two bindings' own scripts but, unlike theirs, had not been run against a
 real Docker daemon as of this binding's own first version (the environment it was developed in
 had no Docker daemon available) - `build.sh` (the plain host build) and the full smoke test *did*
-run and pass there. The first real run of the `Build Bindings` workflow after this lands on `main`
-is effectively that validation - if it fails, the `build-java` job's log is the place to start
-(most likely culprit: an apt package name that's moved since this was written, or a step that
-assumed something about the container beyond what `debian:bookworm-slim` actually provides).
+run and pass there. The first real run of the `Build Bindings` workflow (the next time a version
+is tagged, or a manual `workflow_dispatch` run) is effectively that validation - if it fails, the
+`build-java` job's log is the place to start (most likely culprit: an apt package name that's
+moved since this was written, or a step that assumed something about the container beyond what
+`debian:bookworm-slim` actually provides).

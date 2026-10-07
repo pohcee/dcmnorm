@@ -177,6 +177,8 @@ by hand. `build`/`build:debug` (plain host builds) are for fast local
 iteration only; don't commit their output.
 
 The [`Build Bindings`](../../.github/workflows/build-bindings.yml) GitHub Actions workflow also
-runs `build-in-docker.sh` (for all three bindings) and commits whatever changed, on every push to
-`main` that touches the core library or this binding's own source — so the committed `.node` file
-stays in sync automatically between releases too, not just when `npm run release` is run by hand.
+runs `build-in-docker.sh` (for all three bindings) and commits whatever changed — triggered the
+same way [`release.yml`](../../.github/workflows/release.yml) is, by a pushed `v*.*.*` tag (i.e.
+whenever [`semver-tag.yml`](../../.github/workflows/semver-tag.yml) cuts a new version) — so the
+committed `.node` file is rebuilt as part of cutting a release even if `npm run release` wasn't
+run by hand for this particular one.

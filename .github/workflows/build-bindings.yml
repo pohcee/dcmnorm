@@ -7,39 +7,28 @@ name: Build Bindings
 # so these scripts (designed for a human running `docker run` from their own machine) run here
 # completely unmodified, bind-mounting the actual checkout instead of a local clone.
 #
-# Triggers on a push to main that touches anything that could change a binding's compiled output
-# (the core library, a binding's own Rust source, or its build script), plus workflow_dispatch for
-# an on-demand rebuild (e.g. after changing something this path list doesn't cover, or to recover
-# from a failed run). The three builds run as independent jobs so one binding failing doesn't
-# block seeing the other two's results, but committing only happens if all three succeed - a
-# partial rebuild is never pushed silently.
+# Triggered the same way release.yml (CLI binaries/debs) is: a pushed `v*.*.*`/`v*.*.*-*` tag -
+# i.e. whenever SemVer Tag (semver-tag.yml) cuts a new version - plus workflow_dispatch for an
+# on-demand rebuild/recovery run. The three builds run as independent jobs so one binding failing
+# doesn't block seeing the other two's results, but committing only happens if all three succeed -
+# a partial rebuild is never pushed silently. A tag is an immutable ref, so there's nothing to
+# commit the rebuilt binaries ONTO there - the `commit` job below checks out `main` specifically
+# (not the tag) and pushes the new binaries there, the same way the tag itself was originally cut
+# from main's tip (see semver-tag.yml).
 #
-# This workflow's own commit touches only the compiled artifacts (the .node file, the wheel, the
-# .so), never the paths the trigger below watches - so it cannot re-trigger itself.
+# The `build-bindings` concurrency group (not ref-scoped) serializes separate runs against each
+# other - e.g. two tags pushed in quick succession - since they'd otherwise race to push to the
+# same `main` branch.
 
 on:
   push:
-    branches: [main]
-    paths:
-      - "src/**"
-      - "crates/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "bindings/node/src/**"
-      - "bindings/node/Cargo.toml"
-      - "bindings/node/build-in-docker.sh"
-      - "bindings/python/src/**"
-      - "bindings/python/Cargo.toml"
-      - "bindings/python/pyproject.toml"
-      - "bindings/python/build-in-docker.sh"
-      - "bindings/java/src/**"
-      - "bindings/java/Cargo.toml"
-      - "bindings/java/pom.xml"
-      - "bindings/java/build-in-docker.sh"
+    tags:
+      - v*.*.*
+      - v*.*.*-*
   workflow_dispatch: {}
 
 concurrency:
-  group: build-bindings-${{ github.ref }}
+  group: build-bindings
   cancel-in-progress: false
 
 jobs:
@@ -108,8 +97,15 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Checkout repository
+      - name: Checkout main
+        # Not the triggering ref - that's the pushed tag (immutable, and generally not `main`'s
+        # exact tip by the time this job actually runs), while the rebuilt binaries need to land
+        # as a real commit on a branch. The build jobs above build from the tag itself (matching
+        # release.yml's own CLI binaries, also built from the tag); only where the result lands
+        # differs.
         uses: actions/checkout@v4
+        with:
+          ref: main
 
       - name: Download Node artifact
         uses: actions/download-artifact@v4
@@ -158,5 +154,5 @@ jobs:
 
           git commit \
             -m "chore(bindings): rebuild native artifacts" \
-            -m "Rebuilt by the Build Bindings workflow (run ${{ github.run_id }}) from ${{ github.sha }}."
-          git push origin "HEAD:${{ github.ref_name }}"
+            -m "Rebuilt by the Build Bindings workflow (run ${{ github.run_id }}), triggered by ${{ github.ref_name }}."
+          git push origin HEAD:main
