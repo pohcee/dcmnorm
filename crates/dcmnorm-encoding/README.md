@@ -20,3 +20,19 @@ both still depended on it. Fully renamed to `dcmnorm-encoding`/
 `dcmnorm_encoding` once both were replaced by `dcmnorm-object` and
 `dcmnorm-dimse` and nothing in the dependency graph needed the original name
 anymore.
+
+## Upstream changes ported since the fork
+
+Selectively ported from dicom-rs after 0.9.1 (each commit message names the
+upstream commit):
+
+- `encode/explicit_{le,be}.rs`: reject short-form VR values over 65535 bytes
+  (upstream bff112e6) instead of truncating the length field.
+- `adapters.rs`: a correct, cumulative Basic Offset Table from the default
+  `PixelDataWriter::encode` (upstream 59ab4edb), which here also counts
+  odd-length fragments' padding byte.
+- `decode/adaptive_le.rs`: `AdaptiveVRLittleEndianDecoder` (upstream
+  e5e2a99a), for files that declare Explicit VR Little Endian but write
+  Implicit VR. dcmnorm decides a probed long-form VR that disagrees with the
+  dictionary from its reserved bytes, so explicit files written as all-`UN`
+  aren't misdetected.

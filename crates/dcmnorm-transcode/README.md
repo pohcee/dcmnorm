@@ -99,3 +99,17 @@ because `dicom-object` and `dicom-ul` both still depended on it. Fully
 renamed to `dcmnorm-transcode`/`dcmnorm_transcode` once both were replaced by
 `dcmnorm-object` and `dcmnorm-dimse` and nothing in the dependency graph
 needed the original name anymore.
+
+## Upstream changes ported since the fork
+
+Selectively ported from dicom-rs after 0.9.1 (each commit message names the
+upstream commit):
+
+- `adapters/rle_lossless.rs` + `alloc.rs`: bounds-checked segment slicing and
+  allocation guards against implausible compression ratios (upstream
+  10f9b6db). The ratio limit is 64:1, PackBits' actual maximum, rather than
+  upstream's 32:1, which refuses valid mostly-blank images; and the RLE header
+  itself is validated (64 bytes, at most 15 segments), which upstream doesn't.
+- `adapters/jpeg.rs`: color JPEG Baseline output is labeled `YBR_FULL_422`
+  (upstream 636ae060), or `YBR_FULL` when `jpeg-encoder` doesn't subsample
+  chroma, instead of `RGB`.

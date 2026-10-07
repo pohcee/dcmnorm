@@ -25,3 +25,14 @@ consistency with the other forks, to keep the Phase 6 rename batch uniform.
 Fully renamed to `dcmnorm-parser`/`dcmnorm_parser` in that same batch, once
 every crate it depends on (`dcmnorm-core`, `dcmnorm-dictionary`,
 `dcmnorm-encoding`) had also dropped its original name.
+
+## Upstream changes ported since the fork
+
+Selectively ported from dicom-rs after 0.9.1 (each commit message names the
+upstream commit):
+
+- `dataset/read.rs`: stray item delimiters are skipped in a loop rather than
+  by recursion (upstream 8c98b8a8), which a crafted file could use to
+  overflow the stack.
+- `dataset/read.rs`: `DataSetReaderOptions::flexible_decoding` (upstream
+  e5e2a99a), selecting `dcmnorm-encoding`'s adaptive VR decoder.
