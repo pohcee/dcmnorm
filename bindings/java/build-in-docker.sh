@@ -21,7 +21,14 @@ docker run --rm -v "$SCRIPT_DIR/../..":/repo -w /repo/bindings/java \
   debian:bookworm-slim bash -c '
     set -euo pipefail
     apt-get update -qq
-    apt-get install -y -qq curl build-essential clang cmake pkg-config libclang-dev \
+    # ffmpeg here is the CLI binary renderMovie/write_dicom_video shells out to for muxing an MP4
+    # (see that functions own doc comment) - a completely separate concern from the ffmpeg-codec
+    # Cargo feature probed for below, which only links libav*.a for DECODING MPEG transfer syntax
+    # frames and has nothing to do with producing video output. Confirmed necessary empirically:
+    # the Smoke.java renderMovie check failed with "ffmpeg executable not found in PATH" the
+    # first time this script ever ran in a container that was not also the host dcmnorm was
+    # developed in (which already happened to have ffmpeg on PATH for unrelated reasons).
+    apt-get install -y -qq curl build-essential clang cmake pkg-config libclang-dev ffmpeg \
       default-jdk-headless maven \
       > /dev/null
 
