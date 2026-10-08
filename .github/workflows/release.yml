@@ -5,6 +5,13 @@ on:
     tags:
       - v*.*.*
       - v*.*.*-*
+  # Manual fallback: the SemVer Tag workflow (semver-tag.yml) pushes its tag using the Actions
+  # run's own GITHUB_TOKEN, which GitHub deliberately excludes from triggering other workflows
+  # (anti-recursion protection) - so a tag created that way does NOT, on its own, fire this
+  # workflow's `push: tags:` trigger above. `./scripts/release-tag.sh`, run locally with a
+  # human's own git credentials, doesn't hit this - only the in-Actions path does. Dispatch this
+  # manually (ref: the tag itself, e.g. `v0.4.0`) to recover when that happens.
+  workflow_dispatch: {}
 
 permissions:
   contents: write
