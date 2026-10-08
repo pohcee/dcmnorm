@@ -196,7 +196,7 @@ dcmnorm --mpr axial series_dir/*.dcm volume.gputex                   # whole ser
 dcmnorm --mpr axial series_dir/*.dcm volume.gputex --texture-compression none  # skip gzip
 ```
 
-`--texture-max-dim <N>` caps the longest axis (proportional downsample), for both a single-frame export and a `--mpr` volume export. A frame-stack variant (independent frames packed as a texture array, e.g. a cine loop's frames or one file per series instance, no resampling/physical geometry) exists only via the Node bindings' `exportFrameStackTexture` — no CLI flag for it yet.
+`--texture-max-dim <N>` caps the longest axis (proportional downsample), for both a single-frame export and a `--mpr` volume export. A frame-stack variant (independent frames packed as a texture array, e.g. a cine loop's frames or one file per series instance, no resampling/physical geometry) exists only via each binding's own `exportFrameStackTexture`/`export_frame_stack_texture` (Node, Python, Java) — no CLI flag for it yet.
 
 ## Tips
 
