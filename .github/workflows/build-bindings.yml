@@ -34,16 +34,16 @@ concurrency:
 jobs:
   build-node:
     name: Build Node bindings
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Run build-in-docker.sh
         run: bindings/node/build-in-docker.sh
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: dcmnorm-node-binary
           path: bindings/node/dcmnorm-node.linux-x64-gnu.node
@@ -51,10 +51,10 @@ jobs:
 
   build-python:
     name: Build Python bindings
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Remove the previously committed wheel
         # build-in-docker.sh itself only ever ADDS a file to dist/ (maturin's --out doesn't
@@ -67,7 +67,7 @@ jobs:
         run: bindings/python/build-in-docker.sh
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: dcmnorm-python-wheel
           path: bindings/python/dist/*.whl
@@ -75,16 +75,16 @@ jobs:
 
   build-java:
     name: Build Java bindings
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Run build-in-docker.sh
         run: bindings/java/build-in-docker.sh
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: dcmnorm-java-native
           path: bindings/java/src/main/resources/native/linux-x64/libdcmnorm_java.so
@@ -93,7 +93,7 @@ jobs:
   commit:
     name: Commit rebuilt artifacts
     needs: [build-node, build-python, build-java]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
@@ -103,24 +103,24 @@ jobs:
         # as a real commit on a branch. The build jobs above build from the tag itself (matching
         # release.yml's own CLI binaries, also built from the tag); only where the result lands
         # differs.
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: main
 
       - name: Download Node artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: dcmnorm-node-binary
           path: bindings/node/
 
       - name: Download Python artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: dcmnorm-python-wheel
           path: bindings/python/dist-new/
 
       - name: Download Java artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: dcmnorm-java-native
           path: bindings/java/src/main/resources/native/linux-x64/
