@@ -1,0 +1,111 @@
+name: Deploy Test Website
+
+# Rebuilds bindings/node/examples/test-website and redeploys it to Cloud Run whenever the Node
+# binding (or the site itself) changes on main, so the public demo never lags behind the latest
+# dcmnorm-node version. Same image + service as deploy-cloudrun.sh, which stays the manual path.
+#
+# Triggers:
+#   - push to main touching bindings/node/** - a human commit (e.g. a "Release 0.1.x" version
+#     bump with its rebuilt .node, or a test-website change).
+#   - workflow_run of Build Bindings - that workflow's own commit of the rebuilt .node is pushed
+#     with GITHUB_TOKEN, which GitHub deliberately excludes from firing `push` triggers (see
+#     release.yml's comment), so `push` above never sees it. workflow_run always runs against
+#     main's tip, i.e. after that commit has landed.
+#   - workflow_dispatch - on-demand redeploy.
+#
+# Auth is keyless Workload Identity Federation (no SA key, no repo secrets). The pool/provider and
+# every grant are Terraform in the safebridge repo (env/prod/tf/gcp/core-services/dcmnorm_deploy.tf),
+# which only trusts this repo on refs/heads/main and only for this one AR repo + Cloud Run service.
+# The service runs as a zero-role SA, not the project's default compute SA.
+#
+# Only the image changes on deploy (`gcloud run deploy --image` keeps every other setting); the
+# public allUsers invoker binding was set once by deploy-cloudrun.sh and persists.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - bindings/node/**
+      - test/files/**
+      - .github/workflows/deploy-test-website.yml
+  workflow_run:
+    workflows: [Build Bindings]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch: {}
+
+# Newer commit supersedes an in-flight deploy - only the latest version matters.
+concurrency:
+  group: deploy-test-website
+  cancel-in-progress: true
+
+env:
+  PROJECT_ID: safebridge-sandbox
+  REGION: us-central1
+  REPOSITORY: dcmnorm
+  SERVICE_NAME: dcmnorm-test-website
+  RUNTIME_SA: dcmnorm-test-website@safebridge-sandbox.iam.gserviceaccount.com
+  WORKLOAD_IDENTITY_PROVIDER: projects/507315604716/locations/global/workloadIdentityPools/github/providers/dcmnorm
+  MAX_UPLOAD_BYTES: "25000000"
+
+jobs:
+  deploy:
+    name: Build and deploy
+    # Build Bindings is triggered by tags; a failed/cancelled run committed nothing new to deploy.
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.WORKLOAD_IDENTITY_PROVIDER }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Build and push image
+        id: image
+        shell: bash
+        run: |
+          set -euo pipefail
+          IMAGE="${REGION}-docker.pkg.dev/${PROJECT_ID}/${REPOSITORY}/${SERVICE_NAME}"
+          VERSION="$(jq -r .version bindings/node/package.json)"
+          TAG="${VERSION}-${GITHUB_SHA::7}"
+          gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet
+          docker build -f bindings/node/examples/test-website/Dockerfile \
+            -t "${IMAGE}:${TAG}" -t "${IMAGE}:latest" .
+          docker push "${IMAGE}:${TAG}"
+          docker push "${IMAGE}:latest"
+          echo "ref=${IMAGE}:${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy to Cloud Run
+        shell: bash
+        run: |
+          set -euo pipefail
+          gcloud run deploy "$SERVICE_NAME" \
+            --project="$PROJECT_ID" \
+            --region="$REGION" \
+            --image="${{ steps.image.outputs.ref }}" \
+            --service-account="$RUNTIME_SA" \
+            --set-env-vars="MAX_UPLOAD_BYTES=${MAX_UPLOAD_BYTES}" \
+            --quiet
+
+      - name: Smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+          URL="$(gcloud run services describe "$SERVICE_NAME" --project="$PROJECT_ID" \
+            --region="$REGION" --format='value(status.url)')"
+          WANT="$(jq -r .version bindings/node/package.json)"
+          GOT="$(curl -fsS --retry 5 --retry-all-errors "${URL}/api/version" | jq -r .dcmnormNodeVersion)"
+          echo "Deployed ${URL}: dcmnorm-node ${GOT}"
+          [[ "$GOT" == "$WANT" ]] || { echo "::error::expected dcmnorm-node ${WANT}, live is ${GOT}"; exit 1; }
+          echo "### Deployed dcmnorm-node ${GOT} to ${URL}" >> "$GITHUB_STEP_SUMMARY"

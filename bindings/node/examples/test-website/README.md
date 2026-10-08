@@ -113,3 +113,13 @@ image there, then runs `gcloud run deploy` with `--allow-unauthenticated`. Requi
 CLI (authenticated) and Docker; the script prints the live service URL when done. See the
 script's own header comment for the full list of configurable env vars (region, service name,
 Artifact Registry repo name, upload size cap).
+
+### Continuous deploy
+
+`.github/workflows/deploy-test-website.yml` redeploys the public instance
+(`dcmnorm-test-website` in `safebridge-sandbox`) automatically whenever the Node binding changes
+on `main`: any push touching `bindings/node/**`, and every successful Build Bindings run (whose
+bot commit can't fire a `push` trigger itself). It can also be run by hand via
+`workflow_dispatch`. Auth is keyless Workload Identity Federation - no SA key or repo secret -
+and the job finishes by checking that `/api/version` reports the `package.json` version it just
+built. The script above remains for manual/other-project deploys.
