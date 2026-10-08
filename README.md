@@ -572,8 +572,9 @@ A third texture kind, `ContentKind::FrameStack` (`"framestack"` in the sidecar),
 independent original frames — a cine instance's own frames, or one file per instance in a
 non-MPR-eligible multi-image series — as one texture-array upload with no resampling and no
 physical geometry (`rowSpacing`/`origin`/etc. are meaningless for this kind). It has no CLI
-invocation today; it's exposed only via the Node bindings' `exportFrameStackTexture` — see
-[`bindings/node`](bindings/node/)'s own README.
+invocation today; it's exposed only via each binding's own `exportFrameStackTexture`/
+`export_frame_stack_texture` — see [`bindings/node`](bindings/node/)'s,
+[`bindings/python`](bindings/python/)'s, or [`bindings/java`](bindings/java/)'s own README.
 
 ### Render a Multiplanar Reformation (MPR)
 
@@ -1245,21 +1246,29 @@ cargo test --workspace
 
 ## Releasing
 
-This repository uses two GitHub Actions workflows for SemVer-based CLI releases:
+This repository uses three GitHub Actions workflows for SemVer-based releases:
 
 - `.github/workflows/semver-tag.yml`: manually creates and pushes the next `vX.Y.Z` tag from the latest existing `v*` tag
 - `.github/workflows/release.yml`: runs on pushed version tags, builds the CLI, and creates a GitHub Release with artifacts
+- `.github/workflows/build-bindings.yml`: also runs on pushed version tags, rebuilds each of `bindings/{node,python,java}`'s committed native artifact (via that binding's own `build-in-docker.sh`) and pushes a commit with whatever changed, straight to `main`
 
 Release flow:
 
 1. Run the **SemVer Tag** workflow from the Actions tab and choose `patch`, `minor`, or `major`.
 2. The workflow pushes a new version tag (for example `v0.1.1`).
-3. The **Build and Release CLIs** workflow is triggered by that tag and publishes, for each of `dcmnorm` and `dcmtalk`:
-    - `<name>-<tag>-linux-x86_64.tar.gz` (+ `.sha256`)
-    - `<name>-<tag>-linux-x86_64.deb` (+ `.sha256`) — built with [`cargo-deb`](https://github.com/kornelski/cargo-deb) from each exec crate's `[package.metadata.deb]`, `Depends:` on `ffmpeg`/`ca-certificates` plus whatever `cargo-deb`'s `$auto` detects from the linked shared libraries
-    - `<name>-linux-x86_64.tar.gz` / `.deb` + `.sha256` (rolling "latest" aliases, overwritten each release)
+3. That tag triggers both of the following, independently and in parallel:
+    - **Build and Release CLIs**, which publishes, for each of `dcmnorm` and `dcmtalk`:
+        - `<name>-<tag>-linux-x86_64.tar.gz` (+ `.sha256`)
+        - `<name>-<tag>-linux-x86_64.deb` (+ `.sha256`) — built with [`cargo-deb`](https://github.com/kornelski/cargo-deb) from each exec crate's `[package.metadata.deb]`, `Depends:` on `ffmpeg`/`ca-certificates` plus whatever `cargo-deb`'s `$auto` detects from the linked shared libraries
+        - `<name>-linux-x86_64.tar.gz` / `.deb` + `.sha256` (rolling "latest" aliases, overwritten each release)
+    - **Build Bindings**, which rebuilds and commits `bindings/node`'s `.node` file, `bindings/python`'s wheel, and `bindings/java`'s native library (see each binding's own README's "Packaging" section) - but only pushes that commit if all three builds succeed, so a partial rebuild never lands silently
 
 Prereleases are supported in the SemVer tag workflow via the `prerelease` input.
+
+Note that cutting a release this way does **not** bump the version numbers inside
+`bindings/node/package.json`, `bindings/python/pyproject.toml`, or `bindings/java/pom.xml` - each
+binding keeps its own independent version (see `scripts/release-tag.sh` below, which only touches
+the root/exec crate manifests the CLI release actually uses).
 
 ### Local tag + release trigger
 
