@@ -28,10 +28,13 @@ on:
       - bindings/node/**
       - test/files/**
       - .github/workflows/deploy-test-website.yml
+  # No `branches:` filter here: it matches the *triggering* run's branch, and Build Bindings runs
+  # on the release tag (head_branch = v0.4.1, not main), so a main filter silently skips every
+  # release. This job still checks out main, and the OIDC token's ref is main either way
+  # (workflow_run executes in the default branch's context), which the WIF condition requires.
   workflow_run:
     workflows: [Build Bindings]
     types: [completed]
-    branches: [main]
   workflow_dispatch: {}
 
 # Newer commit supersedes an in-flight deploy - only the latest version matters.
