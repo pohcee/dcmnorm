@@ -10,12 +10,14 @@
 //! reslicing/window-level itself in a GPU shader instead of round-tripping to the server per
 //! interaction.
 
+use std::borrow::Cow;
 use std::error::Error;
 use std::fmt;
 use std::io::{self, Write};
 
 use flate2::write::GzEncoder;
 use flate2::Compression;
+use rayon::prelude::*;
 use serde_json::json;
 
 use super::render::{
@@ -266,47 +268,83 @@ fn gzip_bytes(bytes: &[u8]) -> Result<Vec<u8>, TextureExportError> {
 ///
 /// Returns `(bytes, format, rescale_slope, rescale_intercept, lossless)`.
 pub fn quantize_samples(raw: &[f32]) -> (Vec<u8>, SampleFormat, f64, f64, bool) {
+    quantize_with_stats(raw, &sample_stats(raw))
+}
+
+/// Min/max and integrality of a sample buffer. One parallel pass, shared by `quantize_with_stats`
+/// and `window_from_stats` - previously two separate serial passes plus a serial per-sample
+/// `extend_from_slice` encode made this the bulk of a large volume's export time (a 1,200-slice
+/// 512x512 CT, 315M samples: ~2.4 s single-threaded).
+#[derive(Clone, Copy, Debug)]
+struct SampleStats {
+    min: f64,
+    max: f64,
+    all_integral: bool,
+}
+
+const PAR_CHUNK_SAMPLES: usize = 1 << 16;
+
+fn sample_stats(raw: &[f32]) -> SampleStats {
+    let identity = || SampleStats { min: f64::INFINITY, max: f64::NEG_INFINITY, all_integral: true };
+    raw.par_chunks(PAR_CHUNK_SAMPLES)
+        .map(|chunk| {
+            let mut stats = identity();
+            for &sample in chunk {
+                let value = sample as f64;
+                stats.min = stats.min.min(value);
+                stats.max = stats.max.max(value);
+                if stats.all_integral && (value - value.round()).abs() > 1e-4 {
+                    stats.all_integral = false;
+                }
+            }
+            stats
+        })
+        .reduce(identity, |a, b| SampleStats {
+            min: a.min.min(b.min),
+            max: a.max.max(b.max),
+            all_integral: a.all_integral && b.all_integral,
+        })
+}
+
+/// Encodes every sample to 2 little-endian bytes, in parallel chunks, into one preallocated buffer.
+fn encode_u16_le(raw: &[f32], encode: impl Fn(f32) -> [u8; 2] + Sync) -> Vec<u8> {
+    let mut bytes = vec![0u8; raw.len() * 2];
+    bytes
+        .par_chunks_mut(PAR_CHUNK_SAMPLES * 2)
+        .zip(raw.par_chunks(PAR_CHUNK_SAMPLES))
+        .for_each(|(out, samples)| {
+            for (dst, &sample) in out.chunks_exact_mut(2).zip(samples) {
+                dst.copy_from_slice(&encode(sample));
+            }
+        });
+    bytes
+}
+
+/// `quantize_samples` with its min/max/integrality pass already done (see `sample_stats`).
+fn quantize_with_stats(raw: &[f32], stats: &SampleStats) -> (Vec<u8>, SampleFormat, f64, f64, bool) {
     if raw.is_empty() {
         return (Vec::new(), SampleFormat::Int16, 1.0, 0.0, true);
     }
-
-    let mut min = f64::INFINITY;
-    let mut max = f64::NEG_INFINITY;
-    let mut all_integral = true;
-    for &sample in raw {
-        let value = sample as f64;
-        min = min.min(value);
-        max = max.max(value);
-        if all_integral && (value - value.round()).abs() > 1e-4 {
-            all_integral = false;
-        }
-    }
+    let SampleStats { min, max, all_integral } = *stats;
 
     if all_integral && min >= i16::MIN as f64 && max <= i16::MAX as f64 {
-        let mut bytes = Vec::with_capacity(raw.len() * 2);
-        for &sample in raw {
-            bytes.extend_from_slice(&(sample.round() as i16).to_le_bytes());
-        }
+        let bytes = encode_u16_le(raw, |sample| (sample.round() as i16).to_le_bytes());
         return (bytes, SampleFormat::Int16, 1.0, 0.0, true);
     }
 
     if all_integral && max - min <= u16::MAX as f64 {
         let intercept = min.round();
-        let mut bytes = Vec::with_capacity(raw.len() * 2);
-        for &sample in raw {
-            bytes.extend_from_slice(&((sample as f64 - intercept).round() as u16).to_le_bytes());
-        }
+        let bytes = encode_u16_le(raw, |sample| ((sample as f64 - intercept).round() as u16).to_le_bytes());
         return (bytes, SampleFormat::Uint16, 1.0, intercept, true);
     }
 
     let range = (max - min).max(1e-6);
     let slope = range / 65535.0;
     let intercept = min;
-    let mut bytes = Vec::with_capacity(raw.len() * 2);
-    for &sample in raw {
+    let bytes = encode_u16_le(raw, |sample| {
         let scaled = ((sample as f64 - intercept) / slope).round().clamp(0.0, 65535.0);
-        bytes.extend_from_slice(&(scaled as u16).to_le_bytes());
-    }
+        (scaled as u16).to_le_bytes()
+    });
     (bytes, SampleFormat::Uint16, slope, intercept, false)
 }
 
@@ -317,13 +355,11 @@ pub fn quantize_samples(raw: &[f32]) -> (Vec<u8>, SampleFormat, f64, f64, bool) 
 /// Without this, `default_window_center`/`width` stay `None` and the GPU shader's own hardcoded
 /// default (`center=0, width=1`) clips nearly all real (non-zero-centered) pixel data to white.
 fn min_max_window(raw: &[f32]) -> (f64, f64) {
-    let mut min = f64::INFINITY;
-    let mut max = f64::NEG_INFINITY;
-    for &sample in raw {
-        let value = sample as f64;
-        min = min.min(value);
-        max = max.max(value);
-    }
+    window_from_stats(&sample_stats(raw))
+}
+
+fn window_from_stats(stats: &SampleStats) -> (f64, f64) {
+    let SampleStats { min, max, .. } = *stats;
     if !min.is_finite() || !max.is_finite() {
         return (0.0, 1.0);
     }
@@ -355,16 +391,18 @@ pub fn pack_volume_texture(
     }
 
     let native_max = native_dims.0.max(native_dims.1).max(native_dims.2);
-    let (raw, dims, downsampled): (Vec<f32>, (u32, u32, u32), bool) = match target_max_dim {
+    // Borrowed unless downsampled - cloning a native-size volume here was a full extra copy of
+    // every sample (1.26 GB for a 1,200-slice 512x512 CT) just to read it.
+    let (raw, dims, downsampled): (Cow<[f32]>, (u32, u32, u32), bool) = match target_max_dim {
         Some(max_dim) if native_max > max_dim.max(1) => {
             let scale = max_dim.max(1) as f64 / native_max as f64;
             let target_cols = ((native_dims.0 as f64 * scale).round() as u32).max(1);
             let target_rows = ((native_dims.1 as f64 * scale).round() as u32).max(1);
             let target_slices = ((native_dims.2 as f64 * scale).round() as u32).max(1);
             let resampled = resample_volume(volume, target_cols, target_rows, target_slices, Interpolation::Trilinear);
-            (resampled, (target_cols, target_rows, target_slices), true)
+            (Cow::Owned(resampled), (target_cols, target_rows, target_slices), true)
         }
-        _ => (volume.samples.clone(), native_dims, false),
+        _ => (Cow::Borrowed(volume.samples.as_slice()), native_dims, false),
     };
 
     let expected = dims.0 as usize * dims.1 as usize * dims.2 as usize;
@@ -372,8 +410,9 @@ pub fn pack_volume_texture(
         return Err(TextureExportError::SampleCountMismatch { expected, found: raw.len() });
     }
 
-    let (quantized, sample_format, rescale_slope, rescale_intercept, lossless) = quantize_samples(&raw);
-    let default_window = default_window.or_else(|| Some(min_max_window(&raw)));
+    let stats = sample_stats(&raw);
+    let (quantized, sample_format, rescale_slope, rescale_intercept, lossless) = quantize_with_stats(&raw, &stats);
+    let default_window = default_window.or_else(|| Some(window_from_stats(&stats)));
     let (payload, payload_bytes_raw) = apply_compression(quantized, compression)?;
     let payload_bytes_stored = payload.len() as u64;
 
@@ -497,13 +536,14 @@ pub fn pack_frame_texture(
     let (raw, out_width, out_height, downsampled) = match target_max_dim {
         Some(max_dim) if width.max(height) > max_dim.max(1) => {
             let (resampled, w, h) = resample_frame_2d(values, width, height, max_dim);
-            (resampled, w, h, true)
+            (Cow::Owned(resampled), w, h, true)
         }
-        _ => (values.to_vec(), width, height, false),
+        _ => (Cow::Borrowed(values), width, height, false),
     };
 
-    let (quantized, sample_format, rescale_slope, rescale_intercept, lossless) = quantize_samples(&raw);
-    let default_window = default_window.or_else(|| Some(min_max_window(&raw)));
+    let stats = sample_stats(&raw);
+    let (quantized, sample_format, rescale_slope, rescale_intercept, lossless) = quantize_with_stats(&raw, &stats);
+    let default_window = default_window.or_else(|| Some(window_from_stats(&stats)));
     let (payload, payload_bytes_raw) = apply_compression(quantized, compression)?;
     let payload_bytes_stored = payload.len() as u64;
 
@@ -628,8 +668,9 @@ pub fn pack_frame_stack_texture(
     let depth = frames.len() as u32;
     let native_dims = (width, height, depth);
 
-    let (quantized, sample_format, rescale_slope, rescale_intercept, lossless) = quantize_samples(&concatenated);
-    let default_window = default_window.or_else(|| Some(min_max_window(&concatenated)));
+    let stats = sample_stats(&concatenated);
+    let (quantized, sample_format, rescale_slope, rescale_intercept, lossless) = quantize_with_stats(&concatenated, &stats);
+    let default_window = default_window.or_else(|| Some(window_from_stats(&stats)));
     let (payload, payload_bytes_raw) = apply_compression(quantized, compression)?;
     let payload_bytes_stored = payload.len() as u64;
 
