@@ -22,7 +22,20 @@ docker run --rm -v "$SCRIPT_DIR/../..":/repo -w /repo/bindings/python \
   python:3.12-slim-bookworm bash -c '
     set -euo pipefail
     apt-get update -qq
-    apt-get install -y -qq curl build-essential clang cmake pkg-config libclang-dev \
+    # git and nasm: ffmpeg-codec (dcmnorm/Cargo.toml, on by default, and - unlike bindings/node
+    # and bindings/java - not something this crate can opt out of, since bindings/python/Cargo.toml
+    # takes dcmnorm as a plain path dependency with no default-features override or feature
+    # forwarding of its own) builds FFmpeg from source and statically links it
+    # (ffmpeg-next/ffmpeg-sys-next "build" feature): git shallow-clones the FFmpeg source, nasm
+    # provides the x86 asm optimizations FFmpeg'"'"'s own ./configure hard-fails without on x86_64 -
+    # see bindings/node/build-in-docker.sh'"'"'s own copy of this comment, which also explains why
+    # the libavutil-dev/etc. headers below are NOT what actually satisfies this (those are for
+    # dynamically linking a system FFmpeg, which the default feature set never does). Confirmed
+    # necessary empirically: this script failed outright the first time it ever ran unattended
+    # (in CI, rather than a host that already happened to have git/nasm installed for other
+    # reasons) with ffmpeg-sys-next'"'"'s build.rs panicking on a bare `Os { code: 2, kind:
+    # NotFound }` trying to invoke one of them.
+    apt-get install -y -qq curl build-essential clang cmake pkg-config libclang-dev git nasm \
       libavutil-dev libavcodec-dev libavformat-dev libswscale-dev libswresample-dev \
       > /dev/null
     curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y -q
