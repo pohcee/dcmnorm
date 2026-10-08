@@ -1,0 +1,553 @@
+// Copyright (c) 2019 - 2026, Osamu Watanabe
+// All rights reserved.
+//
+// Redistribution and use in source and binary forms, with or without
+//    modification, are permitted provided that the following conditions are met:
+//
+// 1. Redistributions of source code must retain the above copyright notice, this
+// list of conditions and the following disclaimer.
+//
+// 2. Redistributions in binary form must reproduce the above copyright notice,
+// this list of conditions and the following disclaimer in the documentation
+// and/or other materials provided with the distribution.
+//
+// 3. Neither the name of the copyright holder nor the names of its
+// contributors may be used to endorse or promote products derived from
+// this software without specific prior written permission.
+//
+// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+// AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+//    IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+// DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+//    FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+//    DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+//    SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+//    CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+// OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+// OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+#pragma once
+
+#include <cstdint>
+#include <cstring>
+#include <vector>
+#include "open_htj2k_typedef.hpp"
+#include "codestream.hpp"
+#include "marker_def.hpp"
+#include "visual_weighting.hpp"
+
+/********************************************************************************
+ * j2k_marker_io_base
+ *******************************************************************************/
+class j2k_marker_io_base {
+ protected:
+  // marker code
+  uint16_t code;
+  // length of marker segment in bytes
+  uint16_t Lmar{};
+  // position in buffer
+  uint16_t pos;
+  // some markers require pointer to buffer
+  uint8_t *buf;
+  size_t buf_pos;
+  bool is_set;
+
+ public:
+  explicit j2k_marker_io_base(uint16_t mar) : code(mar), pos(0), buf(nullptr), buf_pos(0), is_set(false) {}
+  ~j2k_marker_io_base() = default;
+  void set_buf(uint8_t *p);
+
+  OPENHTJ2K_MAYBE_UNUSED uint16_t get_marker() const;
+  uint16_t get_length() const;
+  uint8_t *get_buf();
+  uint8_t get_byte();
+  uint16_t get_word();
+  uint32_t get_dword();
+};
+
+/********************************************************************************
+ * SIZ_marker
+ *******************************************************************************/
+class SIZ_marker : public j2k_marker_io_base {
+ private:
+  uint16_t Rsiz;
+  uint32_t Xsiz;
+  uint32_t Ysiz;
+  uint32_t XOsiz;
+  uint32_t YOsiz;
+  uint32_t XTsiz;
+  uint32_t YTsiz;
+  uint32_t XTOsiz;
+  uint32_t YTOsiz;
+  uint16_t Csiz;
+  std::vector<uint8_t> Ssiz;
+  std::vector<uint8_t> XRsiz;
+  std::vector<uint8_t> YRsiz;
+
+ public:
+  explicit SIZ_marker(j2c_src_memory &in);
+  SIZ_marker(uint16_t R, uint32_t X, uint32_t Y, uint32_t XO, uint32_t YO, uint32_t XT, uint32_t YT,
+             uint32_t XTO, uint32_t YTO, uint16_t C, std::vector<uint8_t> &S, std::vector<uint8_t> &XR,
+             std::vector<uint8_t> &YR, bool needCAP);
+  int write(j2c_dst_memory &dst);
+  bool is_signed(uint16_t c);
+  uint8_t get_bitdepth(uint16_t c);
+  void get_image_size(element_siz &siz) const;
+  uint32_t get_component_stride(uint16_t c) const;
+  void get_image_origin(element_siz &siz) const;
+  void get_tile_size(element_siz &siz) const;
+  void get_tile_origin(element_siz &siz) const;
+  void get_subsampling_factor(element_siz &siz, uint16_t c);
+  uint16_t get_num_components() const;
+  uint8_t get_chroma_format() const;
+};
+
+/********************************************************************************
+ * CAP_marker
+ *******************************************************************************/
+class CAP_marker : public j2k_marker_io_base {
+ private:
+  uint32_t Pcap;
+  uint16_t Ccap[32];
+  void set_Pcap(uint8_t part);
+
+ public:
+  CAP_marker();
+  explicit CAP_marker(j2c_src_memory &in);
+  void set_Ccap(uint16_t val, uint8_t Ccap);
+
+  OPENHTJ2K_MAYBE_UNUSED uint32_t get_Pcap() const;
+  uint16_t get_Ccap(uint8_t n);
+  int write(j2c_dst_memory &dst);
+};
+
+/********************************************************************************
+ * CPF_marker
+ *******************************************************************************/
+class CPF_marker : public j2k_marker_io_base {
+ private:
+  std::vector<uint16_t> Pcpf;
+
+ public:
+  CPF_marker();
+  explicit CPF_marker(j2c_src_memory &in);
+  int write(j2c_dst_memory &dst);
+};
+
+/********************************************************************************
+ * PRF_marker
+ *******************************************************************************/
+// Profile marker (Rec. ITU-T T.800 | ISO/IEC 15444-1, A.5.3).  Purely
+// informational: it signals the profile number (PRFnum) the codestream claims
+// to conform to and requires no codec processing.  Parsed here so the main
+// header is consumed correctly (a 15444-2 / 15444-18 codestream may carry it
+// after SIZ/CAP) instead of being skipped byte-by-byte as "unknown markers".
+class PRF_marker : public j2k_marker_io_base {
+ private:
+  std::vector<uint16_t> Pprf;
+  uint64_t PRFnum;
+
+ public:
+  PRF_marker();
+  explicit PRF_marker(j2c_src_memory &in);
+  // Signalled profile number (>= 4096), or 0 if no PRF marker was present.
+  uint64_t get_PRFnum() const { return PRFnum; }
+};
+
+/********************************************************************************
+ * COD_marker
+ *******************************************************************************/
+class COD_marker : public j2k_marker_io_base {
+ private:
+  uint8_t Scod;
+  uint32_t SGcod;
+  std::vector<uint8_t> SPcod;
+
+ public:
+  explicit COD_marker(j2c_src_memory &in);
+  COD_marker(bool is_max_precincts, bool use_SOP, bool use_EPH, uint8_t progression_order,
+             uint16_t number_of_layers, uint8_t use_color_trafo, uint8_t dwt_levels, uint8_t log2cblksizex,
+             uint8_t log2cblksizey, uint8_t codeblock_style, uint8_t reversible_flag,
+             std::vector<uint8_t> log2PPx, std::vector<uint8_t> log2PPy);
+  int write(j2c_dst_memory &dst);
+  bool is_maximum_precincts() const;
+  bool is_use_SOP() const;
+  bool is_use_EPH() const;
+  uint8_t get_progression_order() const;
+  uint16_t get_number_of_layers() const;
+  uint8_t use_color_trafo() const;
+  uint8_t get_dwt_levels();
+  void get_codeblock_size(element_siz &out);
+  void get_precinct_size(element_siz &out, uint8_t resolution);
+  uint8_t get_Cmodes();
+  uint8_t get_transformation();
+};
+
+/********************************************************************************
+ * COC_marker
+ *******************************************************************************/
+class COC_marker : public j2k_marker_io_base {
+ private:
+  uint16_t Ccoc;
+  uint8_t Scoc;
+  std::vector<uint8_t> SPcoc;
+
+ public:
+  COC_marker();
+  COC_marker(j2c_src_memory &in, uint16_t Csiz);
+  uint16_t get_component_index() const;
+  bool is_maximum_precincts() const;
+  bool is_dfs_defined() const;    // bit 7 of SPcoc[0] set → DFS active for this component
+  uint8_t get_dfs_index() const;  // bits[3:0] of SPcoc[0] when DFS active
+  uint8_t get_dwt_levels();
+  void get_codeblock_size(element_siz &out);
+  void get_precinct_size(element_siz &out, uint8_t resolution);
+  uint8_t get_Cmodes();
+  uint8_t get_transformation();
+};
+
+/********************************************************************************
+ * RGN_marker
+ *******************************************************************************/
+class RGN_marker : public j2k_marker_io_base {
+ private:
+  uint16_t Crgn;
+  uint8_t Srgn;
+  uint8_t SPrgn;
+
+ public:
+  RGN_marker();
+  RGN_marker(j2c_src_memory &in, uint16_t Csiz);
+  uint16_t get_component_index() const;
+  uint8_t get_ROIshift() const;
+};
+
+/********************************************************************************
+ * DFS_marker  (Part 2, marker code 0xFF72)
+ * Defines per-level DWT directionality for one DFS index.
+ *******************************************************************************/
+enum dwt_type : uint8_t { DWT_NO = 0, DWT_BIDIR = 1, DWT_HORZ = 2, DWT_VERT = 3 };
+
+class DFS_marker : public j2k_marker_io_base {
+ private:
+  uint16_t Sdfs;               // DFS descriptor word; bits[3:0] = DFS index (1-15)
+  uint8_t Ids;                 // number of DWT levels described
+  std::vector<dwt_type> Ddfs;  // per-level DWT type (index 0 = finest, i.e. Ddfs[0]=type of level 1)
+
+ public:
+  // Precomputed cumulative horizontal/vertical decomposition depths.
+  // hor_depth[k] = number of BIDIR/HORZ levels among the k finest DWT levels (0..Ids).
+  // ver_depth[k] = number of BIDIR/VERT levels among the k finest DWT levels (0..Ids).
+  // These replace the uniform d=1<<(NL-r) formula for DFS-active components.
+  uint8_t hor_depth[33]{};
+  uint8_t ver_depth[33]{};
+  // qcd_offset[r] = starting SPqcd flat index for resolution r (1..NL).
+  // Accounts for the fact that HORZ/VERT levels contribute only 1 SPqcd entry instead of 3.
+  uint8_t qcd_offset[33]{};
+
+  explicit DFS_marker(j2c_src_memory &in);
+  uint8_t get_index() const;
+  uint8_t get_num_levels() const;
+  dwt_type get_dwt_type(uint8_t level) const;          // level 1..Ids (1=finest); DWT_BIDIR if out of range
+  uint8_t get_num_bands(uint8_t r, uint8_t NL) const;  // num subbands for resolution r (0=LL)
+  // Returns count of consecutive DWT_BIDIR levels from the finest level onward.
+  // This is the maximum -reduce value that produces a valid 2D reduced image for
+  // components using this DFS marker; beyond this, a HONLY or VONLY level would
+  // halve only one spatial dimension, which is meaningless as a resolution step.
+  uint8_t get_max_safe_reduce() const;
+};
+
+/********************************************************************************
+ * ATK_marker  (Part 2, marker code 0xFF79)
+ * Defines an arbitrary lifting kernel (irreversible only for our implementation).
+ *******************************************************************************/
+struct atk_step {
+  uint8_t mk;  // step offset parameter
+  float Aatk;  // lifting coefficient (irreversible)
+};
+
+class ATK_marker : public j2k_marker_io_base {
+ private:
+  uint16_t Satk;  // descriptor word; bits[3:0]=index, bit12=0→irrev
+  float Katk;     // DC-level normalisation gain (present when irreversible)
+  uint8_t Natk;   // number of lifting steps
+  std::vector<atk_step> steps;
+
+ public:
+  explicit ATK_marker(j2c_src_memory &in);
+  uint8_t get_index() const;
+  bool is_reversible() const;
+  float get_Katk() const;
+  uint8_t get_num_steps() const;
+  const atk_step &get_step(uint8_t k) const;
+};
+
+/********************************************************************************
+ * QCD_marker
+ *******************************************************************************/
+class QCD_marker : public j2k_marker_io_base {
+ private:
+  uint8_t Sqcd;
+  std::vector<uint16_t> SPqcd;
+  bool is_reversible{};
+
+ public:
+  explicit QCD_marker(j2c_src_memory &in);
+  QCD_marker(uint8_t number_of_guardbits, uint8_t dwt_levels, uint8_t transformation, bool is_derived,
+             uint8_t RI, uint8_t use_ycc, double basestep = 1.0 / 256.0, uint8_t qfactor = 0xFF,
+             const open_htj2k::visual_weighting_params &vp = {});
+  int write(j2c_dst_memory &dst);
+  uint8_t get_quantization_style() const;
+  uint8_t get_exponents(uint8_t nb);
+  uint16_t get_mantissas(uint8_t nb);
+  uint8_t get_number_of_guardbits() const;
+  // return the actual number of SPqcd entries as parsed from the marker body
+  uint8_t get_num_entries() const { return static_cast<uint8_t>(SPqcd.size()); }
+  // return MAGB value for CAP
+  uint8_t get_MAGB();
+};
+
+/********************************************************************************
+ * QCC_marker
+ *******************************************************************************/
+class QCC_marker : public j2k_marker_io_base {
+ private:
+  uint16_t max_components;
+  uint16_t Cqcc;
+  uint8_t Sqcc;
+  std::vector<uint16_t> SPqcc;
+  bool is_reversible;
+
+ public:
+  // (sub_x, sub_y) are this component's SIZ sub-sampling factors (XRsiz, YRsiz);
+  // analytic CSF models fold them into the per-axis visual-frequency mapping.
+  // 0 keeps the historical chroma_format-derived factors.
+  QCC_marker(uint16_t Csiz, uint16_t c, uint8_t number_of_guardbits, uint8_t dwt_levels,
+             uint8_t transformation, bool is_derived, uint8_t RI, uint8_t use_ycc, uint8_t qfactor,
+             uint8_t chroma_format, const open_htj2k::visual_weighting_params &vp = {}, uint8_t sub_x = 0,
+             uint8_t sub_y = 0);
+  QCC_marker(j2c_src_memory &in, uint16_t Csiz);
+  int write(j2c_dst_memory &dst);
+  uint16_t get_component_index() const;
+  uint8_t get_quantization_style() const;
+  uint8_t get_exponents(uint8_t nb);
+  uint16_t get_mantissas(uint8_t nb);
+  uint8_t get_number_of_guardbits() const;
+  // return the actual number of SPqcc entries as parsed from the marker body
+  uint8_t get_num_entries() const { return static_cast<uint8_t>(SPqcc.size()); }
+};
+
+/********************************************************************************
+ * POC_marker
+ *******************************************************************************/
+class POC_marker : public j2k_marker_io_base {
+ private:
+ public:
+  std::vector<uint8_t> RSpoc;
+  std::vector<uint16_t> CSpoc;
+  std::vector<uint16_t> LYEpoc;
+  std::vector<uint8_t> REpoc;
+  std::vector<uint16_t> CEpoc;
+  std::vector<uint8_t> Ppoc;
+  unsigned long nPOC;
+  POC_marker();
+  POC_marker(uint8_t RS, uint16_t CS, uint16_t LYE, uint8_t RE, uint16_t CE, uint8_t P);
+  POC_marker(j2c_src_memory &in, uint16_t Csiz);
+  void add(uint8_t RS, uint16_t CS, uint16_t LYE, uint8_t RE, uint16_t CE, uint8_t P);
+
+  OPENHTJ2K_MAYBE_UNUSED unsigned long get_num_poc() const;
+};
+
+/********************************************************************************
+ * TLM_marker
+ *******************************************************************************/
+class TLM_marker : public j2k_marker_io_base {
+ private:
+  uint8_t Ztlm;
+  uint8_t Stlm;
+  std::vector<uint16_t> Ttlm;
+  std::vector<uint32_t> Ptlm;
+
+ public:
+  TLM_marker();
+  explicit TLM_marker(j2c_src_memory &in);
+  TLM_marker(uint8_t ztlm, const std::vector<uint16_t> &tile_indices,
+             const std::vector<uint32_t> &tile_part_lengths);
+  void write(j2c_dst_memory &buf) const;
+
+  uint8_t index() const { return Ztlm; }
+  size_t num_entries() const { return Ptlm.size(); }
+  bool has_tile_indices() const { return !Ttlm.empty() && ((Stlm >> 4) & 0x03) != 0; }
+  const std::vector<uint16_t> &tile_indices() const { return Ttlm; }
+  const std::vector<uint32_t> &tile_part_lengths() const { return Ptlm; }
+};
+
+/********************************************************************************
+ * PLM_marker
+ *******************************************************************************/
+class PLM_marker : public j2k_marker_io_base {
+ private:
+  uint8_t Zplm;
+  uint8_t *plmbuf;
+  uint16_t plmlen;
+
+ public:
+  PLM_marker();
+  explicit PLM_marker(j2c_src_memory &in);
+};
+
+/********************************************************************************
+ * PPM_marker
+ *******************************************************************************/
+class PPM_marker : public j2k_marker_io_base {
+ private:
+  uint8_t Zppm;
+
+ public:
+  uint8_t *ppmbuf;
+  uint16_t ppmlen;
+  PPM_marker();
+  explicit PPM_marker(j2c_src_memory &in);
+};
+
+/********************************************************************************
+ * CRG_marker
+ *******************************************************************************/
+class CRG_marker : public j2k_marker_io_base {
+ private:
+  std::vector<uint16_t> Xcrg;
+  std::vector<uint16_t> Ycrg;
+
+ public:
+  CRG_marker();
+  explicit CRG_marker(j2c_src_memory &in);
+};
+
+/********************************************************************************
+ * COM_marker
+ *******************************************************************************/
+class COM_marker : public j2k_marker_io_base {
+ private:
+  uint16_t Rcom;
+  std::vector<uint8_t> Ccom;
+
+ public:
+  explicit COM_marker(j2c_src_memory &in);
+  COM_marker(std::string com, bool is_text);
+  int write(j2c_dst_memory &dst);
+};
+
+/********************************************************************************
+ * SOT_marker
+ *******************************************************************************/
+class SOT_marker : public j2k_marker_io_base {
+ private:
+  uint16_t Isot;
+  uint32_t Psot;
+  uint8_t TPsot;
+  uint8_t TNsot;
+
+ public:
+  SOT_marker();
+  explicit SOT_marker(j2c_src_memory &in);
+  int set_SOT_marker(uint16_t tile_index, uint8_t tile_part_index, uint8_t num_tile_parts);
+  int set_tile_part_length(uint32_t length);
+  int write(j2c_dst_memory &dst);
+  uint16_t get_tile_index() const;
+  uint32_t get_tile_part_length() const;
+  uint8_t get_tile_part_index() const;
+
+  OPENHTJ2K_MAYBE_UNUSED uint8_t get_number_of_tile_parts() const;
+};
+
+/********************************************************************************
+ * PLT_marker
+ *******************************************************************************/
+class PLT_marker : public j2k_marker_io_base {
+ private:
+  uint8_t Zplt;
+  uint8_t *pltbuf;
+  uint16_t pltlen;
+
+ public:
+  PLT_marker();
+  explicit PLT_marker(j2c_src_memory &in);
+};
+
+/********************************************************************************
+ * PPT_marker
+ *******************************************************************************/
+class PPT_marker : public j2k_marker_io_base {
+ private:
+  uint8_t Zppt;
+
+ public:
+  uint8_t *pptbuf;
+  uint16_t pptlen;
+  PPT_marker();
+  explicit PPT_marker(j2c_src_memory &in);
+};
+
+/********************************************************************************
+ * j2k_main_header
+ *******************************************************************************/
+class j2k_main_header {
+ public:
+  std::unique_ptr<SIZ_marker> SIZ;
+  std::unique_ptr<CAP_marker> CAP;
+  std::unique_ptr<PRF_marker> PRF;
+  std::unique_ptr<COD_marker> COD;
+  std::vector<std::unique_ptr<COC_marker>> COC;
+  std::unique_ptr<CPF_marker> CPF;
+  std::unique_ptr<QCD_marker> QCD;
+  std::vector<std::unique_ptr<QCC_marker>> QCC;
+  std::vector<std::unique_ptr<RGN_marker>> RGN;
+  std::unique_ptr<POC_marker> POC;
+  std::vector<std::unique_ptr<PPM_marker>> PPM;
+  std::vector<std::unique_ptr<TLM_marker>> TLM;
+  std::vector<std::unique_ptr<PLM_marker>> PLM;
+  std::unique_ptr<CRG_marker> CRG;
+  std::vector<std::unique_ptr<COM_marker>> COM;
+  // Part 2 extensions
+  std::vector<std::unique_ptr<DFS_marker>> DFS;
+  std::vector<std::unique_ptr<ATK_marker>> ATK;
+  std::unique_ptr<buf_chain> ppm_header;
+  std::unique_ptr<uint8_t[]> ppm_buf;
+
+ public:
+  j2k_main_header();
+  j2k_main_header(SIZ_marker *siz, COD_marker *cod, QCD_marker *qcd, CAP_marker *cap = nullptr,
+                  uint8_t qfactor = 0xFF, const open_htj2k::visual_weighting_params &vw = {},
+                  CPF_marker *cpf = nullptr, POC_marker *poc = nullptr, CRG_marker *crg = nullptr);
+  void add_COM_marker(const COM_marker &com);
+  void flush(j2c_dst_memory &buf);
+  int read(j2c_src_memory &);
+  void get_number_of_tiles(uint32_t &x, uint32_t &y) const;
+  buf_chain *get_ppm_header() const { return ppm_header.get(); }
+  // Return the DFS marker for the given DFS index, or nullptr if not found.
+  const DFS_marker *get_dfs_marker(uint8_t dfs_index) const;
+  // Return the ATK marker for the given ATK index, or nullptr if not found.
+  const ATK_marker *get_atk_marker(uint8_t atk_index) const;
+};
+
+/********************************************************************************
+ * j2k_tilepart_header
+ *******************************************************************************/
+class j2k_tilepart_header {
+ public:
+  uint16_t num_components;
+  SOT_marker SOT;
+  std::unique_ptr<COD_marker> COD;
+  std::vector<std::unique_ptr<COC_marker>> COC;
+  std::unique_ptr<QCD_marker> QCD;
+  std::vector<std::unique_ptr<QCC_marker>> QCC;
+  std::vector<std::unique_ptr<RGN_marker>> RGN;
+  std::unique_ptr<POC_marker> POC;
+  std::vector<std::unique_ptr<PPT_marker>> PPT;
+  std::vector<std::unique_ptr<PLT_marker>> PLT;
+  std::vector<std::unique_ptr<COM_marker>> COM;
+
+ public:
+  explicit j2k_tilepart_header(uint16_t nc);
+  uint32_t read(j2c_src_memory &in);
+};

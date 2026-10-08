@@ -13,6 +13,7 @@ Examples:
   ./scripts/release-tag.sh major --dry-run
 
 This script:
+  0) Fast-forwards onto origin (CI pushes rebuilt binding artifacts after each tag)
   1) Computes the next SemVer tag from existing v* tags
     2) Updates crate versions in Cargo.toml files
     3) Commits the version bump
@@ -191,6 +192,12 @@ fi
 require_clean_tree
 
 git fetch --tags --force --quiet
+# The tag-triggered Build Bindings workflow pushes a "rebuild native artifacts" commit to main
+# after every release; build on top of it rather than failing the push below.
+if git rev-parse --abbrev-ref '@{u}' >/dev/null 2>&1; then
+    git fetch --quiet
+    git merge --ff-only --quiet '@{u}'
+fi
 
 latest_tag="$(latest_semver_tag)"
 version_source="git tag"
@@ -224,7 +231,9 @@ update_manifest_version "Cargo.toml" "$next_version"
 update_manifest_version "exec/dcmnorm/Cargo.toml" "$next_version"
 update_manifest_version "exec/dcmtalk/Cargo.toml" "$next_version"
 
-cargo generate-lockfile --quiet
+# Only the workspace's own version entries: `cargo generate-lockfile` would re-resolve every
+# dependency to its newest compatible version as a side effect of each release.
+cargo update --workspace --quiet
 
 git add -u
 if git diff --cached --quiet; then

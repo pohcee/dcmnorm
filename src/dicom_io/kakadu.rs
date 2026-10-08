@@ -23,7 +23,6 @@ unsafe extern "C" {
     ) -> c_int;
     fn dcmnorm_kakadu_free_buffer(buffer: *mut u8, len: usize);
     fn dcmnorm_kakadu_free_error(error_message: *mut c_char);
-    fn dcmnorm_kakadu_supports_htj2k() -> c_int;
     fn dcmnorm_kakadu_encode(
         pixel_data: *const u8,
         pixel_data_len: usize,
@@ -38,21 +37,6 @@ unsafe extern "C" {
         out_len: *mut usize,
         error_message: *mut *mut c_char,
     ) -> c_int;
-}
-
-/// Whether the linked Kakadu SDK is new enough (v8.0+) to have any HTJ2K (Part-15) support at
-/// all. Versions before that don't fail cleanly on an HT-coded codestream - `kdu_codestream`
-/// can hang indefinitely trying to interpret Part-15-only marker signaling it doesn't
-/// understand - so this must be checked before ever attempting a Kakadu decode of `.201`/`.202`/
-/// `.203`, never inferred from how a decode attempt turns out.
-#[cfg(feature = "kakadu-ffi")]
-pub(super) fn kakadu_supports_htj2k() -> bool {
-    unsafe { dcmnorm_kakadu_supports_htj2k() != 0 }
-}
-
-#[cfg(not(feature = "kakadu-ffi"))]
-pub(super) fn kakadu_supports_htj2k() -> bool {
-    false
 }
 
 #[cfg(feature = "kakadu-ffi")]

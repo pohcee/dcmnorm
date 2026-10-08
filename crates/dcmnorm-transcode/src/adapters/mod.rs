@@ -6,14 +6,9 @@
 //! - [`jpeg`] provides JPEG decoding (baseline and lossless, via the in-house
 //!   `dcmnorm-jpeg`) and encoding (baseline, via `jpeg-encoder`).
 //!   Requires the `jpeg` feature, enabled by default.
-//! - [`jpeg2k`] contains JPEG 2000 support,
-//!   which is currently available through [OpenJPEG].
-//!   Use feature `openjpeg-sys`
-//!   to statically link to the OpenJPEG reference implementation,
-//!   thus providing JPEG 2000 decoding.
-//!   Alternatively, feature `openjp2` provides native JPEG 2000 decoding
-//!   via the [Rust port of OpenJPEG][OpenJPEG-rs],
-//!   which is maintained separately.
+//! - [`jpeg2k`] contains JPEG 2000 support: classic JPEG 2000 through [OpenJPEG] and
+//!   High-Throughput JPEG 2000 through OpenHTJ2K, both provided by the `dcmnorm-jpeg2000`
+//!   crate. Requires the `jpeg2000` feature.
 //! - [`rle_lossless`] provides native RLE lossless decoding.
 //!   Requires the `rle` feature,
 //!   enabled by default.
@@ -24,10 +19,9 @@
 //! calls `charls` directly, bypassing this registry entirely.
 //!
 //! [OpenJPEG]: https://github.com/uclouvain/openjpeg
-//! [OpenJPEG-rs]: https://crates.io/crates/openjp2
 #[cfg(feature = "jpeg")]
 pub mod jpeg;
-#[cfg(any(feature = "openjp2", feature = "openjpeg-sys"))]
+#[cfg(feature = "jpeg2000")]
 pub mod jpeg2k;
 #[cfg(feature = "rle")]
 pub mod rle_lossless;
@@ -42,8 +36,8 @@ pub mod uncompressed;
 pub mod jpeg {}
 
 /// **Note:** This module is a stub.
-/// Enable either `openjp2` or `openjpeg-sys` to use this module.
-#[cfg(not(any(feature = "openjp2", feature = "openjpeg-sys")))]
+/// Enable the `jpeg2000` feature to use this module.
+#[cfg(not(feature = "jpeg2000"))]
 pub mod jpeg2k {}
 
 /// **Note:** This module is a stub.

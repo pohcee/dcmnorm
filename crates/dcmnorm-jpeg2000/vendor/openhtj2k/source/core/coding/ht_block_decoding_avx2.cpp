@@ -1,0 +1,1166 @@
+// Copyright (c) 2019 - 2026, Osamu Watanabe
+// All rights reserved.
+//
+// Redistribution and use in source and binary forms, with or without
+//    modification, are permitted provided that the following conditions are met:
+//
+// 1. Redistributions of source code must retain the above copyright notice, this
+// list of conditions and the following disclaimer.
+//
+// 2. Redistributions in binary form must reproduce the above copyright notice,
+// this list of conditions and the following disclaimer in the documentation
+// and/or other materials provided with the distribution.
+//
+// 3. Neither the name of the copyright holder nor the names of its
+// contributors may be used to endorse or promote products derived from
+// this software without specific prior written permission.
+//
+// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+// AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+//    IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+// DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+//    FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+//    DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+//    SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+//    CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+// OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+// OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+#if defined(OPENHTJ2K_TRY_AVX2) && defined(__AVX2__)
+  #include "coding_units.hpp"
+  #include "dec_CxtVLC_tables.hpp"
+  #include "ht_block_decoding.hpp"
+  #include "block_decoding.hpp"
+  #include "coding_local.hpp"
+  #include "utils.hpp"
+
+  #if defined(_MSC_VER) || defined(__MINGW64__)
+    #include <intrin.h>
+  #else
+    #include <x86intrin.h>
+  #endif
+
+static FORCE_INLINE uint8_t calc_mbr_inline(const uint8_t *block_states, size_t blkstate_stride, uint32_t i,
+                                            uint32_t j, uint8_t causal_cond) {
+  const uint8_t *p0 = block_states + static_cast<size_t>(i) * blkstate_stride + j;
+  const uint8_t *p1 = p0 + blkstate_stride;
+  const uint8_t *p2 = p1 + blkstate_stride;
+
+  uint32_t mbr0 = p0[0] | p0[1] | p0[2];
+  uint32_t mbr1 = p1[0] | p1[2];
+  uint32_t mbr2 = p2[0] | p2[1] | p2[2];
+  uint32_t mbr  = mbr0 | mbr1 | (mbr2 & causal_cond);
+  mbr |= (mbr0 >> SHIFT_REF) & (mbr0 >> SHIFT_SCAN);
+  mbr |= (mbr1 >> SHIFT_REF) & (mbr1 >> SHIFT_SCAN);
+  mbr |= (mbr2 >> SHIFT_REF) & (mbr2 >> SHIFT_SCAN) & causal_cond;
+  return mbr & 1;
+}
+
+// Pointer-based MBR: state_p points to state[(i+1)*stride + (j+1)].
+static FORCE_INLINE uint8_t calc_mbr_p(const uint8_t *state_p, size_t stride, uint8_t causal_cond) {
+  const uint8_t *p0 = state_p - stride - 1;
+  const uint8_t *p1 = state_p - 1;
+  const uint8_t *p2 = state_p + stride - 1;
+
+  uint32_t mbr0 = p0[0] | p0[1] | p0[2];
+  uint32_t mbr1 = p1[0] | p1[2];
+  uint32_t mbr2 = p2[0] | p2[1] | p2[2];
+  uint32_t mbr  = mbr0 | mbr1 | (mbr2 & causal_cond);
+  mbr |= (mbr0 >> SHIFT_REF) & (mbr0 >> SHIFT_SCAN);
+  mbr |= (mbr1 >> SHIFT_REF) & (mbr1 >> SHIFT_SCAN);
+  mbr |= (mbr2 >> SHIFT_REF) & (mbr2 >> SHIFT_SCAN) & causal_cond;
+  return mbr & 1;
+}
+
+// Keep the member function for ABI compatibility (used by non-AVX2 callers).
+uint8_t j2k_codeblock::calc_mbr(const uint32_t i, const uint32_t j, const uint8_t causal_cond) const {
+  return calc_mbr_inline(block_states, blkstate_stride, i, j, causal_cond);
+}
+
+// https://stackoverflow.com/a/58827596
+inline __m128i sse_lzcnt_epi32(__m128i v) {
+  // prevent value from being rounded up to the next power of two
+  v = _mm_andnot_si128(_mm_srli_epi32(v, 8), v);  // keep 8 MSB
+
+  v = _mm_castps_si128(_mm_cvtepi32_ps(v));    // convert an integer to float
+  v = _mm_srli_epi32(v, 23);                   // shift down the exponent
+  v = _mm_subs_epu16(_mm_set1_epi32(158), v);  // undo bias
+  v = _mm_min_epi16(v, _mm_set1_epi32(32));    // clamp at 32
+
+  return v;
+}
+
+// AVX2 256-bit leading-zero count for 8 × uint32_t values.
+inline __m256i avx2_lzcnt_epi32(__m256i v) {
+  v = _mm256_andnot_si256(_mm256_srli_epi32(v, 8), v);  // keep 8 MSB
+  v = _mm256_castps_si256(_mm256_cvtepi32_ps(v));
+  v = _mm256_srli_epi32(v, 23);
+  v = _mm256_subs_epu16(_mm256_set1_epi32(158), v);
+  v = _mm256_min_epi16(v, _mm256_set1_epi32(32));
+  return v;
+}
+
+// Build __m256i with lower 128 = broadcast of qinf[0], upper = broadcast of qinf[1].
+static FORCE_INLINE __m256i expand_two_quads(__m128i qinf128) {
+  return _mm256_set_m128i(_mm_shuffle_epi32(qinf128, _MM_SHUFFLE(1, 1, 1, 1)),
+                          _mm_shuffle_epi32(qinf128, _MM_SHUFFLE(0, 0, 0, 0)));
+}
+
+// Fused dequantize-and-store for 8 × int32 MagSgn samples → 8 × float.
+// Lossless (transformation==1): sign-magnitude → two's-complement shift → float.
+// Lossy   (transformation==0): magnitude → float → scale → apply sign via XOR.
+template <bool StoreI32 = false>
+static FORCE_INLINE void dequant_store_256(int32_t *dst, __m256i val, uint8_t transformation,
+                                           int32_t pLSB_dq, __m256 vfscale, __m256i vmagmask,
+                                           __m256i vsignmask) {
+  if (transformation == 1) {
+    __m256i mag = _mm256_and_si256(val, vmagmask);
+    __m256i res = _mm256_sign_epi32(_mm256_srai_epi32(mag, pLSB_dq), val);
+    if constexpr (StoreI32)
+      _mm256_storeu_si256(reinterpret_cast<__m256i *>(dst), res);
+    else
+      _mm256_storeu_ps(reinterpret_cast<float *>(dst), _mm256_cvtepi32_ps(res));
+  } else {
+    __m256i mag = _mm256_and_si256(val, vmagmask);
+    __m256 f    = _mm256_mul_ps(_mm256_cvtepi32_ps(mag), vfscale);
+    f           = _mm256_xor_ps(f, _mm256_castsi256_ps(_mm256_and_si256(val, vsignmask)));
+    _mm256_storeu_ps(reinterpret_cast<float *>(dst), f);
+  }
+}
+
+template <bool StoreI32 = false>
+static FORCE_INLINE void dequant_store_128(int32_t *dst, __m128i val, uint8_t transformation,
+                                           int32_t pLSB_dq, __m256 vfscale256, __m128i vmagmask,
+                                           __m128i vsignmask) {
+  if (transformation == 1) {
+    __m128i mag = _mm_and_si128(val, vmagmask);
+    __m128i res = _mm_sign_epi32(_mm_srai_epi32(mag, pLSB_dq), val);
+    if constexpr (StoreI32)
+      _mm_storeu_si128(reinterpret_cast<__m128i *>(dst), res);
+    else
+      _mm_storeu_ps(reinterpret_cast<float *>(dst), _mm_cvtepi32_ps(res));
+  } else {
+    __m128i mag = _mm_and_si128(val, vmagmask);
+    __m128 f    = _mm_mul_ps(_mm_cvtepi32_ps(mag), _mm256_castps256_ps128(vfscale256));
+    f           = _mm_xor_ps(f, _mm_castsi128_ps(_mm_and_si128(val, vsignmask)));
+    _mm_storeu_ps(reinterpret_cast<float *>(dst), f);
+  }
+}
+
+// Step-2 of the HT cleanup pass: MagSgn decoding over the (tv, u) scratch
+// written by ht_cleanup_step1_nway (the former phase 1 of this function).
+// Kept per-block: the fwd_buf destuff scratch is thread-local (constructing a
+// second fwd_buf on the same thread invalidates the first), and step-2 is
+// throughput-bound — there is nothing to gain from interleaving it.
+template <bool fuse_dequant = false, bool store_i32 = false>
+static void ht_cleanup_step2(j2k_codeblock *block, const uint8_t pLSB, const int32_t Pcup,
+                             uint16_t *scratch, const int32_t sstr) {
+  uint8_t *compressed_data = block->get_compressed_data();
+  const uint16_t QW        = static_cast<uint16_t>(ceil_int(static_cast<int16_t>(block->size.x), 2));
+  const uint16_t QH        = static_cast<uint16_t>(ceil_int(static_cast<int16_t>(block->size.y), 2));
+  uint16_t *sp;
+  int32_t qx;
+  /*******************************************************************************************************************/
+  // MagSgn decoding
+  /*******************************************************************************************************************/
+
+  // Fused dequantize setup: when fuse_dequant is true, we write dequantized float values
+  // directly to band_buf, eliminating the separate dequantize pass.
+  // pLSB_dq is the dequantization shift (31 - M_b), distinct from the MagSgn pLSB.
+  int32_t pLSB_dq      = 0;
+  float fscale_direct  = 0.0f;
+  __m256 vfscale       = _mm256_setzero_ps();
+  __m256i vsignmask_dq = _mm256_setzero_si256();
+  __m256i vmagmask_dq  = _mm256_setzero_si256();
+  if constexpr (fuse_dequant) {
+    const int32_t M_b_val = block->get_Mb();
+    pLSB_dq               = 31 - M_b_val;
+    vmagmask_dq           = _mm256_set1_epi32(0x7FFFFFFF);
+    vsignmask_dq          = _mm256_set1_epi32(INT32_MIN);
+    if (block->transformation != 1) {
+      // lossy path (transformation==0 for irrev97, transformation>=2 for ATK irrev)
+      fscale_direct = block->stepsize;
+      fscale_direct *= static_cast<float>(1 << FRACBITS);
+      if (M_b_val <= 31)
+        fscale_direct /= static_cast<float>(1 << (31 - M_b_val));
+      else
+        fscale_direct *= static_cast<float>(1 << (M_b_val - 31));
+      vfscale = _mm256_set1_ps(fscale_direct);
+    }
+  }
+
+  int32_t *const sample_buf = block->sample_buf;
+  // When fusing dequantize, output pointers target band_buf (float*) instead of sample_buf (int32_t*).
+  // Both are 32-bit wide so pointer arithmetic is identical.
+  int32_t *mp0 = fuse_dequant ? reinterpret_cast<int32_t *>(block->band_buf) : sample_buf;
+  int32_t *mp1 = mp0 + (fuse_dequant ? block->band_stride : block->blksampl_stride);
+
+  alignas(32) int32_t Eline[1040];  // 2 * QW_max + 16, QW_max = 512
+  std::memset(Eline, 0, (2U * QW + 16U) * sizeof(int32_t));
+  int32_t *E_p = Eline + 1;
+
+  __m128i v_n, mu0_n, mu1_n;
+  fwd_buf<0xFF> MagSgn(compressed_data, Pcup);
+
+  // Shuffle constants to expand 4-quad 16-bit results to 32-bit.
+  // decode_four_quads returns row256 as 16 × int16_t where consecutive pairs
+  // within each quad are (row0_sample, row1_sample). Placing each int16_t in the
+  // upper 16 bits of a 32-bit slot moves the sign from bit 15 to bit 31, which
+  // matches OpenHTJ2K's fixed-point format (sign at bit 31).
+  // shuffle_r0 extracts even-indexed 16-bit elements (row 0 samples).
+  // shuffle_r1 extracts odd-indexed 16-bit elements (row 1 samples).
+  const __m256i shuffle_r0 =
+      _mm256_set_epi8(0x0D, 0x0C, -1, -1, 0x09, 0x08, -1, -1, 0x05, 0x04, -1, -1, 0x01, 0x00, -1, -1, 0x0D,
+                      0x0C, -1, -1, 0x09, 0x08, -1, -1, 0x05, 0x04, -1, -1, 0x01, 0x00, -1, -1);
+  const __m256i shuffle_r1 =
+      _mm256_set_epi8(0x0F, 0x0E, -1, -1, 0x0B, 0x0A, -1, -1, 0x07, 0x06, -1, -1, 0x03, 0x02, -1, -1, 0x0F,
+                      0x0E, -1, -1, 0x0B, 0x0A, -1, -1, 0x07, 0x06, -1, -1, 0x03, 0x02, -1, -1);
+
+  // When pLSB > 16 (mmsbp2 = 32 - pLSB < 16), decoded sample values fit in 16 bits
+  // so we use the faster 4-quad 16-bit path which processes twice as many quads per
+  // SIMD iteration.  For pLSB <= 16 we fall back to the 32-bit 2-quad path.
+  if (pLSB > 16) {
+    const uint8_t pLSB_adj = pLSB - 16;
+
+    // Initial line-pair — 4 quads at a time
+    sp = scratch;
+    for (qx = QW; qx >= 4; qx -= 4, sp += 8, mp0 += 8, mp1 += 8) {
+      v_n             = _mm_setzero_si128();
+      __m128i qinf128 = _mm_loadu_si128((__m128i *)sp);
+      __m128i U_q128  = _mm_srli_epi32(qinf128, 16);
+      __m256i row256  = MagSgn.decode_four_quads(qinf128, U_q128, pLSB_adj, v_n);
+
+      if constexpr (fuse_dequant) {
+        dequant_store_256<store_i32>(mp0, _mm256_shuffle_epi8(row256, shuffle_r0), block->transformation,
+                                     pLSB_dq, vfscale, vmagmask_dq, vsignmask_dq);
+        dequant_store_256<store_i32>(mp1, _mm256_shuffle_epi8(row256, shuffle_r1), block->transformation,
+                                     pLSB_dq, vfscale, vmagmask_dq, vsignmask_dq);
+      } else {
+        _mm256_storeu_si256((__m256i *)mp0, _mm256_shuffle_epi8(row256, shuffle_r0));
+        _mm256_storeu_si256((__m256i *)mp1, _mm256_shuffle_epi8(row256, shuffle_r1));
+      }
+
+      __m256i vn32 = _mm256_cvtepu16_epi32(v_n);
+      vn32         = avx2_lzcnt_epi32(vn32);
+      vn32         = _mm256_sub_epi32(_mm256_set1_epi32(32), vn32);
+      _mm256_storeu_si256((__m256i *)E_p, vn32);
+      E_p += 8;
+    }
+    // Handle remaining 0 or 2 quads — use decode_one_quad per quad so E_p is
+    // written per-column (consistent with the 4-quad loop's per-column format).
+    for (; qx > 0; qx -= 2, sp += 4, mp0 += 4, mp1 += 4) {
+      v_n             = _mm_setzero_si128();
+      __m128i qinf128 = _mm_loadu_si128((__m128i *)sp);
+      __m128i U_q128  = _mm_srli_epi32(qinf128, 16);
+      mu0_n           = MagSgn.decode_one_quad<0>(qinf128, U_q128, pLSB, v_n);
+      mu1_n           = MagSgn.decode_one_quad<1>(qinf128, U_q128, pLSB, v_n);
+      // v_n now has per-column (row-1 only) values for 4 columns.
+
+      auto t0 = _mm_unpacklo_epi32(mu0_n, mu1_n);
+      auto t1 = _mm_unpackhi_epi32(mu0_n, mu1_n);
+      mu0_n   = _mm_unpacklo_epi32(t0, t1);
+      mu1_n   = _mm_unpackhi_epi32(t0, t1);
+      if constexpr (fuse_dequant) {
+        dequant_store_128<store_i32>(mp0, mu0_n, block->transformation, pLSB_dq, vfscale,
+                                     _mm256_castsi256_si128(vmagmask_dq),
+                                     _mm256_castsi256_si128(vsignmask_dq));
+        dequant_store_128<store_i32>(mp1, mu1_n, block->transformation, pLSB_dq, vfscale,
+                                     _mm256_castsi256_si128(vmagmask_dq),
+                                     _mm256_castsi256_si128(vsignmask_dq));
+      } else {
+        _mm_storeu_si128((__m128i *)mp0, mu0_n);
+        _mm_storeu_si128((__m128i *)mp1, mu1_n);
+      }
+      v_n = sse_lzcnt_epi32(v_n);
+      v_n = _mm_sub_epi32(_mm_set1_epi32(32), v_n);
+      _mm_storeu_si128((__m128i *)E_p, v_n);
+      E_p += 4;
+    }
+
+    // Non-initial line-pairs
+    for (uint16_t row = 1; row < QH; row++) {
+      E_p = Eline + 1;
+      if constexpr (fuse_dequant) {
+        mp0 = reinterpret_cast<int32_t *>(block->band_buf) + (row * 2U) * block->band_stride;
+        mp1 = mp0 + block->band_stride;
+      } else {
+        mp0 = sample_buf + (row * 2U) * block->blksampl_stride;
+        mp1 = mp0 + block->blksampl_stride;
+      }
+      sp = scratch + row * sstr;
+
+      // Vectorized Emax: sliding max over 4-column windows using AVX2.
+      // Emax[q] = max(E_p[2q-1], E_p[2q], E_p[2q+1], E_p[2q+2]).
+      // Two 8-wide loads offset by 2 → max → per-lane shift → pairwise max → permute.
+      const __m256i perm_emax = _mm256_set_epi32(0, 0, 0, 0, 6, 4, 2, 0);
+      __m256i elo             = _mm256_loadu_si256((__m256i *)(E_p - 1));
+      __m256i ehi             = _mm256_loadu_si256((__m256i *)(E_p + 1));
+      __m256i emx             = _mm256_max_epi32(elo, ehi);
+      __m256i epr             = _mm256_max_epi32(emx, _mm256_srli_si256(emx, 4));
+      __m128i emax128         = _mm256_castsi256_si128(_mm256_permutevar8x32_epi32(epr, perm_emax));
+
+      for (qx = QW; qx >= 4; qx -= 4, sp += 8, mp0 += 8, mp1 += 8) {
+        v_n             = _mm_setzero_si128();
+        __m128i qinf128 = _mm_loadu_si128((__m128i *)sp);
+
+        // Compute kappa for all 4 quads using vectorized emax128.
+        __m128i rho128   = _mm_and_si128(qinf128, _mm_set1_epi32(0x00F0));
+        __m128i gm1      = _mm_sub_epi32(rho128, _mm_set1_epi32(1));
+        __m128i gamma128 = _mm_cmpeq_epi32(_mm_and_si128(rho128, gm1), _mm_setzero_si128());
+        __m128i em1      = _mm_sub_epi32(emax128, _mm_set1_epi32(1));
+        em1              = _mm_andnot_si128(gamma128, em1);
+        __m128i kappa128 = _mm_max_epi32(em1, _mm_set1_epi32(1));
+        __m128i U_q128   = _mm_add_epi32(_mm_srli_epi32(qinf128, 16), kappa128);
+
+        __m256i row256 = MagSgn.decode_four_quads(qinf128, U_q128, pLSB_adj, v_n);
+
+        if constexpr (fuse_dequant) {
+          dequant_store_256<store_i32>(mp0, _mm256_shuffle_epi8(row256, shuffle_r0), block->transformation,
+                                       pLSB_dq, vfscale, vmagmask_dq, vsignmask_dq);
+          dequant_store_256<store_i32>(mp1, _mm256_shuffle_epi8(row256, shuffle_r1), block->transformation,
+                                       pLSB_dq, vfscale, vmagmask_dq, vsignmask_dq);
+        } else {
+          _mm256_storeu_si256((__m256i *)mp0, _mm256_shuffle_epi8(row256, shuffle_r0));
+          _mm256_storeu_si256((__m256i *)mp1, _mm256_shuffle_epi8(row256, shuffle_r1));
+        }
+
+        // Read-ahead: vectorized Emax for next 4 quads BEFORE writing E_p.
+        elo     = _mm256_loadu_si256((__m256i *)(E_p + 7));
+        ehi     = _mm256_loadu_si256((__m256i *)(E_p + 9));
+        emx     = _mm256_max_epi32(elo, ehi);
+        epr     = _mm256_max_epi32(emx, _mm256_srli_si256(emx, 4));
+        emax128 = _mm256_castsi256_si128(_mm256_permutevar8x32_epi32(epr, perm_emax));
+
+        __m256i vn32 = _mm256_cvtepu16_epi32(v_n);
+        vn32         = avx2_lzcnt_epi32(vn32);
+        vn32         = _mm256_sub_epi32(_mm256_set1_epi32(32), vn32);
+        _mm256_storeu_si256((__m256i *)E_p, vn32);
+        E_p += 8;
+      }
+      // Remaining 0 or 2 quads — emax128[0..1] already hold the correct Emax values.
+      for (; qx > 0; qx -= 2, sp += 4, mp0 += 4, mp1 += 4) {
+        v_n             = _mm_setzero_si128();
+        __m128i qinf128 = _mm_loadu_si128((__m128i *)sp);
+        __m256i qinf256 = expand_two_quads(qinf128);
+        __m256i U_q256;
+        {
+          // Compute kappa without scalar extracts: broadcast Emax-1 per quad lane.
+          __m128i emax_m1 = _mm_sub_epi32(emax128, _mm_set1_epi32(1));
+          __m256i gamma   = _mm256_and_si256(qinf256, _mm256_set1_epi32(0xF0));
+          __m256i gm1     = _mm256_sub_epi32(gamma, _mm256_set1_epi32(1));
+          gamma           = _mm256_and_si256(gamma, gm1);
+          gamma           = _mm256_cmpeq_epi32(gamma, _mm256_setzero_si256());
+          __m256i emax256 = _mm256_set_m128i(_mm_shuffle_epi32(emax_m1, _MM_SHUFFLE(1, 1, 1, 1)),
+                                             _mm_shuffle_epi32(emax_m1, _MM_SHUFFLE(0, 0, 0, 0)));
+          emax256         = _mm256_andnot_si256(gamma, emax256);
+          __m256i kappa   = _mm256_max_epi32(emax256, _mm256_set1_epi32(1));
+          U_q256          = _mm256_add_epi32(_mm256_srli_epi32(qinf256, 16), kappa);
+        }
+        __m128i U_q128 =
+            _mm_unpacklo_epi32(_mm256_castsi256_si128(U_q256), _mm256_extracti128_si256(U_q256, 1));
+        mu0_n = MagSgn.decode_one_quad<0>(qinf128, U_q128, pLSB, v_n);
+        mu1_n = MagSgn.decode_one_quad<1>(qinf128, U_q128, pLSB, v_n);
+
+        auto t0 = _mm_unpacklo_epi32(mu0_n, mu1_n);
+        auto t1 = _mm_unpackhi_epi32(mu0_n, mu1_n);
+        mu0_n   = _mm_unpacklo_epi32(t0, t1);
+        mu1_n   = _mm_unpackhi_epi32(t0, t1);
+        if constexpr (fuse_dequant) {
+          dequant_store_128<store_i32>(mp0, mu0_n, block->transformation, pLSB_dq, vfscale,
+                                       _mm256_castsi256_si128(vmagmask_dq),
+                                       _mm256_castsi256_si128(vsignmask_dq));
+          dequant_store_128<store_i32>(mp1, mu1_n, block->transformation, pLSB_dq, vfscale,
+                                       _mm256_castsi256_si128(vmagmask_dq),
+                                       _mm256_castsi256_si128(vsignmask_dq));
+        } else {
+          _mm_storeu_si128((__m128i *)mp0, mu0_n);
+          _mm_storeu_si128((__m128i *)mp1, mu1_n);
+        }
+        // Read-ahead Emax for next 2 quads.
+        __m128i elo128 = _mm_loadu_si128((__m128i *)(E_p + 3));
+        __m128i ehi128 = _mm_loadu_si128((__m128i *)(E_p + 5));
+        __m128i emx128 = _mm_max_epi32(elo128, ehi128);
+        __m128i epr128 = _mm_max_epi32(emx128, _mm_srli_si128(emx128, 4));
+        emax128        = _mm_shuffle_epi32(epr128, _MM_SHUFFLE(3, 3, 2, 0));
+        v_n            = sse_lzcnt_epi32(v_n);
+        v_n            = _mm_sub_epi32(_mm_set1_epi32(32), v_n);
+        _mm_storeu_si128((__m128i *)E_p, v_n);
+        E_p += 4;
+      }
+    }
+  } else {
+    // 32-bit 2-quad path (used when pLSB <= 16, i.e. high-precision / heavy lossy)
+    // Initial line-pair
+    sp = scratch;
+    for (qx = QW; qx > 0; qx -= 2, sp += 4, mp0 += 4, mp1 += 4) {
+      v_n             = _mm_setzero_si128();
+      __m128i qinf128 = _mm_loadu_si128((__m128i *)sp);
+      __m256i qinf256 = expand_two_quads(qinf128);
+      __m256i U_q256  = _mm256_srli_epi32(qinf256, 16);
+      __m256i row256  = MagSgn.decode_two_quads(qinf256, U_q256, pLSB, v_n);
+
+      mu0_n   = _mm256_castsi256_si128(row256);
+      mu1_n   = _mm256_extracti128_si256(row256, 1);
+      auto t0 = _mm_unpacklo_epi32(mu0_n, mu1_n);
+      auto t1 = _mm_unpackhi_epi32(mu0_n, mu1_n);
+      mu0_n   = _mm_unpacklo_epi32(t0, t1);
+      mu1_n   = _mm_unpackhi_epi32(t0, t1);
+      if constexpr (fuse_dequant) {
+        dequant_store_128<store_i32>(mp0, mu0_n, block->transformation, pLSB_dq, vfscale,
+                                     _mm256_castsi256_si128(vmagmask_dq),
+                                     _mm256_castsi256_si128(vsignmask_dq));
+        dequant_store_128<store_i32>(mp1, mu1_n, block->transformation, pLSB_dq, vfscale,
+                                     _mm256_castsi256_si128(vmagmask_dq),
+                                     _mm256_castsi256_si128(vsignmask_dq));
+      } else {
+        _mm_storeu_si128((__m128i *)mp0, mu0_n);
+        _mm_storeu_si128((__m128i *)mp1, mu1_n);
+      }
+      v_n = sse_lzcnt_epi32(v_n);
+      v_n = _mm_sub_epi32(_mm_set1_epi32(32), v_n);
+      _mm_storeu_si128((__m128i *)E_p, v_n);
+      E_p += 4;
+    }
+    // Non-initial line-pairs
+    for (uint16_t row = 1; row < QH; row++) {
+      E_p = Eline + 1;
+      if constexpr (fuse_dequant) {
+        mp0 = reinterpret_cast<int32_t *>(block->band_buf) + (row * 2U) * block->band_stride;
+        mp1 = mp0 + block->band_stride;
+      } else {
+        mp0 = sample_buf + (row * 2U) * block->blksampl_stride;
+        mp1 = mp0 + block->blksampl_stride;
+      }
+      sp = scratch + row * sstr;
+
+      // Vectorized Emax for 2-quad path: sliding max over 4-column windows.
+      // epr128 positions {0, 2} hold {Emax[0], Emax[1]}; kept as vector to avoid scalar extracts.
+      __m128i elo128 = _mm_loadu_si128((__m128i *)(E_p - 1));
+      __m128i ehi128 = _mm_loadu_si128((__m128i *)(E_p + 1));
+      __m128i emx128 = _mm_max_epi32(elo128, ehi128);
+      __m128i epr128 = _mm_max_epi32(emx128, _mm_srli_si128(emx128, 4));
+      for (qx = QW; qx > 0; qx -= 2, sp += 4, mp0 += 4, mp1 += 4) {
+        v_n             = _mm_setzero_si128();
+        __m128i qinf128 = _mm_loadu_si128((__m128i *)sp);
+        __m256i qinf256 = expand_two_quads(qinf128);
+        __m256i U_q256;
+        {
+          // Compute kappa without scalar extracts: broadcast (Emax-1) per quad lane.
+          __m128i emax_m1 = _mm_sub_epi32(epr128, _mm_set1_epi32(1));
+          __m256i gamma   = _mm256_and_si256(qinf256, _mm256_set1_epi32(0xF0));
+          __m256i gm1     = _mm256_sub_epi32(gamma, _mm256_set1_epi32(1));
+          gamma           = _mm256_and_si256(gamma, gm1);
+          gamma           = _mm256_cmpeq_epi32(gamma, _mm256_setzero_si256());
+          __m256i emax256 = _mm256_set_m128i(_mm_shuffle_epi32(emax_m1, _MM_SHUFFLE(2, 2, 2, 2)),
+                                             _mm_shuffle_epi32(emax_m1, _MM_SHUFFLE(0, 0, 0, 0)));
+          emax256         = _mm256_andnot_si256(gamma, emax256);
+          __m256i kappa   = _mm256_max_epi32(emax256, _mm256_set1_epi32(1));
+          U_q256          = _mm256_add_epi32(_mm256_srli_epi32(qinf256, 16), kappa);
+        }
+        __m256i row256 = MagSgn.decode_two_quads(qinf256, U_q256, pLSB, v_n);
+        mu0_n          = _mm256_castsi256_si128(row256);
+        mu1_n          = _mm256_extracti128_si256(row256, 1);
+        auto t0        = _mm_unpacklo_epi32(mu0_n, mu1_n);
+        auto t1        = _mm_unpackhi_epi32(mu0_n, mu1_n);
+        mu0_n          = _mm_unpacklo_epi32(t0, t1);
+        mu1_n          = _mm_unpackhi_epi32(t0, t1);
+        if constexpr (fuse_dequant) {
+          dequant_store_128<store_i32>(mp0, mu0_n, block->transformation, pLSB_dq, vfscale,
+                                       _mm256_castsi256_si128(vmagmask_dq),
+                                       _mm256_castsi256_si128(vsignmask_dq));
+          dequant_store_128<store_i32>(mp1, mu1_n, block->transformation, pLSB_dq, vfscale,
+                                       _mm256_castsi256_si128(vmagmask_dq),
+                                       _mm256_castsi256_si128(vsignmask_dq));
+        } else {
+          _mm_storeu_si128((__m128i *)mp0, mu0_n);
+          _mm_storeu_si128((__m128i *)mp1, mu1_n);
+        }
+        // Read-ahead: vectorized Emax for next 2 quads BEFORE writing E_p.
+        elo128 = _mm_loadu_si128((__m128i *)(E_p + 3));
+        ehi128 = _mm_loadu_si128((__m128i *)(E_p + 5));
+        emx128 = _mm_max_epi32(elo128, ehi128);
+        epr128 = _mm_max_epi32(emx128, _mm_srli_si128(emx128, 4));
+        v_n    = sse_lzcnt_epi32(v_n);
+        v_n    = _mm_sub_epi32(_mm_set1_epi32(32), v_n);
+        _mm_storeu_si128((__m128i *)E_p, v_n);
+        E_p += 4;
+      }
+    }
+  }  // end if (pLSB > 16)
+}
+
+// Pack block_states SIGMA bits into nibble-packed uint16_t sigma array.
+// Layout: sigma[qy * mstr + qx] holds 16 bits for the 4×4 block at (qy*4, qx*4).
+// Nibbles: bits[0:3] = column 0, bits[4:7] = column 1, bits[8:11] = column 2, bits[12:15] = column 3.
+// Within each nibble: bit 0 = row 0, bit 1 = row 1, bit 2 = row 2, bit 3 = row 3.
+static void pack_sigma(const uint8_t *states, size_t bstride, uint32_t width, uint32_t height,
+                       uint16_t *sigma, uint32_t mstr) {
+  const uint32_t qw = (width + 3) >> 2;
+  const uint32_t qh = (height + 3) >> 2;
+  for (uint32_t qy = 0; qy < qh; qy++) {
+    const uint32_t y0 = qy * 4;
+    const uint32_t sh = (height - y0 < 4) ? (height - y0) : 4;
+    for (uint32_t qx = 0; qx < qw; qx++) {
+      const uint32_t x0 = qx * 4;
+      const uint32_t sw = (width - x0 < 4) ? (width - x0) : 4;
+      uint16_t s        = 0;
+      for (uint32_t col = 0; col < sw; col++) {
+        const uint8_t *p = states + (y0 + 1) * bstride + (x0 + col + 1);
+        for (uint32_t row = 0; row < sh; row++) {
+          s |= static_cast<uint16_t>((p[0] & 1) << (col * 4 + row));
+          p += bstride;
+        }
+      }
+      sigma[qy * mstr + qx] = s;
+    }
+    sigma[qy * mstr + qw] = 0;
+  }
+  // Zero the extra row below the block (needed for below-stripe MBR context)
+  for (uint32_t qx = 0; qx <= qw; qx++) {
+    sigma[qh * mstr + qx] = 0;
+  }
+}
+
+void ht_sigprop_decode(j2k_codeblock *block, uint8_t *HT_magref_segment, uint32_t magref_length,
+                       const uint8_t &pLSB, uint16_t *sigma, uint32_t mstr) {
+  if (pLSB == 0) return;  // no plane below the LSB; mirrors ht_magref_decode (avoids 1 << (pLSB-1) UB)
+  SP_dec SigProp(HT_magref_segment, magref_length);
+  const uint32_t height  = block->size.y;
+  const uint32_t width   = block->size.x;
+  const size_t sstride   = block->blksampl_stride;
+  int32_t *samples       = block->sample_buf;
+  const bool non_causal  = (block->Cmodes & CAUSAL) == 0;
+  const int32_t spp_mask = 3 << (pLSB - 1);
+  uint16_t prev_row_sig[264];
+  memset(prev_row_sig, 0, sizeof(prev_row_sig));
+
+  for (uint32_t y = 0; y < height; y += 4) {
+    const uint32_t sh = (height - y < 4) ? (height - y) : 4;
+    uint32_t pattern  = 0xFFFFu;
+    if (sh < 4) pattern = (sh == 3) ? 0x7777u : (sh == 2) ? 0x3333u : 0x1111u;
+
+    uint32_t prev     = 0;
+    uint16_t *cur_sig = sigma + (y >> 2) * mstr;
+
+    for (uint32_t x = 0; x < width; x += 4) {
+      const uint32_t qx = x >> 2;
+      uint32_t pat      = pattern;
+      int32_t excess    = static_cast<int32_t>(x + 4) - static_cast<int32_t>(width);
+      if (excess > 0) pat >>= (excess * 4);
+
+      // Load current + right-neighbor sigma as 32 bits (for horizontal MBR context)
+      uint32_t cs = *reinterpret_cast<const uint32_t *>(cur_sig + qx);
+      uint32_t ps = *reinterpret_cast<const uint32_t *>(prev_row_sig + qx);
+      uint32_t ns = *reinterpret_cast<const uint32_t *>(cur_sig + mstr + qx);
+
+      // Context from stripe above (bottom row) and below (top row)
+      uint32_t u = (ps & 0x88888888u) >> 3;
+      if (non_causal) u |= (ns & 0x11111111u) << 3;
+
+      // Vertical MBR integration
+      uint32_t mbr = cs;
+      mbr |= (cs & 0x77777777u) << 1;
+      mbr |= (cs & 0xEEEEEEEEu) >> 1;
+      mbr |= u;
+      // Horizontal MBR integration
+      uint32_t t = mbr;
+      mbr |= t << 4;
+      mbr |= t >> 4;
+      mbr |= prev >> 12;
+
+      mbr &= pat;
+      mbr &= ~cs;
+
+      uint32_t new_sig = 0;
+      if (mbr) {
+        static const uint32_t row_masks[4] = {0x33u, 0x76u, 0xECu, 0xC8u};
+        uint32_t inv_sig                   = ~cs & pat;
+        // CTZ iteration: process only set mbr bits in column-major order
+        // (nibble layout guarantees ascending bit positions = column-major).
+        // Branchless bit-result handling eliminates the unpredictable
+        // if(importSigPropBit()) branch (~50% mispredict rate).
+        while (mbr) {
+          uint32_t pos   = static_cast<uint32_t>(openhtj2k_ctz32(mbr));
+          uint32_t smask = 1u << pos;
+          mbr &= ~smask;
+          uint32_t bit      = SigProp.importSigPropBit();
+          uint32_t bit_mask = static_cast<uint32_t>(-static_cast<int32_t>(bit));
+          new_sig |= smask & bit_mask;
+          uint32_t neighbor = row_masks[pos & 3] << (pos & ~3u);
+          mbr |= neighbor & inv_sig & ~new_sig & bit_mask;
+        }
+
+        // Write magnitude + sign using CTZ (avoids 32 branch checks)
+        if (new_sig) {
+          uint32_t bits = new_sig;
+          while (bits) {
+            uint32_t pos = static_cast<uint32_t>(openhtj2k_ctz32(bits));
+            bits &= bits - 1;
+            samples[(y + (pos & 3)) * sstride + (x + (pos >> 2))] |= spp_mask;
+          }
+          bits = new_sig;
+          while (bits) {
+            uint32_t pos = static_cast<uint32_t>(openhtj2k_ctz32(bits));
+            bits &= bits - 1;
+            samples[(y + (pos & 3)) * sstride + (x + (pos >> 2))] |=
+                static_cast<int32_t>(SigProp.importSigPropBit()) << 31;
+          }
+        }
+      }
+
+      // Update prev_row_sig for above-stripe context in next stripe
+      // Do NOT update sigma — it must retain cleanup-only significance for MRP
+      new_sig |= cs & 0xFFFFu;
+      prev_row_sig[qx] = static_cast<uint16_t>(new_sig);
+
+      // Prepare left-neighbor context for next quad
+      t = new_sig;
+      new_sig |= (t & 0x7777u) << 1;
+      new_sig |= (t & 0xEEEEu) >> 1;
+      prev = (new_sig | u) & 0xF000u;
+    }
+  }
+}
+
+void ht_magref_decode(j2k_codeblock *block, uint8_t *HT_magref_segment, uint32_t magref_length,
+                      const uint8_t &pLSB, const uint16_t *sigma, uint32_t mstr) {
+  if (pLSB == 0) return;
+  MR_dec MagRef(HT_magref_segment, magref_length);
+  const uint32_t height = block->size.y;
+  const uint32_t width  = block->size.x;
+  const size_t sstride  = block->blksampl_stride;
+  int32_t *samples      = block->sample_buf;
+
+  for (uint32_t y = 0; y < height; y += 4) {
+    const uint16_t *csig = sigma + (y >> 2) * mstr;
+
+    for (uint32_t x = 0; x < width; x += 4) {
+      uint16_t sig = csig[x >> 2];
+      if (!sig) continue;
+
+      // CTZ iteration: process only significant samples (column-major order
+      // preserved by nibble layout). Avoids 16 per-quad if(sig & bit) checks.
+      uint32_t s = sig;
+      while (s) {
+        uint32_t pos = static_cast<uint32_t>(openhtj2k_ctz32(s));
+        s &= s - 1;
+        int32_t *sp  = samples + (y + (pos & 3)) * sstride + (x + (pos >> 2));
+        int32_t bit  = MagRef.importMagRefBit();
+        int32_t mask = static_cast<int32_t>(0xFFFFFFFE | static_cast<unsigned int>(bit));
+        mask <<= pLSB;
+        sp[0] &= mask;
+        sp[0] |= 1 << (pLSB - 1);
+      }
+    }
+  }
+}
+
+void j2k_codeblock::dequantize(uint8_t ROIshift) const {
+  // number of decoded magnitude bit‐planes
+  const int32_t pLSB = 31 - M_b;  // indicates binary point;
+  // bit mask for ROI detection
+  const uint32_t mask = UINT32_MAX >> (M_b + 1);
+
+  const __m256i magmask = _mm256_set1_epi32(0x7FFFFFFF);
+  const __m256i vmask   = _mm256_set1_epi32(static_cast<int32_t>(~mask));
+  const __m256i zero    = _mm256_setzero_si256();
+  const __m256i shift   = _mm256_set1_epi32(ROIshift);
+  __m256i v0, v1, s0, s1, vdst0, vdst1, vROImask;
+  if (this->transformation == 1) {
+    auto rev_dequant = [&](auto simd_store, auto scalar_store) {
+      for (size_t i = 0; i < static_cast<size_t>(this->size.y); i++) {
+        int32_t *val = this->sample_buf + i * this->blksampl_stride;
+        sprec_t *dst = this->band_buf + i * this->band_stride;
+        size_t len   = this->size.x;
+        if (ROIshift == 0) {
+          for (; len >= 16; len -= 16) {
+            v0    = _mm256_load_si256((__m256i *)val);
+            v1    = _mm256_load_si256((__m256i *)(val + 8));
+            s0    = v0;
+            s1    = v1;
+            v0    = _mm256_and_si256(v0, magmask);
+            v1    = _mm256_and_si256(v1, magmask);
+            vdst0 = _mm256_sign_epi32(_mm256_srai_epi32(v0, pLSB), s0);
+            vdst1 = _mm256_sign_epi32(_mm256_srai_epi32(v1, pLSB), s1);
+            simd_store(dst, vdst0, vdst1);
+            val += 16;
+            dst += 16;
+          }
+        } else {
+          for (; len >= 16; len -= 16) {
+            v0       = _mm256_load_si256((__m256i *)val);
+            v1       = _mm256_load_si256((__m256i *)(val + 8));
+            s0       = v0;
+            s1       = v1;
+            v0       = _mm256_and_si256(v0, magmask);
+            v1       = _mm256_and_si256(v1, magmask);
+            vROImask = _mm256_and_si256(v0, vmask);
+            vROImask = _mm256_cmpeq_epi32(vROImask, zero);
+            vROImask = _mm256_and_si256(vROImask, shift);
+            v0       = _mm256_sllv_epi32(v0, vROImask);
+            vROImask = _mm256_and_si256(v1, vmask);
+            vROImask = _mm256_cmpeq_epi32(vROImask, zero);
+            vROImask = _mm256_and_si256(vROImask, shift);
+            v1       = _mm256_sllv_epi32(v1, vROImask);
+            vdst0    = _mm256_sign_epi32(_mm256_srai_epi32(v0, pLSB), s0);
+            vdst1    = _mm256_sign_epi32(_mm256_srai_epi32(v1, pLSB), s1);
+            simd_store(dst, vdst0, vdst1);
+            val += 16;
+            dst += 16;
+          }
+        }
+        for (; len > 0; --len) {
+          int32_t sign = *val & INT32_MIN;
+          *val &= INT32_MAX;
+          if (ROIshift && (((uint32_t)*val & ~mask) == 0)) {
+            *val <<= ROIshift;
+          }
+          *val >>= pLSB;
+          if (sign) *val = -(*val & INT32_MAX);
+          assert(pLSB >= 0);
+          scalar_store(dst, *val);
+          val++;
+          dst++;
+        }
+      }
+    };
+    if (this->dequant_i32) {
+      rev_dequant(
+          [](sprec_t *d, __m256i a, __m256i b) {
+            _mm256_storeu_si256(reinterpret_cast<__m256i *>(d), a);
+            _mm256_storeu_si256(reinterpret_cast<__m256i *>(d + 8), b);
+          },
+          [](sprec_t *d, int32_t v) { *reinterpret_cast<int32_t *>(d) = v; });
+    } else {
+      rev_dequant(
+          [](sprec_t *d, __m256i a, __m256i b) {
+            _mm256_storeu_ps(d, _mm256_cvtepi32_ps(a));
+            _mm256_storeu_ps(d + 8, _mm256_cvtepi32_ps(b));
+          },
+          [](sprec_t *d, int32_t v) { *d = static_cast<float>(v); });
+    }
+  } else {
+    // lossy path: compute the direct float scale factor
+    // decoded magnitude is in Q(31-M_b) fixed-point; result must be in Q(FRACBITS)
+    float fscale_direct = this->stepsize;
+    fscale_direct *= static_cast<float>(1 << FRACBITS);
+    if (M_b <= 31)
+      fscale_direct /= static_cast<float>(1 << (31 - M_b));
+    else
+      fscale_direct *= static_cast<float>(1 << (M_b - 31));
+
+    if (ROIshift == 0) {
+      // Common case: no ROI — direct float multiply, sign via XOR.
+      const __m256 vfscale    = _mm256_set1_ps(fscale_direct);
+      const __m256i vsignmask = _mm256_set1_epi32(INT32_MIN);
+      for (size_t i = 0; i < static_cast<size_t>(this->size.y); i++) {
+        int32_t *val = this->sample_buf + i * this->blksampl_stride;
+        sprec_t *dst = this->band_buf + i * this->band_stride;
+        size_t len   = this->size.x;
+        // 2× unrolled: 4 vectors (32 elements) per iteration for better ILP
+        // val = sample_buf + i*blksampl_stride; 32-byte aligned → _mm256_load_si256 ok.
+        for (; len >= 32; len -= 32) {
+          __m256i a0 = _mm256_load_si256((__m256i *)val);
+          __m256i a1 = _mm256_load_si256((__m256i *)(val + 8));
+          __m256i a2 = _mm256_load_si256((__m256i *)(val + 16));
+          __m256i a3 = _mm256_load_si256((__m256i *)(val + 24));
+          __m256i m0 = _mm256_and_si256(a0, magmask);
+          __m256i m1 = _mm256_and_si256(a1, magmask);
+          __m256i m2 = _mm256_and_si256(a2, magmask);
+          __m256i m3 = _mm256_and_si256(a3, magmask);
+          __m256 f0  = _mm256_mul_ps(_mm256_cvtepi32_ps(m0), vfscale);
+          __m256 f1  = _mm256_mul_ps(_mm256_cvtepi32_ps(m1), vfscale);
+          __m256 f2  = _mm256_mul_ps(_mm256_cvtepi32_ps(m2), vfscale);
+          __m256 f3  = _mm256_mul_ps(_mm256_cvtepi32_ps(m3), vfscale);
+          f0         = _mm256_xor_ps(f0, _mm256_castsi256_ps(_mm256_and_si256(a0, vsignmask)));
+          f1         = _mm256_xor_ps(f1, _mm256_castsi256_ps(_mm256_and_si256(a1, vsignmask)));
+          f2         = _mm256_xor_ps(f2, _mm256_castsi256_ps(_mm256_and_si256(a2, vsignmask)));
+          f3         = _mm256_xor_ps(f3, _mm256_castsi256_ps(_mm256_and_si256(a3, vsignmask)));
+          _mm256_storeu_ps(dst, f0);
+          _mm256_storeu_ps(dst + 8, f1);
+          _mm256_storeu_ps(dst + 16, f2);
+          _mm256_storeu_ps(dst + 24, f3);
+          val += 32;
+          dst += 32;
+        }
+        for (; len >= 8; len -= 8) {
+          __m256i a0 = _mm256_load_si256((__m256i *)val);
+          __m256i m0 = _mm256_and_si256(a0, magmask);
+          __m256 f0  = _mm256_mul_ps(_mm256_cvtepi32_ps(m0), vfscale);
+          f0         = _mm256_xor_ps(f0, _mm256_castsi256_ps(_mm256_and_si256(a0, vsignmask)));
+          _mm256_storeu_ps(dst, f0);
+          val += 8;
+          dst += 8;
+        }
+        for (; len > 0; --len) {
+          int32_t sign = *val & INT32_MIN;
+          float f      = static_cast<float>(*val & INT32_MAX) * fscale_direct;
+          if (sign) f = -f;
+          *dst++ = f;
+          val++;
+        }
+      }
+    } else {
+      // ROI path — rarely used; keep integer-arithmetic approach for correctness.
+      float fscale                = fscale_direct;
+      constexpr int32_t downshift = 15;
+      fscale *= static_cast<float>(1 << 16) * static_cast<float>(1 << downshift);
+      const auto scale = static_cast<int32_t>(fscale + 0.5f);
+      for (size_t i = 0; i < static_cast<size_t>(this->size.y); i++) {
+        int32_t *val = this->sample_buf + i * this->blksampl_stride;
+        sprec_t *dst = this->band_buf + i * this->band_stride;
+        size_t len   = this->size.x;
+        for (; len >= 16; len -= 16) {
+          v0 = _mm256_load_si256((__m256i *)val);
+          v1 = _mm256_load_si256((__m256i *)(val + 8));
+          s0 = v0;
+          s1 = v1;
+          v0 = _mm256_and_si256(v0, magmask);
+          v1 = _mm256_and_si256(v1, magmask);
+          // upshift background region
+          vROImask = _mm256_and_si256(v0, vmask);
+          vROImask = _mm256_cmpeq_epi32(vROImask, zero);
+          vROImask = _mm256_and_si256(vROImask, shift);
+          v0       = _mm256_sllv_epi32(v0, vROImask);
+          vROImask = _mm256_and_si256(v1, vmask);
+          vROImask = _mm256_cmpeq_epi32(vROImask, zero);
+          vROImask = _mm256_and_si256(vROImask, shift);
+          v1       = _mm256_sllv_epi32(v1, vROImask);
+          // truncate to int16 range
+          v0 = _mm256_srai_epi32(_mm256_add_epi32(v0, _mm256_set1_epi32(1 << 15)), 16);
+          v1 = _mm256_srai_epi32(_mm256_add_epi32(v1, _mm256_set1_epi32(1 << 15)), 16);
+          // dequantization
+          v0 = _mm256_mullo_epi32(v0, _mm256_set1_epi32(scale));
+          v1 = _mm256_mullo_epi32(v1, _mm256_set1_epi32(scale));
+          // downshift and sign
+          v0 = _mm256_srai_epi32(_mm256_add_epi32(v0, _mm256_set1_epi32(1 << (downshift - 1))), downshift);
+          v1 = _mm256_srai_epi32(_mm256_add_epi32(v1, _mm256_set1_epi32(1 << (downshift - 1))), downshift);
+          v0 = _mm256_sign_epi32(v0, s0);
+          v1 = _mm256_sign_epi32(v1, s1);
+          _mm256_storeu_ps(dst, _mm256_cvtepi32_ps(v0));
+          _mm256_storeu_ps(dst + 8, _mm256_cvtepi32_ps(v1));
+          val += 16;
+          dst += 16;
+        }
+        for (; len > 0; --len) {
+          int32_t sign = *val & INT32_MIN;
+          *val &= INT32_MAX;
+          if (((uint32_t)*val & ~mask) == 0) *val <<= ROIshift;
+          *val = (*val + (1 << 15)) >> 16;
+          *val *= scale;
+          *val = static_cast<int32_t>((*val + (1 << (downshift - 1))) >> downshift);
+          if (sign) *val = -(*val & INT32_MAX);
+          *dst = static_cast<float>(*val);
+          val++;
+          dst++;
+        }
+      }
+    }
+  }
+}
+
+// Per-block decode setup: segment validation, Lcup/Lref/Scup/Pcup derivation
+// and the modDcup buffer mutation.  Factored out of htj2k_decode so the
+// 1-way and batched entries share one source of truth.
+struct ht_dec_setup {
+  int32_t Lcup, Pcup, Scup;
+  uint32_t Lref;
+  uint8_t *Dref;  // nullptr when single-segment
+  uint8_t S_blk;
+  uint8_t num_ht_passes;
+  bool ok;     // false → htj2k_decode returns false
+  bool empty;  // num_ht_passes == 0 → success with no work
+};
+
+static ht_dec_setup htj2k_dec_setup(j2k_codeblock *block) {
+  ht_dec_setup su;
+  su.Lcup  = 0;
+  su.Pcup  = 0;
+  su.Scup  = 0;
+  su.Lref  = 0;
+  su.Dref  = nullptr;
+  su.S_blk = 0;
+  su.ok    = false;
+  su.empty = false;
+
+  // number of placeholder pass
+  uint8_t P0 = 0;
+  // number of HT Sets preceding the given(this) HT Set
+  const uint8_t S_skip = 0;
+
+  if (block->num_passes > 3) {
+    for (uint32_t i = 0; i < block->pass_length_count; i++) {
+      if (block->pass_length[i] != 0) {
+        break;
+      }
+      P0++;
+    }
+    P0 /= 3;
+  } else if (block->length == 0 && block->num_passes != 0) {
+    P0 = 1;
+  } else {
+    P0 = 0;
+  }
+  const uint8_t empty_passes = static_cast<uint8_t>(P0 * 3);
+  if (block->num_passes < empty_passes) {
+    printf("WARNING: number of passes %d exceeds number of empty passes %d", block->num_passes,
+           empty_passes);
+    return su;
+  }
+  // number of ht coding pass (Z_blk in the spec)
+  su.num_ht_passes = static_cast<uint8_t>(block->num_passes - empty_passes);
+  if (su.num_ht_passes == 0) {
+    su.ok    = true;
+    su.empty = true;
+    return su;
+  }
+
+  // HT defines at most two segments per codeblock (Cleanup + optional
+  // Refinement); `all_segments[4]` is over-provisioned.  A malformed
+  // input with pass_length_count > 4 non-zero entries used to write
+  // past the array and smash the stack — guard the write and the
+  // later `all_segments[0]` read.  Reported by IM JUN SEO (KISIA) and
+  // OH HAN GUEL (SANGMYUNG UNIVERSITY).
+  uint8_t all_segments[4] = {};
+  uint32_t num_segments   = 0;
+  for (uint32_t i = 0; i < block->pass_length_count; i++) {
+    if (block->pass_length[i] != 0) {
+      if (num_segments >= 4) {
+        printf("WARNING: too many HT coding-pass segments (>4) — malformed input.\n");
+        return su;
+      }
+      all_segments[num_segments++] = static_cast<uint8_t>(i);
+    }
+  }
+  if (num_segments == 0) {
+    printf("WARNING: no non-empty HT coding-pass segments.\n");
+    return su;
+  }
+  su.Lcup += static_cast<int32_t>(block->pass_length[all_segments[0]]);
+  if (su.Lcup < 2) {
+    printf("WARNING: Cleanup pass length must be at least 2 bytes in length.\n");
+    return su;
+  }
+  // Bound the attacker-controlled cleanup length by the (already clamped)
+  // codeblock byte count before any Dcup[Lcup-1] access / modDcup write.
+  if (static_cast<uint32_t>(su.Lcup) > block->length) {
+    printf("WARNING: HT cleanup pass length %d exceeds codeblock bytes %u — malformed input.\n", su.Lcup,
+           block->length);
+    return su;
+  }
+  for (uint32_t i = 1; i < num_segments; i++) {
+    su.Lref += block->pass_length[all_segments[i]];
+  }
+  // The refinement segments are read from Dcup + Lcup; keep them in the buffer.
+  if (static_cast<uint32_t>(su.Lref) > block->length - static_cast<uint32_t>(su.Lcup)) {
+    printf("WARNING: HT refinement length exceeds remaining codeblock bytes %u — malformed input.\n",
+           block->length - static_cast<uint32_t>(su.Lcup));
+    return su;
+  }
+  uint8_t *Dcup = block->get_compressed_data();
+
+  if (block->num_passes > 1 && num_segments > 1) {
+    su.Dref = block->get_compressed_data() + su.Lcup;
+  } else {
+    su.Dref = nullptr;
+  }
+  // number of (skipped) magnitude bitplanes
+  su.S_blk = static_cast<uint8_t>(P0 + block->num_ZBP + S_skip);
+  if (su.S_blk >= 30) {
+    printf("WARNING: Number of skipped mag bitplanes %d is too large.\n", su.S_blk);
+    return su;
+  }
+  // Suffix length (=MEL + VLC) of HT Cleanup pass
+  su.Scup = static_cast<int32_t>((Dcup[su.Lcup - 1] << 4) + (Dcup[su.Lcup - 2] & 0x0F));
+  if (su.Scup < 2 || su.Scup > su.Lcup || su.Scup > 4079) {
+    printf("WARNING: cleanup pass suffix length %d is invalid.\n", su.Scup);
+    return su;
+  }
+  // modDcup (shall be done before the creation of state_VLC instance)
+  Dcup[su.Lcup - 1] = 0xFF;
+  Dcup[su.Lcup - 2] |= 0x0F;
+  su.Pcup = static_cast<int32_t>(su.Lcup - su.Scup);
+  su.ok   = true;
+  return su;
+}
+
+// Everything after step-1: step-2 (MagSgn) variant dispatch, SigProp/MagRef
+// refinement passes, and dequantization.  scratch/sstr hold the step-1 output.
+static bool htj2k_dec_finish(j2k_codeblock *block, const ht_dec_setup &su, const uint8_t ROIshift,
+                             uint16_t *scratch, const int32_t sstr) {
+  const uint8_t pLSB = static_cast<uint8_t>(30 - su.S_blk);
+
+  // Single HT pass with no ROI: use fused dequantize path to eliminate
+  // the separate dequantize pass over sample_buf.
+  bool dequant_done = false;
+  // Fused dequant: the MagSgn SIMD stores write in units of 4 (128-bit) or 8 (256-bit)
+  // elements.  When block width is not a multiple of 4, the extra elements overflow into
+  // adjacent blocks' column range in the shared output buffer (subband or ring buffer).
+  // This is safe in single-threaded decode (sequential order overwrites correctly) but
+  // causes a data race in multi-threaded decode.  Gate on width % 4 == 0 to avoid this.
+  if (su.num_ht_passes == 1 && ROIshift == 0 && (block->size.x & 3) == 0 && (block->size.y & 1u) == 0) {
+    if (block->dequant_i32)
+      ht_cleanup_step2<true, true>(block, pLSB, su.Pcup, scratch, sstr);
+    else
+      ht_cleanup_step2<true>(block, pLSB, su.Pcup, scratch, sstr);
+    dequant_done = true;
+  } else if (su.num_ht_passes == 1) {
+    ht_cleanup_step2<>(block, pLSB, su.Pcup, scratch, sstr);
+  } else {
+    ht_cleanup_step2<>(block, pLSB, su.Pcup, scratch, sstr);
+
+    // Pack block_states SIGMA bits into nibble-packed sigma array
+    const uint32_t qw                 = (block->size.x + 3) >> 2;
+    const uint32_t mstr               = ((qw + 2) + 7u) & ~7u;
+    uint16_t sigma_buf[(17 + 1) * 24] = {};
+    pack_sigma(block->block_states, block->blkstate_stride, block->size.x, block->size.y, sigma_buf, mstr);
+
+    ht_sigprop_decode(block, su.Dref, su.Lref, static_cast<uint8_t>(30 - (su.S_blk + 1)), sigma_buf, mstr);
+    if (su.num_ht_passes > 2) {
+      ht_magref_decode(block, su.Dref, su.Lref, static_cast<uint8_t>(30 - (su.S_blk + 1)), sigma_buf, mstr);
+    }
+  }
+
+  // dequantization (skipped when already fused into MagSgn output)
+  if (!dequant_done) {
+    block->dequantize(ROIshift);
+  }
+
+  return true;
+}
+
+// Decode one block from an already-computed setup.  htj2k_dec_setup is NOT
+// idempotent (modDcup mutates the compressed buffer, so a re-run reads a
+// corrupted Scup) — every setup must be consumed by exactly one decode.
+static bool htj2k_decode_su(j2k_codeblock *block, const ht_dec_setup &su, const uint8_t ROIshift) {
+  if (!su.ok) return false;
+  if (su.empty) return true;
+
+  const uint16_t QW  = static_cast<uint16_t>(ceil_int(static_cast<int16_t>(block->size.x), 2));
+  const uint16_t QH  = static_cast<uint16_t>(ceil_int(static_cast<int16_t>(block->size.y), 2));
+  const int32_t sstr = static_cast<int32_t>(((block->size.x + 2) + 7u) & ~7u);  // multiples of 8
+
+  uint16_t scratch[8 * 513];
+  ht_step1_lane ln;
+  ln.Dcup            = block->get_compressed_data();
+  ln.Lcup            = su.Lcup;
+  ln.Scup            = su.Scup;
+  ln.scratch         = scratch;
+  ln.block_states    = block->block_states;
+  ln.blkstate_stride = block->blkstate_stride;
+  if (su.num_ht_passes == 1) {
+    ht_cleanup_step1_nway<1, true>(&ln, QW, QH, sstr);
+  } else {
+    ht_cleanup_step1_nway<1, false>(&ln, QW, QH, sstr);
+  }
+
+  return htj2k_dec_finish(block, su, ROIshift, scratch, sstr);
+}
+
+bool htj2k_decode(j2k_codeblock *block, const uint8_t ROIshift) {
+  return htj2k_decode_su(block, htj2k_dec_setup(block), ROIshift);
+}
+
+  // Number of codeblocks whose step-1 chains are decoded in lockstep.
+  // 2 is the Zen-class AVX2 sweet spot (N=4's step-1 working set starts to
+  // pressure L1d and GPRs); override at configure time to experiment.
+  #ifndef OPENHTJ2K_HT_DEC_BATCH_N
+    #define OPENHTJ2K_HT_DEC_BATCH_N 2
+  #endif
+
+// Batched entry point (see block_decoding.hpp).  Walks the block list and
+// decodes OPENHTJ2K_HT_DEC_BATCH_N consecutive blocks with the N-way
+// lockstep step-1 kernel whenever they share dimensions and pass-class and
+// all validate; everything else falls back to the 1-way path.  Output is
+// byte-identical to per-block decoding (the lockstep kernel preserves each
+// lane's operation sequence, and step-2 runs per block in list order).
+bool htj2k_decode_batch(j2k_codeblock *const *blocks, uint32_t n, uint8_t ROIshift, bool *results) {
+  constexpr uint32_t BN = OPENHTJ2K_HT_DEC_BATCH_N;
+  bool all_ok           = true;
+  uint32_t i            = 0;
+  while (i < n) {
+    // A group needs BN consecutive blocks of equal dimensions (⇒ shared
+    // QW/QH/sstr) — check the cheap key before running any setup.
+    bool key = (i + BN <= n);
+    for (uint32_t k = 1; key && k < BN; ++k) {
+      key = blocks[i + k]->size.x == blocks[i]->size.x && blocks[i + k]->size.y == blocks[i]->size.y;
+    }
+    if (!key) {
+      results[i] = htj2k_decode(blocks[i], ROIshift);
+      all_ok &= results[i];
+      ++i;
+      continue;
+    }
+
+    // Setup mutates each block's buffer (modDcup): from here on, every one
+    // of the BN setups is consumed below, batched or not.
+    ht_dec_setup su[BN];
+    bool group = true;
+    for (uint32_t k = 0; k < BN; ++k) {
+      su[k] = htj2k_dec_setup(blocks[i + k]);
+      group &= su[k].ok && !su[k].empty;
+    }
+    // skip_sigma is a step-1 template parameter: lanes must share pass-class.
+    for (uint32_t k = 1; group && k < BN; ++k) {
+      group &= (su[k].num_ht_passes == 1) == (su[0].num_ht_passes == 1);
+    }
+    if (!group) {
+      for (uint32_t k = 0; k < BN; ++k) {
+        results[i + k] = htj2k_decode_su(blocks[i + k], su[k], ROIshift);
+        all_ok &= results[i + k];
+      }
+      i += BN;
+      continue;
+    }
+
+    const j2k_codeblock *b0 = blocks[i];
+    const uint16_t QW       = static_cast<uint16_t>(ceil_int(static_cast<int16_t>(b0->size.x), 2));
+    const uint16_t QH       = static_cast<uint16_t>(ceil_int(static_cast<int16_t>(b0->size.y), 2));
+    const int32_t sstr      = static_cast<int32_t>(((b0->size.x + 2) + 7u) & ~7u);  // multiples of 8
+    const bool skip_sigma   = su[0].num_ht_passes == 1;
+
+    uint16_t scratch[BN][8 * 513];
+    ht_step1_lane ln[BN];
+    for (uint32_t k = 0; k < BN; ++k) {
+      ln[k].Dcup            = blocks[i + k]->get_compressed_data();
+      ln[k].Lcup            = su[k].Lcup;
+      ln[k].Scup            = su[k].Scup;
+      ln[k].scratch         = scratch[k];
+      ln[k].block_states    = blocks[i + k]->block_states;
+      ln[k].blkstate_stride = blocks[i + k]->blkstate_stride;
+    }
+
+    bool step1_done = true;
+    try {
+      if (skip_sigma) {
+        ht_cleanup_step1_nway<BN, true>(ln, QW, QH, sstr);
+      } else {
+        ht_cleanup_step1_nway<BN, false>(ln, QW, QH, sstr);
+      }
+    } catch (...) {
+      // Malformed input: one lane's rev_buf underflowed mid-lockstep.  Redo
+      // every lane 1-way from its saved setup so per-block results and
+      // exceptions match the non-batched path exactly (per-lane step-1 work
+      // is idempotent: scratch is fully rewritten, sigma stores are pure
+      // assignments).  This path never runs on valid streams.
+      step1_done = false;
+    }
+    for (uint32_t k = 0; k < BN; ++k) {
+      if (!step1_done) {
+        ht_step1_lane l1 = ln[k];
+        if (skip_sigma) {
+          ht_cleanup_step1_nway<1, true>(&l1, QW, QH, sstr);  // may throw, like the 1-way path
+        } else {
+          ht_cleanup_step1_nway<1, false>(&l1, QW, QH, sstr);
+        }
+      }
+      results[i + k] = htj2k_dec_finish(blocks[i + k], su[k], ROIshift, scratch[k], sstr);
+      all_ok &= results[i + k];
+    }
+    i += BN;
+  }
+  return all_ok;
+}
+
+const uint32_t htj2k_dec_batch_lanes = OPENHTJ2K_HT_DEC_BATCH_N;
+#endif

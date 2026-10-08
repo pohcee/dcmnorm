@@ -15,7 +15,7 @@ use lcms2::{Intent, PixelFormat, Profile, Transform};
 use rayon::prelude::*;
 
 use super::io::{
-    apply_jpeg2000_component_correction, is_jpeg2000_transfer_syntax, jpeg2000_component_mismatch,
+    apply_jpeg2000_component_correction, is_htj2k_transfer_syntax, is_jpeg2000_transfer_syntax, jpeg2000_component_mismatch,
     jpeg2000_frame_uses_mct, kakadu_ffi_enabled, normalize_transfer_syntax_uid,
     transcode_dcmnorm_object, JPEG2000_DEBUG_ENV_FLAG,
 };
@@ -3377,8 +3377,9 @@ fn try_decode_single_frame_object(
         .get(source_uid)
         .ok_or_else(|| RenderError::Transcode(super::types::TranscodeError::UnknownTransferSyntax(source_uid.to_owned())))?;
 
-    if is_jpeg2000_transfer_syntax(source_uid) && kakadu_ffi_enabled() {
-        // Route JPEG2000 through full transcode to leverage the Kakadu decode path.
+    if is_jpeg2000_transfer_syntax(source_uid) && !is_htj2k_transfer_syntax(source_uid) && kakadu_ffi_enabled() {
+        // Route classic JPEG2000 through full transcode to leverage the Kakadu decode path
+        // (HTJ2K never uses Kakadu - it decodes right here through the registry's OpenHTJ2K adapter).
         jpeg2000_debug_log("render single-frame path defers JPEG2000 to transcode path for Kakadu decode");
         return Ok(None);
     }

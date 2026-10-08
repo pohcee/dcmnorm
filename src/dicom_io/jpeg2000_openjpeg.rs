@@ -1,11 +1,8 @@
 //! Raw `openjpeg-sys` FFI encoder for classic JPEG 2000 (`.90`/`.91`).
 //!
-//! The `jpeg2k` crate this codebase already depends on for JPEG2000 *decode* only ever
-//! constructs an `Image` by decoding existing codestream bytes - it has no way to build one
-//! from raw pixel samples for encoding (its `sys` module wrapping `openjpeg-sys` is also
-//! private, so it can't be reused directly either). This module talks to `openjpeg-sys`
-//! directly instead, the same way `mpeg.rs` talks to `ffmpeg-next`'s raw `ffi` module where the
-//! safe wrapper crate doesn't cover what's needed.
+//! Decode lives in the `dcmnorm-jpeg2000` crate (`openjpeg` module, used by the transfer syntax
+//! registry's adapters); this module is the matching encoder, talking to `openjpeg-sys` directly
+//! the same way `mpeg.rs` talks to `ffmpeg-next`'s raw `ffi` module.
 
 #[cfg(feature = "jpeg2000-openjpeg-encode")]
 mod imp {
@@ -196,6 +193,13 @@ mod imp {
             return Err("opj_create_compress failed".to_owned());
         }
         let codec = Codec(codec);
+        // Production OpenJPEG used to encode single-threaded; one large frame (a 4096x3328
+        // mammogram) now spreads across the shared JPEG 2000 thread budget - see
+        // dcmnorm_jpeg2000::threads.
+        let threads = dcmnorm_jpeg2000::threads::per_call_threads();
+        if threads > 1 && unsafe { sys::opj_has_thread_support() } != 0 {
+            unsafe { sys::opj_codec_set_threads(codec.0, threads as i32) };
+        }
         let mut errors: Vec<String> = Vec::new();
         unsafe {
             sys::opj_set_error_handler(

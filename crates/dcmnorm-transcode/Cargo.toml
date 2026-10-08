@@ -41,14 +41,7 @@ native = [
     "jpeg",
     "rle",
 ]
-openjp2 = [
-    "dep:jpeg2k",
-    "jpeg2k/openjp2",
-]
-openjpeg-sys = [
-    "dep:jpeg2k",
-    "jpeg2k/openjpeg-sys",
-]
+jpeg2000 = ["dep:dcmnorm-jpeg2000"]
 rle = []
 simd = ["jpeg-encoder?/simd"]
 
@@ -77,10 +70,9 @@ optional = true
 version = "0.6"
 optional = true
 
-[dependencies.jpeg2k]
-version = "0.10"
+[dependencies.dcmnorm-jpeg2000]
+path = "../dcmnorm-jpeg2000"
 optional = true
-default-features = false
 
 [dependencies.lazy_static]
 version = "1.2.0"

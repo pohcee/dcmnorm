@@ -273,7 +273,9 @@ JSON to DICOM defaults to:
 ### Runtime environment variables
 
 - `DCMNORM_PERF` — enables scoped performance timing logs to stderr. Truthy values: `1`, `true`, `yes`, `on`.
-- `DCMNORM_JPEG2000_CODEC` — JPEG 2000 decoder preference: `auto`, `openjpeg`, or `kakadu`. The CLI always sets this from `--jpeg2000-codec` (default `auto`).
+- `DCMNORM_JPEG2000_CODEC` — classic JPEG 2000 decoder preference: `auto`, `openjpeg`, or `kakadu`. The CLI always sets this from `--jpeg2000-codec` (default `auto`). HTJ2K always uses OpenHTJ2K regardless.
+- `DCMNORM_JPEG2000_THREADS` — threads per JPEG 2000 decode/encode call (OpenJPEG and OpenHTJ2K). Default: min(available CPUs, 8). See [JPEG 2000 codec selection](#jpeg-2000-codec-selection).
+- `DCMNORM_HTJ2K_SIMD` — set to `base` to force the portable (non-AVX2) OpenHTJ2K build on an x86-64-v3 CPU. Diagnostic use only.
 - `DCMNORM_JPEG2000_DEBUG` — enables JPEG 2000 debug logging when truthy. `--verbose` sets this to `1`.
 - `LD_LIBRARY_PATH` — used to discover Kakadu shared libraries (`libkdu*.so`) at runtime.
 
@@ -852,7 +854,8 @@ without extra native imaging libraries:
 - JPEG baseline decode/encode
 - JPEG extended and JPEG lossless decode-only
 - JPEG-LS transfer syntax support via CharLS-backed build integration
-- JPEG 2000 decode-only
+- JPEG 2000 decode, plus encode to `.90`/`.91` (OpenJPEG)
+- High-Throughput JPEG 2000 (HTJ2K) decode for `.201`-`.203`, plus lossless encode to `.201`/`.203` (OpenHTJ2K)
 - RLE lossless decode-only
 
 Transfer syntaxes which the current build cannot encode or decode are reported explicitly by
@@ -860,11 +863,32 @@ Transfer syntaxes which the current build cannot encode or decode are reported e
 
 ### JPEG 2000 codec selection
 
-`dcmnorm` checks `LD_LIBRARY_PATH` at runtime for Kakadu libraries (`libkdu*.so`). Kakadu use
-is FFI-only (Rust → C++ interop), not CLI-based, and requires the `kakadu-ffi` build feature
-(see [Kakadu FFI](#kakadu-ffi-jpeg-2000)). If Kakadu FFI is not enabled or Kakadu is
-unavailable, the OpenJPEG-based path remains in use. `--jpeg2000-codec`/`DCMNORM_JPEG2000_CODEC`
-select between `auto`, `openjpeg`, and `kakadu` at runtime.
+| Transfer syntaxes | Decode | Encode |
+|---|---|---|
+| Classic JPEG 2000 (`.90`-`.93`) | OpenJPEG (or Kakadu, see below) | OpenJPEG (`.90` lossless, `.91` lossy 10:1) |
+| HTJ2K (`.201`-`.203`) | OpenHTJ2K, with OpenJPEG as an automatic fallback | OpenHTJ2K, lossless (`.201`, `.203`); `.202` is decode-only |
+
+Both libraries are linked statically through the `crates/dcmnorm-jpeg2000` crate, which vendors
+OpenHTJ2K. Unlike OpenJPEG, OpenHTJ2K decodes HTJ2K that uses multiple quality layers. On
+x86-64 Linux it is compiled twice, portable and AVX2 (`x86-64-v3`), and the faster variant is
+picked at runtime from the CPU's features. `--verbose` prints the variant in use:
+`classic=openjpeg htj2k=openhtj2k(x86-64-v3) threads=8`.
+
+A single large image is decoded and encoded across several threads.
+`DCMNORM_JPEG2000_THREADS` sets the per-call thread count; the default is min(CPUs, 8). Frames
+of a multi-frame object that are already decoded in parallel use one OpenJPEG thread each.
+
+Kakadu is an optional override for **classic** JPEG 2000 only.
+- It requires the `kakadu-ffi` build feature (see [Kakadu FFI](#kakadu-ffi-jpeg-2000)).
+  Kakadu use is FFI-only (Rust → C++ interop), not CLI-based.
+- At runtime `dcmnorm` looks for its libraries (`libkdu*.so`) on `LD_LIBRARY_PATH`.
+- `--jpeg2000-codec` / `DCMNORM_JPEG2000_CODEC` select between `auto`, `openjpeg` and `kakadu`
+  for classic codestreams.
+- HTJ2K never goes to Kakadu: the licensed Kakadu 7.8 predates HTJ2K and can hang on it.
+
+The evaluation behind these choices covers OpenJPEG, OpenHTJ2K, OpenJPH, Grok, Kakadu and several
+Rust decoders, with correctness checks and benchmarks on full-field mammograms. See
+[docs/jpeg2000-codec-evaluation.md](docs/jpeg2000-codec-evaluation.md).
 
 ## dcmtalk CLI Usage
 
@@ -1091,6 +1115,9 @@ tool can't "win" by failing fast (e.g. a dcmtk built without libpng rejects
 ├── exec/
 │   ├── dcmnorm/       # dcmnorm-cli package (the `dcmnorm` binary)
 │   └── dcmtalk/       # dcmtalk package (the `dcmtalk` binary)
+├── crates/            # in-house library crates (DICOM core/object/encoding/transcode/...,
+│                      # dcmnorm-jpeg2000: OpenJPEG + vendored OpenHTJ2K)
+├── docs/              # design notes and evaluations
 ├── bindings/
 │   ├── node/          # @pohcee/dcmnorm-node napi-rs bindings
 │   ├── python/        # dcmnorm-python PyO3 bindings
@@ -1121,6 +1148,10 @@ default build on Debian or Ubuntu are:
 
 The FFmpeg integration is built with a reduced `ffmpeg-next` feature set, so
 `libavfilter-dev` and `libavdevice-dev` are not required for the current build.
+
+The vendored OpenHTJ2K (`crates/dcmnorm-jpeg2000`) needs a C++17 compiler, plus `ar` and
+`objcopy` for its dual-variant x86-64 build. All three come with `build-essential`. Without
+`objcopy`, the build falls back to a single portable variant and prints a cargo warning.
 
 Example install command:
 
@@ -1170,8 +1201,8 @@ cargo build -p dcmnorm-cli -p dcmtalk --release
 
 ### Kakadu FFI (JPEG 2000)
 
-By default, JPEG 2000 decoding uses the bundled OpenJPEG path. To enable the optional
-Kakadu FFI bridge instead:
+By default, classic JPEG 2000 decoding uses the bundled OpenJPEG path (HTJ2K always uses the
+bundled OpenHTJ2K). To enable the optional Kakadu FFI bridge for classic JPEG 2000 instead:
 
 ```bash
 cargo build --workspace --features kakadu-ffi
@@ -1280,9 +1311,14 @@ If you prefer not to manually run the tag workflow in GitHub, use the local help
 ./scripts/release-tag.sh patch --dry-run  # preview the computed next tag only
 ```
 
-The script updates versions in `Cargo.toml`, `exec/dcmnorm/Cargo.toml`, and
-`exec/dcmtalk/Cargo.toml`, then creates a release commit and pushes both the commit and the
-version tag to `origin`. The pushed tag triggers `.github/workflows/release.yml` automatically.
+The script first fast-forwards onto `origin`, which picks up the previous release's
+Build Bindings commit. It then updates versions in `Cargo.toml`, `exec/dcmnorm/Cargo.toml` and
+`exec/dcmtalk/Cargo.toml`, and refreshes only the workspace's own entries in `Cargo.lock`
+(`cargo update --workspace`, so a release never silently upgrades dependencies). Finally it
+creates a release commit and pushes both the commit and the version tag to `origin`. The pushed
+tag triggers `.github/workflows/release.yml` and `.github/workflows/build-bindings.yml`
+automatically. The script is non-interactive, so release automation can call it as its "release"
+step (`./scripts/release-tag.sh patch`), much as an npm package's `npm run release` is used.
 If no `v*` tags exist yet, the script uses the root `Cargo.toml` `package.version` as the
 baseline for computing the next version.
 
@@ -1306,3 +1342,7 @@ Thanks to both projects and their maintainers.
 ## License
 
 Licensed under the [Apache License, Version 2.0](LICENSE).
+
+Bundled third-party code keeps its own license: OpenHTJ2K
+(`crates/dcmnorm-jpeg2000/vendor/openhtj2k`) is BSD-3-Clause, see its
+[LICENSE](crates/dcmnorm-jpeg2000/vendor/openhtj2k/LICENSE).

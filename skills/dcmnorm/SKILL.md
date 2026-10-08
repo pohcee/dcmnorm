@@ -128,7 +128,7 @@ dcmnorm --list-transfer-syntaxes                 # table of supported UIDs + dec
 dcmnorm --transfer-syntax 1.2.840.10008.1.2.1 in.dcm out.dcm
 ```
 
-Common targets: `1.2.840.10008.1.2.1` Explicit VR Little Endian (uncompressed, maximally compatible), `1.2.840.10008.1.2.4.90` JPEG 2000 lossless, `1.2.840.10008.1.2.4.50` JPEG baseline. Check the PIXEL_ENCODE column in the list before targeting a compressed syntax. `--jpeg2000-codec openjpeg|kakadu` forces a specific JPEG 2000 decoder if needed.
+Common targets: `1.2.840.10008.1.2.1` Explicit VR Little Endian (uncompressed, maximally compatible), `1.2.840.10008.1.2.4.90` JPEG 2000 lossless, `1.2.840.10008.1.2.4.201` HTJ2K lossless (faster to encode/decode, ~3.5% larger), `1.2.840.10008.1.2.4.50` JPEG baseline. Check the PIXEL_ENCODE column in the list before targeting a compressed syntax. `--jpeg2000-codec openjpeg|kakadu` forces a specific *classic* JPEG 2000 decoder if needed; HTJ2K always decodes with OpenHTJ2K.
 
 ## Visualizing / rendering
 

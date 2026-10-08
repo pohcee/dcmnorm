@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use clap::{ArgAction, CommandFactory, FromArgMatches, Parser, ValueEnum};
 use dcmnorm::dicom_io::{
-    apply_filter_to_object, compute_frame_histogram, compute_instance_histograms, jpeg2000_backend_name,
+    apply_filter_to_object, compute_frame_histogram, compute_instance_histograms, jpeg2000_codec_summary, jpeg2000_engine_name_for,
     kakadu_ffi_enabled, list_transfer_syntax_support,
     parse_attribute_override, parse_filter_requests, parse_tag_key, read_dicom_bytes, read_dicom_file,
     read_dicom_file_deferring_bulk_data, read_dicom_file_for_frame, read_dicom_json_with_options, read_dcmnorm_object_for_filter,
@@ -37,7 +37,7 @@ use serde_json::Value as JsonValue;
     long_about = "Convert between DICOM and flattened or standard DICOM JSON, transcode DICOM transfer syntaxes, render DICOM frames to raw/PNG/JPEG/MPEG4 outputs, and list transfer-syntax support for the current build. The CLI infers the operation from the input and output file types unless an explicit mode flag is provided."
 )]
 #[command(
-    after_help = "Environment:\n  DCMNORM_PERF            Enable scoped perf logs (1/true/yes/on)\n  DCMNORM_JPEG2000_CODEC JPEG 2000 decoder preference: auto|openjpeg|kakadu\n                         (set by --jpeg2000-codec)\n  DCMNORM_JPEG2000_DEBUG Enable JPEG 2000 debug logs (1/true/yes/on)\n                         (set to 1 by --verbose)\n  LD_LIBRARY_PATH         Used to discover Kakadu libkdu*.so at runtime\n\nBuild-time Kakadu variables (for --features kakadu-ffi):\n  KAKADU_INCLUDE_DIR      Path containing Kakadu headers\n  KAKADU_LIB_DIR          Path containing libkdu*.so\n  KAKADU_LIB_NAME         Optional Kakadu library base name override"
+    after_help = "Environment:\n  DCMNORM_PERF            Enable scoped perf logs (1/true/yes/on)\n  DCMNORM_JPEG2000_CODEC Classic JPEG 2000 decoder preference: auto|openjpeg|kakadu\n                         (set by --jpeg2000-codec; HTJ2K always uses OpenHTJ2K)\n  DCMNORM_JPEG2000_THREADS Threads per JPEG 2000 decode/encode (default min(CPUs, 8))\n  DCMNORM_JPEG2000_DEBUG Enable JPEG 2000 debug logs (1/true/yes/on)\n                         (set to 1 by --verbose)\n  LD_LIBRARY_PATH         Used to discover Kakadu libkdu*.so at runtime\n\nBuild-time Kakadu variables (for --features kakadu-ffi):\n  KAKADU_INCLUDE_DIR      Path containing Kakadu headers\n  KAKADU_LIB_DIR          Path containing libkdu*.so\n  KAKADU_LIB_NAME         Optional Kakadu library base name override"
 )]
 #[command(arg_required_else_help = true)]
 struct Cli {
@@ -107,7 +107,7 @@ struct Cli {
         long,
         value_enum,
         default_value_t = Jpeg2000Codec::Auto,
-        help = "Force JPEG2000 decoder selection (auto/openjpeg/kakadu). Useful for codec A/B testing",
+        help = "Force the classic JPEG2000 decoder (auto/openjpeg/kakadu). Useful for codec A/B testing. HTJ2K always uses OpenHTJ2K",
         help_heading = "General",
         display_order = 5
     )]
@@ -1318,7 +1318,7 @@ fn transfer_syntax_engine(entry: &dcmnorm::dicom_io::TransferSyntaxSupport) -> &
     }
 
     if is_jpeg2000_transfer_syntax_uid(&entry.uid) {
-        return jpeg2000_backend_name();
+        return jpeg2000_engine_name_for(&entry.uid);
     }
 
     if !entry.encapsulated_pixel_data {
@@ -1339,6 +1339,9 @@ fn is_jpeg2000_transfer_syntax_uid(uid: &str) -> bool {
             | "1.2.840.10008.1.2.4.91"
             | "1.2.840.10008.1.2.4.92"
             | "1.2.840.10008.1.2.4.93"
+            | "1.2.840.10008.1.2.4.201"
+            | "1.2.840.10008.1.2.4.202"
+            | "1.2.840.10008.1.2.4.203"
     )
 }
 
@@ -1729,8 +1732,8 @@ fn run_dicom_to_render_with_object(
     verbose_log(
         cli,
         format!(
-            "JPEG2000 backend for this build: {}",
-            jpeg2000_backend_name()
+            "JPEG2000 codecs for this build: {}",
+            jpeg2000_codec_summary()
         ),
     );
     apply_attribute_overrides(cli, &mut object)?;

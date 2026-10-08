@@ -46,14 +46,14 @@
 //! | JPEG Lossless, Non-Hierarchical, First-Order Prediction (Process 14 [Selection Value 1]) | Cargo feature `jpeg` | x |
 //! | JPEG-LS Lossless              | not supported here; see `src/dicom_io/jpeg_ls.rs` | - |
 //! | JPEG-LS Lossy (Near-Lossless) | not supported here; see `src/dicom_io/jpeg_ls.rs` | - |
-//! | JPEG 2000 (Lossless Only)     | Cargo feature `openjp2` or `openjpeg-sys` | x |
-//! | JPEG 2000                     | Cargo feature `openjp2` or `openjpeg-sys` | x |
-//! | JPEG 2000 Part 2 Multi-component Image Compression (Lossless Only) | Cargo feature `openjp2` or `openjpeg-sys` | x |
-//! | JPEG 2000 Part 2 Multi-component Image Compression | Cargo feature `openjp2` or `openjpeg-sys` | x |
+//! | JPEG 2000 (Lossless Only)     | Cargo feature `jpeg2000` (OpenJPEG) | x |
+//! | JPEG 2000                     | Cargo feature `jpeg2000` (OpenJPEG) | x |
+//! | JPEG 2000 Part 2 Multi-component Image Compression (Lossless Only) | Cargo feature `jpeg2000` (OpenJPEG) | x |
+//! | JPEG 2000 Part 2 Multi-component Image Compression | Cargo feature `jpeg2000` (OpenJPEG) | x |
 //! | JPIP Referenced Deflate       | Cargo feature `deflate` | ✓ |
-//! | High-Throughput JPEG 2000 (Lossless Only) | Cargo feature `openjp2` or `openjpeg-sys` | x |
-//! | High-Throughput JPEG 2000 with RPCL Options (Lossless Only) | Cargo feature `openjp2` or `openjpeg-sys` | x |
-//! | High-Throughput JPEG 2000     | Cargo feature `openjp2` or `openjpeg-sys` | x |
+//! | High-Throughput JPEG 2000 (Lossless Only) | Cargo feature `jpeg2000` (OpenHTJ2K) | x (dcmnorm encodes it directly) |
+//! | High-Throughput JPEG 2000 with RPCL Options (Lossless Only) | Cargo feature `jpeg2000` (OpenHTJ2K) | x |
+//! | High-Throughput JPEG 2000     | Cargo feature `jpeg2000` (OpenHTJ2K) | x (dcmnorm encodes it directly) |
 //! | JPIP HTJ2K Referenced Deflate | Cargo feature `deflate` | ✓ |
 //! | JPEG XL (Lossless/Recompression/general) | Cargo feature `jpeg-xl-codec` on the top-level `dcmnorm` crate; see `src/dicom_io/jpeg_xl.rs` | x |
 //! | RLE Lossless                  | Cargo feature `rle` | x |
@@ -67,13 +67,9 @@
 //! for scenarios where a native implementation is not available,
 //! or alternative implementations are available.
 //!
-//! - `openjpeg-sys` provides a binding to the OpenJPEG reference implementation,
-//!   which is written in C and is statically linked.
-//!   It may offer better performance than the pure Rust implementation,
-//!   but cannot be used in WebAssembly.
-//! - `openjp2` provides a binding to a computer-translated Rust port of OpenJPEG.
-//!   Due to the nature of this crate,
-//!   it might not work on all modern platforms.
+//! - `jpeg2000` provides JPEG 2000 decoding through the `dcmnorm-jpeg2000` crate: OpenJPEG (C,
+//!   statically linked) for classic JPEG 2000 and the vendored OpenHTJ2K (C++) for
+//!   High-Throughput JPEG 2000. Neither can be used in WebAssembly.
 //!
 //! JPEG-LS and JPEG XL are not supported via this registry - see `entries.rs`
 //! for the reasoning. Transfer syntaxes which are not supported,

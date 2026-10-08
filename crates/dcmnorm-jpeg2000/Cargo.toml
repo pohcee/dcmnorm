@@ -1,0 +1,17 @@
+[package]
+name = "dcmnorm-jpeg2000"
+version = "0.1.0"
+edition = "2021"
+description = "JPEG 2000 codecs for dcmnorm: OpenHTJ2K (HTJ2K, vendored) and OpenJPEG (classic), with an explicit threading policy."
+license = "MIT OR Apache-2.0"
+build = "build.rs"
+links = "dcmnorm_openhtj2k"
+
+[dependencies]
+# "threads" compiles OpenJPEG's own thread pool in; every codec still gets an explicit count via
+# opj_codec_set_threads (see src/threads.rs), so this never means "all CPUs" implicitly.
+openjpeg-sys = { version = "1.0.12", default-features = false, features = ["threads"] }
+rayon = "1.10"
+
+[build-dependencies]
+cc = { version = "1.2", features = ["parallel"] }

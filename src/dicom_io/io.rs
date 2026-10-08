@@ -86,6 +86,28 @@ pub fn jpeg2000_backend_name() -> &'static str {
     jpeg2000_backend().name()
 }
 
+/// The engine that decodes/encodes `uid`'s pixel data when it's a JPEG 2000-family transfer
+/// syntax: always OpenHTJ2K for HTJ2K (`.201`-`.203`) - Kakadu is only ever used for classic
+/// JPEG 2000, see `decode_pixel_data` - otherwise [`jpeg2000_backend_name`].
+pub fn jpeg2000_engine_name_for(uid: &str) -> &'static str {
+    if is_htj2k_transfer_syntax(uid) {
+        "openhtj2k"
+    } else {
+        jpeg2000_backend_name()
+    }
+}
+
+/// One-line summary of the JPEG 2000 codec setup, for diagnostics: classic backend, the OpenHTJ2K
+/// CPU variant in use, and the per-call thread count.
+pub fn jpeg2000_codec_summary() -> String {
+    format!(
+        "classic={} htj2k=openhtj2k({}) threads={}",
+        jpeg2000_backend_name(),
+        dcmnorm_jpeg2000::htj2k::variant_name(),
+        dcmnorm_jpeg2000::threads::configured_threads()
+    )
+}
+
 pub fn detect_jpeg2000_backend_from_search_path(search_path: &str) -> Jpeg2000Backend {
     detect_jpeg2000_backend_from_ld_library_path(Some(OsStr::new(search_path)))
 }
@@ -170,20 +192,29 @@ pub(super) fn is_jpeg2000_transfer_syntax(uid: &str) -> bool {
     )
 }
 
-/// The High-Throughput JPEG 2000 (Part-15) subset of [`is_jpeg2000_transfer_syntax`] - see
-/// `kakadu::kakadu_supports_htj2k` for why this needs to be checked separately from classic
-/// JPEG 2000 before ever attempting a Kakadu decode.
-fn is_htj2k_transfer_syntax(uid: &str) -> bool {
+/// The High-Throughput JPEG 2000 (Part-15) subset of [`is_jpeg2000_transfer_syntax`]. HTJ2K is
+/// always decoded and encoded with OpenHTJ2K, never Kakadu - see `decode_pixel_data`.
+pub(super) fn is_htj2k_transfer_syntax(uid: &str) -> bool {
     matches!(
         normalize_transfer_syntax_uid(uid),
         "1.2.840.10008.1.2.4.201" | "1.2.840.10008.1.2.4.202" | "1.2.840.10008.1.2.4.203"
     )
 }
 
-/// Classic JPEG 2000 (Lossless Only / may-be-lossy), the only two JPEG2000-family transfer
-/// syntaxes this build can *encode* - see `encode_jpeg2000_pixel_data`'s doc comment for why
-/// Part 2 multi-component (`.92`/`.93`) and HTJ2K (`.201`-`.203`) aren't included even though
-/// they're all grouped together for *decode* by [`is_jpeg2000_transfer_syntax`].
+/// HTJ2K transfer syntaxes this build can *encode* (losslessly, via OpenHTJ2K - see
+/// `encode_htj2k_pixel_data`). `.202` (RPCL Options) is decode-only: its DICOM profile also
+/// requires PLT/TLM marker segments, which OpenHTJ2K's encoder doesn't write.
+fn is_htj2k_encode_transfer_syntax(uid: &str) -> bool {
+    matches!(
+        normalize_transfer_syntax_uid(uid),
+        "1.2.840.10008.1.2.4.201" | "1.2.840.10008.1.2.4.203"
+    )
+}
+
+/// Classic JPEG 2000 (Lossless Only / may-be-lossy), the two classic JPEG2000 transfer syntaxes
+/// this build can *encode* - see `encode_jpeg2000_pixel_data`'s doc comment for why Part 2
+/// multi-component (`.92`/`.93`) isn't included even though it's grouped together for *decode*
+/// by [`is_jpeg2000_transfer_syntax`]. HTJ2K encode is [`is_htj2k_encode_transfer_syntax`].
 fn is_classic_jpeg2000_encode_transfer_syntax(uid: &str) -> bool {
     matches!(
         normalize_transfer_syntax_uid(uid),
@@ -1042,10 +1073,13 @@ fn can_encode_pixel_data<D, R, W>(
     _ffmpeg_enabled: bool,
 ) -> bool {
     let uid = ts.uid();
+    if is_htj2k_transfer_syntax(uid) {
+        return is_htj2k_encode_transfer_syntax(uid);
+    }
     if is_jpeg2000_transfer_syntax(uid) {
         // Only classic JPEG2000 (.90/.91) can be encoded, and only via the OpenJPEG backend -
-        // see `encode_jpeg2000_pixel_data`'s doc comment for why Kakadu and the other
-        // JPEG2000-family transfer syntaxes (.92/.93 Part 2, .201-.203 HTJ2K) aren't included.
+        // see `encode_jpeg2000_pixel_data`'s doc comment for why Kakadu and Part 2
+        // multi-component (.92/.93) aren't included.
         return cfg!(feature = "jpeg2000-openjpeg-encode") && is_classic_jpeg2000_encode_transfer_syntax(uid);
     }
 
@@ -1066,9 +1100,9 @@ fn kakadu_ffi_available_from_backend(backend: &Jpeg2000Backend) -> bool {
 /// never Kakadu, regardless of `jpeg2000_backend()`/`DCMNORM_JPEG2000_CODEC` (which only govern
 /// *decode* preference): a Kakadu encoder exists (`kakadu::encode_jpeg2000`) but was found to
 /// produce incorrect pixel data on the currently-licensed Kakadu v7.8 SDK - see that function's
-/// doc comment. `.92`/`.93` (Part 2 multi-component) and `.201`-`.203` (HTJ2K) aren't handled
-/// here at all: OpenJPEG has never implemented an HT encoder, and Part 2 multi-component encode
-/// was never implemented on either backend.
+/// doc comment. `.92`/`.93` (Part 2 multi-component) aren't handled here at all: Part 2
+/// multi-component encode was never implemented on either backend. HTJ2K is
+/// [`encode_htj2k_pixel_data`].
 fn encode_jpeg2000_pixel_data(
     object: &DefaultDicomObject,
     target_uid: &str,
@@ -1138,6 +1172,104 @@ fn encode_jpeg2000_pixel_data(
             JPEG2000_LOSSY_COMPRESSION_RATIO,
         )
         .map_err(|e| format!("JPEG2000 encode failed for frame {frame_index}: {e}"))?;
+        fragments.push(encoded);
+    }
+
+    Ok(fragments)
+}
+
+/// Encodes native pixel data to HTJ2K (`.201` / `.203`) with OpenHTJ2K, one fragment per frame.
+/// Always lossless (reversible 5/3, single quality layer) - valid for `.203` as well, which allows
+/// but doesn't require lossy compression - and never applies a colour transform, so RGB stays RGB
+/// and PhotometricInterpretation doesn't change. Multi-component frames are deinterleaved into
+/// planes; signed samples are sign-extended from BitsStored.
+fn encode_htj2k_pixel_data(object: &DefaultDicomObject) -> Result<Vec<Vec<u8>>, String> {
+    let pixel_data = object
+        .element(tags::PIXEL_DATA)
+        .map_err(|e| format!("missing PixelData: {e}"))?
+        .to_bytes()
+        .map_err(|e| format!("failed to access pixel data: {e}"))?;
+
+    let rows = object
+        .get(tags::ROWS)
+        .and_then(|e| e.uint16().ok())
+        .ok_or_else(|| "missing Rows attribute".to_owned())?;
+    let cols = object
+        .get(tags::COLUMNS)
+        .and_then(|e| e.uint16().ok())
+        .ok_or_else(|| "missing Columns attribute".to_owned())?;
+    let samples_per_pixel = object.get(tags::SAMPLES_PER_PIXEL).and_then(|e| e.uint16().ok()).unwrap_or(1);
+    let bits_allocated = object
+        .get(tags::BITS_ALLOCATED)
+        .and_then(|e| e.uint16().ok())
+        .ok_or_else(|| "missing BitsAllocated attribute".to_owned())?;
+    let bits_stored = object.get(tags::BITS_STORED).and_then(|e| e.uint16().ok()).unwrap_or(bits_allocated);
+    let is_signed = object
+        .get(tags::PIXEL_REPRESENTATION)
+        .and_then(|e| e.uint16().ok())
+        .unwrap_or(0)
+        != 0;
+    let number_of_frames = object
+        .get(tags::NUMBER_OF_FRAMES)
+        .and_then(|e| e.to_str().ok())
+        .and_then(|s| s.trim().parse::<usize>().ok())
+        .unwrap_or(1)
+        .max(1);
+
+    if bits_allocated != 8 && bits_allocated != 16 {
+        return Err(format!("unsupported BitsAllocated for HTJ2K encoding: {bits_allocated}"));
+    }
+    if bits_stored == 0 || bits_stored > bits_allocated {
+        return Err(format!("unsupported BitsStored {bits_stored} for BitsAllocated {bits_allocated}"));
+    }
+    let bytes_per_sample = usize::from(bits_allocated / 8);
+    let spp = usize::from(samples_per_pixel);
+    let pixels = usize::from(rows) * usize::from(cols);
+    let frame_len = pixels * spp * bytes_per_sample;
+    let expected_len = frame_len * number_of_frames;
+    if pixel_data.len() < expected_len {
+        return Err(format!(
+            "PixelData too short for {number_of_frames} frame(s) of {rows}x{cols}x{samples_per_pixel} \
+             at {bits_allocated} bits allocated: expected at least {expected_len} bytes, got {}",
+            pixel_data.len()
+        ));
+    }
+
+    // Masks off any bits above BitsStored (overlay bits in the high bits are allowed by the
+    // standard) and sign-extends from BitsStored for signed data.
+    let shift = 32 - u32::from(bits_stored);
+    let sample = |raw: u32| -> i32 {
+        if is_signed {
+            ((raw << shift) as i32) >> shift
+        } else {
+            ((raw << shift) >> shift) as i32
+        }
+    };
+
+    let mut planes = vec![vec![0i32; pixels]; spp];
+    let mut fragments = Vec::with_capacity(number_of_frames);
+    for frame_index in 0..number_of_frames {
+        let frame = &pixel_data[frame_index * frame_len..(frame_index + 1) * frame_len];
+        for (i, pixel) in frame.chunks_exact(spp * bytes_per_sample).enumerate() {
+            for (c, value) in pixel.chunks_exact(bytes_per_sample).enumerate() {
+                let raw = if bytes_per_sample == 2 {
+                    u32::from(u16::from_le_bytes([value[0], value[1]]))
+                } else {
+                    u32::from(value[0])
+                };
+                planes[c][i] = sample(raw);
+            }
+        }
+        let plane_refs: Vec<&[i32]> = planes.iter().map(Vec::as_slice).collect();
+        let encoded = dcmnorm_jpeg2000::htj2k::encode_lossless(
+            &plane_refs,
+            u32::from(cols),
+            u32::from(rows),
+            bits_stored as u8,
+            is_signed,
+            dcmnorm_jpeg2000::htj2k::Progression::Lrcp,
+        )
+        .map_err(|e| format!("HTJ2K encode failed for frame {frame_index}: {e}"))?;
         fragments.push(encoded);
     }
 
@@ -1260,12 +1392,13 @@ fn decode_pixel_data(
         ));
     }
 
-    // Kakadu only gained HTJ2K (Part-15) support in v8.0 - handing an HT-coded codestream to an
-    // older linked SDK doesn't fail cleanly, it can hang `kdu_codestream::create()` indefinitely
-    // (verified empirically against a real v7.8 build). So this has to be checked *before* ever
-    // attempting the decode, not learned from how the attempt turns out.
-    let kakadu_can_decode = kakadu_ffi_enabled()
-        && (!is_htj2k_transfer_syntax(source_ts.uid()) || kakadu::kakadu_supports_htj2k());
+    // Kakadu is only ever an override for classic JPEG 2000. HTJ2K always goes to OpenHTJ2K (the
+    // registry's Htj2kAdapter below): the licensed Kakadu v7.8 predates HTJ2K, and handing it an
+    // HT-coded codestream doesn't fail cleanly - `kdu_codestream::create()` can hang indefinitely
+    // (verified empirically) - and OpenHTJ2K is the faster HTJ2K decoder regardless (see
+    // docs/jpeg2000-codec-evaluation.md).
+    let is_htj2k = is_htj2k_transfer_syntax(source_ts.uid());
+    let kakadu_can_decode = kakadu_ffi_enabled() && !is_htj2k;
 
     if is_jpeg2000_transfer_syntax(source_ts.uid())
         && kakadu_can_decode
@@ -1296,23 +1429,10 @@ fn decode_pixel_data(
             }
         }
     } else if is_jpeg2000_transfer_syntax(source_ts.uid()) {
-        if codec_preference == Jpeg2000CodecPreference::Kakadu
-            && kakadu_ffi_enabled()
-            && !kakadu_can_decode
-        {
-            return Err(TranscodeError::DecodePixelData {
-                uid: source_ts.uid().to_owned(),
-                name: source_ts.name().to_owned(),
-                message: "forced kakadu decode failed: the linked Kakadu SDK predates HTJ2K \
-                          (Part-15) support (added in v8.0) and cannot safely attempt this \
-                          transfer syntax"
-                    .to_owned(),
-            });
-        }
-        let reason = if codec_preference == Jpeg2000CodecPreference::OpenJpeg {
+        let reason = if is_htj2k {
+            "HTJ2K: decoding with OpenHTJ2K (Kakadu is only used for classic JPEG 2000)"
+        } else if codec_preference == Jpeg2000CodecPreference::OpenJpeg {
             "Kakadu decode not attempted because DCMNORM_JPEG2000_CODEC=openjpeg"
-        } else if !kakadu_can_decode && kakadu_ffi_enabled() {
-            "Kakadu decode not attempted because the linked Kakadu SDK predates HTJ2K support"
         } else {
             "Kakadu decode not attempted because kakadu-ffi feature is disabled"
         };
@@ -1530,7 +1650,8 @@ fn is_parallel_decode_transfer_syntax(uid: &str) -> bool {
             // JPEG-LS
             | "1.2.840.10008.1.2.4.80"
             | "1.2.840.10008.1.2.4.81"
-            // JPEG 2000
+            // JPEG 2000 (not HTJ2K: OpenHTJ2K serializes its calls and spreads each frame across its
+            // own pool, so frame-parallel workers would only block on its lock)
             | "1.2.840.10008.1.2.4.90"
             | "1.2.840.10008.1.2.4.91"
             // RLE Lossless
@@ -1543,7 +1664,21 @@ fn encode_pixel_data(
     target_ts: &dcmnorm_encoding::TransferSyntax,
 ) -> Result<(), TranscodeError> {
     let _scope = perf::scope("transcode.encode_pixel_data");
-    if is_classic_jpeg2000_encode_transfer_syntax(target_ts.uid()) {
+    if is_htj2k_encode_transfer_syntax(target_ts.uid()) {
+        match encode_htj2k_pixel_data(object) {
+            Ok(fragments) => {
+                replace_with_encapsulated_pixel_data(object, vec![0], fragments);
+                return Ok(());
+            }
+            Err(error) => {
+                return Err(TranscodeError::EncodePixelData {
+                    uid: target_ts.uid().to_owned(),
+                    name: target_ts.name().to_owned(),
+                    message: error,
+                });
+            }
+        }
+    } else if is_classic_jpeg2000_encode_transfer_syntax(target_ts.uid()) {
         match encode_jpeg2000_pixel_data(object, target_ts.uid()) {
             Ok(fragments) => {
                 replace_with_encapsulated_pixel_data(object, vec![0], fragments);
@@ -1561,8 +1696,9 @@ fn encode_pixel_data(
         return Err(TranscodeError::UnsupportedTargetTransferSyntax {
             uid: target_ts.uid().to_owned(),
             name: target_ts.name().to_owned(),
-            reason: "JPEG2000 Part 2 multi-component and HTJ2K encoding are not supported in \
-                     this build (only classic JPEG2000 .90/.91)"
+            reason: "JPEG2000 Part 2 multi-component and HTJ2K with RPCL Options (.202) encoding \
+                     are not supported in this build (classic JPEG2000 .90/.91 and HTJ2K \
+                     .201/.203 are)"
                 .to_owned(),
         });
     }
@@ -1812,20 +1948,17 @@ mod tests {
         assert!(!is_jpeg2000_transfer_syntax("1.2.840.10008.1.2.4.205"));
     }
 
-    /// Regression test for the Kakadu/HTJ2K hang bug: verified empirically against a real
-    /// Kakadu v7.8 SDK that `decode_jpeg2000_with_kakadu` hangs `kdu_codestream::create()`
-    /// indefinitely when handed a genuine HT-coded (Part-15) codestream, rather than failing
-    /// cleanly - v7.8 predates HTJ2K support entirely (added in v8.0). `kakadu_can_decode`'s
-    /// `kakadu::kakadu_supports_htj2k()` gate exists specifically to keep this dispatch from ever
-    /// reaching that call, falling through to OpenJPEG (which has genuinely supported HTJ2K
-    /// decode since 2.5) instead. This exercises the real end-to-end `transcode_dcmnorm_object`
-    /// path with the default `Auto` codec preference against a real HT codestream (produced by
-    /// `openjph-core`, an independent HTJ2K encoder, not this codebase's own code) - if the gate
-    /// ever regressed, this test would hang rather than fail, which is the correct failure mode
-    /// for a hang bug: a fast, wrong answer would be a worse regression to miss silently.
-    #[cfg(feature = "kakadu-ffi")]
+    /// HTJ2K must always decode through OpenHTJ2K (the registry's Htj2kAdapter), never Kakadu:
+    /// verified empirically against a real Kakadu v7.8 SDK that `decode_jpeg2000_with_kakadu`
+    /// hangs `kdu_codestream::create()` indefinitely when handed a genuine HT-coded (Part-15)
+    /// codestream, rather than failing cleanly - v7.8 predates HTJ2K support entirely. This
+    /// exercises the real end-to-end `transcode_dcmnorm_object` path with the default `Auto`
+    /// codec preference against a real HT codestream (produced by `openjph-core`, an independent
+    /// HTJ2K encoder, not this codebase's own code). In a `kakadu-ffi` build a regression here
+    /// hangs rather than fails, which is the correct failure mode for a hang bug: a fast, wrong
+    /// answer would be a worse regression to miss silently.
     #[test]
-    fn htj2k_decode_falls_back_to_openjpeg_when_kakadu_predates_part15() {
+    fn htj2k_decodes_with_openhtj2k_and_never_reaches_kakadu() {
         use dcmnorm_core::value::PixelFragmentSequence;
         use dcmnorm_core::{DataElement, PrimitiveValue, VR};
         use dcmnorm_object::{DefaultDicomObject, FileMetaTableBuilder};
@@ -1875,10 +2008,9 @@ mod tests {
         }
 
         // Default `Auto` preference - the same path a real caller with no special configuration
-        // would take. Must complete (not hang) and must decode correctly via the OpenJPEG
-        // fallback.
+        // would take. Must complete (not hang) and must decode correctly via OpenHTJ2K.
         let transcoded = super::transcode_dcmnorm_object(&object, dcmnorm_dictionary::uids::EXPLICIT_VR_LITTLE_ENDIAN)
-            .expect("HTJ2K decode should succeed via the OpenJPEG fallback");
+            .expect("HTJ2K decode should succeed via OpenHTJ2K");
         let decoded = transcoded
             .element(dcmnorm_dictionary::tags::PIXEL_DATA)
             .unwrap()
@@ -1937,5 +2069,173 @@ mod tests {
         assert!(object.get(dcmnorm_dictionary::tags::STUDY_INSTANCE_UID).is_some());
         assert!(object.get(dcmnorm_dictionary::tags::SERIES_INSTANCE_UID).is_some());
         assert!(object.get(dcmnorm_dictionary::tags::PIXEL_DATA).is_none(), "should stop before PixelData");
+    }
+
+    fn htj2k_test_object(
+        transfer_syntax: &str,
+        rows: u16,
+        cols: u16,
+        samples_per_pixel: u16,
+        bits_allocated: u16,
+        bits_stored: u16,
+        signed: bool,
+        frames: usize,
+        pixel_data: dcmnorm_core::value::Value<dcmnorm_object::InMemDicomObject, Vec<u8>>,
+    ) -> dcmnorm_object::DefaultDicomObject {
+        use dcmnorm_core::{DataElement, PrimitiveValue, VR};
+        use dcmnorm_dictionary::tags;
+
+        let meta = dcmnorm_object::FileMetaTableBuilder::new()
+            .transfer_syntax(transfer_syntax)
+            .media_storage_sop_class_uid("1.2.840.10008.5.1.4.1.1.7")
+            .media_storage_sop_instance_uid("2.25.1234567890")
+            .build()
+            .unwrap();
+        let mut object = dcmnorm_object::DefaultDicomObject::new_empty_with_meta(meta);
+        let photometric = if samples_per_pixel == 3 { "RGB" } else { "MONOCHROME2" };
+        let vr = if bits_allocated > 8 { VR::OW } else { VR::OB };
+        for element in [
+            DataElement::new(tags::ROWS, VR::US, PrimitiveValue::from(rows)),
+            DataElement::new(tags::COLUMNS, VR::US, PrimitiveValue::from(cols)),
+            DataElement::new(tags::SAMPLES_PER_PIXEL, VR::US, PrimitiveValue::from(samples_per_pixel)),
+            DataElement::new(tags::BITS_ALLOCATED, VR::US, PrimitiveValue::from(bits_allocated)),
+            DataElement::new(tags::BITS_STORED, VR::US, PrimitiveValue::from(bits_stored)),
+            DataElement::new(tags::HIGH_BIT, VR::US, PrimitiveValue::from(bits_stored - 1)),
+            DataElement::new(tags::PIXEL_REPRESENTATION, VR::US, PrimitiveValue::from(u16::from(signed))),
+            DataElement::new(tags::PHOTOMETRIC_INTERPRETATION, VR::CS, PrimitiveValue::from(photometric.to_owned())),
+            DataElement::new(tags::NUMBER_OF_FRAMES, VR::IS, PrimitiveValue::from(frames.to_string())),
+        ] {
+            object.put(element);
+        }
+        if samples_per_pixel == 3 {
+            object.put(DataElement::new(tags::PLANAR_CONFIGURATION, VR::US, PrimitiveValue::from(0u16)));
+        }
+        object.put(DataElement::new(tags::PIXEL_DATA, vr, pixel_data));
+        object
+    }
+
+    fn fnv1a64(bytes: &[u8]) -> u64 {
+        bytes.iter().fold(0xcbf2_9ce4_8422_2325u64, |hash, &byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+        })
+    }
+
+    /// The failure mode behind pohcee/safebridge#406: real HTJ2K that OpenJPEG can't decode. These
+    /// are ISO/IEC 15444-4 conformance codestreams (test/files/htj2k_conformance/README.md); the
+    /// expected checksums come from an independent decoder (Grok), not from dcmnorm.
+    #[test]
+    fn htj2k_conformance_codestreams_decode_where_openjpeg_cannot() {
+        use dcmnorm_core::value::PixelFragmentSequence;
+
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test/files/htj2k_conformance");
+        for (file, rows, cols, spp, expected) in [
+            ("ds0_ht_02_b11.j2k", 126u16, 64u16, 1u16, 0x3406_5ee0_6095_3dedu64),
+            ("ds0_ht_10_b11.j2k", 64, 64, 3, 0x3dcd_ad4d_ac4e_848e),
+        ] {
+            let codestream = std::fs::read(dir.join(file)).unwrap();
+            assert!(
+                dcmnorm_jpeg2000::openjpeg::decode(&codestream).is_err(),
+                "{file}: OpenJPEG unexpectedly decoded this - pick a fixture that still exercises the gap"
+            );
+            let object = htj2k_test_object(
+                "1.2.840.10008.1.2.4.201",
+                rows,
+                cols,
+                spp,
+                8,
+                8,
+                false,
+                1,
+                PixelFragmentSequence::new(vec![0], vec![codestream]).into(),
+            );
+            let decoded = super::transcode_dcmnorm_object(&object, dcmnorm_dictionary::uids::EXPLICIT_VR_LITTLE_ENDIAN)
+                .unwrap_or_else(|e| panic!("{file}: {e}"));
+            let bytes = decoded.element(dcmnorm_dictionary::tags::PIXEL_DATA).unwrap().to_bytes().unwrap();
+            assert_eq!(bytes.len(), usize::from(rows) * usize::from(cols) * usize::from(spp), "{file}");
+            assert_eq!(fnv1a64(&bytes), expected, "{file}");
+        }
+    }
+
+    /// Native -> HTJ2K (.201 and .203) -> native must be bit-exact across bit depths, signedness,
+    /// colour and multiple frames, and must leave PhotometricInterpretation alone (no colour
+    /// transform is applied).
+    #[test]
+    fn htj2k_encode_round_trips_through_transcode() {
+        use dcmnorm_core::PrimitiveValue;
+        use dcmnorm_dictionary::{tags, uids};
+
+        for (rows, cols, spp, bits_allocated, bits_stored, signed, frames) in [
+            (29u16, 37u16, 1u16, 8u16, 8u16, false, 1usize),
+            (128, 96, 1, 16, 12, false, 1),
+            (64, 80, 1, 16, 16, true, 1),
+            (48, 64, 3, 8, 8, false, 1),
+            (32, 40, 1, 16, 10, false, 3),
+        ] {
+            let samples = usize::from(rows) * usize::from(cols) * usize::from(spp) * frames;
+            let mask = (1u32 << bits_stored) - 1;
+            let values: Vec<u32> = (0..samples as u32)
+                .map(|i| (i.wrapping_mul(2_654_435_761) >> 9) & mask)
+                .collect();
+            let (pixel_data, raw_bytes): (dcmnorm_core::value::Value<dcmnorm_object::InMemDicomObject, Vec<u8>>, Vec<u8>) = if bits_allocated == 8 {
+                let bytes: Vec<u8> = values.iter().map(|&v| v as u8).collect();
+                (PrimitiveValue::from(bytes.clone()).into(), bytes)
+            } else {
+                // Signed samples: sign-extend from BitsStored into the 16-bit container.
+                let words: Vec<u16> = values
+                    .iter()
+                    .map(|&v| {
+                        if signed {
+                            let shift = 32 - u32::from(bits_stored);
+                            (((v << shift) as i32 >> shift) as i16) as u16
+                        } else {
+                            v as u16
+                        }
+                    })
+                    .collect();
+                let bytes = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+                (PrimitiveValue::U16(words.into()).into(), bytes)
+            };
+            let native = htj2k_test_object(
+                uids::EXPLICIT_VR_LITTLE_ENDIAN,
+                rows,
+                cols,
+                spp,
+                bits_allocated,
+                bits_stored,
+                signed,
+                frames,
+                pixel_data,
+            );
+            for target in ["1.2.840.10008.1.2.4.201", "1.2.840.10008.1.2.4.203"] {
+                let label = format!("{rows}x{cols}x{spp} {bits_stored}/{bits_allocated}-bit signed={signed} frames={frames} -> {target}");
+                let encoded = super::transcode_dcmnorm_object(&native, target).unwrap_or_else(|e| panic!("{label}: {e}"));
+                let fragments = encoded.element(tags::PIXEL_DATA).unwrap().fragments().map(|f| f.len());
+                assert_eq!(fragments, Some(frames), "{label}: one fragment per frame");
+                assert_eq!(
+                    encoded.element(tags::PHOTOMETRIC_INTERPRETATION).unwrap().to_str().unwrap().trim(),
+                    if spp == 3 { "RGB" } else { "MONOCHROME2" },
+                    "{label}"
+                );
+                let decoded = super::transcode_dcmnorm_object(&encoded, uids::EXPLICIT_VR_LITTLE_ENDIAN)
+                    .unwrap_or_else(|e| panic!("{label}: decode: {e}"));
+                let bytes = decoded.element(tags::PIXEL_DATA).unwrap().to_bytes().unwrap();
+                assert_eq!(bytes.as_ref(), raw_bytes.as_slice(), "{label}");
+            }
+        }
+    }
+
+    #[test]
+    fn htj2k_capabilities_are_reported_accurately() {
+        let support = super::list_transfer_syntax_support();
+        let entry = |uid: &str| support.iter().find(|entry| entry.uid == uid).unwrap().clone();
+        for uid in ["1.2.840.10008.1.2.4.201", "1.2.840.10008.1.2.4.203"] {
+            let entry = entry(uid);
+            assert!(entry.can_decode_pixel_data && entry.can_encode_pixel_data && entry.can_transcode_to(), "{uid}");
+            assert!(super::can_encode_transfer_syntax(uid), "{uid}");
+        }
+        // RPCL Options: decode only (its profile needs PLT/TLM markers OpenHTJ2K doesn't write).
+        let rpcl = entry("1.2.840.10008.1.2.4.202");
+        assert!(rpcl.can_decode_pixel_data && !rpcl.can_encode_pixel_data);
+        assert_eq!(super::jpeg2000_engine_name_for("1.2.840.10008.1.2.4.201"), "openhtj2k");
     }
 }
