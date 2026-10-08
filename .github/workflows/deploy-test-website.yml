@@ -18,8 +18,12 @@ name: Deploy Test Website
 # which only trusts this repo on refs/heads/main and only for this one AR repo + Cloud Run service.
 # The service runs as a zero-role SA, not the project's default compute SA.
 #
-# Only the image changes on deploy (`gcloud run deploy --image` keeps every other setting); the
-# public allUsers invoker binding was set once by deploy-cloudrun.sh and persists.
+# Each deploy sets the image plus CPU/memory (`gcloud run deploy` keeps every other setting); the
+# public allUsers invoker binding was set once by deploy-cloudrun.sh and persists. 4 vCPU so the
+# timings the site shows reflect dcmnorm's multi-threaded JPEG 2000 decode the way production
+# (render-server, 8 vCPU) runs it - on 1 vCPU codec threading has nothing to work with. Cloud Run
+# requires at least 2Gi for 4 vCPU. Keep in sync with
+# bindings/node/examples/test-website/deploy-cloudrun.sh.
 
 on:
   push:
@@ -98,6 +102,8 @@ jobs:
             --region="$REGION" \
             --image="${{ steps.image.outputs.ref }}" \
             --service-account="$RUNTIME_SA" \
+            --cpu=4 \
+            --memory=2Gi \
             --set-env-vars="MAX_UPLOAD_BYTES=${MAX_UPLOAD_BYTES}" \
             --quiet
 

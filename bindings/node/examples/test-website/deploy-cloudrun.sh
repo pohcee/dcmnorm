@@ -83,8 +83,8 @@ gcloud run deploy "$SERVICE_NAME" \
   --image="${IMAGE}:${TAG}" \
   --platform=managed \
   --allow-unauthenticated \
-  --memory=1Gi \
-  --cpu=1 \
+  --memory=2Gi \
+  --cpu=4 \
   --max-instances=3 \
   --set-env-vars="MAX_UPLOAD_BYTES=${MAX_UPLOAD_BYTES}"
 
