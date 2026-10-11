@@ -9,8 +9,8 @@ name: Build Bindings
 #
 # Triggered the same way release.yml (CLI binaries/debs) is: a pushed `v*.*.*`/`v*.*.*-*` tag -
 # i.e. whenever SemVer Tag (semver-tag.yml) cuts a new version - plus workflow_dispatch for an
-# on-demand rebuild/recovery run. The three builds run as independent jobs so one binding failing
-# doesn't block seeing the other two's results, but committing only happens if all three succeed -
+# on-demand rebuild/recovery run. The four builds (Node linux, Node Windows, Python, Java) run as independent jobs so one
+# failing doesn't block seeing the others' results, but committing only happens if all succeed -
 # a partial rebuild is never pushed silently. A tag is an immutable ref, so there's nothing to
 # commit the rebuilt binaries ONTO there - the `commit` job below checks out `main` specifically
 # (not the tag) and pushes the new binaries there, the same way the tag itself was originally cut
@@ -47,6 +47,130 @@ jobs:
         with:
           name: dcmnorm-node-binary
           path: bindings/node/dcmnorm-node.linux-x64-gnu.node
+          if-no-files-found: error
+
+  build-node-windows:
+    name: Build Node bindings (Windows)
+    # The Windows edge install (see docs/edge-windows-support.md in the SafeBridge umbrella repo)
+    # runs the same Node services natively, so it needs a win32 build of the addon:
+    # bindings/node/index.js (napi-generated) already resolves ./dcmnorm-node.win32-x64-msvc.node
+    # on win32/x64. Built natively on a Windows runner (MSVC) rather than cross-compiled - the
+    # C/C++ codec dependencies below (CharLS via cmake, OpenJPEG via cc) need a real MSVC toolchain,
+    # which windows-latest already ships along with cmake, Node and LLVM (libclang, for bindgen).
+    #
+    # Linux and Windows edges must be consistent: this addon has every codec the Linux one has,
+    # FFmpeg (MPEG-2/H.264/HEVC transfer syntaxes, renderMovie) included, and a codec that fails to
+    # build fails the job - there is deliberately no fallback to a smaller feature set. Linux builds
+    # FFmpeg from source (ffmpeg-codec -> ffmpeg-sys-next "build": ./configure + make, which MSVC
+    # targets can't do), so here it is built by vcpkg instead and linked in with ffmpeg-codec-linked.
+    runs-on: windows-latest
+    env:
+      # vcpkg is checked out at a pinned commit rather than using the runner's preinstalled
+      # (unpinned, usually stale) one: the ffmpeg port there must be the same 8.x line that
+      # ffmpeg-sys-next 8.1 builds on Linux (release/8.1), and vcpkg master has moved on to 9.x,
+      # which the ffmpeg-next 8.1 bindings don't target. cf1f98216 = ffmpeg 8.1.2.
+      VCPKG_COMMIT: cf1f98216ddd83d3dc838e96ba1143801992f71e
+      VCPKG_TRIPLET: x64-windows-static-md
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Restore vcpkg binary cache
+        # The FFmpeg compile is the slow part (tens of minutes). vcpkg's files-based binary cache
+        # keys each package by an ABI hash of its port, triplet, compiler and dependencies, so
+        # restoring this directory turns a repeat run's install into a copy.
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}\vcpkg-binary-cache
+          key: vcpkg-ffmpeg-${{ env.VCPKG_COMMIT }}-${{ env.VCPKG_TRIPLET }}-${{ hashFiles('.github/workflows/build-bindings.yml') }}
+          restore-keys: |
+            vcpkg-ffmpeg-${{ env.VCPKG_COMMIT }}-${{ env.VCPKG_TRIPLET }}-
+
+      - name: Install FFmpeg (vcpkg, static)
+        shell: pwsh
+        # Only the libraries dcmnorm links (ffmpeg-next features codec, format,
+        # software-resampling, software-scaling = avcodec, avformat, swresample, swscale; avutil
+        # comes with them). No optional ffmpeg features and no GPL/nonfree ports, so it is
+        # LGPL-only with FFmpeg's native decoders/encoders, the same as the Linux source build
+        # (--disable-autodetect, no external codec libraries). x64-windows-static-md = static
+        # libs (no FFmpeg DLLs next to the .node) against the dynamic CRT, which Node's own
+        # addons use too.
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:RUNNER_TEMP 'vcpkg'
+          $cache = Join-Path $env:RUNNER_TEMP 'vcpkg-binary-cache'
+          New-Item -ItemType Directory -Force $cache | Out-Null
+          git init $root
+          git -C $root fetch --depth 1 https://github.com/microsoft/vcpkg.git $env:VCPKG_COMMIT
+          git -C $root checkout FETCH_HEAD
+          & "$root\bootstrap-vcpkg.bat" -disableMetrics
+          if ($LASTEXITCODE -ne 0) { throw 'bootstrap-vcpkg failed' }
+          $env:VCPKG_BINARY_SOURCES = "clear;files,$cache,readwrite"
+          & "$root\vcpkg.exe" install "ffmpeg[core,avcodec,avformat,swresample,swscale]:$env:VCPKG_TRIPLET" --clean-after-build
+          if ($LASTEXITCODE -ne 0) { throw 'vcpkg install ffmpeg failed' }
+          # Read by ffmpeg-sys-next's build.rs (try_vcpkg -> the vcpkg crate): VCPKG_ROOT locates
+          # the install tree, VCPKGRS_TRIPLET picks the static triplet (the ffmpeg-next "static"
+          # feature, enabled by ffmpeg-codec-linked, makes it link statically), and
+          # LIBCLANG_PATH is bindgen's libclang (LLVM ships on windows-latest).
+          "VCPKG_ROOT=$root" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "VCPKGRS_TRIPLET=$env:VCPKG_TRIPLET" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "LIBCLANG_PATH=C:\Program Files\LLVM\bin" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          if (-not (Test-Path 'C:\Program Files\LLVM\bin\libclang.dll')) { throw 'libclang.dll not found on runner' }
+
+      - name: Install npm dependencies
+        working-directory: bindings/node
+        run: npm ci --no-audit --no-fund
+
+      - name: Build addon
+        working-directory: bindings/node
+        shell: pwsh
+        # Same codec set as the Linux addon (the default feature set), with ffmpeg-codec-linked in
+        # place of ffmpeg-codec: jpeg-xl-codec is pure Rust (jxl-oxide), jpeg2000-openjpeg-encode
+        # compiles vendored OpenJPEG C with cc, jpeg-ls-codec builds CharLS C++ via cmake, and
+        # FFmpeg comes from the vcpkg install above. No nasm needed on this side.
+        run: npx napi build --platform --release --target x86_64-pc-windows-msvc --no-default-features --features "ffmpeg-codec-linked,jpeg-ls-codec,jpeg-xl-codec,jpeg2000-openjpeg-encode"
+
+      - name: Check the addon is self-contained
+        working-directory: bindings/node
+        shell: pwsh
+        # FFmpeg must be linked in statically: a Windows edge gets just the .node, so any av*/sw*
+        # DLL import would be a load failure on the customer's machine.
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          $dumpbin = Get-ChildItem "$vs\VC\Tools\MSVC" -Recurse -Filter dumpbin.exe | Where-Object { $_.FullName -match 'Hostx64\\x64' } | Select-Object -First 1
+          if (-not $dumpbin) { throw 'dumpbin.exe not found' }
+          $deps = & $dumpbin.FullName /dependents dcmnorm-node.win32-x64-msvc.node
+          $deps | Write-Host
+          $bad = $deps | Where-Object { $_ -match '^\s+(av|sw|postproc)[a-z]*-\d+\.dll\s*$' }
+          if ($bad) { throw "addon imports FFmpeg DLLs (not statically linked): $bad" }
+
+      - name: Load check
+        working-directory: bindings/node
+        shell: pwsh
+        # Not test/smoke.js - that one is written for the Linux container (glibc check). Prove
+        # the .node dlopens under the runner's Node, parses a DICOM fixture, and that FFmpeg works:
+        # there is no MPEG-encoded fixture, so round-trip us.dcm through MPEG-2 (FFmpeg's native
+        # mpeg2video encoder and decoder, 1.2.840.10008.1.2.4.100) and back to Explicit VR LE.
+        # Without FFmpeg linked in, dcmnorm rejects the MPEG transfer syntax and this step fails.
+        run: node load-check.js
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: dcmnorm-node-binary-win32
+          path: bindings/node/dcmnorm-node.win32-x64-msvc.node
           if-no-files-found: error
 
   build-python:
@@ -92,7 +216,10 @@ jobs:
 
   commit:
     name: Commit rebuilt artifacts
-    needs: [build-node, build-python, build-java]
+    # Only for main or a release tag: a manual run on a feature branch builds and uploads the
+    # artifacts (to prove the builds) but never pushes binaries to main.
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/')
+    needs: [build-node, build-node-windows, build-python, build-java]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -111,6 +238,12 @@ jobs:
         uses: actions/download-artifact@v8
         with:
           name: dcmnorm-node-binary
+          path: bindings/node/
+
+      - name: Download Node Windows artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: dcmnorm-node-binary-win32
           path: bindings/node/
 
       - name: Download Python artifact
@@ -144,6 +277,7 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
           git add bindings/node/dcmnorm-node.linux-x64-gnu.node
+          git add bindings/node/dcmnorm-node.win32-x64-msvc.node
           git add bindings/python/dist
           git add bindings/java/src/main/resources/native
 

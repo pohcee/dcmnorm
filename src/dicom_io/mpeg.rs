@@ -1,4 +1,4 @@
-#[cfg(feature = "ffmpeg-codec")]
+#[cfg(feature = "ffmpeg-codec-linked")]
 pub mod mpeg_impl {
     use dcmnorm_dictionary::tags;
     use dcmnorm_object::DefaultDicomObject;
@@ -406,7 +406,7 @@ pub mod mpeg_impl {
     }
 }
 
-#[cfg(not(feature = "ffmpeg-codec"))]
+#[cfg(not(feature = "ffmpeg-codec-linked"))]
 pub mod mpeg_impl {
     use dcmnorm_object::DefaultDicomObject;
 
@@ -424,7 +424,7 @@ pub mod mpeg_impl {
 
 pub use mpeg_impl::{decode_mpeg_pixel_data, encode_mpeg_pixel_data};
 
-#[cfg(all(test, feature = "ffmpeg-codec"))]
+#[cfg(all(test, feature = "ffmpeg-codec-linked"))]
 mod tests {
     use super::{decode_mpeg_pixel_data, encode_mpeg_pixel_data};
     use dcmnorm_core::value::PixelFragmentSequence;

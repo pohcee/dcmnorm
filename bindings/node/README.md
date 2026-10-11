@@ -182,3 +182,17 @@ same way [`release.yml`](../../.github/workflows/release.yml) is, by a pushed `v
 whenever [`semver-tag.yml`](../../.github/workflows/semver-tag.yml) cuts a new version) — so the
 committed `.node` file is rebuilt as part of cutting a release even if `npm run release` wasn't
 run by hand for this particular one.
+
+The Windows x64 addon, `dcmnorm-node.win32-x64-msvc.node`, is committed the same way (the
+Windows edge install ships it - see `docs/edge-windows-support.md` in the SafeBridge umbrella
+repo) but is only built by the workflow's `build-node-windows` job on a `windows-latest` runner
+(MSVC), never by `build-in-docker.sh`; the `commit` job pushes it alongside the Linux binary, and
+only if every build succeeded (and only on `main` or a tag - a branch run just uploads
+artifacts). It has the same codecs as the Linux addon, FFmpeg included, and a codec that fails to
+build fails the job, so a Windows edge never transcodes fewer transfer syntaxes than a Linux one.
+Linux builds FFmpeg from source (`ffmpeg-codec`); MSVC can't run FFmpeg's `./configure` + `make`, so
+Windows builds a pinned vcpkg `ffmpeg` (`x64-windows-static-md`: static, LGPL-only, native codecs)
+and links it with `ffmpeg-codec-linked`. The job fails if the `.node` imports any FFmpeg DLL. To
+build it by hand on Windows, install that vcpkg package, set `VCPKG_ROOT` and
+`VCPKGRS_TRIPLET=x64-windows-static-md`, then:
+`npx napi build --platform --release --target x86_64-pc-windows-msvc --no-default-features --features ffmpeg-codec-linked,jpeg-ls-codec,jpeg-xl-codec,jpeg2000-openjpeg-encode`.

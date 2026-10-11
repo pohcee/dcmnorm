@@ -1062,7 +1062,7 @@ fn can_decode_pixel_data<D, R, W>(
     let uid = ts.uid();
     matches!(ts.codec(), Codec::EncapsulatedPixelData(Some(_), _))
         || (kakadu_enabled && is_jpeg2000_transfer_syntax(uid))
-        || (cfg!(feature = "ffmpeg-codec") && is_mpeg_transfer_syntax(uid))
+        || (cfg!(feature = "ffmpeg-codec-linked") && is_mpeg_transfer_syntax(uid))
         || (cfg!(feature = "jpeg-ls-codec") && is_jpeg_ls_transfer_syntax(uid))
         || (cfg!(feature = "jpeg-xl-codec") && is_jpeg_xl_transfer_syntax(uid))
 }
@@ -1084,7 +1084,7 @@ fn can_encode_pixel_data<D, R, W>(
     }
 
     matches!(ts.codec(), Codec::EncapsulatedPixelData(_, Some(_)))
-        || (cfg!(feature = "ffmpeg-codec") && is_mpeg_transfer_syntax(uid))
+        || (cfg!(feature = "ffmpeg-codec-linked") && is_mpeg_transfer_syntax(uid))
         || (cfg!(feature = "jpeg-ls-codec") && is_jpeg_ls_transfer_syntax(uid))
 }
 
