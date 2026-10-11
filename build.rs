@@ -9,6 +9,18 @@ fn main() {
     println!("cargo:rerun-if-env-changed=KAKADU_LIB_NAME");
     println!("cargo:rerun-if-env-changed=LD_LIBRARY_PATH");
 
+    // A static FFmpeg from vcpkg (the Windows addon, ffmpeg-codec-linked) leaves the Windows
+    // libraries it uses unresolved, and ffmpeg-sys-next's vcpkg path only adds ole32, secur32,
+    // ws2_32, bcrypt and user32: the Media Foundation / DirectShow IIDs (mfenc, mf_utils), and
+    // CryptoAPI + CNG (the schannel TLS code in avformat).
+    if env::var_os("CARGO_FEATURE_FFMPEG_CODEC_LINKED").is_some()
+        && env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc")
+    {
+        for lib in ["mfuuid", "strmiids", "crypt32", "ncrypt"] {
+            println!("cargo:rustc-link-lib={lib}");
+        }
+    }
+
     if env::var_os("CARGO_FEATURE_KAKADU_FFI").is_none() {
         return;
     }
