@@ -24,7 +24,13 @@
 #define DCMNORM_CAT2(a, b, c) a##b##c
 #define DCMNORM_CAT(a, b, c) DCMNORM_CAT2(a, b, c)
 #define DCMNORM_HTJ2K_FN(name) DCMNORM_CAT(dcmnorm_htj2k_, DCMNORM_HTJ2K_VARIANT, _##name)
+#if defined(_MSC_VER)
+// MSVC has no -fvisibility / __attribute__; the dual-variant symbol isolation in build.rs is
+// Linux-only, and Windows builds the single `base` variant, where plain extern "C" suffices.
+#define DCMNORM_HTJ2K_API extern "C"
+#else
 #define DCMNORM_HTJ2K_API extern "C" __attribute__((visibility("default")))
+#endif
 
 namespace {
 

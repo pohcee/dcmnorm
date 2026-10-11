@@ -194,6 +194,10 @@ fn build_isolated_variants(core: &Path, sources: &[PathBuf], out_dir: &Path) -> 
 
 fn link_runtime() {
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    if target_os == "windows" && env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+        // The MSVC runtime is linked implicitly; there is no libstdc++/pthread.
+        return;
+    }
     if target_os == "macos" {
         println!("cargo:rustc-link-lib=dylib=c++");
     } else {
