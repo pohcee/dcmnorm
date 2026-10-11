@@ -89,7 +89,9 @@ jobs:
         # The FFmpeg compile is the slow part (tens of minutes). vcpkg's files-based binary cache
         # keys each package by an ABI hash of its port, triplet, compiler and dependencies, so
         # restoring this directory turns a repeat run's install into a copy.
-        uses: actions/cache@v4
+        # (restore + a separate save step below: the save runs even if a later step fails, so a
+        # failed addon build doesn't throw away a good FFmpeg.)
+        uses: actions/cache/restore@v4
         with:
           path: ${{ runner.temp }}\vcpkg-binary-cache
           key: vcpkg-ffmpeg-${{ env.VCPKG_COMMIT }}-${{ env.VCPKG_TRIPLET }}-${{ hashFiles('.github/workflows/build-bindings.yml') }}
@@ -127,9 +129,17 @@ jobs:
           "LIBCLANG_PATH=C:\Program Files\LLVM\bin" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
           if (-not (Test-Path 'C:\Program Files\LLVM\bin\libclang.dll')) { throw 'libclang.dll not found on runner' }
 
+      - name: Save vcpkg binary cache
+        if: ${{ !cancelled() }}
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}\vcpkg-binary-cache
+          key: vcpkg-ffmpeg-${{ env.VCPKG_COMMIT }}-${{ env.VCPKG_TRIPLET }}-${{ hashFiles('.github/workflows/build-bindings.yml') }}
+
       - name: Install npm dependencies
         working-directory: bindings/node
-        run: npm ci --no-audit --no-fund
+        # No package-lock.json is committed for bindings/node, so `npm ci` can't be used.
+        run: npm install --no-audit --no-fund
 
       - name: Build addon
         working-directory: bindings/node
