@@ -21,7 +21,7 @@ build its Docker image, and deploy it to Cloud Run.
 npm install
 npm run build        # release build -> dcmnorm-node.<platform>.node + index.js/index.d.ts
 npm run build:debug  # debug build, faster to iterate
-npm run build:docker # release build inside node:22-slim - see Packaging below
+npm run build:docker # release build inside node:22-bullseye-slim (glibc 2.31) - see Packaging below
 npm test             # runs test/smoke.js against the fixtures in ../../test/files
 ```
 
@@ -167,9 +167,11 @@ The compiled `dcmnorm-node.linux-x64-gnu.node` binary **is committed** to this
 repo (see `.gitignore`) rather than built at Docker-image time, since a
 consumer's Docker builder stage may be plain `node:22-slim` with no Rust
 toolchain. `npm run build:docker` (`build-in-docker.sh`) builds it inside a
-`node:22-slim` container rather than on the host, specifically to match that
-image's glibc — building on an arbitrary host risks a `GLIBC_X.XX not found`
-failure that only surfaces once deployed. `npm run release`'s `before:init`
+`node:22-bullseye-slim` container (glibc 2.31, GCC 10) rather than on the host,
+so the addon needs at most GLIBC 2.31 / GLIBCXX 3.4.28 and runs natively on
+Ubuntu 20.04+/Debian 11+ hosts as well as in the bookworm-based service images;
+the script fails the build if a newer symbol version sneaks in. Building on an
+arbitrary host risks a `GLIBC_X.XX not found` failure that only surfaces once deployed. `npm run release`'s `before:init`
 hook runs `build:docker` (needs Docker available wherever a release is cut)
 followed by `npm test`, so cutting a release always ships a binary that's
 actually safe for the deploy target — you don't need to remember to do this

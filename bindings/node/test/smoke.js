@@ -13,22 +13,27 @@ const overlayEmbeddedFixture = path.join(__dirname, "..", "..", "..", "test", "f
 const ctFixture = path.join(__dirname, "..", "..", "..", "test", "files", "ct.dcm");
 const wsiFixture = path.join(__dirname, "..", "..", "..", "test", "files", "wsi.dcm");
 
-// The addon must run on the oldest glibc among its consumers' runtime images - node:22-slim
-// (edge services), Debian bookworm, GLIBC 2.36 - even though render-server's node:24-trixie-slim
-// has a newer one (2.41). build-in-docker.sh builds inside node:22-slim for exactly this reason,
-// but nothing stops a plain host `npm run build` (e.g. during dev iteration) from silently
-// producing a binary linked against the *host's* (often newer) glibc instead - which then loads
-// fine here but dlopen-fails only once actually deployed. Catch that here: this file runs
-// unconditionally as part of every release, from inside build-in-docker.sh itself (see
-// package.json's release-it "before:init" hook, which just runs `npm run build:docker`) -
-// not on the host afterward, since the host's own system libraries (e.g. its FFmpeg SONAMEs)
-// have no reason to match this node:22-slim-built binary's, independent of glibc entirely.
-const MAX_ALLOWED_GLIBC = "2.36";
+// The addon must run on the oldest glibc among its consumers: the native Linux edge install
+// (Ubuntu 20.04 / Debian 11, glibc 2.31, libstdc++ GLIBCXX 3.4.28) as well as the bookworm-based
+// service images (2.36). build-in-docker.sh builds inside node:22-bullseye-slim for exactly this
+// reason, but a plain host `npm run build` would silently link the host's (newer) glibc. Catch
+// that here (this file runs from inside build-in-docker.sh; build-in-docker.sh also repeats the
+// check with objdump as a hard gate).
+const MAX_ALLOWED_GLIBC = "2.31";
+const MAX_ALLOWED_GLIBCXX = "3.4.28";
 
 function compareVersions(a, b) {
-  const [aMaj, aMin] = a.split(".").map(Number);
-  const [bMaj, bMin] = b.split(".").map(Number);
-  return aMaj !== bMaj ? aMaj - bMaj : aMin - bMin;
+  const pa = a.split(".").map(Number);
+  const pb = b.split(".").map(Number);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const d = (pa[i] || 0) - (pb[i] || 0);
+    if (d !== 0) return d;
+  }
+  return 0;
+}
+
+function maxVersion(output, re) {
+  return [...output.matchAll(re)].map((m) => m[1]).reduce((max, v) => (compareVersions(v, max) > 0 ? v : max), "0");
 }
 
 function checkGlibcCompatibility() {
@@ -47,14 +52,18 @@ function checkGlibcCompatibility() {
       console.warn(`Skipping GLIBC compatibility check for ${file}: objdump unavailable (${error.message})`);
       continue;
     }
-    const versions = [...output.matchAll(/GLIBC_([0-9]+\.[0-9]+)/g)].map((m) => m[1]);
-    const maxRequired = versions.reduce((max, v) => (compareVersions(v, max) > 0 ? v : max), "0.0");
+    const maxRequired = maxVersion(output, /GLIBC_([0-9]+(?:\.[0-9]+)+)/g);
+    const maxCxx = maxVersion(output, /GLIBCXX_([0-9]+(?:\.[0-9]+)+)/g);
     assert.ok(
       compareVersions(maxRequired, MAX_ALLOWED_GLIBC) <= 0,
-      `${file} requires GLIBC_${maxRequired}, but the oldest consumer runtime (node:22-slim) only has ` +
-        `GLIBC_${MAX_ALLOWED_GLIBC} - it was likely built directly on the host instead of via ` +
-        `'npm run build:docker' (build-in-docker.sh), which links against node:22-slim's own glibc. ` +
-        `Rebuild with 'npm run build:docker' before committing.`,
+      `${file} requires GLIBC_${maxRequired}, but the supported floor is GLIBC_${MAX_ALLOWED_GLIBC} ` +
+        `(Ubuntu 20.04 / Debian 11) - it was likely built on the host instead of via ` +
+        `'npm run build:docker' (build-in-docker.sh, node:22-bullseye-slim). Rebuild before committing.`,
+    );
+    assert.ok(
+      compareVersions(maxCxx, MAX_ALLOWED_GLIBCXX) <= 0,
+      `${file} requires GLIBCXX_${maxCxx}, but the supported floor is GLIBCXX_${MAX_ALLOWED_GLIBCXX} ` +
+        `(Ubuntu 20.04 libstdc++). Rebuild via 'npm run build:docker'.`,
     );
   }
 }
