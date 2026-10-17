@@ -1,11 +1,8 @@
-//! [`PDataWriter`]/[`PDataReader`]: `std::io::Write`/`Read` adapters that transparently split (or
-//! reassemble) a byte stream across as many P-DATA-TF PDUs as needed, so callers can stream a
-//! large command/data set without manually chunking it to the negotiated max PDU length. Ported
-//! from `dicom-ul`'s `association::pdata`, simplified to plain blocking reads (see `conn.rs`'s
-//! doc comment for why the incremental-buffer-fill dance isn't needed for a sync-only stream).
+//! [`PDataWriter`]: a `std::io::Write` adapter that transparently splits a byte stream across as many P-DATA-TF PDUs as
+//! needed, so callers can stream a large command/data set without manually chunking it to the negotiated max PDU length.
+//! Ported from `dicom-ul`'s `association::pdata`. Receiving is message-level, in `message.rs`.
 
-use std::collections::VecDeque;
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 
 use crate::conn;
 use crate::pdu::{PDataValueType, Pdu, PDU_HEADER_SIZE, PDV_HEADER_SIZE};
@@ -91,66 +88,3 @@ impl<W: Write> Drop for PDataWriter<W> {
     }
 }
 
-/// Reads bytes reassembled from one or more incoming P-DATA-TF PDUs on a single presentation
-/// context, until the peer marks its final PDV `is_last`.
-pub struct PDataReader<R> {
-    stream: R,
-    max_pdu_length: u32,
-    buffer: VecDeque<u8>,
-    presentation_context_id: Option<u8>,
-    done: bool,
-}
-
-impl<R: Read> PDataReader<R> {
-    pub(crate) fn new(stream: R, max_pdu_length: u32) -> Self {
-        PDataReader {
-            stream,
-            max_pdu_length,
-            buffer: VecDeque::new(),
-            presentation_context_id: None,
-            done: false,
-        }
-    }
-}
-
-impl<R: Read> Read for PDataReader<R> {
-    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
-        if self.buffer.is_empty() {
-            if self.done {
-                return Ok(0);
-            }
-            let pdu = conn::receive_pdu(&mut self.stream, self.max_pdu_length)
-                .map_err(|e| io::Error::other(e.to_string()))?;
-            match pdu {
-                Pdu::PData { data } => {
-                    for pdv in data {
-                        self.presentation_context_id.get_or_insert(pdv.presentation_context_id);
-                        self.buffer.extend(pdv.data);
-                        if pdv.is_last {
-                            self.done = true;
-                        }
-                    }
-                }
-                other => {
-                    return Err(io::Error::other(format!(
-                        "expected P-DATA-TF while streaming, got {other:?}"
-                    )));
-                }
-            }
-        }
-
-        // Bulk-copy from the deque's (up to two, ring-buffer-wrapped) contiguous slices instead
-        // of popping one byte at a time - this is the streaming path for a whole received
-        // C-STORE data set/image, so a per-byte loop is a meaningful cost on multi-MB payloads.
-        let n = out.len().min(self.buffer.len());
-        let (front, back) = self.buffer.as_slices();
-        if n <= front.len() {
-            out[..n].copy_from_slice(&front[..n]);
-        } else {
-            out[..front.len()].copy_from_slice(front);
-            out[front.len()..n].copy_from_slice(&back[..n - front.len()]);
-        }
-        self.buffer.drain(..n);
-        Ok(n)
-    }
-}

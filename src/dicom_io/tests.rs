@@ -2463,31 +2463,17 @@ fn echo_scu_returns_cancelled_error_when_signalled_mid_wait() {
     scp_handle.join().unwrap();
 }
 
-/// Receives a Command + its Data Set (C-STORE's dataset, or C-FIND/C-MOVE's Identifier),
-/// tolerating either of `send_command_with_data`'s two send paths: small enough combines both
-/// into one PDU (2 PDataValues in a single `receive()`), while anything too large for one PDU
-/// (store_scu's only, in practice - find/move identifiers are always small) sends the Command
-/// alone, then streams the Data separately via `send_pdata` (arriving as its own PData PDU(s),
-/// read here with `receive_pdata()`).
+/// Receives a Command + its Data Set (C-STORE's dataset, or C-FIND/C-MOVE's Identifier), message-level: whichever of
+/// `send_command_with_data`'s two send paths was used (both in one PDU, or the data set streamed in its own PDUs).
 fn dimse_recv_command_with_data(
     association: &mut dcmnorm_dimse::ServerAssociation<std::net::TcpStream>,
 ) -> (u8, InMemDicomObject, Vec<u8>) {
-    match association.receive().unwrap() {
-        dcmnorm_dimse::pdu::Pdu::PData { data } if data.len() == 2 => {
-            let command =
-                InMemDicomObject::read_dataset_with_ts(data[0].data.as_slice(), dimse_implicit_vr_le()).unwrap();
-            (data[0].presentation_context_id, command, data[1].data.clone())
+    match association.receive_command().unwrap() {
+        dcmnorm_dimse::Incoming::Command { presentation_context_id, data } => {
+            let command = InMemDicomObject::read_dataset_with_ts(data.as_slice(), dimse_implicit_vr_le()).unwrap();
+            (presentation_context_id, command, association.receive_data_set().unwrap())
         }
-        dcmnorm_dimse::pdu::Pdu::PData { data } if data.len() == 1 => {
-            let pc_id = data[0].presentation_context_id;
-            let command =
-                InMemDicomObject::read_dataset_with_ts(data[0].data.as_slice(), dimse_implicit_vr_le()).unwrap();
-            let mut reader = association.receive_pdata();
-            let mut dataset_bytes = Vec::new();
-            std::io::Read::read_to_end(&mut reader, &mut dataset_bytes).unwrap();
-            (pc_id, command, dataset_bytes)
-        }
-        other => panic!("expected a Command P-Data PDU, got {other:?}"),
+        other => panic!("expected a Command, got {other:?}"),
     }
 }
 
@@ -3803,10 +3789,16 @@ fn scp_on_log_reports_study_uid_and_a_completion_summary_for_a_stored_instance()
     .unwrap();
     assert_eq!(results[0].status, 0);
 
+    // The completion summary is logged after A-RELEASE-RP goes out (store_scu has returned by then) and `stop()` does not
+    // wait for association threads, so wait for the line rather than racing the SCP's connection thread.
+    let summary = "stored 1 instance(s) across 1 study before ending";
+    let joined = wait_for(|| {
+        let joined = logger.lines.lock().unwrap().join("\n");
+        joined.contains(summary).then_some(joined)
+    });
     scp.stop();
     fs::remove_dir_all(&cache_dir).ok();
 
-    let joined = logger.lines.lock().unwrap().join("\n");
     assert!(
         joined.contains(&format!("received C-STORE-RQ dataset: study {study_instance_uid}, SOP instance {sop_instance_uid}")),
         "missing per-dataset study/SOP UID log, got: {joined}"
@@ -4526,3 +4518,218 @@ fn flexible_decoding_reads_conformant_files_unchanged() {
     assert!(compared > 40, "expected to compare most fixtures, compared {compared}");
 }
 
+
+// ---------------------------------------------------------------------------------------------
+// DIMSE - peers that pack several PDVs into one P-DATA-TF PDU (dcm4che / dcm4chee-arc does, up to the max PDU length).
+// Found 2026-10-17 against dcm4chee-arc 5.35 (env/scripts/test-pacs): the edge SCP answered C000 to its C-STORE, and
+// find/move SCU missed responses, because PDU boundaries were read as message boundaries.
+// ---------------------------------------------------------------------------------------------
+
+fn dimse_pdv(pc_id: u8, value_type: dcmnorm_dimse::pdu::PDataValueType, is_last: bool, data: Vec<u8>) -> dcmnorm_dimse::pdu::PDataValue {
+    dcmnorm_dimse::pdu::PDataValue { presentation_context_id: pc_id, value_type, is_last, data }
+}
+
+fn dimse_command_bytes(command: &InMemDicomObject) -> Vec<u8> {
+    let mut data = Vec::new();
+    command.write_dataset_with_ts(&mut data, dimse_implicit_vr_le()).unwrap();
+    data
+}
+
+/// dcm4chee answers a C-FIND with the pending response, its identifier and the final response in ONE PDU.
+#[test]
+fn find_scu_reads_pending_match_and_final_response_packed_into_one_pdu() {
+    use dcmnorm_dimse::pdu::PDataValueType::{Command, Data};
+    let abstract_syntax = uids::STUDY_ROOT_QUERY_RETRIEVE_INFORMATION_MODEL_FIND;
+    let (scp_handle, addr) = spawn_mock_scp(abstract_syntax, move |association| {
+        let (pc_id, request, _identifier) = dimse_recv_command_with_data(association);
+        let message_id = dimse_message_id(&request);
+        let response = |status: u16, data_set_type: u16| {
+            dimse_command_bytes(&InMemDicomObject::command_from_element_iter([
+                DataElement::new(tags::AFFECTED_SOP_CLASS_UID, VR::UI, dicom_value!(Str, abstract_syntax)),
+                DataElement::new(tags::COMMAND_FIELD, VR::US, dicom_value!(U16, [0x8020])),
+                DataElement::new(tags::MESSAGE_ID_BEING_RESPONDED_TO, VR::US, dicom_value!(U16, [message_id])),
+                DataElement::new(tags::COMMAND_DATA_SET_TYPE, VR::US, dicom_value!(U16, [data_set_type])),
+                DataElement::new(tags::STATUS, VR::US, dicom_value!(U16, [status])),
+            ]))
+        };
+        let ts = {
+            use dcmnorm_encoding::TransferSyntaxIndex;
+            dcmnorm_transcode::TransferSyntaxRegistry.get(&association.presentation_contexts()[0].transfer_syntax).unwrap()
+        };
+        let mut matched = Vec::new();
+        InMemDicomObject::from_element_iter([DataElement::new(tags::STUDY_INSTANCE_UID, VR::UI, dicom_value!(Str, "1.2.3.4.5"))])
+            .write_dataset_with_ts(&mut matched, ts)
+            .unwrap();
+        association
+            .send(&dcmnorm_dimse::pdu::Pdu::PData {
+                data: vec![
+                    dimse_pdv(pc_id, Command, true, response(0xFF00, 0x0001)),
+                    dimse_pdv(pc_id, Data, true, matched),
+                    dimse_pdv(pc_id, Command, true, response(0x0000, 0x0101)),
+                ],
+            })
+            .unwrap();
+    });
+
+    let mut query = std::collections::HashMap::new();
+    query.insert("StudyInstanceUID".to_owned(), "1.2.3.4.5".to_owned());
+    let matches = find_scu(
+        &addr.to_string(),
+        &query,
+        FindScuOptions {
+            calling_ae_title: "TEST-SCU".to_owned(),
+            called_ae_title: Some("MOCK-SCP".to_owned()),
+            max_pdu_length: 16384,
+            timeout: Some(std::time::Duration::from_secs(10)),
+            on_log: None,
+            cancel: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(matches.len(), 1);
+    let value: serde_json::Value = serde_json::from_str(&matches[0]).unwrap();
+    assert_eq!(value["0020000D"], "1.2.3.4.5");
+    scp_handle.join().unwrap();
+}
+
+/// dcm4chee's final C-MOVE-RSP with a Failed SOP Instance UID List in the SAME PDU as the response command.
+#[test]
+fn move_scu_reads_a_failed_sop_instance_uid_list_packed_with_its_response() {
+    use dcmnorm_dimse::pdu::PDataValueType::{Command, Data};
+    let abstract_syntax = uids::STUDY_ROOT_QUERY_RETRIEVE_INFORMATION_MODEL_MOVE;
+    let (scp_handle, addr) = spawn_mock_scp(abstract_syntax, move |association| {
+        let (pc_id, request, _identifier) = dimse_recv_command_with_data(association);
+        let message_id = dimse_message_id(&request);
+        let response = |status: u16, data_set_type: u16, completed: u16, failed: u16, remaining: u16| {
+            dimse_command_bytes(&InMemDicomObject::command_from_element_iter([
+                DataElement::new(tags::AFFECTED_SOP_CLASS_UID, VR::UI, dicom_value!(Str, abstract_syntax)),
+                DataElement::new(tags::COMMAND_FIELD, VR::US, dicom_value!(U16, [0x8021])),
+                DataElement::new(tags::MESSAGE_ID_BEING_RESPONDED_TO, VR::US, dicom_value!(U16, [message_id])),
+                DataElement::new(tags::COMMAND_DATA_SET_TYPE, VR::US, dicom_value!(U16, [data_set_type])),
+                DataElement::new(tags::STATUS, VR::US, dicom_value!(U16, [status])),
+                DataElement::new(tags::NUMBER_OF_REMAINING_SUBOPERATIONS, VR::US, dicom_value!(U16, [remaining])),
+                DataElement::new(tags::NUMBER_OF_COMPLETED_SUBOPERATIONS, VR::US, dicom_value!(U16, [completed])),
+                DataElement::new(tags::NUMBER_OF_FAILED_SUBOPERATIONS, VR::US, dicom_value!(U16, [failed])),
+                DataElement::new(tags::NUMBER_OF_WARNING_SUBOPERATIONS, VR::US, dicom_value!(U16, [0])),
+            ]))
+        };
+        let mut failed_list = Vec::new();
+        InMemDicomObject::from_element_iter([DataElement::new(
+            tags::FAILED_SOP_INSTANCE_UID_LIST,
+            VR::UI,
+            dicom_value!(Str, "1.2.3.4.5.6"),
+        )])
+        .write_dataset_with_ts(&mut failed_list, dimse_implicit_vr_le())
+        .unwrap();
+        // A pending response alone, then the final response + its identifier together.
+        association
+            .send(&dcmnorm_dimse::pdu::Pdu::PData { data: vec![dimse_pdv(pc_id, Command, true, response(0xFF00, 0x0101, 1, 0, 1))] })
+            .unwrap();
+        association
+            .send(&dcmnorm_dimse::pdu::Pdu::PData {
+                data: vec![dimse_pdv(pc_id, Command, true, response(0xA702, 0x0001, 1, 1, 0)), dimse_pdv(pc_id, Data, true, failed_list)],
+            })
+            .unwrap();
+    });
+
+    let result = move_scu(
+        &addr.to_string(),
+        "MOVE-DEST",
+        "1.2.3.4.5",
+        MoveScuOptions {
+            calling_ae_title: "TEST-SCU".to_owned(),
+            called_ae_title: Some("MOCK-SCP".to_owned()),
+            max_pdu_length: 16384,
+            timeout: Some(std::time::Duration::from_secs(10)),
+            stale_data_path: None,
+            stale_data_timeout: None,
+            on_log: None,
+            cancel: None,
+        },
+    )
+    .unwrap();
+    assert_eq!((result.status, result.completed, result.failed), (0xA702, 1, 1));
+    // The mock asserts it then receives A-RELEASE-RQ: nothing of the identifier was left on the wire.
+    scp_handle.join().unwrap();
+}
+
+/// dcm4che's C-STORE SCU: the command and the FIRST fragment of the data set share a PDU, the rest follows in later PDUs.
+/// The SCP used to take that first fragment as the whole data set and answer C000.
+#[test]
+fn scp_stores_a_data_set_whose_first_fragment_shares_the_command_pdu() {
+    use dcmnorm_dimse::pdu::PDataValueType::{Command, Data};
+    let cache_dir = std::env::temp_dir().join(format!(
+        "dcmnorm-scp-packed-test-{}",
+        SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+    ));
+    fs::create_dir_all(&cache_dir).unwrap();
+    let handlers = std::sync::Arc::new(TestScpHandlers {
+        find_query: std::sync::Mutex::new(None),
+        find_response: Vec::new(),
+        move_calls: std::sync::Mutex::new(Vec::new()),
+        move_result: true,
+        association_complete: std::sync::Mutex::new(None),
+    });
+    let scp = start_scp(0, cache_dir.clone(), handlers.clone(), ScpOptions { ae_title: "TEST-SCP".to_owned(), ..Default::default() })
+        .unwrap();
+
+    let object = read_dicom_file(&fixture_path("sr.dcm")).unwrap();
+    let sop_class_uid = object.meta().media_storage_sop_class_uid.trim_end_matches(['\0', ' ']).to_owned();
+    let sop_instance_uid = object.meta().media_storage_sop_instance_uid.trim_end_matches(['\0', ' ']).to_owned();
+    let study_instance_uid = object.element(tags::STUDY_INSTANCE_UID).unwrap().to_str().unwrap().trim().to_owned();
+    let ts_uid = object.meta().transfer_syntax().trim_end_matches('\0').to_owned();
+    let ts = {
+        use dcmnorm_encoding::TransferSyntaxIndex;
+        dcmnorm_transcode::TransferSyntaxRegistry.get(&ts_uid).unwrap()
+    };
+    let mut data_set = Vec::new();
+    object.write_dataset_with_ts(&mut data_set, ts).unwrap();
+    assert!(data_set.len() > 300, "fixture too small to split into three fragments");
+
+    let mut association = dcmnorm_dimse::association::client::ClientAssociationOptions::new()
+        .calling_ae_title("DCM4CHE-LIKE")
+        .called_ae_title("TEST-SCP")
+        .with_presentation_context(sop_class_uid.clone(), vec![ts_uid.clone()])
+        .establish_with(&format!("127.0.0.1:{}", scp.local_port()))
+        .unwrap();
+    let pc_id = association.presentation_contexts()[0].id;
+    let command = dimse_command_bytes(&InMemDicomObject::command_from_element_iter([
+        DataElement::new(tags::AFFECTED_SOP_CLASS_UID, VR::UI, dicom_value!(Str, sop_class_uid.as_str())),
+        DataElement::new(tags::COMMAND_FIELD, VR::US, dicom_value!(U16, [0x0001])),
+        DataElement::new(tags::MESSAGE_ID, VR::US, dicom_value!(U16, [1])),
+        DataElement::new(tags::PRIORITY, VR::US, dicom_value!(U16, [0x0000])),
+        DataElement::new(tags::COMMAND_DATA_SET_TYPE, VR::US, dicom_value!(U16, [0x0000])),
+        DataElement::new(tags::AFFECTED_SOP_INSTANCE_UID, VR::UI, dicom_value!(Str, sop_instance_uid.as_str())),
+    ]));
+    let third = data_set.len() / 3;
+    association
+        .send(&dcmnorm_dimse::pdu::Pdu::PData {
+            data: vec![dimse_pdv(pc_id, Command, true, command), dimse_pdv(pc_id, Data, false, data_set[..third].to_vec())],
+        })
+        .unwrap();
+    association
+        .send(&dcmnorm_dimse::pdu::Pdu::PData { data: vec![dimse_pdv(pc_id, Data, false, data_set[third..2 * third].to_vec())] })
+        .unwrap();
+    association
+        .send(&dcmnorm_dimse::pdu::Pdu::PData { data: vec![dimse_pdv(pc_id, Data, true, data_set[2 * third..].to_vec())] })
+        .unwrap();
+
+    let status = match association.receive_command().unwrap() {
+        dcmnorm_dimse::Incoming::Command { data, .. } => {
+            let response = InMemDicomObject::read_dataset_with_ts(data.as_slice(), dimse_implicit_vr_le()).unwrap();
+            response.element(tags::STATUS).unwrap().to_int::<u16>().unwrap()
+        }
+        other => panic!("expected C-STORE-RSP, got {other:?}"),
+    };
+    association.release().unwrap();
+    assert_eq!(status, 0x0000);
+
+    let stored = wait_for(|| handlers.association_complete.lock().unwrap().clone());
+    let paths = stored.get(&study_instance_uid).expect("the study was stored");
+    assert_eq!(paths.len(), 1);
+    assert!(paths[0].ends_with(&format!("{sop_instance_uid}.dcm")), "unexpected path {}", paths[0]);
+    let written = read_dicom_file(Path::new(&paths[0])).unwrap();
+    assert_eq!(written.element(tags::SOP_INSTANCE_UID).unwrap().to_str().unwrap().trim(), sop_instance_uid);
+    scp.stop();
+    fs::remove_dir_all(&cache_dir).ok();
+}

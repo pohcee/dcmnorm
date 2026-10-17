@@ -11,7 +11,6 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::io::Read;
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -26,7 +25,7 @@ use dcmnorm_object::FileMetaTableBuilder;
 use dcmnorm_dimse::{
     association::server::ServerAssociationOptions,
     pdu::{PDataValue, PDataValueType, Pdu, PresentationContextResultReason},
-    ServerAssociation,
+    Incoming, ServerAssociation,
 };
 
 use super::dimse::{implicit_vr_le, log_event, transfer_syntax, DimseLogger};
@@ -238,16 +237,18 @@ fn handle_association(stream: TcpStream, cache_path: &Path, handlers: &dyn ScpHa
     let mut stored_instances_by_study: HashMap<String, Vec<String>> = HashMap::new();
 
     loop {
-        let pdu = match association.receive() {
-            Ok(pdu) => pdu,
+        // Message-level (dcmnorm-dimse's `message.rs`): a sender may put the command and the first fragment of its data set
+        // in one PDU and the rest in later ones (dcm4che does), so PDU boundaries are never used as message boundaries.
+        let incoming = match association.receive_command() {
+            Ok(incoming) => incoming,
             Err(error) => {
                 log_event(logger, || format!("association with {peer} closed: {error}"));
                 break;
             }
         };
 
-        match pdu {
-            Pdu::ReleaseRQ => {
+        match incoming {
+            Incoming::Pdu(Pdu::ReleaseRQ) => {
                 // Logged before the reply is sent (matching every other log/act pairing in this
                 // file) rather than after: `assoc.release()` on the SCU side returns as soon as
                 // it reads A-RELEASE-RP off the wire, which races this thread's next instruction
@@ -257,19 +258,12 @@ fn handle_association(stream: TcpStream, cache_path: &Path, handlers: &dyn ScpHa
                 let _ = association.send(&Pdu::ReleaseRP);
                 break;
             }
-            Pdu::AbortRQ { .. } => {
+            Incoming::Pdu(Pdu::AbortRQ { .. }) => {
                 log_event(logger, || format!("association with {peer} aborted by peer"));
                 break;
             }
-            Pdu::PData { data } => {
-                let Some(command_pdv) = data.first() else {
-                    log_event(logger, || format!("association with {peer} closed: empty P-DATA-TF (no command PDV)"));
-                    break;
-                };
-                let pc_id = command_pdv.presentation_context_id;
-                let Ok(command) =
-                    InMemDicomObject::read_dataset_with_ts(command_pdv.data.as_slice(), implicit_vr_le())
-                else {
+            Incoming::Command { presentation_context_id: pc_id, data: command_data } => {
+                let Ok(command) = InMemDicomObject::read_dataset_with_ts(command_data.as_slice(), implicit_vr_le()) else {
                     log_event(logger, || format!("association with {peer} closed: failed to parse DIMSE command"));
                     break;
                 };
@@ -285,14 +279,13 @@ fn handle_association(stream: TcpStream, cache_path: &Path, handlers: &dyn ScpHa
                         &mut association,
                         pc_id,
                         &command,
-                        &data,
                         negotiated_ts,
                         cache_path,
                         &mut stored_instances_by_study,
                         logger,
                     ),
-                    0x0020 => handle_find(&mut association, pc_id, &command, &data, negotiated_ts, handlers, logger),
-                    0x0021 => handle_move(&mut association, pc_id, &command, &data, negotiated_ts, handlers, logger),
+                    0x0020 => handle_find(&mut association, pc_id, &command, negotiated_ts, handlers, logger),
+                    0x0021 => handle_move(&mut association, pc_id, &command, negotiated_ts, handlers, logger),
                     _ => Err(()),
                 };
                 if outcome.is_err() {
@@ -370,30 +363,11 @@ fn send_data(association: &mut ServerAssociation<TcpStream>, pc_id: u8, data: Ve
         .map_err(|_| ())
 }
 
+/// The data set that follows the request command just received, reassembled from however many PDVs/PDUs the sender used.
 fn receive_data(association: &mut ServerAssociation<TcpStream>, logger: Option<&dyn DimseLogger>) -> Result<Vec<u8>, ()> {
-    let mut reader = association.receive_pdata();
-    let mut buffer = Vec::new();
-    if let Err(error) = reader.read_to_end(&mut buffer) {
-        log_event(logger, || format!("failed to receive C-STORE dataset PDU(s): {error}"));
-        return Err(());
-    }
-    Ok(buffer)
-}
-
-/// Resolves the data set that follows a command, tolerating either of the two ways a sender may
-/// deliver it: bundled into the same `Pdu::PData` as the command (a small payload might combine
-/// both PDataValues into one PDU - see `store_scu`'s combined-PDU path), or sent as its own
-/// separate PDU(s) afterward (read here via `receive_pdata()`, which transparently reassembles
-/// a data set split across multiple PDU fragments).
-fn resolve_data(
-    association: &mut ServerAssociation<TcpStream>,
-    initial_pdata: &[PDataValue],
-    logger: Option<&dyn DimseLogger>,
-) -> Result<Vec<u8>, ()> {
-    match initial_pdata.get(1) {
-        Some(data_pdv) => Ok(data_pdv.data.clone()),
-        None => receive_data(association, logger),
-    }
+    association.receive_data_set().map_err(|error| {
+        log_event(logger, || format!("failed to receive data set PDU(s): {error}"));
+    })
 }
 
 fn handle_echo(
@@ -420,7 +394,6 @@ fn handle_store(
     association: &mut ServerAssociation<TcpStream>,
     pc_id: u8,
     command: &InMemDicomObject,
-    initial_pdata: &[PDataValue],
     negotiated_ts: &TransferSyntax,
     cache_path: &Path,
     stored_instances_by_study: &mut HashMap<String, Vec<String>>,
@@ -432,7 +405,7 @@ fn handle_store(
 
     log_event(logger, || format!("received C-STORE-RQ: SOP instance {affected_sop_instance_uid}"));
 
-    let dataset_bytes = resolve_data(association, initial_pdata, logger)?;
+    let dataset_bytes = receive_data(association, logger)?;
     let status = match store_received_dataset(
         &dataset_bytes,
         negotiated_ts,
@@ -533,7 +506,6 @@ fn handle_find(
     association: &mut ServerAssociation<TcpStream>,
     pc_id: u8,
     command: &InMemDicomObject,
-    initial_pdata: &[PDataValue],
     negotiated_ts: &TransferSyntax,
     handlers: &dyn ScpHandlers,
     logger: Option<&dyn DimseLogger>,
@@ -541,7 +513,7 @@ fn handle_find(
     let message_id = command_u16(command, tags::MESSAGE_ID);
     let affected_sop_class_uid = command_str(command, tags::AFFECTED_SOP_CLASS_UID).unwrap_or_default();
 
-    let identifier_bytes = resolve_data(association, initial_pdata, logger)?;
+    let identifier_bytes = receive_data(association, logger)?;
     let identifier = InMemDicomObject::read_dataset_with_ts(identifier_bytes.as_slice(), negotiated_ts).map_err(|_| ())?;
 
     let mut filter = HashMap::new();
@@ -627,7 +599,6 @@ fn handle_move(
     association: &mut ServerAssociation<TcpStream>,
     pc_id: u8,
     command: &InMemDicomObject,
-    initial_pdata: &[PDataValue],
     negotiated_ts: &TransferSyntax,
     handlers: &dyn ScpHandlers,
     logger: Option<&dyn DimseLogger>,
@@ -636,7 +607,7 @@ fn handle_move(
     let affected_sop_class_uid = command_str(command, tags::AFFECTED_SOP_CLASS_UID).unwrap_or_default();
     let move_destination = command_str(command, tags::MOVE_DESTINATION).unwrap_or_default();
 
-    let identifier_bytes = resolve_data(association, initial_pdata, logger)?;
+    let identifier_bytes = receive_data(association, logger)?;
     let identifier = InMemDicomObject::read_dataset_with_ts(identifier_bytes.as_slice(), negotiated_ts).map_err(|_| ())?;
     let study_instance_uid = element_str(&identifier, tags::STUDY_INSTANCE_UID).unwrap_or_default();
 

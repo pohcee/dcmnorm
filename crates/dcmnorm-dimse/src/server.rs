@@ -243,6 +243,7 @@ impl ServerAssociationOptions {
 
         Ok(ServerAssociation {
             stream,
+            receiver: crate::message::Receiver::default(),
             requestor_max_pdu_length,
             acceptor_max_pdu_length: self.max_pdu_length,
             presentation_contexts,
@@ -255,6 +256,7 @@ impl ServerAssociationOptions {
 #[derive(Debug)]
 pub struct ServerAssociation<S> {
     stream: S,
+    receiver: crate::message::Receiver,
     requestor_max_pdu_length: u32,
     acceptor_max_pdu_length: u32,
     /// Every negotiated context, accepted or not - unlike the client side, worth surfacing in
@@ -277,8 +279,22 @@ impl<S: std::io::Read + std::io::Write> ServerAssociation<S> {
         conn::send_pdu(&mut self.stream, pdu)
     }
 
+
+    /// The next PDU (P-DATA fragments left over from an earlier message come first). Prefer
+    /// [`Self::receive_command`]/[`Self::receive_data_set`] for DIMSE messages: a PDU may hold several messages' PDVs.
     pub fn receive(&mut self) -> Result<Pdu> {
-        conn::receive_pdu(&mut self.stream, self.acceptor_max_pdu_length)
+        self.receiver.receive_pdu(&mut self.stream, self.acceptor_max_pdu_length)
+    }
+
+    /// The next complete DIMSE command, or the non-P-DATA PDU (release, abort, ...) that arrived between messages.
+    /// Retry after a read timeout: partial PDUs and fragments are kept (see `message.rs`).
+    pub fn receive_command(&mut self) -> Result<crate::Incoming> {
+        self.receiver.receive_command(&mut self.stream, self.acceptor_max_pdu_length)
+    }
+
+    /// The complete data set following the command just received. Retry after a read timeout, as above.
+    pub fn receive_data_set(&mut self) -> Result<Vec<u8>> {
+        self.receiver.receive_data_set(&mut self.stream, self.acceptor_max_pdu_length)
     }
 
     pub fn send_pdata(&mut self, presentation_context_id: u8) -> crate::pdata::PDataWriter<&mut S> {
@@ -290,9 +306,6 @@ impl<S: std::io::Read + std::io::Write> ServerAssociation<S> {
         )
     }
 
-    pub fn receive_pdata(&mut self) -> crate::pdata::PDataReader<&mut S> {
-        crate::pdata::PDataReader::new(&mut self.stream, self.acceptor_max_pdu_length)
-    }
 }
 
 #[cfg(test)]

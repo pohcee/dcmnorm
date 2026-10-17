@@ -1,8 +1,7 @@
-//! The shared PDU send/receive transport, used by both [`crate::client::ClientAssociation`] and
-//! [`crate::server::ServerAssociation`] once an association is established. Reads a PDU by
-//! blocking on exactly the 6-byte header, then exactly `length` more bytes, then parsing that
-//! complete buffer - simpler than `dicom-ul`'s incremental buffer-fill loop, which exists there
-//! to share code with an async reader dcmnorm doesn't need (see `pdu.rs`'s doc comment).
+//! PDU send, and the blocking PDU receive used during association negotiation: exactly the
+//! 6-byte header, then exactly `length` more bytes. Once an association is established, receiving
+//! goes through `message.rs`'s `Receiver` instead, which keeps a half-read PDU across read
+//! timeouts (`read_exact` here would lose those bytes) and splits PDUs into DIMSE messages.
 
 use std::io::{Read, Write};
 

@@ -15,13 +15,15 @@
 mod client;
 mod conn;
 mod error;
+mod message;
 mod pdata;
 pub mod pdu;
 mod server;
 
 pub use client::{ClientAssociation, ClientAssociationOptions};
 pub use error::{Error, Result};
-pub use pdata::{PDataReader, PDataWriter};
+pub use message::Incoming;
+pub use pdata::PDataWriter;
 pub use server::{ServerAssociation, ServerAssociationOptions};
 
 /// Association module, kept for import-path compatibility with dicom-ul-shaped call sites

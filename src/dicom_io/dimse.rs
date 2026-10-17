@@ -20,7 +20,6 @@
 use std::collections::HashMap;
 use std::error::Error as StdError;
 use std::fmt;
-use std::io::Read;
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -36,7 +35,7 @@ use dcmnorm_transcode::TransferSyntaxRegistry;
 use dcmnorm_dimse::{
     association::{client::ClientAssociationOptions, Error as AssociationError},
     pdu::{PDataValue, PDataValueType, Pdu, PresentationContextNegotiated},
-    ClientAssociation,
+    ClientAssociation, Incoming,
 };
 
 use super::io::{can_encode_transfer_syntax, read_dicom_file, transcode_dcmnorm_object};
@@ -364,23 +363,19 @@ fn send_command_with_data(
     Ok(())
 }
 
+/// The next response command. Message-level (dcmnorm-dimse's `message.rs`): PDU boundaries mean nothing, a peer may pack
+/// a response, its data set and the next response into one PDU (dcm4che does), and a read timeout (a `poll_bounded` tick)
+/// mid-PDU or mid-message keeps what was read for the retry.
 fn receive_command(assoc: &mut ClientAssociation<TcpStream>) -> Result<InMemDicomObject, DimseError> {
-    match assoc.receive()? {
-        Pdu::PData { data } => {
-            let value = data
-                .first()
-                .ok_or_else(|| DimseError::Protocol("empty P-Data response".to_owned()))?;
-            Ok(InMemDicomObject::read_dataset_with_ts(value.data.as_slice(), implicit_vr_le())?)
-        }
-        other => Err(DimseError::Protocol(format!("unexpected response PDU: {other:?}"))),
+    match assoc.receive_command()? {
+        Incoming::Command { data, .. } => Ok(InMemDicomObject::read_dataset_with_ts(data.as_slice(), implicit_vr_le())?),
+        Incoming::Pdu(other) => Err(DimseError::Protocol(format!("unexpected response PDU: {other:?}"))),
     }
 }
 
+/// The data set that follows the response command just received (see `receive_command`).
 fn read_pdata_to_end(assoc: &mut ClientAssociation<TcpStream>) -> Result<Vec<u8>, DimseError> {
-    let mut reader = assoc.receive_pdata();
-    let mut buffer = Vec::new();
-    reader.read_to_end(&mut buffer)?;
-    Ok(buffer)
+    Ok(assoc.receive_data_set()?)
 }
 
 /// Releases `assoc`, logging clearly if the release itself fails - unlike a bare
