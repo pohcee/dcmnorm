@@ -2120,7 +2120,7 @@ mod tests {
         })
     }
 
-    /// The failure mode behind pohcee/safebridge#406: real HTJ2K that OpenJPEG can't decode. These
+    /// Real-world HTJ2K files can use features OpenJPEG cannot decode. These
     /// are ISO/IEC 15444-4 conformance codestreams (test/files/htj2k_conformance/README.md); the
     /// expected checksums come from an independent decoder (Grok), not from dcmnorm.
     #[test]

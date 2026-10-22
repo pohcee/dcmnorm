@@ -51,8 +51,8 @@ jobs:
 
   build-node-windows:
     name: Build Node bindings (Windows)
-    # The Windows edge install (see docs/edge-windows-support.md in the SafeBridge umbrella repo)
-    # runs the same Node services natively, so it needs a win32 build of the addon:
+    # Windows consumers of the Node binding run the same Node code natively, so they need a
+    # win32 build of the addon:
     # bindings/node/index.js (napi-generated) already resolves ./dcmnorm-node.win32-x64-msvc.node
     # on win32/x64. Built natively on a Windows runner (MSVC) rather than cross-compiled - the
     # C/C++ codec dependencies below (CharLS via cmake, OpenJPEG via cc) need a real MSVC toolchain,

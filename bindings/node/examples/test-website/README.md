@@ -116,10 +116,10 @@ Artifact Registry repo name, upload size cap).
 
 ### Continuous deploy
 
-`.github/workflows/deploy-test-website.yml` redeploys the public instance
-(`dcmnorm-test-website` in `safebridge-sandbox`) automatically whenever the Node binding changes
-on `main`: any push touching `bindings/node/**`, and every successful Build Bindings run (whose
-bot commit can't fire a `push` trigger itself). It can also be run by hand via
-`workflow_dispatch`. Auth is keyless Workload Identity Federation - no SA key or repo secret -
-and the job finishes by checking that `/api/version` reports the `package.json` version it just
-built. The script above remains for manual/other-project deploys.
+The public instance is deployed to Cloud Run by `.github/workflows/deploy-test-website.yml`,
+automatically whenever the Node binding changes on `main`: any push touching `bindings/node/**`,
+and every successful Build Bindings run (whose bot commit can't fire a `push` trigger itself). It
+can also be run by hand via `workflow_dispatch`. Auth is keyless Workload Identity Federation (no
+SA key); the deployment identifiers come from repository secrets, and the job is skipped when they
+are absent (e.g. on forks). The job finishes by checking that `/api/version` reports the
+`package.json` version it just built. The script above remains for manual/other-project deploys.
