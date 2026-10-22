@@ -13,15 +13,21 @@ name: Deploy Test Website
 #     main's tip, i.e. after that commit has landed.
 #   - workflow_dispatch - on-demand redeploy.
 #
-# Auth is keyless Workload Identity Federation (no SA key, no repo secrets). The pool/provider and
-# every grant are Terraform in the safebridge repo (env/prod/tf/gcp/core-services/dcmnorm_deploy.tf),
-# which only trusts this repo on refs/heads/main and only for this one AR repo + Cloud Run service.
-# The service runs as a zero-role SA, not the project's default compute SA.
+# Auth is keyless Workload Identity Federation (no SA key). The provider only trusts this repo on
+# refs/heads/main and only for this one AR repo + Cloud Run service. The service runs as a
+# zero-role SA, not the project's default compute SA.
+#
+# Deployment identifiers come from repository secrets (secrets, not variables, so they are masked
+# in the public Actions logs). When any is missing - e.g. on a fork - the deploy job is skipped:
+#   TEST_WEBSITE_GCP_PROJECT   GCP project id hosting the Artifact Registry repo + Cloud Run service
+#   TEST_WEBSITE_RUNTIME_SA    email of the service account the Cloud Run service runs as
+#   TEST_WEBSITE_WIF_PROVIDER  full Workload Identity provider resource name
+#                              (projects/<number>/locations/global/workloadIdentityPools/<pool>/providers/<provider>)
 #
 # Each deploy sets the image plus CPU/memory (`gcloud run deploy` keeps every other setting); the
 # public allUsers invoker binding was set once by deploy-cloudrun.sh and persists. 4 vCPU so the
-# timings the site shows reflect dcmnorm's multi-threaded JPEG 2000 decode the way production
-# (render-server, 8 vCPU) runs it - on 1 vCPU codec threading has nothing to work with. Cloud Run
+# timings the site shows reflect dcmnorm's multi-threaded JPEG 2000 decode the way a production
+# server (8 vCPU) runs it - on 1 vCPU codec threading has nothing to work with. Cloud Run
 # requires at least 2Gi for 4 vCPU. Keep in sync with
 # bindings/node/examples/test-website/deploy-cloudrun.sh.
 
@@ -47,24 +53,61 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  PROJECT_ID: safebridge-sandbox
   REGION: us-central1
   REPOSITORY: dcmnorm
   SERVICE_NAME: dcmnorm-test-website
-  RUNTIME_SA: dcmnorm-test-website@safebridge-sandbox.iam.gserviceaccount.com
-  WORKLOAD_IDENTITY_PROVIDER: projects/507315604716/locations/global/workloadIdentityPools/github/providers/dcmnorm
   MAX_UPLOAD_BYTES: "25000000"
 
 jobs:
+  # `secrets` can't be referenced in a job-level `if:`, so presence is checked here and exposed as
+  # an output (a boolean only - never the values).
+  configured:
+    name: Check deploy configuration
+    runs-on: ubuntu-24.04
+    permissions: {}
+    outputs:
+      ok: ${{ steps.check.outputs.ok }}
+    steps:
+      - name: Check required secrets
+        id: check
+        shell: bash
+        env:
+          HAS_PROJECT: ${{ secrets.TEST_WEBSITE_GCP_PROJECT != '' }}
+          HAS_RUNTIME_SA: ${{ secrets.TEST_WEBSITE_RUNTIME_SA != '' }}
+          HAS_WIF_PROVIDER: ${{ secrets.TEST_WEBSITE_WIF_PROVIDER != '' }}
+        run: |
+          if [[ "$HAS_PROJECT" == true && "$HAS_RUNTIME_SA" == true && "$HAS_WIF_PROVIDER" == true ]]; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Test website deploy secrets are not configured; skipping deploy."
+          fi
+
   deploy:
     name: Build and deploy
+    needs: configured
     # Build Bindings is triggered by tags; a failed/cancelled run committed nothing new to deploy.
-    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    if: >-
+      needs.configured.outputs.ok == 'true' &&
+      (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success')
     runs-on: ubuntu-24.04
     permissions:
       contents: read
       id-token: write
+    env:
+      PROJECT_ID: ${{ secrets.TEST_WEBSITE_GCP_PROJECT }}
+      RUNTIME_SA: ${{ secrets.TEST_WEBSITE_RUNTIME_SA }}
+      WORKLOAD_IDENTITY_PROVIDER: ${{ secrets.TEST_WEBSITE_WIF_PROVIDER }}
     steps:
+      # The project number is only a substring of the provider secret, so it is not masked on its
+      # own - but it appears in Cloud Run's deterministic service URL. Mask it explicitly.
+      - name: Mask derived identifiers
+        shell: bash
+        run: |
+          PROJECT_NUMBER="$(cut -d/ -f2 <<<"$WORKLOAD_IDENTITY_PROVIDER")"
+          [[ -n "$PROJECT_NUMBER" ]] && echo "::add-mask::${PROJECT_NUMBER}"
+          true
+
       - name: Checkout main
         uses: actions/checkout@v7
         with:
@@ -105,6 +148,7 @@ jobs:
             --cpu=4 \
             --memory=2Gi \
             --set-env-vars="MAX_UPLOAD_BYTES=${MAX_UPLOAD_BYTES}" \
+            --verbosity=error \
             --quiet
 
       - name: Smoke test

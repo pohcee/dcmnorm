@@ -185,9 +185,8 @@ whenever [`semver-tag.yml`](../../.github/workflows/semver-tag.yml) cuts a new v
 committed `.node` file is rebuilt as part of cutting a release even if `npm run release` wasn't
 run by hand for this particular one.
 
-The Windows x64 addon, `dcmnorm-node.win32-x64-msvc.node`, is committed the same way (the
-Windows edge install ships it - see `docs/edge-windows-support.md` in the SafeBridge umbrella
-repo) but is only built by the workflow's `build-node-windows` job on a `windows-latest` runner
+The Windows x64 addon, `dcmnorm-node.win32-x64-msvc.node`, is committed the same way (for
+Windows consumers of the Node binding) but is only built by the workflow's `build-node-windows` job on a `windows-latest` runner
 (MSVC), never by `build-in-docker.sh`; the `commit` job pushes it alongside the Linux binary, and
 only if every build succeeded (and only on `main` or a tag - a branch run just uploads
 artifacts). It has the same codecs as the Linux addon, FFmpeg included, and a codec that fails to
