@@ -166,6 +166,8 @@ association open/close, each request/response, release/abort). `destination` is 
   sub-operation counts regardless of success/warning/failure. `watchPath` + `staleDataTimeoutMs`
   watch a directory (typically this retrieve's own cache destination) for write activity and
   abort if it goes stale, independent of the overall `timeoutMs` ceiling.
+  `queryRetrieveLevel("SERIES"|"IMAGE")` + `seriesInstanceUid` (+ `sopInstanceUids` for IMAGE)
+  retrieve one series or a list of its instances instead of the whole study.
 
 **Scope note - what's intentionally not here yet:** the Python bindings additionally expose
 handle-based `start_echo_scu`/`start_store_scu`/`start_find_scu` (returning a handle a caller can

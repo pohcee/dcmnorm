@@ -37,7 +37,7 @@ use dcmnorm::dicom_io::{
     store_scu as dcm_store_scu, transcode_dicom_file, write_dicom_file, write_dicom_json_with_options,
     write_dicom_video as dcm_write_dicom_video, CancelMode as DcmCancelMode, DicomJsonBulkDataMode, DicomJsonFormat,
     DicomJsonKeyStyle, DicomJsonReadOptions, DicomJsonWriteOptions, DimseLogger, EchoScuOptions as DcmEchoScuOptions,
-    FindScuOptions as DcmFindScuOptions, Interpolation as DcmInterpolation, MoveScuOptions as DcmMoveScuOptions,
+    FindScuOptions as DcmFindScuOptions, Interpolation as DcmInterpolation, MoveScuOptions as DcmMoveScuOptions, QueryRetrieveLevel as DcmQueryRetrieveLevel,
     PlaneParams as DcmPlaneParams, RenderOutputFormat as DcmRenderOutputFormat,
     RenderPipelineOptions as DcmRenderPipelineOptions, SlabProjection as DcmSlabProjection,
     StoreScuOptions as DcmStoreScuOptions, TextureCompression as DcmTextureCompression, Volume as DcmVolume,
@@ -792,6 +792,9 @@ struct MoveScuOptionsIn {
     timeout_ms: Option<u32>,
     watch_path: Option<String>,
     stale_data_timeout_ms: Option<u32>,
+    query_retrieve_level: Option<String>,
+    series_instance_uid: Option<String>,
+    sop_instance_uids: Option<Vec<String>>,
 }
 
 /// Performs a C-MOVE (Study Root Query/Retrieve), asking `destination` ("host:port") to push
@@ -832,6 +835,10 @@ pub extern "system" fn Java_com_pohcee_dcmnorm_Dcmnorm_nativeMoveScu<'local>(
 
     let result = guarded(|| {
         let options: MoveScuOptionsIn = parse_json(&options_json)?;
+        let query_retrieve_level = options
+            .query_retrieve_level
+            .map(|level| level.parse::<DcmQueryRetrieveLevel>().map_err(|error| error.to_string()))
+            .transpose()?;
 
         let outcome = dcm_move_scu(
             &destination,
@@ -846,6 +853,9 @@ pub extern "system" fn Java_com_pohcee_dcmnorm_Dcmnorm_nativeMoveScu<'local>(
                 stale_data_timeout: options.stale_data_timeout_ms.map(|ms| Duration::from_millis(ms as u64)),
                 on_log: logger,
                 cancel: None,
+                query_retrieve_level,
+                series_instance_uid: options.series_instance_uid,
+                sop_instance_uids: options.sop_instance_uids.unwrap_or_default(),
             },
         )
         .map_err(|error| error.to_string())?;

@@ -24,7 +24,7 @@ use ::dcmnorm::dicom_io::{
     CancelSignal, DicomJsonBulkDataMode, DicomJsonFormat, DicomJsonKeyStyle, DicomJsonReadOptions,
     DicomJsonWriteOptions, DicomScp, DimseLogger, EchoScuOptions as DcmEchoScuOptions,
     FindScuOptions as DcmFindScuOptions, Interpolation as DcmInterpolation,
-    MoveScuOptions as DcmMoveScuOptions, OverlaySummary as DcmOverlaySummary,
+    MoveScuOptions as DcmMoveScuOptions, QueryRetrieveLevel as DcmQueryRetrieveLevel, OverlaySummary as DcmOverlaySummary,
     PlaneParams as DcmPlaneParams, RenderOutputFormat as DcmRenderOutputFormat,
     RenderPipelineOptions as DcmRenderPipelineOptions, ScpHandlers as DcmScpHandlers,
     ScpOptions as DcmScpOptions, SlabProjection as DcmSlabProjection,
@@ -784,7 +784,8 @@ impl MoveScuHandle {
 }
 
 /// Performs a C-MOVE (Study Root Query/Retrieve), asking `destination` ("host:port") to push
-/// `study_instance_uid` to `move_destination_ae` (an AE title `destination` already knows how to
+/// `study_instance_uid` - or, with `query_retrieve_level="SERIES"`/`"IMAGE"`, the series
+/// `series_instance_uid` / the instances `sop_instance_uids` of it - to `move_destination_ae` (an AE title `destination` already knows how to
 /// reach, not a socket address). Returns a handle immediately - the retrieve itself runs on its
 /// own background thread - rather than blocking until it reaches a terminal status; call
 /// `.result()` to wait for that terminal status and sub-operation counts (regardless of
@@ -800,6 +801,7 @@ impl MoveScuHandle {
     destination, move_destination_ae, study_instance_uid,
     calling_ae_title=None, called_ae_title=None, max_pdu_length=None, timeout_ms=None,
     watch_path=None, stale_data_timeout_ms=None, on_log=None,
+    query_retrieve_level=None, series_instance_uid=None, sop_instance_uids=None,
 ))]
 #[allow(clippy::too_many_arguments)]
 fn move_scu(
@@ -813,6 +815,9 @@ fn move_scu(
     watch_path: Option<String>,
     stale_data_timeout_ms: Option<u32>,
     on_log: Option<Py<PyAny>>,
+    query_retrieve_level: Option<String>,
+    series_instance_uid: Option<String>,
+    sop_instance_uids: Option<Vec<String>>,
 ) -> MoveScuHandle {
     let cancel = CancelSignal::new();
     let cancel_for_call = cancel.clone();
@@ -821,9 +826,13 @@ fn move_scu(
     let timeout = timeout_ms.map(|ms| Duration::from_millis(ms as u64));
     let stale_data_path = watch_path.map(PathBuf::from);
     let stale_data_timeout = stale_data_timeout_ms.map(|ms| Duration::from_millis(ms as u64));
+    let sop_instance_uids = sop_instance_uids.unwrap_or_default();
     let logger = dimse_logger(on_log);
 
     let state = ScuCallState::spawn(move || {
+        let query_retrieve_level = query_retrieve_level
+            .map(|level| level.parse::<DcmQueryRetrieveLevel>().map_err(|error| error.to_string()))
+            .transpose()?;
         dcm_move_scu(
             &destination,
             &move_destination_ae,
@@ -837,6 +846,9 @@ fn move_scu(
                 stale_data_timeout,
                 on_log: logger,
                 cancel: Some(cancel_for_call),
+                query_retrieve_level,
+                series_instance_uid,
+                sop_instance_uids,
             },
         )
         .map(|result| MoveScuResult {

@@ -317,7 +317,8 @@ export interface HistogramOptions {
 
 /**
  * Performs a C-MOVE (Study Root Query/Retrieve), asking `destination` ("host:port") to push
- * `studyInstanceUid` to `moveDestinationAe` (an AE title `destination` already knows how to
+ * `studyInstanceUid` - or one series of it / a list of its instances, per
+ * `options.queryRetrieveLevel` - to `moveDestinationAe` (an AE title `destination` already knows how to
  * reach, not a socket address). Returns a handle immediately - the retrieve itself runs on its
  * own background thread - rather than blocking until it reaches a terminal status; call
  * `.result()` to await that terminal status and sub-operation counts (regardless of
@@ -348,6 +349,20 @@ export interface MoveScuOptions {
    * `timeoutMs`.
    */
   staleDataTimeoutMs?: number
+  /**
+   * `"STUDY"` (default: the whole study, same Identifier as before this option existed),
+   * `"SERIES"` (needs `seriesInstanceUid`) or `"IMAGE"` (needs `seriesInstanceUid` and a
+   * non-empty `sopInstanceUids`). An invalid combination rejects `.result()` without opening
+   * an association.
+   */
+  queryRetrieveLevel?: string
+  /** SeriesInstanceUID for a `"SERIES"`/`"IMAGE"` retrieve; ignored for `"STUDY"`. */
+  seriesInstanceUid?: string
+  /**
+   * SOPInstanceUIDs for an `"IMAGE"` retrieve, sent as one multi-valued UID list; ignored
+   * otherwise.
+   */
+  sopInstanceUids?: Array<string>
 }
 
 export interface MoveScuResult {
