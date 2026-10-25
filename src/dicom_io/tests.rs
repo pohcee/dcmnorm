@@ -289,11 +289,12 @@ use super::{
     write_dicom_json_with_options, write_dicom_json_with_source, BoundingBox, BoxLength,
     DicomJsonBulkDataMode, DicomJsonFormat, DicomJsonKeyStyle, DicomJsonReadOptions,
     CancelMode, CancelSignal, DicomJsonWriteOptions, DimseError, DimseLogger, EchoScuOptions, FindScuOptions,
-    Jpeg2000Backend, MoveScuOptions, RenderError, RenderOutputFormat, RenderPipelineOptions,
+    Jpeg2000Backend, MoveScuOptions, QueryRetrieveLevel, RenderError, RenderOutputFormat, RenderPipelineOptions,
     ScpHandlers, ScpOptions, StoreScuOptions,
     build_volume, reformat_plane, Interpolation, PlaneParams, SlabProjection, VolumeError,
     pack_dicom_frame_stack_texture, pack_dicom_frame_texture, ContentKind, TextureCompression, TextureExportError,
 };
+use super::dimse::build_move_identifier;
 
 #[test]
 fn set_attribute_writes_media_storage_sop_class_uid_to_meta_not_dataset() {
@@ -2858,6 +2859,9 @@ fn move_scu_collects_suboperation_progress_until_terminal_status() {
             stale_data_timeout: None,
             on_log: None,
             cancel: None,
+            query_retrieve_level: None,
+            series_instance_uid: None,
+            sop_instance_uids: Vec::new(),
         },
     )
     .unwrap();
@@ -2933,6 +2937,9 @@ fn move_scu_drains_failed_sop_instance_uid_list_sent_as_separate_pdu() {
             stale_data_timeout: None,
             on_log: None,
             cancel: None,
+            query_retrieve_level: None,
+            series_instance_uid: None,
+            sop_instance_uids: Vec::new(),
         },
     )
     .unwrap();
@@ -3014,6 +3021,9 @@ fn move_scu_still_returns_the_terminal_result_when_the_peer_does_not_send_releas
             stale_data_timeout: None,
             on_log: None,
             cancel: None,
+            query_retrieve_level: None,
+            series_instance_uid: None,
+            sop_instance_uids: Vec::new(),
         },
     );
 
@@ -3091,6 +3101,9 @@ fn move_scu_aborts_on_absolute_timeout_despite_continued_pending_responses() {
             stale_data_timeout: None,
             on_log: None,
             cancel: None,
+            query_retrieve_level: None,
+            series_instance_uid: None,
+            sop_instance_uids: Vec::new(),
         },
     );
 
@@ -3169,6 +3182,9 @@ fn move_scu_aborts_when_stale_data_path_receives_no_new_files() {
             stale_data_timeout: Some(std::time::Duration::from_millis(200)),
             on_log: None,
             cancel: None,
+            query_retrieve_level: None,
+            series_instance_uid: None,
+            sop_instance_uids: Vec::new(),
         },
     );
 
@@ -3254,6 +3270,9 @@ fn move_scu_returns_cancelled_result_when_signalled_mid_wait() {
             stale_data_timeout: None,
             on_log: None,
             cancel: Some(cancel),
+            query_retrieve_level: None,
+            series_instance_uid: None,
+            sop_instance_uids: Vec::new(),
         },
     )
     .unwrap();
@@ -3311,6 +3330,9 @@ fn move_scu_hard_aborts_immediately_when_cancel_mode_is_abort() {
             stale_data_timeout: None,
             on_log: None,
             cancel: Some(cancel),
+            query_retrieve_level: None,
+            series_instance_uid: None,
+            sop_instance_uids: Vec::new(),
         },
     )
     .unwrap();
@@ -3653,6 +3675,9 @@ fn scp_round_trips_echo_store_find_move_against_the_scu_functions() {
             stale_data_timeout: None,
             on_log: None,
             cancel: None,
+            query_retrieve_level: None,
+            series_instance_uid: None,
+            sop_instance_uids: Vec::new(),
         },
     )
     .unwrap();
@@ -4645,6 +4670,9 @@ fn move_scu_reads_a_failed_sop_instance_uid_list_packed_with_its_response() {
             stale_data_timeout: None,
             on_log: None,
             cancel: None,
+            query_retrieve_level: None,
+            series_instance_uid: None,
+            sop_instance_uids: Vec::new(),
         },
     )
     .unwrap();
@@ -4732,4 +4760,234 @@ fn scp_stores_a_data_set_whose_first_fragment_shares_the_command_pdu() {
     assert_eq!(written.element(tags::SOP_INSTANCE_UID).unwrap().to_str().unwrap().trim(), sop_instance_uid);
     scp.stop();
     fs::remove_dir_all(&cache_dir).ok();
+}
+
+// ---------------------------------------------------------------------------------------------
+// C-MOVE retrieve levels (STUDY / SERIES / IMAGE)
+// ---------------------------------------------------------------------------------------------
+
+fn encode_identifier(identifier: &InMemDicomObject) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    identifier.write_dataset_with_ts(&mut bytes, dimse_implicit_vr_le()).unwrap();
+    bytes
+}
+
+fn identifier_strings(identifier: &InMemDicomObject, tag: Tag) -> Vec<String> {
+    identifier.element(tag).unwrap().to_multi_str().unwrap().iter().cloned().collect()
+}
+
+#[test]
+fn move_identifier_study_level_is_byte_for_byte_unchanged() {
+    // What `move_scu` sent before retrieve levels existed: QueryRetrieveLevel=STUDY (CS, padded
+    // with a space) + StudyInstanceUID (UI, padded with NUL), implicit VR little endian.
+    let mut legacy = InMemDicomObject::new_empty();
+    legacy.put_str(tags::QUERY_RETRIEVE_LEVEL, VR::CS, "STUDY");
+    legacy.put_str(tags::STUDY_INSTANCE_UID, VR::UI, "1.2.3.4.5");
+    let legacy_bytes = encode_identifier(&legacy);
+    let expected: &[u8] = &[
+        0x08, 0x00, 0x52, 0x00, 0x06, 0x00, 0x00, 0x00, b'S', b'T', b'U', b'D', b'Y', b' ',
+        0x20, 0x00, 0x0D, 0x00, 0x0A, 0x00, 0x00, 0x00, b'1', b'.', b'2', b'.', b'3', b'.', b'4', b'.', b'5', 0x00,
+    ];
+    assert_eq!(legacy_bytes, expected);
+
+    for level in [None, Some(QueryRetrieveLevel::Study)] {
+        let identifier = build_move_identifier("1.2.3.4.5", level.unwrap_or_default(), None, &[]).unwrap();
+        assert_eq!(encode_identifier(&identifier), expected);
+    }
+    // Series/SOP options are ignored at STUDY level, and the study UID isn't validated there (as before).
+    let identifier = build_move_identifier(
+        "1.2.3.4.5",
+        QueryRetrieveLevel::Study,
+        Some("1.2.3.4.5.6"),
+        &["1.2.3.4.5.6.7".to_owned()],
+    )
+    .unwrap();
+    assert_eq!(encode_identifier(&identifier), expected);
+    assert!(build_move_identifier("not-a-uid", QueryRetrieveLevel::Study, None, &[]).is_ok());
+}
+
+#[test]
+fn move_identifier_series_level_carries_series_instance_uid() {
+    let identifier = build_move_identifier("1.2.3", QueryRetrieveLevel::Series, Some("1.2.3.4"), &[]).unwrap();
+    let decoded =
+        InMemDicomObject::read_dataset_with_ts(encode_identifier(&identifier).as_slice(), dimse_implicit_vr_le()).unwrap();
+    assert_eq!(decoded.element(tags::QUERY_RETRIEVE_LEVEL).unwrap().to_str().unwrap(), "SERIES");
+    assert_eq!(decoded.element(tags::STUDY_INSTANCE_UID).unwrap().to_str().unwrap(), "1.2.3");
+    assert_eq!(decoded.element(tags::SERIES_INSTANCE_UID).unwrap().to_str().unwrap(), "1.2.3.4");
+    assert!(decoded.element(tags::SOP_INSTANCE_UID).is_err());
+    assert_eq!(decoded.iter().count(), 3);
+}
+
+#[test]
+fn move_identifier_image_level_sends_sop_instance_uids_as_one_uid_list() {
+    let sop_instance_uids = vec!["1.2.3.4.1".to_owned(), "1.2.3.4.22".to_owned(), "1.2.3.4.333".to_owned()];
+    let identifier =
+        build_move_identifier("1.2.3", QueryRetrieveLevel::Image, Some("1.2.3.4"), &sop_instance_uids).unwrap();
+    let bytes = encode_identifier(&identifier);
+
+    // One (0008,0018) element, values joined by `\`, NUL-padded to even length: 9+1+10+1+11 = 32
+    // bytes, already even.
+    let mut sop_element = vec![0x08, 0x00, 0x18, 0x00, 32, 0x00, 0x00, 0x00];
+    sop_element.extend_from_slice(b"1.2.3.4.1\\1.2.3.4.22\\1.2.3.4.333");
+    assert!(bytes.windows(sop_element.len()).any(|window| window == sop_element.as_slice()));
+
+    let decoded = InMemDicomObject::read_dataset_with_ts(bytes.as_slice(), dimse_implicit_vr_le()).unwrap();
+    assert_eq!(decoded.element(tags::QUERY_RETRIEVE_LEVEL).unwrap().to_str().unwrap(), "IMAGE");
+    assert_eq!(decoded.element(tags::STUDY_INSTANCE_UID).unwrap().to_str().unwrap(), "1.2.3");
+    assert_eq!(decoded.element(tags::SERIES_INSTANCE_UID).unwrap().to_str().unwrap(), "1.2.3.4");
+    assert_eq!(decoded.element(tags::SOP_INSTANCE_UID).unwrap().vr(), VR::UI);
+    assert_eq!(decoded.element(tags::SOP_INSTANCE_UID).unwrap().value().multiplicity(), 3);
+    assert_eq!(identifier_strings(&decoded, tags::SOP_INSTANCE_UID), sop_instance_uids);
+
+    // An odd total length gets one trailing NUL, not a space.
+    let identifier =
+        build_move_identifier("1.2.3", QueryRetrieveLevel::Image, Some("1.2.3.4"), &["1.2.3.4.5".to_owned()]).unwrap();
+    let bytes = encode_identifier(&identifier);
+    let mut sop_element = vec![0x08, 0x00, 0x18, 0x00, 10, 0x00, 0x00, 0x00];
+    sop_element.extend_from_slice(b"1.2.3.4.5\0");
+    assert!(bytes.windows(sop_element.len()).any(|window| window == sop_element.as_slice()));
+}
+
+#[test]
+fn move_identifier_rejects_incomplete_or_malformed_lower_level_keys() {
+    let invalid = |result: Result<InMemDicomObject, DimseError>| match result {
+        Err(DimseError::InvalidMoveIdentifier(message)) => message,
+        Err(other) => panic!("expected InvalidMoveIdentifier, got {other}"),
+        Ok(_) => panic!("expected InvalidMoveIdentifier, got an identifier"),
+    };
+
+    assert!(invalid(build_move_identifier("1.2.3", QueryRetrieveLevel::Series, None, &[])).contains("SeriesInstanceUID"));
+    assert!(invalid(build_move_identifier("1.2.3", QueryRetrieveLevel::Series, Some(""), &[])).contains("SeriesInstanceUID"));
+    assert!(invalid(build_move_identifier("1.2.3", QueryRetrieveLevel::Image, None, &["1.2".to_owned()]))
+        .contains("SeriesInstanceUID"));
+    assert!(invalid(build_move_identifier("1.2.3", QueryRetrieveLevel::Image, Some("1.2.3.4"), &[])).contains("SOPInstanceUID"));
+    // A backslash would silently split one UID into two values.
+    assert!(invalid(build_move_identifier(
+        "1.2.3",
+        QueryRetrieveLevel::Image,
+        Some("1.2.3.4"),
+        &["1.2.3.4.5\\1.2.3.4.6".to_owned()],
+    ))
+    .contains("SOPInstanceUID"));
+    assert!(invalid(build_move_identifier("1.2.3", QueryRetrieveLevel::Image, Some("1.2.3.4"), &["".to_owned()]))
+        .contains("SOPInstanceUID"));
+    assert!(invalid(build_move_identifier("1.2.3", QueryRetrieveLevel::Series, Some("1.2.3.4 "), &[])).contains("SeriesInstanceUID"));
+    assert!(invalid(build_move_identifier("1.2.3", QueryRetrieveLevel::Series, Some(&"1".repeat(65)), &[]))
+        .contains("SeriesInstanceUID"));
+    assert!(invalid(build_move_identifier("x.1", QueryRetrieveLevel::Series, Some("1.2.3.4"), &[])).contains("StudyInstanceUID"));
+    // Lax by design: a leading-zero component (seen in the wild) is still retrievable.
+    assert!(build_move_identifier("1.2.3", QueryRetrieveLevel::Series, Some("1.02.3"), &[]).is_ok());
+
+    assert_eq!("series".parse::<QueryRetrieveLevel>().unwrap(), QueryRetrieveLevel::Series);
+    assert_eq!(" IMAGE ".parse::<QueryRetrieveLevel>().unwrap(), QueryRetrieveLevel::Image);
+    assert_eq!("STUDY".parse::<QueryRetrieveLevel>().unwrap(), QueryRetrieveLevel::Study);
+    assert!(matches!("PATIENT".parse::<QueryRetrieveLevel>(), Err(DimseError::InvalidMoveIdentifier(_))));
+}
+
+/// Runs a `move_scu` against a mock SCP that answers with one successful terminal response and
+/// hands back the Identifier it received (decoded in the negotiated transfer syntax).
+fn move_scu_capturing_identifier(
+    level: QueryRetrieveLevel,
+    series_instance_uid: Option<&str>,
+    sop_instance_uids: &[&str],
+) -> InMemDicomObject {
+    let abstract_syntax = uids::STUDY_ROOT_QUERY_RETRIEVE_INFORMATION_MODEL_MOVE;
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let (scp_handle, addr) = spawn_mock_scp(abstract_syntax, move |association| {
+        let pc = association.presentation_contexts()[0].clone();
+        let ts = {
+            use dcmnorm_encoding::TransferSyntaxIndex;
+            dcmnorm_transcode::TransferSyntaxRegistry.get(&pc.transfer_syntax).unwrap()
+        };
+        let (pc_id, request, identifier_bytes) = dimse_recv_command_with_data(association);
+        let message_id = dimse_message_id(&request);
+        sender.send(InMemDicomObject::read_dataset_with_ts(identifier_bytes.as_slice(), ts).unwrap()).unwrap();
+
+        let final_response = InMemDicomObject::command_from_element_iter([
+            DataElement::new(tags::AFFECTED_SOP_CLASS_UID, VR::UI, dicom_value!(Str, abstract_syntax)),
+            DataElement::new(tags::COMMAND_FIELD, VR::US, dicom_value!(U16, [0x8021])),
+            DataElement::new(tags::MESSAGE_ID_BEING_RESPONDED_TO, VR::US, dicom_value!(U16, [message_id])),
+            DataElement::new(tags::COMMAND_DATA_SET_TYPE, VR::US, dicom_value!(U16, [0x0101])),
+            DataElement::new(tags::STATUS, VR::US, dicom_value!(U16, [0x0000])),
+            DataElement::new(tags::NUMBER_OF_REMAINING_SUBOPERATIONS, VR::US, dicom_value!(U16, [0])),
+            DataElement::new(tags::NUMBER_OF_COMPLETED_SUBOPERATIONS, VR::US, dicom_value!(U16, [2])),
+            DataElement::new(tags::NUMBER_OF_FAILED_SUBOPERATIONS, VR::US, dicom_value!(U16, [0])),
+            DataElement::new(tags::NUMBER_OF_WARNING_SUBOPERATIONS, VR::US, dicom_value!(U16, [0])),
+        ]);
+        dimse_send_command(association, pc_id, &final_response);
+    });
+
+    let result = move_scu(
+        &addr.to_string(),
+        "MOVE-DEST",
+        "1.2.3.4.5",
+        MoveScuOptions {
+            calling_ae_title: "TEST-SCU".to_owned(),
+            called_ae_title: Some("MOCK-SCP".to_owned()),
+            max_pdu_length: 16384,
+            timeout: Some(std::time::Duration::from_secs(10)),
+            stale_data_path: None,
+            stale_data_timeout: None,
+            on_log: None,
+            cancel: None,
+            query_retrieve_level: Some(level),
+            series_instance_uid: series_instance_uid.map(str::to_owned),
+            sop_instance_uids: sop_instance_uids.iter().map(|uid| (*uid).to_owned()).collect(),
+        },
+    )
+    .unwrap();
+    assert_eq!(result.status, 0);
+    assert_eq!(result.completed, 2);
+    scp_handle.join().unwrap();
+    receiver.recv().unwrap()
+}
+
+#[test]
+fn move_scu_series_level_sends_series_identifier_to_scp() {
+    let identifier = move_scu_capturing_identifier(QueryRetrieveLevel::Series, Some("1.2.3.4.5.6"), &[]);
+    assert_eq!(identifier.element(tags::QUERY_RETRIEVE_LEVEL).unwrap().to_str().unwrap(), "SERIES");
+    assert_eq!(identifier.element(tags::STUDY_INSTANCE_UID).unwrap().to_str().unwrap(), "1.2.3.4.5");
+    assert_eq!(identifier.element(tags::SERIES_INSTANCE_UID).unwrap().to_str().unwrap(), "1.2.3.4.5.6");
+    assert!(identifier.element(tags::SOP_INSTANCE_UID).is_err());
+}
+
+#[test]
+fn move_scu_image_level_sends_sop_instance_uid_list_to_scp() {
+    let identifier = move_scu_capturing_identifier(
+        QueryRetrieveLevel::Image,
+        Some("1.2.3.4.5.6"),
+        &["1.2.3.4.5.6.1", "1.2.3.4.5.6.2"],
+    );
+    assert_eq!(identifier.element(tags::QUERY_RETRIEVE_LEVEL).unwrap().to_str().unwrap(), "IMAGE");
+    assert_eq!(identifier.element(tags::STUDY_INSTANCE_UID).unwrap().to_str().unwrap(), "1.2.3.4.5");
+    assert_eq!(identifier.element(tags::SERIES_INSTANCE_UID).unwrap().to_str().unwrap(), "1.2.3.4.5.6");
+    assert_eq!(
+        identifier_strings(&identifier, tags::SOP_INSTANCE_UID),
+        vec!["1.2.3.4.5.6.1".to_owned(), "1.2.3.4.5.6.2".to_owned()]
+    );
+}
+
+#[test]
+fn move_scu_rejects_invalid_level_options_before_connecting() {
+    // Nothing listens on this address; the identifier check must fail first.
+    let error = move_scu(
+        "127.0.0.1:1",
+        "MOVE-DEST",
+        "1.2.3.4.5",
+        MoveScuOptions {
+            calling_ae_title: "TEST-SCU".to_owned(),
+            called_ae_title: None,
+            max_pdu_length: 16384,
+            timeout: Some(std::time::Duration::from_secs(1)),
+            stale_data_path: None,
+            stale_data_timeout: None,
+            on_log: None,
+            cancel: None,
+            query_retrieve_level: Some(QueryRetrieveLevel::Image),
+            series_instance_uid: Some("1.2.3.4.5.6".to_owned()),
+            sop_instance_uids: Vec::new(),
+        },
+    )
+    .unwrap_err();
+    assert!(matches!(error, DimseError::InvalidMoveIdentifier(_)), "got {error}");
 }

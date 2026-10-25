@@ -235,6 +235,8 @@ Ask a peer to push a study to another AE title it already knows (C-MOVE):
 dcmtalk movescu pacs.example.com:11112 MY_STORE_AE 1.2.840.113619.2.55.3.604688119.971.1600000000.123
 ```
 
+Retrieve one series (`--level SERIES --series-uid <UID>`) or specific instances (`--level IMAGE --series-uid <UID> --sop-uid <UID> [--sop-uid <UID> ...]`) of that study instead of the whole thing.
+
 Run a temporary receiver to capture what a peer sends (a storescp), e.g. to inspect what a modality/PACS is actually transmitting — instances land under `--cache-path` as `S_<StudyInstanceUID>/<Modality>_<SOPInstanceUID>.dcm`, ready for `dcmnorm` to inspect:
 
 ```bash

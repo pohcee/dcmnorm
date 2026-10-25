@@ -152,7 +152,7 @@ event - association open/close, each request/response, release/abort). `destinat
   given. Returns one flat/hex-keyed DICOM JSON string per match (`json.loads()` it, same shape as
   `read_json(format="flat", key_style="hex")`).
 - `start_find_scu(...) -> FindScuHandle` - same shape as `start_echo_scu`, for `find_scu`.
-- `move_scu(destination, move_destination_ae, study_instance_uid, calling_ae_title=None, called_ae_title=None, max_pdu_length=None, timeout_ms=None, watch_path=None, stale_data_timeout_ms=None, on_log=None) -> MoveScuHandle`
+- `move_scu(destination, move_destination_ae, study_instance_uid, calling_ae_title=None, called_ae_title=None, max_pdu_length=None, timeout_ms=None, watch_path=None, stale_data_timeout_ms=None, on_log=None, query_retrieve_level=None, series_instance_uid=None, sop_instance_uids=None) -> MoveScuHandle`
   - asks `destination` to push `study_instance_uid` to `move_destination_ae` (an AE title
   `destination` already knows how to reach, not a socket address). Unlike the other three, this
   **always** returns a handle immediately (the retrieve runs on its own background thread) rather
@@ -162,7 +162,9 @@ event - association open/close, each request/response, release/abort). `destinat
   (e.g. the study already being confirmed fully received via a separate channel) makes further
   waiting pointless. `watch_path` + `stale_data_timeout_ms` watch a directory (typically this
   retrieve's own cache destination) for write activity and abort if it goes stale, independent of
-  the overall `timeout_ms` ceiling.
+  the overall `timeout_ms` ceiling. `query_retrieve_level="SERIES"`/`"IMAGE"` with
+  `series_instance_uid` (+ `sop_instance_uids` for IMAGE) retrieves one series or a list of its
+  instances instead of the whole study.
 
 Every `*ScuHandle`'s background call runs on its own OS thread (not a shared pool) so a
 long-running `move` can't starve an unrelated concurrent `abort()`/`release()`; `.result()` /

@@ -1,6 +1,7 @@
 package com.pohcee.dcmnorm;
 
 import com.pohcee.dcmnorm.internal.Json;
+import java.util.List;
 
 /** Optional arguments for {@link Dcmnorm#moveScu}. */
 public final class MoveScuOptions {
@@ -10,6 +11,9 @@ public final class MoveScuOptions {
     private Integer timeoutMs;
     private String watchPath;
     private Integer staleDataTimeoutMs;
+    private String queryRetrieveLevel;
+    private String seriesInstanceUid;
+    private List<String> sopInstanceUids;
     private DimseLogger onLog;
 
     /** Defaults to {@code "DCMNORM"}. */
@@ -50,6 +54,27 @@ public final class MoveScuOptions {
         return this;
     }
 
+    /** {@code "STUDY"} (default: the whole study), {@code "SERIES"} (needs {@link
+     * #seriesInstanceUid}) or {@code "IMAGE"} (needs {@link #seriesInstanceUid} and a non-empty
+     * {@link #sopInstanceUids}). */
+    public MoveScuOptions queryRetrieveLevel(String queryRetrieveLevel) {
+        this.queryRetrieveLevel = queryRetrieveLevel;
+        return this;
+    }
+
+    /** SeriesInstanceUID for a SERIES/IMAGE retrieve; ignored for STUDY. */
+    public MoveScuOptions seriesInstanceUid(String seriesInstanceUid) {
+        this.seriesInstanceUid = seriesInstanceUid;
+        return this;
+    }
+
+    /** SOPInstanceUIDs for an IMAGE retrieve, sent as one multi-valued UID list; ignored
+     * otherwise. */
+    public MoveScuOptions sopInstanceUids(List<String> sopInstanceUids) {
+        this.sopInstanceUids = sopInstanceUids;
+        return this;
+    }
+
     /** Called synchronously, on the calling thread, with a debug line for each notable DIMSE
      * event - association open/close, and each C-MOVE-RQ/RSP (including every pending response,
      * so a slow multi-instance move is visible sub-operation by sub-operation). */
@@ -65,6 +90,7 @@ public final class MoveScuOptions {
     String toJson() {
         return Json.object().put("callingAeTitle", callingAeTitle).put("calledAeTitle", calledAeTitle)
             .put("maxPduLength", maxPduLength).put("timeoutMs", timeoutMs).put("watchPath", watchPath)
-            .put("staleDataTimeoutMs", staleDataTimeoutMs).build();
+            .put("staleDataTimeoutMs", staleDataTimeoutMs).put("queryRetrieveLevel", queryRetrieveLevel)
+            .put("seriesInstanceUid", seriesInstanceUid).putStrings("sopInstanceUids", sopInstanceUids).build();
     }
 }

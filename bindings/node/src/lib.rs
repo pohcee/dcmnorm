@@ -31,6 +31,7 @@ use dcmnorm::dicom_io::{
     FindScuOptions as DcmFindScuOptions, HistogramOptions as DcmHistogramOptions,
     Interpolation as DcmInterpolation,
     MoveScuOptions as DcmMoveScuOptions, OverlaySummary as DcmOverlaySummary,
+    QueryRetrieveLevel as DcmQueryRetrieveLevel,
     PlaneParams as DcmPlaneParams, RenderOutputFormat as DcmRenderOutputFormat,
     RenderPipelineOptions as DcmRenderPipelineOptions, ScpHandlers as DcmScpHandlers,
     ScpOptions as DcmScpOptions, SlabProjection as DcmSlabProjection,
@@ -938,6 +939,16 @@ pub struct MoveScuOptions {
     /// considered stale and aborted - independent of, and typically much shorter than,
     /// `timeoutMs`.
     pub stale_data_timeout_ms: Option<u32>,
+    /// `"STUDY"` (default: the whole study, same Identifier as before this option existed),
+    /// `"SERIES"` (needs `seriesInstanceUid`) or `"IMAGE"` (needs `seriesInstanceUid` and a
+    /// non-empty `sopInstanceUids`). An invalid combination rejects `.result()` without opening
+    /// an association.
+    pub query_retrieve_level: Option<String>,
+    /// SeriesInstanceUID for a `"SERIES"`/`"IMAGE"` retrieve; ignored for `"STUDY"`.
+    pub series_instance_uid: Option<String>,
+    /// SOPInstanceUIDs for an `"IMAGE"` retrieve, sent as one multi-valued UID list; ignored
+    /// otherwise.
+    pub sop_instance_uids: Option<Vec<String>>,
 }
 
 #[napi(object)]
@@ -986,7 +997,8 @@ impl MoveScuHandle {
 }
 
 /// Performs a C-MOVE (Study Root Query/Retrieve), asking `destination` ("host:port") to push
-/// `studyInstanceUid` to `moveDestinationAe` (an AE title `destination` already knows how to
+/// `studyInstanceUid` - or one series of it / a list of its instances, per
+/// `options.queryRetrieveLevel` - to `moveDestinationAe` (an AE title `destination` already knows how to
 /// reach, not a socket address). Returns a handle immediately - the retrieve itself runs on its
 /// own background thread - rather than blocking until it reaches a terminal status; call
 /// `.result()` to await that terminal status and sub-operation counts (regardless of
@@ -1014,9 +1026,15 @@ pub fn move_scu(
     let timeout = options.timeout_ms.map(|ms| Duration::from_millis(ms as u64));
     let stale_data_path = options.watch_path.map(PathBuf::from);
     let stale_data_timeout = options.stale_data_timeout_ms.map(|ms| Duration::from_millis(ms as u64));
+    let query_retrieve_level = options.query_retrieve_level;
+    let series_instance_uid = options.series_instance_uid;
+    let sop_instance_uids = options.sop_instance_uids.unwrap_or_default();
     let logger = dimse_logger(on_log);
 
     let state = ScuCallState::spawn(move || {
+        let query_retrieve_level = query_retrieve_level
+            .map(|level| level.parse::<DcmQueryRetrieveLevel>().map_err(|error| error.to_string()))
+            .transpose()?;
         dcm_move_scu(
             &destination,
             &move_destination_ae,
@@ -1030,6 +1048,9 @@ pub fn move_scu(
                 stale_data_timeout,
                 on_log: logger,
                 cancel: Some(cancel_for_call),
+                query_retrieve_level,
+                series_instance_uid,
+                sop_instance_uids,
             },
         )
         .map(|result| MoveScuResult {

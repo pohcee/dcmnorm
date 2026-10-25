@@ -25,7 +25,7 @@ mod volume_export;
 
 pub use dimse::{
     echo_scu, find_scu, move_scu, store_scu, CancelMode, CancelSignal, DimseError, DimseLogger,
-    EchoScuOptions, FindScuOptions, MoveScuOptions, MoveScuResult, StoreScuOptions, StoreScuResult,
+    EchoScuOptions, FindScuOptions, MoveScuOptions, MoveScuResult, QueryRetrieveLevel, StoreScuOptions, StoreScuResult,
 };
 pub use scp::{start_scp, DicomScp, ScpError, ScpHandlers, ScpOptions};
 pub use filter::{

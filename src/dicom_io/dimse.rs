@@ -27,7 +27,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use dcmnorm_core::dictionary::{DataDictionary, DataDictionaryEntry};
-use dcmnorm_core::{dicom_value, DataElement, VR};
+use dcmnorm_core::{dicom_value, DataElement, PrimitiveValue, VR};
 use dcmnorm_dictionary::{tags, uids, StandardDataDictionary};
 use dcmnorm_encoding::{TransferSyntax, TransferSyntaxIndex};
 use dcmnorm_object::InMemDicomObject;
@@ -97,6 +97,11 @@ pub enum DimseError {
     NoAcceptablePresentationContext { sop_class_uid: String, transfer_syntax_uid: String },
     NoFilesToSend,
     InvalidQueryKey(String),
+    /// A `move_scu` retrieve's level/UID options don't form a valid C-MOVE Identifier (an unknown
+    /// `QueryRetrieveLevel`, a SERIES/IMAGE retrieve without its `SeriesInstanceUID`, an IMAGE
+    /// retrieve without any `SOPInstanceUID`, or a UID that isn't one) - rejected before any
+    /// association is opened.
+    InvalidMoveIdentifier(String),
     /// Something the peer sent didn't have the shape a well-behaved SCP response should have
     /// (missing Status, malformed PDU sequence, etc.) - not one of the specific, expected error
     /// paths above.
@@ -139,6 +144,7 @@ impl fmt::Display for DimseError {
             ),
             Self::NoFilesToSend => write!(formatter, "no valid DICOM files to send"),
             Self::InvalidQueryKey(key) => write!(formatter, "invalid query key '{key}'"),
+            Self::InvalidMoveIdentifier(message) => write!(formatter, "invalid C-MOVE identifier: {message}"),
             Self::Protocol(message) => write!(formatter, "DIMSE protocol error: {message}"),
             Self::AbsoluteTimeout => write!(formatter, "operation exceeded its absolute timeout"),
             Self::StaleDataConnection { path } => write!(
@@ -170,6 +176,7 @@ impl StdError for DimseError {
             | Self::NoAcceptablePresentationContext { .. }
             | Self::NoFilesToSend
             | Self::InvalidQueryKey(_)
+            | Self::InvalidMoveIdentifier(_)
             | Self::Protocol(_)
             | Self::AbsoluteTimeout
             | Self::StaleDataConnection { .. }
@@ -996,6 +1003,48 @@ pub fn find_scu(
 // C-MOVE
 // ---------------------------------------------------------------------------------------------
 
+/// The level a C-MOVE retrieves at (PS3.4 C.4.2.1.4, Study Root model): the whole study, one
+/// series of it, or a list of instances in one series. Parses from/prints as the DICOM
+/// `QueryRetrieveLevel` code string (`"STUDY"`, `"SERIES"`, `"IMAGE"`), case-insensitively.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum QueryRetrieveLevel {
+    #[default]
+    Study,
+    Series,
+    Image,
+}
+
+impl QueryRetrieveLevel {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Study => "STUDY",
+            Self::Series => "SERIES",
+            Self::Image => "IMAGE",
+        }
+    }
+}
+
+impl fmt::Display for QueryRetrieveLevel {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for QueryRetrieveLevel {
+    type Err = DimseError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_uppercase().as_str() {
+            "STUDY" => Ok(Self::Study),
+            "SERIES" => Ok(Self::Series),
+            "IMAGE" => Ok(Self::Image),
+            _ => Err(DimseError::InvalidMoveIdentifier(format!(
+                "unknown QueryRetrieveLevel '{value}' (expected STUDY, SERIES or IMAGE)"
+            ))),
+        }
+    }
+}
+
 pub struct MoveScuOptions {
     pub calling_ae_title: String,
     pub called_ae_title: Option<String>,
@@ -1019,6 +1068,75 @@ pub struct MoveScuOptions {
     /// it produces a successful, `cancelled: true` result (see `move_scu`), not an error, since
     /// cancellation only happens when the data is already known to be in hand.
     pub cancel: Option<Arc<CancelSignal>>,
+    /// What to retrieve: `None`/`Study` moves the whole study (the Identifier is exactly
+    /// `QueryRetrieveLevel=STUDY` + `StudyInstanceUID`, as before these options existed);
+    /// `Series` adds `series_instance_uid`; `Image` adds it plus `sop_instance_uids`.
+    pub query_retrieve_level: Option<QueryRetrieveLevel>,
+    /// Required for `Series`/`Image` retrieves; ignored for `Study`.
+    pub series_instance_uid: Option<String>,
+    /// Required (non-empty) for `Image` retrieves, sent as one multi-valued `SOPInstanceUID`
+    /// (PS3.4 C.4.2.2.1.2, List of UID Matching); ignored otherwise.
+    pub sop_instance_uids: Vec<String>,
+}
+
+/// Loose UID syntax check for retrieve keys: 1-64 characters, digits and dots only. Deliberately
+/// laxer than `consistency::is_valid_uid` (no leading-zero/empty-component rule) - the UIDs come
+/// from the source PACS's own C-FIND answers, and refusing a slightly non-conformant one there
+/// would make that series/instance unretrievable at all. What it does catch is what would corrupt
+/// the Identifier: an empty value, a `\` (which would split one UID into several), padding or
+/// any other stray character.
+fn check_retrieve_uid(key: &str, uid: &str) -> Result<(), DimseError> {
+    let well_formed = !uid.is_empty()
+        && uid.len() <= 64
+        && uid.bytes().all(|byte| byte.is_ascii_digit() || byte == b'.');
+    if well_formed {
+        Ok(())
+    } else {
+        Err(DimseError::InvalidMoveIdentifier(format!("{key} '{uid}' is not a valid UID")))
+    }
+}
+
+/// Builds the C-MOVE Identifier for `move_scu`. A `Study` retrieve's Identifier is byte-for-byte
+/// what `move_scu` always sent (its UID isn't validated, as before); `Series`/`Image` add the
+/// lower-level unique keys PS3.4 C.4.2.2.1 requires at that level, validated up front so a bad
+/// option fails before any association is opened.
+pub(super) fn build_move_identifier(
+    study_instance_uid: &str,
+    level: QueryRetrieveLevel,
+    series_instance_uid: Option<&str>,
+    sop_instance_uids: &[String],
+) -> Result<InMemDicomObject, DimseError> {
+    let mut identifier = InMemDicomObject::new_empty();
+    put_query_attribute(&mut identifier, "QueryRetrieveLevel", level.as_str())?;
+    put_query_attribute(&mut identifier, "StudyInstanceUID", study_instance_uid)?;
+    if level == QueryRetrieveLevel::Study {
+        return Ok(identifier);
+    }
+
+    check_retrieve_uid("StudyInstanceUID", study_instance_uid)?;
+    let series_instance_uid = series_instance_uid.filter(|uid| !uid.is_empty()).ok_or_else(|| {
+        DimseError::InvalidMoveIdentifier(format!("a {level}-level retrieve needs a SeriesInstanceUID"))
+    })?;
+    check_retrieve_uid("SeriesInstanceUID", series_instance_uid)?;
+    put_query_attribute(&mut identifier, "SeriesInstanceUID", series_instance_uid)?;
+    if level == QueryRetrieveLevel::Series {
+        return Ok(identifier);
+    }
+
+    if sop_instance_uids.is_empty() {
+        return Err(DimseError::InvalidMoveIdentifier(
+            "an IMAGE-level retrieve needs at least one SOPInstanceUID".to_owned(),
+        ));
+    }
+    for uid in sop_instance_uids {
+        check_retrieve_uid("SOPInstanceUID", uid)?;
+    }
+    identifier.put(DataElement::new(
+        tags::SOP_INSTANCE_UID,
+        VR::UI,
+        PrimitiveValue::Strs(sop_instance_uids.iter().cloned().collect()),
+    ));
+    Ok(identifier)
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1064,7 +1182,8 @@ fn handle_move_cancelled(
 }
 
 /// Performs a C-MOVE (Study Root Query/Retrieve), asking `destination` to push
-/// `study_instance_uid` to `move_destination_ae` (an AE title `destination` already knows how to
+/// `study_instance_uid` - or, per `options.query_retrieve_level`, one series of it or a list of
+/// its instances - to `move_destination_ae` (an AE title `destination` already knows how to
 /// reach - not a socket address). Blocks until the move reaches a terminal status; returns the
 /// terminal [`MoveScuResult`] regardless of whether it was success/warning/failure so the caller
 /// can decide what's retryable, mirroring [`store_scu`]'s "return data, don't decide policy" shape.
@@ -1074,6 +1193,13 @@ pub fn move_scu(
     study_instance_uid: &str,
     options: MoveScuOptions,
 ) -> Result<MoveScuResult, DimseError> {
+    let level = options.query_retrieve_level.unwrap_or_default();
+    let identifier = build_move_identifier(
+        study_instance_uid,
+        level,
+        options.series_instance_uid.as_deref(),
+        &options.sop_instance_uids,
+    )?;
     let logger = options.on_log.as_deref();
     let deadline = options.timeout.map(|timeout| Instant::now() + timeout);
     let mut stale_watch = match (options.stale_data_path, options.stale_data_timeout) {
@@ -1100,9 +1226,6 @@ pub fn move_scu(
         .ok_or(DimseError::NoAcceptedPresentationContext)?;
     let ts = transfer_syntax(&pc.transfer_syntax)?;
 
-    let mut identifier = InMemDicomObject::new_empty();
-    put_query_attribute(&mut identifier, "QueryRetrieveLevel", "STUDY")?;
-    put_query_attribute(&mut identifier, "StudyInstanceUID", study_instance_uid)?;
     let mut identifier_data = Vec::with_capacity(128);
     identifier.write_dataset_with_ts(&mut identifier_data, ts)?;
 
@@ -1115,8 +1238,19 @@ pub fn move_scu(
         DataElement::new(tags::COMMAND_DATA_SET_TYPE, VR::US, dicom_value!(U16, [0x0001])),
     ]);
 
-    log_event(logger, || {
-        format!("sending C-MOVE-RQ: study {study_instance_uid} -> move destination AE {move_destination_ae}")
+    log_event(logger, || match level {
+        QueryRetrieveLevel::Study => {
+            format!("sending C-MOVE-RQ: study {study_instance_uid} -> move destination AE {move_destination_ae}")
+        }
+        QueryRetrieveLevel::Series => format!(
+            "sending C-MOVE-RQ: study {study_instance_uid} series {} -> move destination AE {move_destination_ae}",
+            options.series_instance_uid.as_deref().unwrap_or_default()
+        ),
+        QueryRetrieveLevel::Image => format!(
+            "sending C-MOVE-RQ: study {study_instance_uid} series {} ({} instance(s)) -> move destination AE {move_destination_ae}",
+            options.series_instance_uid.as_deref().unwrap_or_default(),
+            options.sop_instance_uids.len()
+        ),
     });
 
     if let Err(error) = send_command_with_data(&mut assoc, pc.id, &command, identifier_data) {

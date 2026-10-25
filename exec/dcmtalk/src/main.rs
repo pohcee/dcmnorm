@@ -7,7 +7,7 @@ use std::time::Duration;
 use clap::{ArgAction, Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 use dcmnorm::dicom_io::{
     echo_scu, find_scu, move_scu, start_scp, store_scu, DimseLogger, EchoScuOptions,
-    FindScuOptions, MoveScuOptions, MoveScuResult, ScpHandlers, ScpOptions, StoreScuOptions,
+    FindScuOptions, MoveScuOptions, MoveScuResult, QueryRetrieveLevel, ScpHandlers, ScpOptions, StoreScuOptions,
     StoreScuResult,
 };
 use sha2::{Digest, Sha256};
@@ -113,6 +113,19 @@ struct MovescuArgs {
 
     /// StudyInstanceUID to retrieve
     study_instance_uid: String,
+
+    /// QueryRetrieveLevel: STUDY (the whole study), SERIES (needs --series-uid) or IMAGE (needs
+    /// --series-uid and at least one --sop-uid)
+    #[arg(long = "level", default_value = "STUDY", value_name = "STUDY|SERIES|IMAGE")]
+    level: String,
+
+    /// SeriesInstanceUID to retrieve (SERIES/IMAGE level)
+    #[arg(long = "series-uid", value_name = "UID")]
+    series_uid: Option<String>,
+
+    /// SOPInstanceUID to retrieve (IMAGE level). Repeatable; all are sent as one UID list.
+    #[arg(long = "sop-uid", action = ArgAction::Append, value_name = "UID")]
+    sop_uids: Vec<String>,
 
     /// Our advertised max PDU length
     #[arg(long = "max-pdu", default_value_t = DEFAULT_SCU_MAX_PDU)]
@@ -355,6 +368,7 @@ fn run_findscu(args: FindscuArgs) -> Result<(), Box<dyn std::error::Error>> {
 
 fn run_movescu(args: MovescuArgs) -> Result<(), Box<dyn std::error::Error>> {
     let common = args.common;
+    let level: QueryRetrieveLevel = args.level.parse()?;
     let options = MoveScuOptions {
         calling_ae_title: common.calling_ae,
         called_ae_title: common.called_ae,
@@ -364,6 +378,9 @@ fn run_movescu(args: MovescuArgs) -> Result<(), Box<dyn std::error::Error>> {
         stale_data_timeout: None,
         on_log: logger_box(common.verbose),
         cancel: None,
+        query_retrieve_level: Some(level),
+        series_instance_uid: args.series_uid,
+        sop_instance_uids: args.sop_uids,
     };
 
     let result: MoveScuResult =
