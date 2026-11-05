@@ -109,7 +109,8 @@ where
                 // doesn't find the tag, locate_element_value retries once from the true start
                 // before giving up, so an out-of-order visit can never cause a false miss.
                 let resume_hint = options.bulk_scan_cursor.map(|cell| cell.get()).unwrap_or(0);
-                match locate_element_value(source, tag, expected_bytes_for_lookup, resume_hint) {
+                let value_width = primitive_value_width(value);
+                match locate_element_value(source, tag, expected_bytes_for_lookup, value_width, resume_hint) {
                     Ok(Some(location)) => {
                         if let Some(cell) = options.bulk_scan_cursor {
                             let end = location.offset + location.length;
@@ -158,7 +159,7 @@ where
     // Borrowed wherever possible: for native byte data (e.g. a multi-frame PixelData) an owned
     // copy here was a whole-value memcpy just to compare/encode it.
     if let Some(source) = bulk_data_source {
-        if let Some(location) = locate_element_value(source, tag, None, 0)? {
+        if let Some(location) = locate_element_value(source, tag, None, 1, 0)? {
             return Ok(std::borrow::Cow::Borrowed(&source[location.offset..location.offset + location.length]));
         }
     }
@@ -231,17 +232,21 @@ pub(super) fn resolve_standard_bulk_bytes(
     Ok(Some(Vec::new()))
 }
 
+/// `inline_binary`: where `bytes` came from. A BulkDataURI's bytes are the source file's, in the
+/// document's transfer syntax byte order. InlineBinary always holds what the writer got from
+/// `PrimitiveValue::to_bytes`: little-endian, whatever the transfer syntax.
 pub(super) fn raw_bytes_to_dicom_value(
     tag: Tag,
     vr: VR,
     bytes: &[u8],
     transfer_syntax_uid: &str,
+    inline_binary: bool,
 ) -> Result<DicomValue<dcmnorm_object::InMemDicomObject>, DicomJsonError> {
     if tag == tags::PIXEL_DATA && is_encapsulated_transfer_syntax(transfer_syntax_uid) {
         return pixel_sequence_from_bytes(bytes);
     }
 
-    let little_endian = is_little_endian_transfer_syntax(transfer_syntax_uid)?;
+    let little_endian = is_little_endian_transfer_syntax(transfer_syntax_uid)? || inline_binary;
 
     let primitive = match vr {
         VR::OB | VR::UN => PrimitiveValue::U8(bytes.to_vec().into()),
@@ -433,10 +438,13 @@ fn take_scan_step(steps: &mut usize) -> Result<(), DicomJsonError> {
 const MAX_MATCH_NEEDLE_LEN: usize = 64 * 1024;
 const MAX_MATCH_SCAN_ATTEMPTS: usize = 2_000;
 
+/// `value_width`: the size of one number in `expected_bytes` (see [`primitive_value_width`]), for
+/// comparing them with a big-endian file's bytes.
 fn locate_element_value(
     source: &[u8],
     target: Tag,
     expected_bytes: Option<&[u8]>,
+    value_width: usize,
     resume_hint: usize,
 ) -> Result<Option<ElementLocation>, DicomJsonError> {
     let has_part10_preamble = source.len() >= 132 && &source[128..132] == b"DICM";
@@ -483,6 +491,13 @@ fn locate_element_value(
     }
 
     let syntax = transfer_syntax_from_uid(transfer_syntax_uid.as_str())?;
+    // expected_bytes are decoded (little-endian), so in a big-endian data set the value's bytes
+    // in the file are those with each number reversed. Only the data set: the meta group above
+    // is little-endian in every transfer syntax.
+    let big_endian_expected = expected_bytes
+        .filter(|_| !syntax.little_endian && value_width > 1)
+        .map(|expected| reverse_each_value(expected, value_width));
+    let expected_bytes = big_endian_expected.as_deref().or(expected_bytes);
     let dataset_start = position;
     let scan_from = resume_hint.max(dataset_start);
 
@@ -821,6 +836,23 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack
         .windows(needle.len())
         .position(|window| window == needle)
+}
+
+/// The size in bytes of one number of a decoded value, i.e. what `PrimitiveValue::to_bytes` lays
+/// out in little-endian order. 1 for anything a byte order doesn't apply to.
+fn primitive_value_width<I, P>(value: &DicomValue<I, P>) -> usize {
+    match value {
+        DicomValue::Primitive(PrimitiveValue::U16(_) | PrimitiveValue::I16(_)) => 2,
+        DicomValue::Primitive(PrimitiveValue::U32(_) | PrimitiveValue::I32(_) | PrimitiveValue::F32(_)) => 4,
+        DicomValue::Primitive(PrimitiveValue::U64(_) | PrimitiveValue::I64(_) | PrimitiveValue::F64(_)) => 8,
+        _ => 1,
+    }
+}
+
+fn reverse_each_value(bytes: &[u8], width: usize) -> Vec<u8> {
+    let mut reversed = bytes.to_vec();
+    reversed.chunks_exact_mut(width).for_each(<[u8]>::reverse);
+    reversed
 }
 
 fn value_matches(

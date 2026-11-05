@@ -366,10 +366,11 @@ struct ReadJsonOptionsIn {
     format: Option<String>,
     key_style: Option<String>,
     bulk_data: Option<String>,
+    omit_keyword_vm: Option<bool>,
 }
 
 /// Reads the full DICOM dataset as JSON. `options_json` (never null - callers pass `"{}"` for
-/// defaults) mirrors `ReadJsonOptions`: `format`/`keyStyle`/`bulkData`. `bulkData` defaults to
+/// defaults) mirrors `ReadJsonOptions`: `format`/`keyStyle`/`bulkData`/`omitKeywordVm`. `bulkData` defaults to
 /// `"uri"` (matching the CLI), not the Rust library's own default of inline-embedding bulk data -
 /// getting this wrong makes a huge difference (`"inline"` base64-embeds e.g. `PixelData`
 /// directly, ~1000x larger output for a typical image, instead of a small
@@ -398,7 +399,13 @@ pub extern "system" fn Java_com_pohcee_dcmnorm_Dcmnorm_nativeReadJson<'local>(
         let bulk_data_mode = parse_bulk_data_mode(options.bulk_data.as_deref())?;
         dicom_file_to_json(
             PathBuf::from(file_path),
-            DicomJsonWriteOptions { format, key_style, bulk_data_mode, ..Default::default() },
+            DicomJsonWriteOptions {
+                format,
+                key_style,
+                bulk_data_mode,
+                omit_keyword_vm: options.omit_keyword_vm.unwrap_or(false),
+                ..Default::default()
+            },
         )
         .map_err(|error| error.to_string())
     });

@@ -405,6 +405,11 @@ export interface ReadJsonOptions {
    * for a typical image is orders of magnitude larger.
    */
   bulkData?: string
+  /**
+   * With format 'standard': omit the non-standard Keyword and VM members, leaving
+   * only what PS3.18 Annex F defines (the CLI's `--omit-keyword-vm`). Default false.
+   */
+  omitKeywordVm?: boolean
 }
 
 export declare function readTags(filePath: string, tags: Array<string>): Promise<unknown>

@@ -320,7 +320,13 @@ fn flat_json_to_dicom_value(
     }
 
     if let Some(bytes) = resolve_flat_bulk_bytes(keyword, json, bulk_data_source)? {
-        return raw_bytes_to_dicom_value(tag, vr, &bytes, transfer_syntax_uid);
+        return raw_bytes_to_dicom_value(
+            tag,
+            vr,
+            &bytes,
+            transfer_syntax_uid,
+            json.get("InlineBinary").is_some(),
+        );
     }
 
     if json.is_null() {

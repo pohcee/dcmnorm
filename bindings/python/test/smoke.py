@@ -106,6 +106,11 @@ def main():
         f"read_json output for a filtered non-bulk fixture should stay small (was {len(full_json_str)} bytes)",
     )
 
+    standard = json.loads(dcmnorm.read_json(FIXTURE, format="standard", key_style="hex"))
+    check("Keyword" in standard["00080018"] and "VM" in standard["00080018"], "standard read_json should keep Keyword/VM by default")
+    bare = json.loads(dcmnorm.read_json(FIXTURE, format="standard", key_style="hex", omit_keyword_vm=True))
+    check(sorted(bare["00080018"]) == ["Value", "vr"], "omit_keyword_vm should leave only vr and Value")
+
     inline = json.loads(dcmnorm.read_json(FIXTURE, bulk_data="inline"))
     check(
         isinstance(inline["PixelData"].get("InlineBinary"), str) and len(inline["PixelData"]["InlineBinary"]) > 1000,

@@ -7,6 +7,7 @@ public final class ReadJsonOptions {
     private String format;
     private String keyStyle;
     private String bulkData;
+    private Boolean omitKeywordVm;
 
     /** {@code "flat"} (default) or {@code "standard"}. */
     public ReadJsonOptions format(String format) {
@@ -26,7 +27,21 @@ public final class ReadJsonOptions {
         return this;
     }
 
+    /**
+     * With {@code format("standard")}: omit the non-standard {@code Keyword} and {@code VM} members,
+     * leaving only what PS3.18 Annex F defines. Default false.
+     */
+    public ReadJsonOptions omitKeywordVm(boolean omitKeywordVm) {
+        this.omitKeywordVm = omitKeywordVm;
+        return this;
+    }
+
     String toJson() {
-        return Json.object().put("format", format).put("keyStyle", keyStyle).put("bulkData", bulkData).build();
+        return Json.object()
+            .put("format", format)
+            .put("keyStyle", keyStyle)
+            .put("bulkData", bulkData)
+            .put("omitKeywordVm", omitKeywordVm)
+            .build();
     }
 }

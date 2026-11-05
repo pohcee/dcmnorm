@@ -41,7 +41,8 @@ than crashing the JVM - every entry point runs the actual dcmnorm call through R
   (`--bulk-data uri`) - not the Rust library's own default, which is `"inline"`. Getting this
   wrong makes a huge difference: `"inline"` base64-embeds elements like `PixelData` directly,
   ~1000x larger output for a typical image, instead of a small `"?offset=..&length=.."`
-  reference.
+  reference. `ReadJsonOptions.omitKeywordVm(true)` drops the non-standard `Keyword` and `VM`
+  members from `format("standard")` output, leaving only what PS3.18 Annex F defines.
 - `Dcmnorm.writeJson(json, outputPath[, WriteJsonOptions])` - writes a DICOM file from JSON.
   `WriteJsonOptions.bulkDataSourcePath` resolves `BulkDataURI` references against that file's
   bytes.

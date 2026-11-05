@@ -37,11 +37,15 @@ pub(super) fn write_standard_json_value(
 
         json.insert(
             tag_key(element.header().tag),
-            decorate_standard_element_json(
-                value,
-                element.header().tag,
-                standard_vm(element.header().tag, element.vr(), element.value()),
-            )?,
+            if options.omit_keyword_vm {
+                value
+            } else {
+                decorate_standard_element_json(
+                    value,
+                    element.header().tag,
+                    standard_vm(element.header().tag, element.vr(), element.value()),
+                )?
+            },
         );
     }
 
@@ -55,11 +59,15 @@ pub(super) fn write_standard_json_value(
 
         json.insert(
             tag_key(element.header().tag),
-            decorate_standard_element_json(
-                value,
-                element.header().tag,
-                standard_vm(element.header().tag, element.vr(), element.value()),
-            )?,
+            if options.omit_keyword_vm {
+                value
+            } else {
+                decorate_standard_element_json(
+                    value,
+                    element.header().tag,
+                    standard_vm(element.header().tag, element.vr(), element.value()),
+                )?
+            },
         );
     }
 
@@ -405,7 +413,13 @@ fn read_standard_element(
         return match resolve_standard_bulk_bytes(tag, vr, object, bulk_data_source)? {
             Some(bytes) => Ok((
                 vr,
-                raw_bytes_to_dicom_value(tag, vr, &bytes, transfer_syntax_uid)?,
+                raw_bytes_to_dicom_value(
+                    tag,
+                    vr,
+                    &bytes,
+                    transfer_syntax_uid,
+                    object.contains_key("InlineBinary"),
+                )?,
             )),
             None => Err(DicomJsonError::InvalidStandardElement {
                 tag: tag_text.to_owned(),

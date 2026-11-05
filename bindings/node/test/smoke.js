@@ -97,6 +97,11 @@ const tagsJson = await binding.readTags(fixture, ["StudyInstanceUID", "SOPInstan
     "readJson with bulkData: 'inline' should base64-embed PixelData");
 
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "dcmnorm-node-smoke-"));
+  const standard = JSON.parse(await binding.readJson(fixture, { format: "standard", keyStyle: "hex" }));
+  assert.ok(standard["00080018"].Keyword && standard["00080018"].VM, "standard readJson should keep Keyword/VM by default");
+  const bare = JSON.parse(await binding.readJson(fixture, { format: "standard", keyStyle: "hex", omitKeywordVm: true }));
+  assert.deepStrictEqual(Object.keys(bare["00080018"]).sort(), ["Value", "vr"], "omitKeywordVm should leave only vr and Value");
+
   const edited = path.join(tmpDir, "edited.dcm");
   await binding.editTags(fixture, {
     outputPath: edited,

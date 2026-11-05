@@ -31,11 +31,13 @@ unless it's caught at the FFI boundary.
   reference) containing only the requested tags. Stops parsing right after the highest requested
   tag, same fast path as `dcmnorm --filter`. Filtering for a bulk-data-eligible tag (e.g.
   `PixelData`) falls back to inlining it rather than a URI reference, unlike `read_json` below.
-- `read_json(file_path, format="flat"|"standard"=None, key_style="name"|"hex"=None, bulk_data="uri"|"inline"=None) -> str`
+- `read_json(file_path, format="flat"|"standard"=None, key_style="name"|"hex"=None, bulk_data="uri"|"inline"=None, omit_keyword_vm=False) -> str`
   - full-file JSON dump. `bulk_data` defaults to `"uri"`, matching the CLI's own default
   (`--bulk-data uri`) - not the Rust library's own default, which is `"inline"`. Getting this
   wrong makes a huge difference: `"inline"` base64-embeds elements like `PixelData` directly,
   ~1000x larger output for a typical image, instead of a small `"?offset=..&length=.."` reference.
+  `omit_keyword_vm=True` drops the non-standard `Keyword` and `VM` members from `format="standard"`
+  output, leaving only what PS3.18 Annex F defines.
 - `write_json(json, output_path, format=None, bulk_data_source_path=None) -> None` - writes a
   DICOM file from JSON. `bulk_data_source_path` resolves `BulkDataURI` references against that
   file's bytes.

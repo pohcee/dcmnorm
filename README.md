@@ -307,6 +307,14 @@ Convert JSON with `BulkDataURI` references back to DICOM using a source file:
 dcmnorm out.json out.dcm --bulk-data-source test/files/dx.dcm
 ```
 
+`--format standard` adds non-standard `Keyword` and `VM` members to each top-level attribute. Pass
+`--omit-keyword-vm` for output with only what PS3.18 Annex F defines (`vr` and the value). JSON
+converts back to DICOM with or without them:
+
+```bash
+dcmnorm test/files/dx.dcm out.json --format standard --keys hex --omit-keyword-vm
+```
+
 ### Filter attributes
 
 Filter DICOM attributes before conversion (only filtered tags are parsed and emitted):
@@ -336,6 +344,13 @@ To embed absolute `file://` URIs in `BulkDataURI`, pass `--bulk-data-source` wit
 ```bash
 dcmnorm test/files/dx.dcm --bulk-data uri --bulk-data-source
 ```
+
+A `BulkDataURI` points at the value's bytes in the file, in the byte order of the file's transfer
+syntax, so they are big-endian for Explicit VR Big Endian. `InlineBinary` is always little-endian.
+Converting JSON back to DICOM handles both, going by the document's `TransferSyntaxUID`, so keep
+that attribute (for example in `--filter`) when `BulkDataURI`s of a big-endian file are to be read
+back. Files whose values can't be addressed (deflated, or big-endian without a file meta group)
+inline them.
 
 ### Validate files with `--check-dicom`
 
