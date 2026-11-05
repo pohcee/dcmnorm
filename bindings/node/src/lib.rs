@@ -175,6 +175,9 @@ pub struct ReadJsonOptions {
     /// small "?offset=..&length=.." reference; 'inline' base64-embeds them, which
     /// for a typical image is orders of magnitude larger.
     pub bulk_data: Option<String>,
+    /// With format 'standard': omit the non-standard Keyword and VM members, leaving
+    /// only what PS3.18 Annex F defines (the CLI's `--omit-keyword-vm`). Default false.
+    pub omit_keyword_vm: Option<bool>,
 }
 
 pub struct ReadJsonTask {
@@ -182,6 +185,7 @@ pub struct ReadJsonTask {
     format: DicomJsonFormat,
     key_style: DicomJsonKeyStyle,
     bulk_data_mode: DicomJsonBulkDataMode,
+    omit_keyword_vm: bool,
 }
 
 impl Task for ReadJsonTask {
@@ -199,6 +203,7 @@ impl Task for ReadJsonTask {
                     format: self.format,
                     key_style: self.key_style,
                     bulk_data_mode: self.bulk_data_mode,
+                    omit_keyword_vm: self.omit_keyword_vm,
                     ..Default::default()
                 },
             )
@@ -228,6 +233,7 @@ pub fn read_json(
         format,
         key_style,
         bulk_data_mode,
+        omit_keyword_vm: options.omit_keyword_vm.unwrap_or(false),
     }))
 }
 

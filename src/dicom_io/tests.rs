@@ -4991,3 +4991,212 @@ fn move_scu_rejects_invalid_level_options_before_connecting() {
     .unwrap_err();
     assert!(matches!(error, DimseError::InvalidMoveIdentifier(_)), "got {error}");
 }
+
+/// The big-endian bytes of `values`, as they must appear in an Explicit VR Big Endian file.
+fn be_u16_bytes(values: &[u16]) -> Vec<u8> {
+    values.iter().flat_map(|value| value.to_be_bytes()).collect()
+}
+
+const BE_NESTED_SEQUENCE: Tag = Tag(0x0029, 0x1010);
+const BE_NESTED_OW: Tag = Tag(0x0029, 0x1011);
+const BE_SMALL_OW: Tag = Tag(0x0029, 0x1020);
+const BE_OF: Tag = Tag(0x0029, 0x1021);
+const BE_OD: Tag = Tag(0x0029, 0x1022);
+const BE_OL: Tag = Tag(0x0029, 0x1023);
+const BE_OB: Tag = Tag(0x0029, 0x1024);
+const BE_OVERLAY_DATA: Tag = Tag(0x6000, 0x3000);
+
+fn be_ramp(seed: u16, count: u16) -> Vec<u16> {
+    (0..count).map(|i| seed.wrapping_add(i.wrapping_mul(257))).collect()
+}
+
+/// A small Explicit VR Big Endian file holding every byte-ordered bulk VR, the same tag nested in
+/// two sequence items with different values, and an OW small enough to stay inline. No value is a
+/// palindrome under byte swapping, so a swap anywhere shows up.
+fn write_big_endian_bulk_file() -> (PathBuf, Vec<u8>) {
+    use dcmnorm_core::value::Value as DicomValue;
+    use dcmnorm_core::Length;
+
+    let nested = |seed| {
+        InMemDicomObject::from_element_iter([DataElement::new(
+            BE_NESTED_OW,
+            VR::OW,
+            PrimitiveValue::U16(be_ramp(seed, 40).into()),
+        )])
+    };
+    let dataset = InMemDicomObject::from_element_iter([
+        DataElement::new(tags::SOP_CLASS_UID, VR::UI, PrimitiveValue::from("1.2.840.10008.5.1.4.1.1.7")),
+        DataElement::new(tags::SOP_INSTANCE_UID, VR::UI, PrimitiveValue::from("1.2.3.4.5.6.9")),
+        DataElement::new(Tag(0x0029, 0x0010), VR::LO, PrimitiveValue::from("TESTCREATOR ")),
+        DataElement::new(
+            BE_NESTED_SEQUENCE,
+            VR::SQ,
+            DicomValue::new_sequence(vec![nested(0x0102), nested(0x0304)], Length::UNDEFINED),
+        ),
+        DataElement::new(BE_SMALL_OW, VR::OW, PrimitiveValue::U16(be_ramp(0x0506, 4).into())),
+        DataElement::new(BE_OF, VR::OF, PrimitiveValue::F32(vec![1.5f32, -2.25, 3.125, 4.0, 5.5, 6.75, 7.0, 8.5, 9.25, 10.0].into())),
+        DataElement::new(BE_OD, VR::OD, PrimitiveValue::F64(vec![1.5f64, -2.25, 3.125, 4.0, 5.5].into())),
+        DataElement::new(BE_OL, VR::OL, PrimitiveValue::U32((0..12u32).map(|i| 0x0102_0304 + i).collect::<Vec<_>>().into())),
+        DataElement::new(BE_OB, VR::OB, PrimitiveValue::U8((0..64u8).collect::<Vec<_>>().into())),
+        DataElement::new(BE_OVERLAY_DATA, VR::OW, PrimitiveValue::U16(be_ramp(0x0708, 50).into())),
+        DataElement::new(tags::PIXEL_DATA, VR::OW, PrimitiveValue::U16(be_ramp(0x090A, 200).into())),
+    ]);
+    let path = temp_file_path("dcmnorm-big-endian-bulk");
+    write_dataset_as_dicom_file(dataset, &path, EXPLICIT_VR_BIG_ENDIAN_UID).unwrap();
+    let bytes = fs::read(&path).unwrap();
+    (path, bytes)
+}
+
+#[test]
+fn big_endian_bulk_values_become_uris_at_their_file_bytes() {
+    let (path, bytes) = write_big_endian_bulk_file();
+
+    let mut expected_values = vec![
+        be_u16_bytes(&be_ramp(0x0102, 40)),
+        be_u16_bytes(&be_ramp(0x0304, 40)),
+        [1.5f32, -2.25, 3.125, 4.0, 5.5, 6.75, 7.0, 8.5, 9.25, 10.0].iter().flat_map(|v| v.to_be_bytes()).collect(),
+        [1.5f64, -2.25, 3.125, 4.0, 5.5].iter().flat_map(|v| v.to_be_bytes()).collect(),
+        (0..12u32).flat_map(|i| (0x0102_0304 + i).to_be_bytes()).collect(),
+        (0..64u8).collect(),
+        be_u16_bytes(&be_ramp(0x0708, 50)),
+        be_u16_bytes(&be_ramp(0x090A, 200)),
+    ];
+    expected_values.sort();
+
+    for (format, pixel_key, overlay_key, small_key) in [
+        (DicomJsonFormat::Flat, "PixelData", "OverlayData", "00291020"),
+        (DicomJsonFormat::Standard, "7FE00010", "60003000", "00291020"),
+    ] {
+        let json = json_via_deferred_read(&path, format);
+        assert_eq!(json_via_full_read_and_scan(&path, format), json, "{format:?}: the scan must agree with the parser");
+
+        let value: JsonValue = serde_json::from_str(&json).unwrap();
+        assert!(value[pixel_key]["BulkDataURI"].is_string(), "{format:?}: PixelData must be a URI");
+        assert!(value[overlay_key]["BulkDataURI"].is_string(), "{format:?}: OverlayData must be a URI");
+        assert!(value[small_key]["InlineBinary"].is_string(), "{format:?}: small OW stays inline");
+
+        let mut uris = Vec::new();
+        bulk_data_uris(&value, &mut uris);
+        let mut referenced: Vec<Vec<u8>> = uris.iter().map(|&(offset, length)| bytes[offset..offset + length].to_vec()).collect();
+        referenced.sort();
+        assert_eq!(expected_values, referenced, "{format:?}: URIs must reference each value's big-endian file bytes");
+    }
+    fs::remove_file(&path).ok();
+}
+
+/// Compares decoded values, which is what a double swap would change.
+fn assert_big_endian_round_trip_values(original: &dcmnorm_object::DefaultDicomObject, roundtrip: &dcmnorm_object::DefaultDicomObject) {
+    assert_eq!(roundtrip.meta().transfer_syntax(), EXPLICIT_VR_BIG_ENDIAN_UID);
+    for tag in [tags::PIXEL_DATA, BE_OVERLAY_DATA, BE_SMALL_OW, BE_OF, BE_OD, BE_OL, BE_OB] {
+        assert_eq!(
+            original.element(tag).unwrap().to_bytes().unwrap(),
+            roundtrip.element(tag).unwrap().to_bytes().unwrap(),
+            "{tag} changed",
+        );
+    }
+    assert_eq!(roundtrip.element(tags::PIXEL_DATA).unwrap().to_multi_int::<u16>().unwrap(), be_ramp(0x090A, 200));
+    let nested = |object: &dcmnorm_object::DefaultDicomObject| -> Vec<Vec<u16>> {
+        object.element(BE_NESTED_SEQUENCE).unwrap().items().unwrap().iter()
+            .map(|item| item.element(BE_NESTED_OW).unwrap().to_multi_int::<u16>().unwrap())
+            .collect()
+    };
+    assert_eq!(nested(roundtrip), vec![be_ramp(0x0102, 40), be_ramp(0x0304, 40)]);
+    assert_eq!(nested(original), nested(roundtrip));
+}
+
+#[test]
+fn big_endian_json_round_trips_without_swapping_values() {
+    let (path, bytes) = write_big_endian_bulk_file();
+    let original = read_dicom_file(&path).unwrap();
+
+    for format in [DicomJsonFormat::Flat, DicomJsonFormat::Standard] {
+        // BulkDataURIs resolved against the source, next to InlineBinary for the small value...
+        let with_uris = json_via_deferred_read(&path, format);
+        let options = DicomJsonReadOptions { format, bulk_data_source: Some(&bytes) };
+        let mut roundtrip = read_dicom_json_with_options(&with_uris, options).unwrap();
+        assert_big_endian_round_trip_values(&original, &roundtrip);
+
+        // ...and through the bytes of a written file, which must hold the same big-endian values
+        let written = write_dicom_bytes(&mut roundtrip).unwrap();
+        assert_big_endian_round_trip_values(&original, &read_dicom_bytes(&written).unwrap());
+        let pixels = be_u16_bytes(&be_ramp(0x090A, 200));
+        assert!(written.windows(pixels.len()).any(|window| window == pixels), "{format:?}: written PixelData isn't big-endian");
+
+        // everything inline
+        let inline = dicom_file_to_json(
+            &path,
+            DicomJsonWriteOptions { format, bulk_data_mode: DicomJsonBulkDataMode::InlineBinary, ..Default::default() },
+        )
+        .unwrap();
+        let roundtrip = read_dicom_json_with_options(&inline, DicomJsonReadOptions { format, bulk_data_source: None }).unwrap();
+        assert_big_endian_round_trip_values(&original, &roundtrip);
+    }
+    fs::remove_file(&path).ok();
+}
+
+/// A file transcoded to big-endian keeps the pixel values through JSON with URIs.
+#[test]
+fn transcoded_big_endian_fixture_round_trips_through_bulk_data_uris() {
+    let original = read_dicom_file(fixture_path("dx.dcm")).unwrap();
+    let mut big_endian = transcode_dcmnorm_object(&original, EXPLICIT_VR_BIG_ENDIAN_UID).unwrap();
+    let path = temp_file_path("dcmnorm-big-endian-dx");
+    write_dicom_file(&mut big_endian, &path).unwrap();
+    let bytes = fs::read(&path).unwrap();
+
+    let json = json_via_deferred_read(&path, DicomJsonFormat::Standard);
+    let value: JsonValue = serde_json::from_str(&json).unwrap();
+    assert!(value["7FE00010"]["BulkDataURI"].is_string());
+    let roundtrip = read_dicom_json_full_with_source(&json, &bytes).unwrap();
+    assert_eq!(
+        original.element(tags::PIXEL_DATA).unwrap().to_multi_int::<u16>().unwrap(),
+        roundtrip.element(tags::PIXEL_DATA).unwrap().to_multi_int::<u16>().unwrap(),
+    );
+    fs::remove_file(&path).ok();
+}
+
+/// Whether any attribute, at any depth of standard JSON, has `member`.
+fn standard_json_has_member(value: &JsonValue, member: &str) -> bool {
+    match value {
+        JsonValue::Object(map) => map.contains_key(member) || map.values().any(|child| standard_json_has_member(child, member)),
+        JsonValue::Array(items) => items.iter().any(|child| standard_json_has_member(child, member)),
+        _ => false,
+    }
+}
+
+#[test]
+fn omit_keyword_vm_leaves_only_ps3_18_members_at_every_level() {
+    let (path, bytes) = write_big_endian_bulk_file();
+    let standard = DicomJsonWriteOptions { format: DicomJsonFormat::Standard, bulk_data_mode: DicomJsonBulkDataMode::Uri, ..Default::default() };
+
+    let default_json = dicom_file_to_json(&path, standard).unwrap();
+    let default_value: JsonValue = serde_json::from_str(&default_json).unwrap();
+    assert_eq!(default_value["7FE00010"]["Keyword"], "PixelData", "the default output keeps Keyword");
+    assert_eq!(default_value["7FE00010"]["VM"], 1, "the default output keeps VM");
+
+    let bare_json = dicom_file_to_json(&path, DicomJsonWriteOptions { omit_keyword_vm: true, ..standard }).unwrap();
+    let bare: JsonValue = serde_json::from_str(&bare_json).unwrap();
+    assert!(!standard_json_has_member(&bare, "Keyword"), "{bare_json}");
+    assert!(!standard_json_has_member(&bare, "VM"), "{bare_json}");
+    assert_eq!(bare["00080018"].as_object().unwrap().len(), 2, "vr and Value only");
+    assert_eq!(bare["00291010"]["Value"].as_array().unwrap().len(), 2, "sequence items are still there");
+    assert!(bare["00291010"]["Value"][1]["00291011"]["BulkDataURI"].is_string());
+
+    // nothing else differs, and it still reads back as the same data set
+    let mut stripped = default_value.clone();
+    for attribute in stripped.as_object_mut().unwrap().values_mut() {
+        let attribute = attribute.as_object_mut().unwrap();
+        attribute.remove("Keyword");
+        attribute.remove("VM");
+    }
+    assert_eq!(stripped, bare);
+    let original = read_dicom_file(&path).unwrap();
+    assert_big_endian_round_trip_values(&original, &read_dicom_json_full_with_source(&bare_json, &bytes).unwrap());
+
+    // the option only concerns standard JSON
+    let flat = DicomJsonWriteOptions { format: DicomJsonFormat::Flat, ..standard };
+    assert_eq!(
+        dicom_file_to_json(&path, flat).unwrap(),
+        dicom_file_to_json(&path, DicomJsonWriteOptions { omit_keyword_vm: true, ..flat }).unwrap(),
+    );
+    fs::remove_file(&path).ok();
+}

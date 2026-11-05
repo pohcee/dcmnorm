@@ -215,15 +215,17 @@ fn read_tags(py: Python<'_>, file_path: String, tags: Vec<String>) -> PyResult<S
 /// bulk_data="inline"`. `bulk_data` defaults to `"uri"` (matching the CLI), not the Rust
 /// library's own default of inline-embedding - getting this wrong makes a huge difference:
 /// `"inline"` base64-embeds elements like `PixelData` directly, ~1000x larger output for a
-/// typical image, instead of a small `"?offset=..&length=.."` reference.
+/// typical image, instead of a small `"?offset=..&length=.."` reference. `omit_keyword_vm=True`
+/// drops the non-standard `Keyword` and `VM` members from `format="standard"` output.
 #[pyfunction]
-#[pyo3(signature = (file_path, format=None, key_style=None, bulk_data=None))]
+#[pyo3(signature = (file_path, format=None, key_style=None, bulk_data=None, omit_keyword_vm=false))]
 fn read_json(
     py: Python<'_>,
     file_path: String,
     format: Option<String>,
     key_style: Option<String>,
     bulk_data: Option<String>,
+    omit_keyword_vm: bool,
 ) -> PyResult<String> {
     let format = parse_json_format(format.as_deref())?;
     let key_style = parse_key_style(key_style.as_deref())?;
@@ -233,7 +235,7 @@ fn read_json(
             let path = PathBuf::from(file_path);
             dicom_file_to_json(
                 &path,
-                DicomJsonWriteOptions { format, key_style, bulk_data_mode, ..Default::default() },
+                DicomJsonWriteOptions { format, key_style, bulk_data_mode, omit_keyword_vm, ..Default::default() },
             )
             .map_err(to_py_err)
         })

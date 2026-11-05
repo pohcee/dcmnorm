@@ -79,6 +79,12 @@ public final class Smoke {
             "readJson's default bulkData mode should be 'uri' (matching the CLI), not inline-embed PixelData");
         check(fullJson.length() < 5000, "readJson output for a filtered non-bulk fixture should stay small (was " + fullJson.length() + " bytes)");
 
+        Map<String, Object> standard = Json.asMap(Json.parse(Dcmnorm.readJson(fixture, new ReadJsonOptions().format("standard").keyStyle("hex"))));
+        check(Json.asMap(standard.get("00080018")).containsKey("Keyword"), "standard readJson should keep Keyword by default");
+        Map<String, Object> bare = Json.asMap(Json.parse(Dcmnorm.readJson(fixture, new ReadJsonOptions().format("standard").keyStyle("hex").omitKeywordVm(true))));
+        Map<String, Object> bareSop = Json.asMap(bare.get("00080018"));
+        check(!bareSop.containsKey("Keyword") && !bareSop.containsKey("VM"), "omitKeywordVm should drop Keyword and VM");
+
         Map<String, Object> inline = Json.asMap(Json.parse(Dcmnorm.readJson(fixture, new ReadJsonOptions().bulkData("inline"))));
         Map<String, Object> inlinePixelData = Json.asMap(inline.get("PixelData"));
         check(inlinePixelData.get("InlineBinary") instanceof String && ((String) inlinePixelData.get("InlineBinary")).length() > 1000,

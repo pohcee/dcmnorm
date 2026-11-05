@@ -363,6 +363,10 @@ pub struct DicomJsonWriteOptions<'a> {
     /// item. In `Uri` mode a deferred element is written straight from its recorded file
     /// location - no `bulk_data_source` scan needed, since its value was never in memory.
     pub deferred_bulk_data: Option<&'a dcmnorm_object::DeferredValues>,
+    /// Leave out the `Keyword` and `VM` members `DicomJsonFormat::Standard` otherwise adds to each
+    /// top-level attribute (they aren't in PS3.18 Annex F; sequence items never have them). No
+    /// effect on `DicomJsonFormat::Flat`.
+    pub omit_keyword_vm: bool,
 }
 
 impl<'a> DicomJsonWriteOptions<'a> {
@@ -389,6 +393,7 @@ impl Default for DicomJsonWriteOptions<'_> {
             bulk_scan_failed: None,
             bulk_scan_cursor: None,
             deferred_bulk_data: None,
+            omit_keyword_vm: false,
         }
     }
 }

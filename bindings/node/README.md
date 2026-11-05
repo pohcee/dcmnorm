@@ -33,12 +33,14 @@ npm test             # runs test/smoke.js against the fixtures in ../../test/fil
   --filter`. Filtering for a bulk-data-eligible tag (e.g. `PixelData`) falls
   back to inlining it rather than a URI reference, unlike `readJson` below -
   see the comment on `ReadTagsTask` in `src/lib.rs`.
-- `readJson(filePath, options?: { format?: 'flat'|'standard', keyStyle?: 'name'|'hex', bulkData?: 'uri'|'inline' }): Promise<string>`
+- `readJson(filePath, options?: { format?: 'flat'|'standard', keyStyle?: 'name'|'hex', bulkData?: 'uri'|'inline', omitKeywordVm?: boolean }): Promise<string>`
   — full-file JSON dump. `bulkData` defaults to `'uri'`, matching the CLI's own
   default (`--bulk-data uri`) - not the Rust library's own default, which is
   `'inline'`. Getting this wrong makes a huge difference: `'inline'`
   base64-embeds elements like `PixelData` directly, ~1000x larger output for a
   typical image, instead of a small `"?offset=..&length=.."` reference.
+  `omitKeywordVm: true` drops the non-standard `Keyword` and `VM` members from
+  `format: 'standard'` output, leaving only what PS3.18 Annex F defines.
 - `editTags(filePath, options?: { outputPath?, set?: Record<string,string>, remove?: string[], removePrivateTags?: boolean }): Promise<void>`
   — set/remove attributes; writes back in place unless `outputPath` is given.
 - `transcode(filePath, outputPath, transferSyntaxUid): Promise<void>`.

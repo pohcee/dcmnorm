@@ -155,8 +155,8 @@ pub fn write_dataset_as_dicom_json_with_options(
 }
 
 /// Convert the DICOM file at `path` to JSON - the library form of plain `dcmnorm file.dcm`, used
-/// by the language bindings. Only `format`, `key_style`, `bulk_data_mode` and
-/// `bulk_data_uri_base` of `options` are honored; the bulk-data plumbing is filled in here.
+/// by the language bindings. Only `format`, `key_style`, `bulk_data_mode`, `bulk_data_uri_base`
+/// and `omit_keyword_vm` of `options` are honored; the bulk-data plumbing is filled in here.
 ///
 /// In `Uri` mode, bulk values are skipped while reading and referenced from where the parser
 /// found them (see `read_dicom_file_deferring_bulk_data`), so the cost doesn't grow with the

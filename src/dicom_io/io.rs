@@ -479,9 +479,12 @@ pub fn read_dicom_bytes(bytes: impl AsRef<[u8]>) -> Result<DefaultDicomObject, R
 /// The returned object's deferred elements hold empty placeholders (see [`DeferredValues`]):
 /// it is only fit for writing that JSON, not for rendering, transcoding or writing DICOM.
 ///
-/// Returns `Ok(None)` when the shortcut doesn't apply - Explicit VR Big Endian (its bulk bytes
-/// in the file aren't the little-endian bytes a URI consumer reads back), a deflated data set,
-/// or a file too short for the ranges it declares - and the caller should read in full.
+/// A location is always the value's bytes as they are in the file, so in Explicit VR Big Endian
+/// those are big-endian: whoever reads them follows the transfer syntax, as the JSON reader does.
+///
+/// Returns `Ok(None)` when the shortcut doesn't apply - a data set without a meta group, a
+/// deflated data set, or a file too short for the ranges it declares - and the caller should
+/// read in full.
 pub fn read_dicom_file_deferring_bulk_data<P>(
     path: P,
 ) -> Result<Option<(DefaultDicomObject, DeferredValues)>, ReadError>
@@ -494,10 +497,7 @@ where
         source,
         context: "opening file",
     })?);
-    let Some(meta) = dcmnorm_object::FileMetaTable::read_from(&mut file)? else {
-        return Ok(None);
-    };
-    if normalize_transfer_syntax_uid(&meta.transfer_syntax) == "1.2.840.10008.1.2.2" {
+    if dcmnorm_object::FileMetaTable::read_from(&mut file)?.is_none() {
         return Ok(None);
     }
 

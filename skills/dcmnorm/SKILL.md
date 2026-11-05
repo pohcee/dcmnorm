@@ -49,6 +49,7 @@ JSON shape options (defaults: `--format flat --keys name`):
 - `--format standard` — PS3.18 DICOM JSON (`{"00080060":{"vr":"CS","Value":["CT"]}}`)
 - `--keys hex` — hex tags instead of keywords
 - `--bulk-data inline` — base64-embed binary values instead of URI references (large output; avoid unless a full self-contained JSON is required)
+- `--omit-keyword-vm` — with `--format standard`, leave out the non-standard `Keyword` and `VM` members (PS3.18 Annex F output)
 
 ### Validating files
 

@@ -205,6 +205,15 @@ struct Cli {
 
     #[arg(
         long,
+        action = ArgAction::SetTrue,
+        help = "With --format standard: omit the non-standard Keyword and VM members, leaving only what PS3.18 Annex F defines",
+        help_heading = "JSON Conversion",
+        display_order = 14
+    )]
+    omit_keyword_vm: bool,
+
+    #[arg(
+        long,
         value_name = "UID",
         help = "Target transfer syntax UID for DICOM-to-DICOM transcoding",
         help_heading = "DICOM Transcoding",
@@ -902,6 +911,7 @@ fn validate_check_dicom_logic_flags(cli: &Cli) -> Result<(), Box<dyn std::error:
         || cli.keys != KeyFormat::Name
         || cli.bulk_data != BulkDataMode::Uri
         || cli.bulk_data_source.is_some()
+        || cli.omit_keyword_vm
         || cli.render_frame != 0
         || cli.render_all_frames
         || cli.render_fps.is_some()
@@ -1411,6 +1421,14 @@ fn run_dicom_to_json_with_deferred(
         .into());
     }
 
+    if cli.omit_keyword_vm && cli.format != JsonFormat::Standard {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "--omit-keyword-vm requires --format standard",
+        )
+        .into());
+    }
+
     if cli.transfer_syntax.is_some() {
         return Err(io::Error::new(
             ErrorKind::InvalidInput,
@@ -1472,6 +1490,7 @@ fn run_dicom_to_json_with_deferred(
             bulk_scan_failed: Some(&bulk_scan_failed),
             bulk_scan_cursor: Some(&bulk_scan_cursor),
             deferred_bulk_data: deferred,
+            omit_keyword_vm: cli.omit_keyword_vm,
         },
     )?
     };
@@ -1577,6 +1596,14 @@ fn run_dicom_to_dicom_with_object(
         return Err(io::Error::new(
             ErrorKind::InvalidInput,
             "--bulk-data is only valid when converting DICOM to JSON",
+        )
+        .into());
+    }
+
+    if cli.omit_keyword_vm {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "--omit-keyword-vm is only valid when converting DICOM to JSON",
         )
         .into());
     }
@@ -1694,6 +1721,14 @@ fn run_dicom_to_render_with_object(
         return Err(io::Error::new(
             ErrorKind::InvalidInput,
             "--bulk-data is only valid when converting DICOM to JSON",
+        )
+        .into());
+    }
+
+    if cli.omit_keyword_vm {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "--omit-keyword-vm is only valid when converting DICOM to JSON",
         )
         .into());
     }
@@ -2484,6 +2519,14 @@ fn run_json_to_dicom(cli: &Cli, input_bytes: &[u8]) -> Result<(), Box<dyn std::e
         .into());
     }
 
+    if cli.omit_keyword_vm {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "--omit-keyword-vm is only valid when converting DICOM to JSON",
+        )
+        .into());
+    }
+
     if cli.transfer_syntax.is_some() {
         return Err(io::Error::new(
             ErrorKind::InvalidInput,
@@ -2890,6 +2933,7 @@ fn validate_check_dicom_flags(cli: &Cli) -> Result<(), Box<dyn std::error::Error
         || cli.keys != KeyFormat::Name
         || cli.bulk_data != BulkDataMode::Uri
         || cli.bulk_data_source.is_some()
+        || cli.omit_keyword_vm
         || cli.render_frame != 0
         || cli.render_all_frames
         || cli.render_fps.is_some()
@@ -3299,6 +3343,7 @@ mod tests {
             keys: super::KeyFormat::Name,
             bulk_data: super::BulkDataMode::Uri,
             bulk_data_source: None,
+            omit_keyword_vm: false,
             transfer_syntax: None,
             set: Vec::new(),
             remove: Vec::new(),
@@ -4188,6 +4233,30 @@ mod tests {
         for path in &paths {
             fs::remove_file(path).ok();
         }
+    }
+
+    #[test]
+    fn omit_keyword_vm_applies_to_standard_json_and_is_rejected_elsewhere() {
+        let input_path = fixture_path("dx.dcm");
+        let output_path = temp_output_path("omit-keyword-vm");
+
+        let mut cli = base_cli();
+        cli.output = Some(output_path.clone());
+        cli.format = super::JsonFormat::Standard;
+        cli.omit_keyword_vm = true;
+        let object = read_dicom_file(&input_path).unwrap();
+        run_dicom_to_json_with_object(&cli, Path::new(&input_path), None, object).unwrap();
+        let json = fs::read_to_string(&output_path).unwrap();
+        fs::remove_file(&output_path).ok();
+        assert!(json.contains("\"vr\""));
+        assert!(!json.contains("\"Keyword\"") && !json.contains("\"VM\""));
+
+        cli.format = super::JsonFormat::Flat;
+        let object = read_dicom_file(&input_path).unwrap();
+        assert!(run_dicom_to_json_with_object(&cli, Path::new(&input_path), None, object).is_err());
+
+        let object = read_dicom_file(&input_path).unwrap();
+        assert!(super::run_dicom_to_dicom_with_object(&cli, Path::new(&input_path), object).is_err());
     }
 
     #[test]
