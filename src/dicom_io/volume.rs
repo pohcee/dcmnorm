@@ -330,7 +330,59 @@ struct SourceSlice {
     row_spacing_mm: f64,
     col_spacing_mm: f64,
     metadata: RenderMetadata,
-    values: Vec<f64>,
+}
+
+/// Reads and decodes one slice: its geometry plus its modality-LUT-applied values, narrowed to
+/// `f32` right away so the wider decode buffer lives only as long as this call.
+fn read_source_slice(path: &Path) -> Result<(SourceSlice, Vec<f32>), VolumeError> {
+    let object = read_dicom_file(path)?;
+    let (row_vector, col_vector) = read_orientation(&object)?;
+    let position = read_position(&object)?;
+    let (row_spacing_mm, col_spacing_mm) = read_pixel_spacing(&object)?;
+    let (metadata, values) = decode_frame_grayscale_values(&object, 0)?;
+    drop(object);
+    if !matches!(metadata.photometric_interpretation.as_str(), "MONOCHROME1" | "MONOCHROME2") {
+        return Err(VolumeError::UnsupportedPhotometricInterpretation(
+            metadata.photometric_interpretation.clone(),
+        ));
+    }
+    let values: Vec<f32> = values.into_iter().map(|value| value as f32).collect();
+    Ok((
+        SourceSlice {
+            row_vector,
+            col_vector,
+            position,
+            row_spacing_mm,
+            col_spacing_mm,
+            metadata,
+        },
+        values,
+    ))
+}
+
+/// Reorders `samples`' planes in place so that plane `k` holds what was plane `order[k]`, with one
+/// plane of scratch space (cycle-following permutation).
+fn permute_planes_in_place(samples: &mut [f32], plane_len: usize, order: &[usize]) {
+    let mut placed = vec![false; order.len()];
+    let mut scratch = vec![0f32; plane_len];
+    for start in 0..order.len() {
+        if placed[start] || order[start] == start {
+            placed[start] = true;
+            continue;
+        }
+        scratch.copy_from_slice(&samples[start * plane_len..(start + 1) * plane_len]);
+        let mut destination = start;
+        loop {
+            placed[destination] = true;
+            let source = order[destination];
+            if source == start {
+                samples[destination * plane_len..(destination + 1) * plane_len].copy_from_slice(&scratch);
+                break;
+            }
+            samples.copy_within(source * plane_len..(source + 1) * plane_len, destination * plane_len);
+            destination = source;
+        }
+    }
 }
 
 /// Reads every file, sorts them into spatial (not necessarily on-disk-list) order by projecting
@@ -338,6 +390,10 @@ struct SourceSlice {
 /// Rejects (rather than silently mis-rendering) a series whose slices don't share a consistent
 /// `ImageOrientationPatient`/dimensions - true oblique/gantry-tilt-inconsistent stacks aren't a
 /// resamplable orthogonal volume without more advanced reconstruction, which is out of scope.
+///
+/// Memory: every slice is decoded straight into its plane of one preallocated `f32` buffer (in
+/// file order), then the planes are sorted in place, so the peak is the volume itself plus one
+/// in-flight slice decode per worker thread - not a decoded copy of every slice next to it.
 pub fn build_volume<P: AsRef<Path> + Sync>(file_paths: &[P]) -> Result<Volume, VolumeError> {
     if file_paths.is_empty() {
         return Err(VolumeError::Empty);
@@ -349,43 +405,42 @@ pub fn build_volume<P: AsRef<Path> + Sync>(file_paths: &[P]) -> Result<Volume, V
         });
     }
 
+    // The first slice fixes Rows/Columns, and with them the buffer size.
+    let (first, first_values) = read_source_slice(file_paths[0].as_ref())?;
+    let rows = first.metadata.rows;
+    let cols = first.metadata.cols;
+    let plane_len = rows as usize * cols as usize;
+    if first_values.len() != plane_len {
+        return Err(VolumeError::InconsistentDimensions);
+    }
+    let mut samples = vec![0f32; plane_len * file_paths.len()];
+    samples[..plane_len].copy_from_slice(&first_values);
+    drop(first_values);
+
     // Reading + decoding each slice is the expensive part of building a volume (DICOM parse plus
     // transfer-syntax decompression per file), and slices are independent of each other until the
     // sort/consistency checks below, so read them concurrently rather than one at a time.
-    let results: Vec<Result<SourceSlice, VolumeError>> = file_paths
-        .par_iter()
-        .map(|path| {
-            let object = read_dicom_file(path.as_ref())?;
-            let (row_vector, col_vector) = read_orientation(&object)?;
-            let position = read_position(&object)?;
-            let (row_spacing_mm, col_spacing_mm) = read_pixel_spacing(&object)?;
-            let (metadata, values) = decode_frame_grayscale_values(&object, 0)?;
-            if !matches!(metadata.photometric_interpretation.as_str(), "MONOCHROME1" | "MONOCHROME2") {
-                return Err(VolumeError::UnsupportedPhotometricInterpretation(
-                    metadata.photometric_interpretation.clone(),
-                ));
+    let results: Vec<Result<SourceSlice, VolumeError>> = samples[plane_len..]
+        .par_chunks_mut(plane_len)
+        .zip(file_paths[1..].par_iter())
+        .map(|(plane, path)| {
+            let (slice, values) = read_source_slice(path.as_ref())?;
+            if slice.metadata.rows != rows || slice.metadata.cols != cols || values.len() != plane_len {
+                return Err(VolumeError::InconsistentDimensions);
             }
-            Ok(SourceSlice {
-                row_vector,
-                col_vector,
-                position,
-                row_spacing_mm,
-                col_spacing_mm,
-                metadata,
-                values,
-            })
+            plane.copy_from_slice(&values);
+            Ok(slice)
         })
         .collect();
-    let slices: Vec<SourceSlice> = results.into_iter().collect::<Result<Vec<_>, _>>()?;
+    let mut slices: Vec<SourceSlice> = Vec::with_capacity(file_paths.len());
+    slices.push(first);
+    for result in results {
+        slices.push(result?);
+    }
 
-    let rows = slices[0].metadata.rows;
-    let cols = slices[0].metadata.cols;
     let row_vector = slices[0].row_vector;
     let col_vector = slices[0].col_vector;
     for slice in &slices[1..] {
-        if slice.metadata.rows != rows || slice.metadata.cols != cols {
-            return Err(VolumeError::InconsistentDimensions);
-        }
         if !vectors_close(slice.row_vector, row_vector, ORIENTATION_EPSILON)
             || !vectors_close(slice.col_vector, col_vector, ORIENTATION_EPSILON)
         {
@@ -417,12 +472,7 @@ pub fn build_volume<P: AsRef<Path> + Sync>(file_paths: &[P]) -> Result<Volume, V
     let row_spacing_mm = slices[order[0]].row_spacing_mm;
     let col_spacing_mm = slices[order[0]].col_spacing_mm;
 
-    let plane_len = rows as usize * cols as usize;
-    let mut samples = Vec::with_capacity(plane_len * order.len());
-    for &index in &order {
-        let values = &slices[index].values;
-        samples.extend(values.iter().map(|&value| value as f32));
-    }
+    permute_planes_in_place(&mut samples, plane_len, &order);
 
     Ok(Volume {
         samples,
@@ -759,6 +809,29 @@ fn rotate_about_axis(v: Vec3, axis: Vec3, degrees: f64) -> Vec3 {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn permute_planes_in_place_applies_every_cycle_shape() {
+        let plane_len = 3;
+        for order in [
+            vec![0, 1, 2, 3, 4, 5],
+            vec![5, 4, 3, 2, 1, 0],
+            vec![1, 2, 3, 4, 5, 0],
+            vec![2, 0, 1, 5, 3, 4],
+            vec![0, 2, 1, 3, 5, 4],
+        ] {
+            let mut samples: Vec<f32> = (0..order.len())
+                .flat_map(|plane| (0..plane_len).map(move |i| (plane * 10 + i) as f32))
+                .collect();
+            super::permute_planes_in_place(&mut samples, plane_len, &order);
+            for (destination, &source) in order.iter().enumerate() {
+                for i in 0..plane_len {
+                    assert_eq!(samples[destination * plane_len + i], (source * 10 + i) as f32, "order {order:?}");
+                }
+            }
+        }
+    }
+
     use super::*;
 
     /// A 4x4x4 volume with axis-aligned geometry and `samples[idx] == idx as f32`, so every

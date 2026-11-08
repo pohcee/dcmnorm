@@ -255,9 +255,13 @@ fn gzip_bytes(bytes: &[u8]) -> Result<Vec<u8>, TextureExportError> {
 /// Quantizes `raw` physical-value samples into a lossless little-endian byte buffer, picking
 /// whichever of two encodings applies:
 ///
-/// - **Exact** (the common case: CT/MR samples are always derived from an integer stored value):
-///   if every sample round-trips through an `i16` lattice with zero error, store `int16` with an
-///   identity slope/intercept (`1.0`/`0.0`) - genuinely lossless, no requantization at all.
+/// - **Exact, unsigned** (MG/DX/CR/DBT and most unsigned MR): integer samples in `0..=65535` are
+///   stored as `uint16` with an identity slope/intercept (`1.0`/`0.0`). Preferred over `int16` even
+///   when the values would also fit in `i16` (12-bit data does), because a client uploads `uint16`
+///   samples as they are, while `int16` needs a rebias pass over every sample first.
+/// - **Exact, signed** (CT and anything else negative): if every sample round-trips through an
+///   `i16` lattice with zero error, store `int16` with an identity slope/intercept (`1.0`/`0.0`) -
+///   genuinely lossless, no requantization at all.
 /// - **Exact, offset `uint16`**: integer samples outside `i16` but whose span `max - min` still
 ///   fits in 16 bits (e.g. 16-bit unsigned DX/MG/CR with values above 32767) - store
 ///   `value - min` as `uint16` with slope `1.0` and intercept `min`. Still genuinely lossless.
@@ -285,8 +289,16 @@ struct SampleStats {
 const PAR_CHUNK_SAMPLES: usize = 1 << 16;
 
 fn sample_stats(raw: &[f32]) -> SampleStats {
+    sample_stats_parts(&[raw])
+}
+
+/// `sample_stats` over several buffers taken as one (the frames of a stack), without
+/// concatenating them first.
+fn sample_stats_parts(parts: &[&[f32]]) -> SampleStats {
     let identity = || SampleStats { min: f64::INFINITY, max: f64::NEG_INFINITY, all_integral: true };
-    raw.par_chunks(PAR_CHUNK_SAMPLES)
+    parts
+        .par_iter()
+        .flat_map(|part| part.par_chunks(PAR_CHUNK_SAMPLES))
         .map(|chunk| {
             let mut stats = identity();
             for &sample in chunk {
@@ -306,42 +318,58 @@ fn sample_stats(raw: &[f32]) -> SampleStats {
         })
 }
 
-/// Encodes every sample to 2 little-endian bytes, in parallel chunks, into one preallocated buffer.
-fn encode_u16_le(raw: &[f32], encode: impl Fn(f32) -> [u8; 2] + Sync) -> Vec<u8> {
-    let mut bytes = vec![0u8; raw.len() * 2];
-    bytes
-        .par_chunks_mut(PAR_CHUNK_SAMPLES * 2)
-        .zip(raw.par_chunks(PAR_CHUNK_SAMPLES))
-        .for_each(|(out, samples)| {
-            for (dst, &sample) in out.chunks_exact_mut(2).zip(samples) {
-                dst.copy_from_slice(&encode(sample));
-            }
-        });
+/// Encodes every sample of `parts` (in order) to 2 little-endian bytes, in parallel chunks, into
+/// one preallocated buffer.
+fn encode_u16_le_parts(parts: &[&[f32]], encode: impl Fn(f32) -> [u8; 2] + Sync) -> Vec<u8> {
+    let total: usize = parts.iter().map(|part| part.len()).sum();
+    let mut bytes = vec![0u8; total * 2];
+    let mut rest: &mut [u8] = &mut bytes;
+    for part in parts {
+        let (out, tail) = rest.split_at_mut(part.len() * 2);
+        rest = tail;
+        out.par_chunks_mut(PAR_CHUNK_SAMPLES * 2)
+            .zip(part.par_chunks(PAR_CHUNK_SAMPLES))
+            .for_each(|(out, samples)| {
+                for (dst, &sample) in out.chunks_exact_mut(2).zip(samples) {
+                    dst.copy_from_slice(&encode(sample));
+                }
+            });
+    }
     bytes
 }
 
 /// `quantize_samples` with its min/max/integrality pass already done (see `sample_stats`).
 fn quantize_with_stats(raw: &[f32], stats: &SampleStats) -> (Vec<u8>, SampleFormat, f64, f64, bool) {
-    if raw.is_empty() {
+    quantize_parts_with_stats(&[raw], stats)
+}
+
+/// `quantize_with_stats` over several buffers taken as one (see `sample_stats_parts`).
+fn quantize_parts_with_stats(parts: &[&[f32]], stats: &SampleStats) -> (Vec<u8>, SampleFormat, f64, f64, bool) {
+    if parts.iter().all(|part| part.is_empty()) {
         return (Vec::new(), SampleFormat::Int16, 1.0, 0.0, true);
     }
     let SampleStats { min, max, all_integral } = *stats;
 
+    if all_integral && min >= 0.0 && max <= u16::MAX as f64 {
+        let bytes = encode_u16_le_parts(parts, |sample| (sample.round() as u16).to_le_bytes());
+        return (bytes, SampleFormat::Uint16, 1.0, 0.0, true);
+    }
+
     if all_integral && min >= i16::MIN as f64 && max <= i16::MAX as f64 {
-        let bytes = encode_u16_le(raw, |sample| (sample.round() as i16).to_le_bytes());
+        let bytes = encode_u16_le_parts(parts, |sample| (sample.round() as i16).to_le_bytes());
         return (bytes, SampleFormat::Int16, 1.0, 0.0, true);
     }
 
     if all_integral && max - min <= u16::MAX as f64 {
         let intercept = min.round();
-        let bytes = encode_u16_le(raw, |sample| ((sample as f64 - intercept).round() as u16).to_le_bytes());
+        let bytes = encode_u16_le_parts(parts, |sample| ((sample as f64 - intercept).round() as u16).to_le_bytes());
         return (bytes, SampleFormat::Uint16, 1.0, intercept, true);
     }
 
     let range = (max - min).max(1e-6);
     let slope = range / 65535.0;
     let intercept = min;
-    let bytes = encode_u16_le(raw, |sample| {
+    let bytes = encode_u16_le_parts(parts, |sample| {
         let scaled = ((sample as f64 - intercept) / slope).round().clamp(0.0, 65535.0);
         (scaled as u16).to_le_bytes()
     });
@@ -354,10 +382,6 @@ fn quantize_with_stats(raw: &[f32], stats: &SampleStats) -> (Vec<u8>, SampleForm
 /// an instance has neither a caller override nor its own `WindowCenter`/`WindowWidth` tags.
 /// Without this, `default_window_center`/`width` stay `None` and the GPU shader's own hardcoded
 /// default (`center=0, width=1`) clips nearly all real (non-zero-centered) pixel data to white.
-fn min_max_window(raw: &[f32]) -> (f64, f64) {
-    window_from_stats(&sample_stats(raw))
-}
-
 fn window_from_stats(stats: &SampleStats) -> (f64, f64) {
     let SampleStats { min, max, .. } = *stats;
     if !min.is_finite() || !max.is_finite() {
@@ -651,7 +675,9 @@ pub fn pack_frame_stack_texture(
     }
     let expected_per_frame = width as usize * height as usize;
 
-    let mut concatenated = Vec::with_capacity(expected_per_frame * frames.len());
+    // Validated and quantized as one sequence of parts - never concatenated into a second full
+    // copy of every sample first.
+    let mut parts: Vec<&[f32]> = Vec::with_capacity(frames.len());
     for frame in frames {
         if frame.width != width || frame.height != height {
             return Err(TextureExportError::FrameDimensionMismatch {
@@ -662,14 +688,14 @@ pub fn pack_frame_stack_texture(
         if frame.values.len() != expected_per_frame {
             return Err(TextureExportError::SampleCountMismatch { expected: expected_per_frame, found: frame.values.len() });
         }
-        concatenated.extend_from_slice(&frame.values);
+        parts.push(&frame.values);
     }
 
     let depth = frames.len() as u32;
     let native_dims = (width, height, depth);
 
-    let stats = sample_stats(&concatenated);
-    let (quantized, sample_format, rescale_slope, rescale_intercept, lossless) = quantize_with_stats(&concatenated, &stats);
+    let stats = sample_stats_parts(&parts);
+    let (quantized, sample_format, rescale_slope, rescale_intercept, lossless) = quantize_parts_with_stats(&parts, &stats);
     let default_window = default_window.or_else(|| Some(window_from_stats(&stats)));
     let (payload, payload_bytes_raw) = apply_compression(quantized, compression)?;
     let payload_bytes_stored = payload.len() as u64;
@@ -762,13 +788,13 @@ pub fn pack_dicom_frame_stack_texture(
                 match object_min_max.iter().find(|(cached, _)| *cached == key) {
                     Some((_, window)) => *window,
                     None => {
-                        let object_values: Vec<f32> = sources
+                        let object_frames: Vec<&[f32]> = sources
                             .iter()
                             .zip(decoded.iter())
                             .filter(|((other, _), _)| std::ptr::eq(*other, *object))
-                            .flat_map(|(_, frame)| frame.values.iter().copied())
+                            .map(|(_, frame)| frame.values.as_slice())
                             .collect();
-                        let window = min_max_window(&object_values);
+                        let window = window_from_stats(&sample_stats_parts(&object_frames));
                         object_min_max.push((key, window));
                         window
                     }
@@ -1053,13 +1079,40 @@ mod tests {
     }
 
     #[test]
-    fn quantize_samples_of_unsigned_16_bit_integer_values_is_exact_offset_uint16() {
-        // 16-bit unsigned DX/MG/CR: above i16::MAX, but the span still fits uint16 exactly.
+    fn quantize_samples_of_unsigned_16_bit_integer_values_is_exact_uint16() {
+        // 16-bit unsigned DX/MG/CR: above i16::MAX, stored as they are.
         let raw = vec![1000.0f32, 28876.0, 56990.0, 65535.0];
         let (bytes, format, slope, intercept, lossless) = quantize_samples(&raw);
         assert_eq!(format, SampleFormat::Uint16);
         assert_eq!(slope, 1.0);
-        assert_eq!(intercept, 1000.0);
+        assert_eq!(intercept, 0.0);
+        assert!(lossless);
+        for (index, &expected) in raw.iter().enumerate() {
+            let stored = u16::from_le_bytes(bytes[index * 2..index * 2 + 2].try_into().unwrap());
+            assert_eq!(stored as f64 * slope + intercept, expected as f64);
+        }
+    }
+
+    #[test]
+    fn quantize_samples_of_unsigned_12_bit_values_is_uint16_not_int16() {
+        // 12-bit MG/DBT fits i16 too, but uint16 needs no rebias on the client.
+        let raw = vec![0.0f32, 1.0, 2048.0, 4095.0];
+        let (bytes, format, slope, intercept, lossless) = quantize_samples(&raw);
+        assert_eq!(format, SampleFormat::Uint16);
+        assert_eq!((slope, intercept, lossless), (1.0, 0.0, true));
+        for (index, &expected) in raw.iter().enumerate() {
+            assert_eq!(u16::from_le_bytes(bytes[index * 2..index * 2 + 2].try_into().unwrap()) as f32, expected);
+        }
+    }
+
+    #[test]
+    fn quantize_samples_of_signed_values_wider_than_i16_is_exact_offset_uint16() {
+        // Negative, so not plain uint16; above i16::MAX, so not int16; the span fits uint16.
+        let raw = vec![-1000.0f32, 0.0, 40000.0, 64535.0];
+        let (bytes, format, slope, intercept, lossless) = quantize_samples(&raw);
+        assert_eq!(format, SampleFormat::Uint16);
+        assert_eq!(slope, 1.0);
+        assert_eq!(intercept, -1000.0);
         assert!(lossless);
         for (index, &expected) in raw.iter().enumerate() {
             let stored = u16::from_le_bytes(bytes[index * 2..index * 2 + 2].try_into().unwrap());

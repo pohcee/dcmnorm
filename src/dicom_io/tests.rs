@@ -4008,6 +4008,47 @@ fn build_volume_sorts_slices_spatially_and_reformats_the_native_axial_plane() {
 }
 
 #[test]
+fn build_volume_puts_each_slice_s_own_pixels_in_its_spatial_plane_for_any_file_order() {
+    // Each slice gets its own RescaleIntercept (index * 1000), so every plane is distinguishable
+    // after the modality LUT; files are listed in a shuffled order with several permutation cycles.
+    let base = read_dicom_file(fixture_path("ct.dcm")).unwrap();
+    let file_order = [2usize, 0, 4, 1, 3];
+    let mut paths = Vec::new();
+    for &index in &file_order {
+        let mut object = base.clone();
+        let z = 1115.0 + index as f64;
+        object.put(DataElement::new(
+            tags::IMAGE_POSITION_PATIENT,
+            VR::DS,
+            PrimitiveValue::from(format!("-151.493508\\-36.6564417\\{z}")),
+        ));
+        object.put(DataElement::new(tags::RESCALE_SLOPE, VR::DS, PrimitiveValue::from("1")));
+        object.put(DataElement::new(
+            tags::RESCALE_INTERCEPT,
+            VR::DS,
+            PrimitiveValue::from(format!("{}", index * 1000)),
+        ));
+        let path = temp_file_path(&format!("mpr-volume-order-slice-{index}"));
+        write_dicom_file(&mut object, &path).unwrap();
+        paths.push(path);
+    }
+
+    let volume = build_volume(&paths).unwrap();
+    let plane = (volume.rows * volume.cols) as usize;
+    assert_eq!(volume.samples.len(), plane * 5);
+    for slice in 0..5 {
+        for pixel in [0usize, plane / 2, plane - 1] {
+            let offset = volume.samples[slice * plane + pixel] - volume.samples[pixel];
+            assert_eq!(offset, (slice * 1000) as f32, "slice {slice} pixel {pixel}");
+        }
+    }
+
+    for path in &paths {
+        fs::remove_file(path).ok();
+    }
+}
+
+#[test]
 fn build_volume_rejects_a_non_parallel_orientation_in_the_stack() {
     let paths = write_synthetic_ct_series(4, 1.0);
 

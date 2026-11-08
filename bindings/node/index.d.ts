@@ -27,6 +27,19 @@ export declare class DicomVolumeHandle {
   /** Number of slices in the built volume. */
   get numSlices(): number
   /**
+   * Bytes of voxel memory this volume holds (native memory, invisible to the JS heap), until
+   * `release()`.
+   */
+  get byteLength(): number
+  /** Whether `release()` has run. */
+  get released(): boolean
+  /**
+   * Frees the voxel memory now instead of whenever the garbage collector finalizes this
+   * handle (which can be much later: the JS heap doesn't see native memory). Calls already
+   * running finish first; `reformat`/`exportTexture` afterwards throw. Idempotent.
+   */
+  release(): void
+  /**
    * The volume's own acquisition-native orientation, for seeding an "axial" reformat -
    * `[rowDir(3), colDir(3)]`.
    */
