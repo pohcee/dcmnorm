@@ -1499,7 +1499,7 @@ impl Task for BuildVolumeTask {
     }
 
     fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
-        Ok(DicomVolumeHandle { volume: Arc::new(output) })
+        Ok(DicomVolumeHandle::new(output))
     }
 }
 
@@ -1619,7 +1619,42 @@ impl Task for ReformatPlaneTask {
 
 #[napi]
 pub struct DicomVolumeHandle {
-    volume: Arc<DcmVolume>,
+    /// `None` once `release()` ran. Tasks already running hold their own `Arc` clone, so the
+    /// samples are freed when the last of them finishes.
+    volume: std::sync::Mutex<Option<Arc<DcmVolume>>>,
+    rows: u32,
+    cols: u32,
+    num_slices: u32,
+    native_basis: Vec<f64>,
+    center: Vec<f64>,
+    min_spacing_mm: f64,
+    byte_length: f64,
+}
+
+impl DicomVolumeHandle {
+    fn new(volume: DcmVolume) -> Self {
+        let mut native_basis = Vec::with_capacity(6);
+        native_basis.extend_from_slice(&volume.row_vector);
+        native_basis.extend_from_slice(&volume.col_vector);
+        Self {
+            rows: volume.rows,
+            cols: volume.cols,
+            num_slices: volume.num_slices,
+            native_basis,
+            center: volume.center().to_vec(),
+            min_spacing_mm: volume.min_spacing_mm(),
+            byte_length: (volume.samples.len() * std::mem::size_of::<f32>()) as f64,
+            volume: std::sync::Mutex::new(Some(Arc::new(volume))),
+        }
+    }
+
+    fn volume(&self) -> Result<Arc<DcmVolume>> {
+        self.volume
+            .lock()
+            .map_err(|_| Error::from_reason("volume lock poisoned"))?
+            .clone()
+            .ok_or_else(|| Error::from_reason("volume was released"))
+    }
 }
 
 #[napi]
@@ -1627,47 +1662,67 @@ impl DicomVolumeHandle {
     /// Rows in the source slices (image height).
     #[napi(getter, js_name = "rows")]
     pub fn rows(&self) -> u32 {
-        self.volume.rows
+        self.rows
     }
     /// Columns in the source slices (image width).
     #[napi(getter, js_name = "cols")]
     pub fn cols(&self) -> u32 {
-        self.volume.cols
+        self.cols
     }
     /// Number of slices in the built volume.
     #[napi(getter, js_name = "numSlices")]
     pub fn num_slices(&self) -> u32 {
-        self.volume.num_slices
+        self.num_slices
+    }
+
+    /// Bytes of voxel memory this volume holds (native memory, invisible to the JS heap), until
+    /// `release()`.
+    #[napi(getter, js_name = "byteLength")]
+    pub fn byte_length(&self) -> f64 {
+        if self.is_released() { 0.0 } else { self.byte_length }
+    }
+
+    /// Whether `release()` has run.
+    #[napi(getter, js_name = "released")]
+    pub fn is_released(&self) -> bool {
+        self.volume.lock().map(|guard| guard.is_none()).unwrap_or(true)
+    }
+
+    /// Frees the voxel memory now instead of whenever the garbage collector finalizes this
+    /// handle (which can be much later: the JS heap doesn't see native memory). Calls already
+    /// running finish first; `reformat`/`exportTexture` afterwards throw. Idempotent.
+    #[napi]
+    pub fn release(&self) {
+        if let Ok(mut guard) = self.volume.lock() {
+            guard.take();
+        }
     }
 
     /// The volume's own acquisition-native orientation, for seeding an "axial" reformat -
     /// `[rowDir(3), colDir(3)]`.
     #[napi(getter, js_name = "nativeBasis")]
     pub fn native_basis(&self) -> Vec<f64> {
-        let mut basis = Vec::with_capacity(6);
-        basis.extend_from_slice(&self.volume.row_vector);
-        basis.extend_from_slice(&self.volume.col_vector);
-        basis
+        self.native_basis.clone()
     }
 
     /// The volume's own physical center, in patient/LPS mm - a reasonable default reformat origin.
     #[napi(getter, js_name = "center")]
     pub fn center(&self) -> Vec<f64> {
-        self.volume.center().to_vec()
+        self.center.clone()
     }
 
     /// The volume's own smallest voxel dimension, in mm - a reasonable default output spacing.
     #[napi(getter, js_name = "minSpacingMm")]
     pub fn min_spacing_mm(&self) -> f64 {
-        self.volume.min_spacing_mm()
+        self.min_spacing_mm
     }
 
     /// Resamples one plane through this volume and encodes it exactly like a normal 2D render
     /// (same `RenderedFrame` shape `renderFrame` returns), so callers can reuse their existing
     /// image-display code path unchanged.
     #[napi]
-    pub fn reformat(&self, options: ReformatPlaneOptions) -> AsyncTask<ReformatPlaneTask> {
-        AsyncTask::new(ReformatPlaneTask { volume: self.volume.clone(), options })
+    pub fn reformat(&self, options: ReformatPlaneOptions) -> Result<AsyncTask<ReformatPlaneTask>> {
+        Ok(AsyncTask::new(ReformatPlaneTask { volume: self.volume()?, options }))
     }
 
     /// Packs this volume's own NATIVE voxel lattice - not a resampled oblique plane, see
@@ -1677,11 +1732,11 @@ impl DicomVolumeHandle {
     /// once and the client does all further rotate/scroll/window-level manipulation itself in a
     /// WebGL2 shader.
     #[napi]
-    pub fn export_texture(&self, options: Option<ExportVolumeTextureOptions>) -> AsyncTask<ExportVolumeTextureTask> {
-        AsyncTask::new(ExportVolumeTextureTask {
-            volume: self.volume.clone(),
+    pub fn export_texture(&self, options: Option<ExportVolumeTextureOptions>) -> Result<AsyncTask<ExportVolumeTextureTask>> {
+        Ok(AsyncTask::new(ExportVolumeTextureTask {
+            volume: self.volume()?,
             options: options.unwrap_or_default(),
-        })
+        }))
     }
 }
 
