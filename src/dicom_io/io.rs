@@ -1099,7 +1099,9 @@ fn can_encode_pixel_data<D, R, W>(
     }
 
     matches!(ts.codec(), Codec::EncapsulatedPixelData(_, Some(_)))
-        || ((cfg!(feature = "ffmpeg-codec-linked") || ffmpeg_enabled) && is_mpeg_transfer_syntax(uid))
+        || ((cfg!(feature = "ffmpeg-codec-linked") || ffmpeg_enabled)
+            && is_mpeg_transfer_syntax(uid)
+            && mpeg::can_encode_video(uid))
         || (cfg!(feature = "jpeg-ls-codec") && is_jpeg_ls_transfer_syntax(uid))
 }
 

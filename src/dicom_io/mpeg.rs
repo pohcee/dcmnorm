@@ -147,6 +147,14 @@ pub mod mpeg_impl {
         }
     }
 
+    /// Whether this FFmpeg build has an encoder for `uid`. The linked FFmpeg is built with only
+    /// FFmpeg's own (LGPL) codecs, which include an MPEG-2 encoder but no H.264 or HEVC encoder
+    /// (those come from libx264 / libx265), so those transfer syntaxes decode but don't encode.
+    pub fn can_encode_video(uid: &str) -> bool {
+        ensure_ffmpeg_init().is_ok()
+            && codec_id_for_transfer_syntax(uid).and_then(ffmpeg::encoder::find).is_some()
+    }
+
 
     /// Decode MPEG2/H.264/HEVC-encoded pixel data using FFmpeg's raw codec API (not a
     /// container/demuxer - DICOM stores a bare elementary stream, not an MP4/MPEG-TS wrapper).
@@ -455,6 +463,12 @@ pub mod mpeg_impl {
         }
     }
 
+    /// Whether `uid` is a video transfer syntax this backend encodes. Whether the installed
+    /// `ffmpeg` has the encoder (libx264 / libx265 for H.264 / HEVC) only shows when encoding.
+    pub fn can_encode_video(uid: &str) -> bool {
+        raw_format(uid, false).is_some()
+    }
+
     /// Runs `ffmpeg` with `args`, feeding `input` on stdin and returning stdout. stdin is
     /// written and stderr drained on their own threads so neither pipe can fill up and stall
     /// the other.
@@ -649,7 +663,7 @@ pub mod mpeg_impl {
     }
 }
 
-pub use mpeg_impl::{decode_mpeg_pixel_data, encode_mpeg_pixel_data};
+pub use mpeg_impl::{can_encode_video, decode_mpeg_pixel_data, encode_mpeg_pixel_data};
 
 #[cfg(test)]
 mod tests {
@@ -662,6 +676,16 @@ mod tests {
     const ROWS: u16 = 120;
     const COLS: u16 = 256;
     const FRAME_LEN: usize = ROWS as usize * COLS as usize * 3;
+
+    /// FFmpeg linked in has no H.264/HEVC encoder (see `can_encode_video`); those round trips are
+    /// skipped there (with a note) rather than failed.
+    fn encoder_available(ts_uid: &str) -> bool {
+        let available = super::can_encode_video(ts_uid);
+        if !available {
+            eprintln!("skipping {ts_uid}: this build has no encoder for it");
+        }
+        available
+    }
 
     /// The round trips need a video codec: FFmpeg linked in, or the `ffmpeg` command for the
     /// default build. Without either they are skipped (with a note), not failed.
@@ -773,7 +797,7 @@ mod tests {
     /// catch, which is why this uses three.
     #[test]
     fn h264_multi_frame_round_trip_preserves_frame_content_and_order() {
-        if !video_codec_available() {
+        if !video_codec_available() || !encoder_available("1.2.840.10008.1.2.4.102") {
             return;
         }
         let frame0 = solid_band_frame(0, [0, 0, 0]);
@@ -819,6 +843,9 @@ mod tests {
         let source = native_rgb_object(3, pixel_data);
 
         for ts_uid in ["1.2.840.10008.1.2.4.100", "1.2.840.10008.1.2.4.107"] {
+            if !encoder_available(ts_uid) {
+                continue;
+            }
             let fragments = encode_mpeg_pixel_data(&source, ts_uid)
                 .unwrap_or_else(|e| panic!("encode for {ts_uid} should succeed: {e}"));
             let encoded = encapsulated_video_object(&source, ts_uid, fragments[0].clone());
@@ -855,6 +882,14 @@ mod tests {
     fn missing_ffmpeg_command_says_how_to_install_it() {
         let result = super::mpeg_impl::run_program("dcmnorm-test-no-such-ffmpeg", &[], Vec::new());
         assert_eq!(result.unwrap_err(), super::mpeg_impl::FFMPEG_NOT_FOUND);
+    }
+
+
+    /// MPEG-2 always encodes (FFmpeg's own mpeg2video encoder, or the ffmpeg command's).
+    #[test]
+    fn mpeg2_is_always_encodable() {
+        assert!(super::can_encode_video("1.2.840.10008.1.2.4.100"));
+        assert!(!super::can_encode_video("1.2.840.10008.1.2.4.90"));
     }
 
 }

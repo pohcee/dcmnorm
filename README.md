@@ -922,7 +922,9 @@ movie output also uses the `ffmpeg` command (with libx264), see [Render frames](
 To link FFmpeg in instead (in-process, no `ffmpeg` command needed at run time), build with
 `--features dcmnorm/ffmpeg-codec`, which compiles FFmpeg from source, or
 `--features dcmnorm/ffmpeg-codec-linked` against an FFmpeg the build machine provides. The
-bindings do this; `--list-transfer-syntaxes` then shows `builtin`.
+bindings do this; `--list-transfer-syntaxes` then shows `builtin`. The linked FFmpeg has only
+FFmpeg's own codecs, so it decodes all of these but encodes only MPEG-2 (H.264 and HEVC encoding
+need libx264 / libx265, which the `ffmpeg` command usually has).
 
 ### JPEG 2000 codec selection
 
