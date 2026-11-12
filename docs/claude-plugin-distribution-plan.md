@@ -1,7 +1,44 @@
 # Plan: dcmnorm as a Claude plugin in Anthropic's directory
 
-Status: plan, not started (written 2026-11-11). Research from Anthropic's docs as of that date; recheck the
-submission checklist before submitting, it changes.
+Status: written 2026-11-11, research from Anthropic's docs as of that date (recheck the submission checklist before
+submitting, it changes). Built on 2026-11-12, see "As built" below; the sections after it are the original plan.
+
+## As built (2026-11-12)
+
+Done:
+
+- **FFmpeg is no longer built by default.** The video transfer syntaxes (MPEG-2, MPEG-4 AVC/H.264, HEVC) go through
+  the `ffmpeg` command on PATH when FFmpeg isn't linked in (`src/dicom_io/mpeg.rs`), with an install hint when it's
+  missing and `ffmpeg` as the engine in `--list-transfer-syntaxes`. `ffmpeg-codec` left the default features; the
+  bindings keep FFmpeg linked in. This made the CLI builds plain `cargo build`s (C/C++ toolchain and CMake only)
+  on every platform, which is what made the five-platform wheel matrix cheap. A clean release build of the CLIs
+  takes about a minute.
+- **CLI wheels**: `packaging/` (see its README). One `dcmnorm` wheel per platform holds both binaries
+  (`.data/scripts/`), built from the same binaries as the release archives. Linux builds run in manylinux_2_28
+  (glibc 2.28+). Verified locally for linux-x86_64: `twine check --strict`, pip and `uv tool install`, Debian
+  bullseye.
+- **Workflows consolidated** into `.github/workflows/release.yml` (Build and release). PRs and main get tests plus
+  every CLI build. A tag publishes the GitHub release (now all 5 platforms, plus `.deb` for both Linux
+  architectures), PyPI (Trusted Publishing, gated on the `PYPI_PUBLISH` variable) and the bindings commit, only
+  after the tests and builds pass. `semver-tag.yml` was removed: it tagged without bumping the Cargo versions, and
+  its token-pushed tags didn't trigger the other workflows. `build-bindings.yml` was merged in.
+  `deploy-test-website.yml` follows the new workflow name and deploys only after release-tag runs.
+- **Plugin**: `plugin/` (`.claude-plugin/plugin.json`, the skill moved to `plugin/skills/dcmnorm/`, README), plus a
+  marketplace at `.claude-plugin/marketplace.json` (`/plugin marketplace add pohcee/dcmnorm`). The skill has a
+  Setup section that installs the pinned version from PyPI. `scripts/check-versions.py` keeps the pins in step
+  with Cargo (CI checks it, and `release-tag.sh` sets it). `claude plugin validate --strict` passes. The install
+  scripts take the skill from the new path and fall back to `skills/` for older tags.
+- **No SessionStart hook.** The skill's Setup section covers a missing binary when it's actually needed; a hook
+  would add a line to every session and is a review risk.
+
+Left (owner steps):
+
+1. A listing icon: a square PNG, 512 to 2048 px, at `plugin/.claude-plugin/icon.png`. It is the only failure under
+   `claude plugin validate --profile directory --strict plugin`, and it is fixed at the first save or submission
+   in the developer portal.
+2. PyPI Trusted Publishing setup (`packaging/README.md`), then a release tag (`./scripts/release-tag.sh minor`).
+   The skill's pinned version must exist on PyPI before the plugin is submitted.
+3. Submit `plugin/` at claude.ai/directory/manage (section 5 below), tracking a release tag.
 
 ## Goal
 

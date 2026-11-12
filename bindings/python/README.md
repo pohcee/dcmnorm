@@ -235,9 +235,8 @@ not something to hardcode or rely on staying the same across builds) works unmod
 CPython >= 3.9, rather than needing one wheel per Python minor version - the Python analog of `bindings/node`
 committing a single `.node` binary per platform/arch rather than per Node version.
 
-The [`Build Bindings`](../../.github/workflows/build-bindings.yml) GitHub Actions workflow also
-runs `build-in-docker.sh` (for all three bindings) and commits whatever changed - triggered the
-same way [`release.yml`](../../.github/workflows/release.yml) is, by a pushed `v*.*.*` tag (i.e.
-whenever [`semver-tag.yml`](../../.github/workflows/semver-tag.yml) cuts a new version) - so the
+The [`Build and release`](../../.github/workflows/release.yml) GitHub Actions workflow also
+runs `build-in-docker.sh` (for all three bindings) on every pushed `v*.*.*` release tag (cut with
+`scripts/release-tag.sh`) and commits whatever changed - so the
 committed wheel is rebuilt as part of cutting a release rather than relying on a maintainer to
 remember to re-run this script by hand.

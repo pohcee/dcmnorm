@@ -180,16 +180,15 @@ actually safe for the deploy target — you don't need to remember to do this
 by hand. `build`/`build:debug` (plain host builds) are for fast local
 iteration only; don't commit their output.
 
-The [`Build Bindings`](../../.github/workflows/build-bindings.yml) GitHub Actions workflow also
-runs `build-in-docker.sh` (for all three bindings) and commits whatever changed — triggered the
-same way [`release.yml`](../../.github/workflows/release.yml) is, by a pushed `v*.*.*` tag (i.e.
-whenever [`semver-tag.yml`](../../.github/workflows/semver-tag.yml) cuts a new version) — so the
+The [`Build and release`](../../.github/workflows/release.yml) GitHub Actions workflow also
+runs `build-in-docker.sh` (for all three bindings) on every pushed `v*.*.*` release tag (cut with
+`scripts/release-tag.sh`) and commits whatever changed — so the
 committed `.node` file is rebuilt as part of cutting a release even if `npm run release` wasn't
 run by hand for this particular one.
 
 The Windows x64 addon, `dcmnorm-node.win32-x64-msvc.node`, is committed the same way (for
 Windows consumers of the Node binding) but is only built by the workflow's `build-node-windows` job on a `windows-latest` runner
-(MSVC), never by `build-in-docker.sh`; the `commit` job pushes it alongside the Linux binary, and
+(MSVC), never by `build-in-docker.sh`; the `commit-bindings` job pushes it alongside the Linux binary, and
 only if every build succeeded (and only on `main` or a tag - a branch run just uploads
 artifacts). It has the same codecs as the Linux addon, FFmpeg included, and a codec that fails to
 build fails the job, so a Windows edge never transcodes fewer transfer syntaxes than a Linux one.

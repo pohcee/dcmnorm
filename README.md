@@ -17,8 +17,8 @@ sample) and see its JSON metadata, a JPEG of every frame, and per-step timings.
 ## Quick start
 
 ```bash
-# install the latest release (Linux x86_64)
-curl -sSL pohcee.com/dcmnorm | sh
+# install the latest release (Linux, macOS, Windows)
+uv tool install dcmnorm           # or: curl -sSL pohcee.com/dcmnorm | sh  (Linux, macOS)
 
 dcmnorm scan.dcm                                                   # DICOM → JSON
 dcmnorm scan.dcm frame.png                                         # render a frame
@@ -28,7 +28,8 @@ dcmnorm --mpr coronal series/*.dcm coronal.png                     # multiplanar
 dcmtalk echoscu somepacs.example.com:11112                         # verify a PACS connection
 ```
 
-See [Install](#install) for other options (Cargo, `.deb`, Docker, build from source).
+See [Install](#install) for other options (the Claude plugin, release archives, `.deb`, Docker,
+Cargo, build from source).
 
 ## Why dcmnorm
 
@@ -66,7 +67,35 @@ See [Install](#install) for other options (Cargo, `.deb`, Docker, build from sou
 
 ## Install
 
-Pre-built release binaries are currently published for **Linux x86_64**. On macOS or Windows, use [Docker](#docker) or [build from source](#build).
+Pre-built binaries are published for Linux (x86_64, aarch64; glibc 2.28+), macOS (Apple silicon,
+Intel) and Windows (x86_64), on PyPI and as GitHub release archives.
+
+### From PyPI
+
+```bash
+uv tool install dcmnorm        # or: pipx install dcmnorm / pip install dcmnorm
+```
+
+This installs the native `dcmnorm` and `dcmtalk` binaries for your platform; nothing runs in
+Python. (For in-process use from Python, see [bindings/python](bindings/python/).)
+
+### Claude plugin
+
+The [`plugin/`](plugin/) directory is a Claude plugin with the dcmnorm skill: Claude uses the CLIs
+for DICOM tasks and installs them from PyPI on first use. In Claude Code:
+
+```
+/plugin marketplace add pohcee/dcmnorm
+/plugin install dcmnorm@dcmnorm
+```
+
+The install scripts below also put the skill into Claude Code, Gemini CLI and Codex CLI.
+
+### Video transfer syntaxes need `ffmpeg`
+
+MPEG-2, MPEG-4 AVC/H.264 and HEVC pixel data and `.mp4`/`.mov` output use the `ffmpeg` command;
+install FFmpeg for those (see [Video transfer syntaxes](#video-transfer-syntaxes)). Everything
+else works without it.
 
 ### From source with Cargo
 
@@ -81,10 +110,9 @@ To install every CLI under `exec/` with one command, use the helper script inste
 ```
 
 This script auto-detects Kakadu headers/libraries and enables `kakadu-ffi` when available,
-and verifies the default codec toolchain (`pkg-config`, `clang`, standard C headers, and the
-FFmpeg development packages listed under [Build](#build)) before invoking Cargo. If it detects Claude Code and/or
+and checks for the build prerequisites listed under [Build](#build) before invoking Cargo. If it detects Claude Code and/or
 Gemini CLI on the machine (an existing `~/.claude` and/or `~/.gemini` directory), it also
-installs the [`skills/dcmnorm`](skills/dcmnorm/) skill to `~/.claude/skills/dcmnorm` and/or
+installs the [`plugin/skills/dcmnorm`](plugin/skills/dcmnorm/) skill to `~/.claude/skills/dcmnorm` and/or
 `~/.gemini/skills/dcmnorm` respectively — set `DCMNORM_SKIP_SKILL=1` to skip this, or
 `CLAUDE_SKILLS_DIR`/`GEMINI_SKILLS_DIR` to install elsewhere (and to force the install even
 without the corresponding `~/.claude`/`~/.gemini` directory).
@@ -128,11 +156,11 @@ curl -sSL pohcee.com/dcmnorm | sh
 ```
 
 This script also installs the `dcmnorm` skill (downloaded from this repo's
-`skills/dcmnorm/SKILL.md`) for any of Claude Code, Gemini CLI, or Codex CLI it detects on the
+`plugin/skills/dcmnorm/SKILL.md`) for any of Claude Code, Gemini CLI, or Codex CLI it detects on the
 machine — same `DCMNORM_SKIP_SKILL`/`CLAUDE_SKILLS_DIR`/`GEMINI_SKILLS_DIR`/`CODEX_SKILLS_DIR`
 overrides as above.
 
-On Debian/Ubuntu (`linux-x86_64` only), pass `--deb` to install a downloaded `.deb` package via
+On Debian/Ubuntu (`linux-x86_64` or `linux-aarch64`), pass `--deb` to install a downloaded `.deb` package via
 `apt install` instead of copying binaries into `INSTALL_DIR` — this resolves runtime dependencies
 (`ffmpeg`, `ca-certificates`) automatically and needs root (the script `sudo`s automatically if not
 already running as root):
@@ -1301,33 +1329,31 @@ cargo test --workspace
 
 ## Releasing
 
-This repository uses three GitHub Actions workflows for SemVer-based releases:
+One GitHub Actions workflow, [`.github/workflows/release.yml`](.github/workflows/release.yml)
+("Build and release"), builds, tests and publishes everything:
 
-- `.github/workflows/semver-tag.yml`: manually creates and pushes the next `vX.Y.Z` tag from the latest existing `v*` tag
-- `.github/workflows/release.yml`: runs on pushed version tags, builds the CLI, and creates a GitHub Release with artifacts
-- `.github/workflows/build-bindings.yml`: also runs on pushed version tags, rebuilds each of `bindings/{node,python,java}`'s committed native artifact (via that binding's own `build-in-docker.sh`) and pushes a commit with whatever changed, straight to `main`
+- **On every pull request and push to `main`**, it runs the test suite and builds every CLI
+  artifact for every platform (archives, `.deb` packages, PyPI wheels, each smoke-tested), but
+  publishes nothing. A packaging change is therefore proven before a release.
+- **On a pushed `v*.*.*` tag**, after the tests and every build pass, it publishes:
+    - a GitHub release with, for each of `dcmnorm` and `dcmtalk` and each platform
+      (`linux-x86_64`, `linux-aarch64`, `macos-x86_64`, `macos-aarch64`, `windows-x86_64`):
+      `<name>-<tag>-<platform>.tar.gz` (`.zip` on Windows) plus a rolling `<name>-<platform>.tar.gz`
+      "latest" alias, each with a `.sha256`. On both Linux platforms there's also
+      `<name>-<tag>-<platform>.deb` (+ alias), built with [`cargo-deb`](https://github.com/kornelski/cargo-deb)
+      from each exec crate's `[package.metadata.deb]` and installed for real by the workflow
+      before upload.
+    - the CLI wheels on PyPI as [`dcmnorm`](https://pypi.org/project/dcmnorm/) (both binaries in
+      one wheel per platform; see [packaging/README.md](packaging/README.md)). This step runs only
+      when the repository variable `PYPI_PUBLISH` is `true`.
+    - each of `bindings/{node,python,java}`'s rebuilt native artifact (via that binding's own
+      `build-in-docker.sh`, plus the Windows Node addon), committed straight to `main`, but only
+      if all four builds succeed, so a partial rebuild never lands silently.
 
-Release flow:
+The Linux CLIs are built in a manylinux_2_28 container and run on any glibc 2.28+ distribution;
+the same binaries go into the archives, the `.deb` packages and the wheels.
 
-1. Run the **SemVer Tag** workflow from the Actions tab and choose `patch`, `minor`, or `major`.
-2. The workflow pushes a new version tag (for example `v0.1.1`).
-3. That tag triggers both of the following, independently and in parallel:
-    - **Build and Release CLIs**, which publishes, for each of `dcmnorm` and `dcmtalk`:
-        - `<name>-<tag>-linux-x86_64.tar.gz` (+ `.sha256`)
-        - `<name>-<tag>-linux-x86_64.deb` (+ `.sha256`) — built with [`cargo-deb`](https://github.com/kornelski/cargo-deb) from each exec crate's `[package.metadata.deb]`, `Depends:` on `ffmpeg`/`ca-certificates` plus whatever `cargo-deb`'s `$auto` detects from the linked shared libraries
-        - `<name>-linux-x86_64.tar.gz` / `.deb` + `.sha256` (rolling "latest" aliases, overwritten each release)
-    - **Build Bindings**, which rebuilds and commits `bindings/node`'s `.node` file, `bindings/python`'s wheel, and `bindings/java`'s native library (see each binding's own README's "Packaging" section) - but only pushes that commit if all three builds succeed, so a partial rebuild never lands silently
-
-Prereleases are supported in the SemVer tag workflow via the `prerelease` input.
-
-Note that cutting a release this way does **not** bump the version numbers inside
-`bindings/node/package.json`, `bindings/python/pyproject.toml`, or `bindings/java/pom.xml` - each
-binding keeps its own independent version (see `scripts/release-tag.sh` below, which only touches
-the root/exec crate manifests the CLI release actually uses).
-
-### Local tag + release trigger
-
-If you prefer not to manually run the tag workflow in GitHub, use the local helper script:
+To cut a release, run the local helper script:
 
 ```bash
 ./scripts/release-tag.sh patch          # bump types: patch, minor, major
@@ -1335,16 +1361,24 @@ If you prefer not to manually run the tag workflow in GitHub, use the local help
 ./scripts/release-tag.sh patch --dry-run  # preview the computed next tag only
 ```
 
-The script first fast-forwards onto `origin`, which picks up the previous release's
-Build Bindings commit. It then updates versions in `Cargo.toml`, `exec/dcmnorm/Cargo.toml` and
-`exec/dcmtalk/Cargo.toml`, and refreshes only the workspace's own entries in `Cargo.lock`
-(`cargo update --workspace`, so a release never silently upgrades dependencies). Finally it
-creates a release commit and pushes both the commit and the version tag to `origin`. The pushed
-tag triggers `.github/workflows/release.yml` and `.github/workflows/build-bindings.yml`
-automatically. The script is non-interactive, so release automation can call it as its "release"
-step (`./scripts/release-tag.sh patch`), much as an npm package's `npm run release` is used.
-If no `v*` tags exist yet, the script uses the root `Cargo.toml` `package.version` as the
-baseline for computing the next version.
+The script first fast-forwards onto `origin`, which picks up the previous release's bindings
+commit. It then updates versions in `Cargo.toml`, `exec/dcmnorm/Cargo.toml` and
+`exec/dcmtalk/Cargo.toml`, plus the Claude plugin's version and the version its skill installs
+(`scripts/check-versions.py --set`; CI fails if these drift), and refreshes only the workspace's
+own entries in `Cargo.lock` (`cargo update --workspace`, so a release never silently upgrades
+dependencies). Finally it creates a release commit and pushes both the commit and the version tag
+to `origin`, which starts the workflow. The script is non-interactive, so release automation can
+call it as its "release" step. If no `v*` tags exist yet, it uses the root `Cargo.toml`
+`package.version` as the baseline. Prereleases must use `alpha`, `beta` or `rc` identifiers, the
+ones PyPI versions allow (`v0.8.0-rc.1` is `0.8.0rc1` on PyPI).
+
+The tag must be pushed with your own git credentials: GitHub doesn't start workflows for a tag
+pushed with a workflow run's own token. If a tag ever ends up without a run, start **Build and
+release** by hand from the Actions tab with the tag as the ref.
+
+Cutting a release does **not** bump the version numbers inside `bindings/node/package.json`,
+`bindings/python/pyproject.toml`, or `bindings/java/pom.xml`: each binding keeps its own
+independent version.
 
 ## Contributing
 
