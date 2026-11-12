@@ -22,6 +22,9 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # A separate target dir: artifacts built against the host's newer glibc must never be reused.
 TARGET_DIR="target/manylinux_2_28-${ARCH}"
 IMAGE="quay.io/pypa/manylinux_2_28_${ARCH}"
+# Created here, as the invoking user: if Docker created it for the bind mount, target/ itself
+# would be root-owned and later host-side builds (cargo deb) couldn't write to it.
+mkdir -p "$REPO_ROOT/$TARGET_DIR"
 
 docker run --rm \
   -v "$REPO_ROOT":/repo -w /repo \
