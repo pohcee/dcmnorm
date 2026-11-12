@@ -859,13 +859,14 @@ dcmnorm --list-transfer-syntaxes
 ```
 
 Transfer-syntax support is build-specific. The default build in this repository enables the
-MPEG and JPEG-LS codec features in addition to the DICOM library support that is available
-without extra native imaging libraries:
+JPEG-LS, JPEG XL and JPEG 2000 encode codec features in addition to the DICOM library support that
+is available without extra native imaging libraries:
 
 - native uncompressed syntaxes
 - deflated dataset syntaxes
 - encapsulated uncompressed pixel data
-- MPEG transfer syntax support via FFmpeg-backed build integration
+- MPEG-2, MPEG-4 AVC/H.264 and HEVC decode/encode through the `ffmpeg` command on `PATH` (see
+  [Video transfer syntaxes](#video-transfer-syntaxes))
 - JPEG baseline decode/encode
 - JPEG extended and JPEG lossless decode-only
 - JPEG-LS transfer syntax support via CharLS-backed build integration
@@ -875,6 +876,25 @@ without extra native imaging libraries:
 
 Transfer syntaxes which the current build cannot encode or decode are reported explicitly by
 `--list-transfer-syntaxes` and by transcoding errors.
+
+### Video transfer syntaxes
+
+MPEG-2 (`.100`/`.101`), MPEG-4 AVC/H.264 (`.102`-`.106`) and HEVC/H.265 (`.107`/`.108`) pixel
+data is decoded and encoded by the `ffmpeg` command on `PATH`: the elementary stream is piped
+through it, so nothing FFmpeg-related is compiled into `dcmnorm` or `dcmtalk`. Install FFmpeg to
+use them (`apt install ffmpeg`, `brew install ffmpeg`, `winget install ffmpeg`).
+`--list-transfer-syntaxes` shows `ffmpeg` as their engine when it is found and `no` when it is
+not, and a transcode that needs it fails with an error saying how to install it. Every other
+transfer syntax works without FFmpeg.
+
+Encoding uses the installed FFmpeg's default encoder for each format: `mpeg2video` for MPEG-2,
+and libx264 / libx265 for H.264 / HEVC, which most packaged FFmpeg builds include. `.mp4`/`.mov`
+movie output also uses the `ffmpeg` command (with libx264), see [Render frames](#render-frames).
+
+To link FFmpeg in instead (in-process, no `ffmpeg` command needed at run time), build with
+`--features dcmnorm/ffmpeg-codec`, which compiles FFmpeg from source, or
+`--features dcmnorm/ffmpeg-codec-linked` against an FFmpeg the build machine provides. The
+bindings do this; `--list-transfer-syntaxes` then shows `builtin`.
 
 ### JPEG 2000 codec selection
 
@@ -1146,23 +1166,17 @@ tool can't "win" by failing fast (e.g. a dcmtk built without libpng rejects
 
 ### Prerequisites
 
-Default builds enable the MPEG and JPEG-LS codec features. Native prerequisites for the
-default build on Debian or Ubuntu are:
+The default build (the library and both CLIs) needs only a C/C++ toolchain and CMake. On Debian
+or Ubuntu:
 
 - `build-essential`
-- `clang`
 - `cmake`
-- `libc6-dev`
-- `libclang-dev`
 - `pkg-config`
-- `libavutil-dev`
-- `libavcodec-dev`
-- `libavformat-dev`
-- `libswscale-dev`
-- `libswresample-dev`
 
-The FFmpeg integration is built with a reduced `ffmpeg-next` feature set, so
-`libavfilter-dev` and `libavdevice-dev` are not required for the current build.
+FFmpeg is not built or linked by default; see [Video transfer syntaxes](#video-transfer-syntaxes).
+The bindings (`bindings/node`, `bindings/python`, `bindings/java`) and any build with
+`--features ffmpeg-codec` compile FFmpeg from source and link it in, which also needs `clang`,
+`libclang-dev`, `nasm` and `git`, and takes much longer.
 
 The vendored OpenHTJ2K (`crates/dcmnorm-jpeg2000`) needs a C++17 compiler, plus `ar` and
 `objcopy` for its dual-variant x86-64 build. All three come with `build-essential`. Without
@@ -1172,18 +1186,9 @@ Example install command:
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y \
-    build-essential \
-    clang \
-    cmake \
-    libc6-dev \
-    libclang-dev \
-    pkg-config \
-    libavutil-dev \
-    libavcodec-dev \
-    libavformat-dev \
-    libswscale-dev \
-    libswresample-dev
+sudo apt-get install -y build-essential cmake pkg-config
+# only for the bindings or --features ffmpeg-codec:
+sudo apt-get install -y clang libclang-dev nasm git
 ```
 
 ### Building the workspace
@@ -1195,8 +1200,11 @@ cargo build --workspace
 # whole workspace, release
 cargo build --workspace --release
 
-# without the default MPEG and JPEG-LS codec features
+# without the default JPEG-LS / JPEG XL / JPEG 2000 encode codec features
 cargo build --workspace --no-default-features
+
+# with FFmpeg linked in (built from source) instead of the `ffmpeg` command
+cargo build -p dcmnorm-cli --release --features dcmnorm/ffmpeg-codec
 ```
 
 Release binaries are written to `target/release/`.
@@ -1245,8 +1253,9 @@ See [JPEG 2000 codec selection](#jpeg-2000-codec-selection) for the correspondin
 
 This repository includes a multi-stage Dockerfile that builds `dcmnorm` and `dcmtalk` in a
 toolchain stage and copies only the release binaries into a slim runtime stage. The final
-runtime image installs `ca-certificates`, `ffmpeg`, and `libstdc++6`; build-only dependencies
-(`clang`, `cmake`, `pkg-config`, FFmpeg `-dev` packages) stay in the builder stage.
+runtime image installs `ca-certificates`, `ffmpeg` (video transfer syntaxes and `.mp4` output),
+and `libstdc++6`; build-only dependencies (`build-essential`, `cmake`, `pkg-config`) stay in the
+builder stage.
 
 Kakadu is not included in the image — see [JPEG 2000 codec selection](#jpeg-2000-codec-selection)
 if you need Kakadu support and are willing to provide the headers/libraries yourself.

@@ -24,8 +24,13 @@ members = [
 resolver = "2"
 
 [features]
-default = ["ffmpeg-codec", "jpeg-ls-codec", "jpeg-xl-codec", "jpeg2000-openjpeg-encode"]
+default = ["jpeg-ls-codec", "jpeg-xl-codec", "jpeg2000-openjpeg-encode"]
 kakadu-ffi = []
+# The video transfer syntaxes (MPEG-2, MPEG-4 AVC/H.264, HEVC) need FFmpeg. By default nothing
+# FFmpeg-related is built: they go through the `ffmpeg` command on PATH and fail with an install
+# hint when it is missing (src/dicom_io/mpeg.rs), which keeps builds fast and lets the CLIs start
+# on machines without FFmpeg. The two features below link FFmpeg in instead, for in-process use
+# with no runtime dependency (the bindings enable ffmpeg-codec):
 # ffmpeg-codec builds FFmpeg from source and links it statically (Linux, see the dependency
 # comment below). ffmpeg-codec-linked is the same codec support without the source build: it
 # links an FFmpeg the build machine provides (FFMPEG_DIR, pkg-config, or vcpkg on MSVC). The

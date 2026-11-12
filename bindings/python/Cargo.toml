@@ -11,7 +11,9 @@ name = "dcmnorm"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-dcmnorm = { path = "../.." }
+# FFmpeg linked in (built from source), so `import dcmnorm` handles the video transfer syntaxes
+# without an `ffmpeg` command at run time.
+dcmnorm = { path = "../..", features = ["ffmpeg-codec"] }
 dcmnorm-object = { path = "../../crates/dcmnorm-object" }
 # abi3-py39: one compiled extension works unmodified against any CPython >= 3.9 (stable ABI) -
 # the Python analog of napi-rs's own single-binary-per-platform story (see this crate's

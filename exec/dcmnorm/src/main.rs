@@ -1336,7 +1336,7 @@ fn transfer_syntax_engine(entry: &dcmnorm::dicom_io::TransferSyntaxSupport) -> &
     }
 
     if entry.can_decode_pixel_data || entry.can_encode_pixel_data {
-        return "builtin";
+        return dcmnorm::dicom_io::video_engine_name_for(&entry.uid).unwrap_or("builtin");
     }
 
     "n/a"

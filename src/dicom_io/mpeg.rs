@@ -1,8 +1,39 @@
+use dcmnorm_dictionary::tags;
+use dcmnorm_object::DefaultDicomObject;
+
+pub(crate) fn transfer_syntax_uid(object: &DefaultDicomObject) -> String {
+    object.meta().transfer_syntax.trim_end_matches(['\0', ' ']).to_owned()
+}
+
+/// Frames per second to encode at: `CineRate` (0018,0040) if present, else derived from
+/// `FrameTime` (0018,1063, milliseconds/frame), else a plain default. Real-world cine
+/// loops nearly always carry one of these; the default only matters for synthetic inputs.
+pub(crate) fn frames_per_second(object: &DefaultDicomObject) -> f64 {
+    if let Some(rate) =
+        object.get(tags::CINE_RATE).and_then(|e| e.to_str().ok()).and_then(|s| s.trim().parse::<f64>().ok())
+    {
+        if rate > 0.0 {
+            return rate;
+        }
+    }
+    if let Some(frame_time_ms) = object
+        .get(tags::FRAME_TIME)
+        .and_then(|e| e.to_str().ok())
+        .and_then(|s| s.trim().parse::<f64>().ok())
+    {
+        if frame_time_ms > 0.0 {
+            return 1000.0 / frame_time_ms;
+        }
+    }
+    30.0
+}
+
 #[cfg(feature = "ffmpeg-codec-linked")]
 pub mod mpeg_impl {
     use dcmnorm_dictionary::tags;
     use dcmnorm_object::DefaultDicomObject;
 
+    use super::{frames_per_second, transfer_syntax_uid};
     use ffmpeg_next as ffmpeg;
     use ffmpeg::codec::{self, packet::Packet};
     use ffmpeg::format::Pixel;
@@ -116,9 +147,6 @@ pub mod mpeg_impl {
         }
     }
 
-    fn transfer_syntax_uid(object: &DefaultDicomObject) -> String {
-        object.meta().transfer_syntax.trim_end_matches(['\0', ' ']).to_owned()
-    }
 
     /// Decode MPEG2/H.264/HEVC-encoded pixel data using FFmpeg's raw codec API (not a
     /// container/demuxer - DICOM stores a bare elementary stream, not an MP4/MPEG-TS wrapper).
@@ -235,28 +263,6 @@ pub mod mpeg_impl {
         Ok(out)
     }
 
-    /// Frames per second to encode at: `CineRate` (0018,0040) if present, else derived from
-    /// `FrameTime` (0018,1063, milliseconds/frame), else a plain default. Real-world cine
-    /// loops nearly always carry one of these; the default only matters for synthetic inputs.
-    fn frames_per_second(object: &DefaultDicomObject) -> f64 {
-        if let Some(rate) =
-            object.get(tags::CINE_RATE).and_then(|e| e.to_str().ok()).and_then(|s| s.trim().parse::<f64>().ok())
-        {
-            if rate > 0.0 {
-                return rate;
-            }
-        }
-        if let Some(frame_time_ms) = object
-            .get(tags::FRAME_TIME)
-            .and_then(|e| e.to_str().ok())
-            .and_then(|s| s.trim().parse::<f64>().ok())
-        {
-            if frame_time_ms > 0.0 {
-                return 1000.0 / frame_time_ms;
-            }
-        }
-        30.0
-    }
 
     /// Encode raw native pixel data to MPEG2/H.264/HEVC using FFmpeg's raw codec API, producing
     /// a single fragment holding the entire bitstream - the encoded-side mirror of
@@ -406,25 +412,246 @@ pub mod mpeg_impl {
     }
 }
 
+/// Video transfer syntaxes through the `ffmpeg` command on `PATH`, for builds without FFmpeg
+/// linked in (the default). Nothing FFmpeg-related is compiled: the elementary stream goes to
+/// `ffmpeg` on stdin and raw frames come back on stdout (or the reverse for encoding), so the
+/// build stays fast and the binary starts on machines without FFmpeg. Only these transfer
+/// syntaxes need it; when `ffmpeg` is missing they fail with an error saying how to install it.
+///
+/// The output matches the linked backend: frames scaled to Rows x Columns as GRAY8
+/// (SamplesPerPixel 1) or RGB24, concatenated in display order; encoding takes 8-bit native
+/// frames, converts them to YUV 4:2:0 and returns the whole bitstream as one fragment. `ffmpeg`'s
+/// raw demuxers split the stream into access units themselves, and its default encoder for each
+/// raw format is used (mpeg2video, and libx264 / libx265 when the installed FFmpeg has them).
 #[cfg(not(feature = "ffmpeg-codec-linked"))]
 pub mod mpeg_impl {
+    use std::io::{ErrorKind, Read, Write};
+    use std::process::{Command, Stdio};
+
+    use dcmnorm_dictionary::tags;
     use dcmnorm_object::DefaultDicomObject;
 
-    pub fn decode_mpeg_pixel_data(_object: &DefaultDicomObject) -> Result<Vec<u8>, String> {
-        Err("MPEG codec support requires 'ffmpeg-codec' feature to be enabled".to_owned())
+    use super::{frames_per_second, transfer_syntax_uid};
+
+    /// Shown whenever the `ffmpeg` command can't be started.
+    pub const FFMPEG_NOT_FOUND: &str = "MPEG-2, MPEG-4 AVC/H.264 and HEVC transfer syntaxes need the `ffmpeg` command on PATH, \
+         and it was not found. Install FFmpeg (for example `apt install ffmpeg`, `brew install ffmpeg` \
+         or `winget install ffmpeg`) and try again.";
+
+    /// `ffmpeg -f` name of the raw elementary stream format for a video transfer syntax (the
+    /// same name works as the demuxer and the muxer, except MPEG-2's demuxer is `mpegvideo`).
+    fn raw_format(uid: &str, demux: bool) -> Option<&'static str> {
+        match uid {
+            "1.2.840.10008.1.2.4.100" | "1.2.840.10008.1.2.4.101" => {
+                Some(if demux { "mpegvideo" } else { "mpeg2video" })
+            }
+            "1.2.840.10008.1.2.4.102"
+            | "1.2.840.10008.1.2.4.103"
+            | "1.2.840.10008.1.2.4.104"
+            | "1.2.840.10008.1.2.4.105"
+            | "1.2.840.10008.1.2.4.106" => Some("h264"),
+            "1.2.840.10008.1.2.4.107" | "1.2.840.10008.1.2.4.108" => Some("hevc"),
+            _ => None,
+        }
+    }
+
+    /// Runs `ffmpeg` with `args`, feeding `input` on stdin and returning stdout. stdin is
+    /// written and stderr drained on their own threads so neither pipe can fill up and stall
+    /// the other.
+    fn run_ffmpeg(args: &[String], input: Vec<u8>) -> Result<Vec<u8>, String> {
+        run_program("ffmpeg", args, input)
+    }
+
+    pub(super) fn run_program(program: &str, args: &[String], input: Vec<u8>) -> Result<Vec<u8>, String> {
+        let mut child = Command::new(program)
+            .args(["-hide_banner", "-loglevel", "error"])
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| {
+                if e.kind() == ErrorKind::NotFound {
+                    FFMPEG_NOT_FOUND.to_owned()
+                } else {
+                    format!("could not start ffmpeg: {e}")
+                }
+            })?;
+
+        let mut stdin = child.stdin.take().expect("stdin is piped");
+        // A write error means ffmpeg exited early; its exit status and stderr say why.
+        let writer = std::thread::spawn(move || {
+            let _ = stdin.write_all(&input);
+        });
+        let mut stderr = child.stderr.take().expect("stderr is piped");
+        let stderr_reader = std::thread::spawn(move || {
+            let mut text = String::new();
+            let _ = stderr.read_to_string(&mut text);
+            text
+        });
+
+        let mut output = Vec::new();
+        child
+            .stdout
+            .take()
+            .expect("stdout is piped")
+            .read_to_end(&mut output)
+            .map_err(|e| format!("failed to read ffmpeg output: {e}"))?;
+        let status = child.wait().map_err(|e| format!("failed to wait for ffmpeg: {e}"))?;
+        let _ = writer.join();
+        let stderr_text = stderr_reader.join().unwrap_or_default();
+
+        if !status.success() {
+            let detail = stderr_text.trim();
+            return Err(if detail.is_empty() {
+                format!("ffmpeg failed ({status})")
+            } else {
+                format!("ffmpeg failed ({status}): {detail}")
+            });
+        }
+        Ok(output)
+    }
+
+    fn raw_pixel_format(samples_per_pixel: u16) -> &'static str {
+        if samples_per_pixel == 1 {
+            "gray"
+        } else {
+            "rgb24"
+        }
+    }
+
+    pub fn decode_mpeg_pixel_data(object: &DefaultDicomObject) -> Result<Vec<u8>, String> {
+        let ts_uid = transfer_syntax_uid(object);
+        let format = raw_format(&ts_uid, true)
+            .ok_or_else(|| format!("unsupported video transfer syntax: {ts_uid}"))?;
+
+        let fragments = object
+            .element(tags::PIXEL_DATA)
+            .map_err(|e| format!("missing PixelData: {e}"))?
+            .fragments()
+            .ok_or_else(|| "expected encapsulated video pixel data".to_owned())?;
+        if fragments.is_empty() {
+            return Err("no video data to decode".to_owned());
+        }
+        let mut bitstream = Vec::new();
+        for fragment in fragments {
+            bitstream.extend_from_slice(fragment);
+        }
+
+        let rows = object
+            .get(tags::ROWS)
+            .and_then(|e| e.uint16().ok())
+            .ok_or_else(|| "missing Rows attribute".to_owned())?;
+        let cols = object
+            .get(tags::COLUMNS)
+            .and_then(|e| e.uint16().ok())
+            .ok_or_else(|| "missing Columns attribute".to_owned())?;
+        let samples_per_pixel =
+            object.get(tags::SAMPLES_PER_PIXEL).and_then(|e| e.uint16().ok()).unwrap_or(1);
+
+        let args: Vec<String> = [
+            "-f", format, "-i", "pipe:0",
+            "-f", "rawvideo",
+            "-pix_fmt", raw_pixel_format(samples_per_pixel),
+            "-s", &format!("{cols}x{rows}"),
+            "-sws_flags", "bilinear",
+            "pipe:1",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let out = run_ffmpeg(&args, bitstream)?;
+
+        let frame_len = usize::from(rows) * usize::from(cols) * usize::from(samples_per_pixel);
+        if out.is_empty() {
+            return Err("no frames decoded".to_owned());
+        }
+        if frame_len == 0 || out.len() % frame_len != 0 {
+            return Err(format!(
+                "ffmpeg returned {} bytes, not a whole number of {cols}x{rows}x{samples_per_pixel} frames",
+                out.len()
+            ));
+        }
+        Ok(out)
     }
 
     pub fn encode_mpeg_pixel_data(
-        _object: &DefaultDicomObject,
-        _target_uid: &str,
+        object: &DefaultDicomObject,
+        target_uid: &str,
     ) -> Result<Vec<Vec<u8>>, String> {
-        Err("MPEG codec support requires 'ffmpeg-codec' feature to be enabled".to_owned())
+        let format = raw_format(target_uid, false)
+            .ok_or_else(|| format!("unsupported video transfer syntax: {target_uid}"))?;
+
+        let rows = object
+            .get(tags::ROWS)
+            .and_then(|e| e.uint16().ok())
+            .ok_or_else(|| "missing Rows attribute".to_owned())?;
+        let cols = object
+            .get(tags::COLUMNS)
+            .and_then(|e| e.uint16().ok())
+            .ok_or_else(|| "missing Columns attribute".to_owned())?;
+        let samples_per_pixel =
+            object.get(tags::SAMPLES_PER_PIXEL).and_then(|e| e.uint16().ok()).unwrap_or(1);
+        let bits_allocated = object
+            .get(tags::BITS_ALLOCATED)
+            .and_then(|e| e.uint16().ok())
+            .ok_or_else(|| "missing BitsAllocated attribute".to_owned())?;
+        if bits_allocated != 8 {
+            return Err(format!(
+                "video encoding only supports 8-bit samples, got BitsAllocated={bits_allocated}"
+            ));
+        }
+        let number_of_frames = object
+            .get(tags::NUMBER_OF_FRAMES)
+            .and_then(|e| e.to_str().ok())
+            .and_then(|s| s.trim().parse::<usize>().ok())
+            .unwrap_or(1)
+            .max(1);
+
+        let mut pixel_data = object
+            .element(tags::PIXEL_DATA)
+            .map_err(|e| format!("missing PixelData: {e}"))?
+            .to_bytes()
+            .map_err(|e| format!("failed to access pixel data: {e}"))?
+            .to_vec();
+        let frame_len = usize::from(rows) * usize::from(cols) * usize::from(samples_per_pixel);
+        let expected_len = frame_len * number_of_frames;
+        if pixel_data.len() < expected_len {
+            return Err(format!(
+                "PixelData too short for {number_of_frames} frame(s) of {rows}x{cols}x{samples_per_pixel}: \
+                 expected at least {expected_len} bytes, got {}",
+                pixel_data.len()
+            ));
+        }
+        // Even-length padding beyond the last frame isn't a frame.
+        pixel_data.truncate(expected_len);
+
+        let fps = (frames_per_second(object).round() as i64).max(1);
+        let args: Vec<String> = [
+            "-f", "rawvideo",
+            "-pix_fmt", raw_pixel_format(samples_per_pixel),
+            "-s", &format!("{cols}x{rows}"),
+            "-framerate", &fps.to_string(),
+            "-i", "pipe:0",
+            "-pix_fmt", "yuv420p",
+            "-sws_flags", "bilinear",
+            "-f", format,
+            "pipe:1",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let bitstream = run_ffmpeg(&args, pixel_data)?;
+        if bitstream.is_empty() {
+            return Err("encoder produced no data".to_owned());
+        }
+        Ok(vec![bitstream])
     }
 }
 
 pub use mpeg_impl::{decode_mpeg_pixel_data, encode_mpeg_pixel_data};
 
-#[cfg(all(test, feature = "ffmpeg-codec-linked"))]
+#[cfg(test)]
 mod tests {
     use super::{decode_mpeg_pixel_data, encode_mpeg_pixel_data};
     use dcmnorm_core::value::PixelFragmentSequence;
@@ -435,6 +662,23 @@ mod tests {
     const ROWS: u16 = 120;
     const COLS: u16 = 256;
     const FRAME_LEN: usize = ROWS as usize * COLS as usize * 3;
+
+    /// The round trips need a video codec: FFmpeg linked in, or the `ffmpeg` command for the
+    /// default build. Without either they are skipped (with a note), not failed.
+    fn video_codec_available() -> bool {
+        if cfg!(feature = "ffmpeg-codec-linked") {
+            return true;
+        }
+        let found = std::process::Command::new("ffmpeg")
+            .arg("-version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !found {
+            eprintln!("skipping: no ffmpeg on PATH");
+        }
+        found
+    }
 
     /// A red band across the top `count` rows, black elsewhere - deliberately not something a
     /// real X-ray/ultrasound frame would ever look like, so any cross-frame bleed or reordering
@@ -529,6 +773,9 @@ mod tests {
     /// catch, which is why this uses three.
     #[test]
     fn h264_multi_frame_round_trip_preserves_frame_content_and_order() {
+        if !video_codec_available() {
+            return;
+        }
         let frame0 = solid_band_frame(0, [0, 0, 0]);
         let frame1 = solid_band_frame(20, [255, 0, 0]);
         let frame2 = solid_band_frame(20, [0, 255, 0]);
@@ -559,6 +806,9 @@ mod tests {
     /// decode-order-equals-display-order sequences.
     #[test]
     fn mpeg2_and_hevc_multi_frame_round_trips_preserve_frame_order() {
+        if !video_codec_available() {
+            return;
+        }
         let frame0 = solid_band_frame(0, [0, 0, 0]);
         let frame1 = solid_band_frame(20, [255, 0, 0]);
         let frame2 = solid_band_frame(20, [0, 255, 0]);
@@ -598,4 +848,13 @@ mod tests {
         let result = encode_mpeg_pixel_data(&source, "1.2.840.10008.1.2.4.90");
         assert!(result.is_err(), "expected an error, got {result:?}");
     }
+
+    /// Without FFmpeg linked in, a missing `ffmpeg` command is a clear, actionable error.
+    #[cfg(not(feature = "ffmpeg-codec-linked"))]
+    #[test]
+    fn missing_ffmpeg_command_says_how_to_install_it() {
+        let result = super::mpeg_impl::run_program("dcmnorm-test-no-such-ffmpeg", &[], Vec::new());
+        assert_eq!(result.unwrap_err(), super::mpeg_impl::FFMPEG_NOT_FOUND);
+    }
+
 }
