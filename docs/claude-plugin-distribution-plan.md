@@ -33,10 +33,12 @@ Done:
 
 Left (owner steps):
 
-1. A listing icon: a square PNG, 512 to 2048 px, at `plugin/.claude-plugin/icon.png`. It is the only failure under
-   `claude plugin validate --profile directory --strict plugin`, and it is fixed at the first save or submission
-   in the developer portal.
-2. PyPI Trusted Publishing setup (`packaging/README.md`), then a release tag (`./scripts/release-tag.sh minor`).
+1. Approve or replace the listing icon, `plugin/.claude-plugin/icon.png` (1024 px, drawn by
+   `packaging/make-plugin-icon.py`): it is fixed at the first save or submission in the developer portal.
+   `claude plugin validate --profile directory --strict plugin` passes with it.
+2. PyPI Trusted Publishing: the GitHub side is done (environment `pypi`, `v*` tags only; variable
+   `PYPI_PUBLISH=true`); the pending publisher on PyPI is left (`packaging/README.md`, step 1). Then a release tag
+   (`./scripts/release-tag.sh minor`).
    The skill's pinned version must exist on PyPI before the plugin is submitted.
 3. Submit `plugin/` at claude.ai/directory/manage (section 5 below), tracking a release tag.
 
