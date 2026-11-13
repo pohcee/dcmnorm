@@ -1,222 +1,341 @@
-:root {
-  color-scheme: light dark;
-  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+/* dcmnorm live demo. Colours come from the dcmnorm icon (packaging/make-brand-images.py): its navy
+   tile, slice blues and ring blue. Rendered frames always sit on black, as on a reading screen. */
 
-  --bg: #ffffff;
-  --fg: #1a1a1a;
-  --muted: #666666;
-  --border: rgba(0, 0, 0, 0.18);
-  --surface: rgba(0, 0, 0, 0.06);
-  --error: #c0392b;
+:root {
+  color-scheme: light;
+  --page: #f3f7fc;
+  --surface: #ffffff;
+  --ink: #102a52;        /* the icon's tile */
+  --ink-soft: #4a5d7c;
+  --line: #d3deec;
+  --link: #2f6db5;       /* the icon's back slice, darkened for contrast */
+  --ring: #78c4ff;       /* the icon's ring: focus */
+  --drop: #e6effa;
+  --error: #b3261e;
+  --viewer: #000000;
+  --viewer-ink: #b9c7da;
+
+  --font: "Atkinson Hyperlegible", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "Atkinson Hyperlegible Mono", ui-monospace, SFMono-Regular, Consolas, monospace;
+  --measure: 68ch;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #16181c;
-    --fg: #e8e8e8;
-    --muted: #a3a3a3;
-    --border: rgba(255, 255, 255, 0.2);
-    --surface: rgba(255, 255, 255, 0.08);
-    --error: #ff7a68;
+    color-scheme: dark;
+    --page: #0e1c33;
+    --surface: #13274a;
+    --ink: #e7f0fb;
+    --ink-soft: #9fb3cf;
+    --line: #26406a;
+    --link: #8ccbff;
+    --drop: #12284b;
+    --error: #ff8a7a;
   }
 }
 
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  font-size: 106.25%; /* 17px body: Atkinson reads small at 16 */
+}
+
 body {
-  max-width: 960px;
+  margin: 0;
+  padding: 2.5rem 1rem 3rem;
+  background: var(--page);
+  color: var(--ink);
+  font-family: var(--font);
+  line-height: 1.55;
+}
+
+.site-header,
+main,
+.site-footer {
+  max-width: 62rem;
   margin: 0 auto;
-  padding: 1.5rem;
-  line-height: 1.5;
-  background: var(--bg);
-  color: var(--fg);
 }
 
-header p {
-  color: var(--muted);
+a {
+  color: var(--link);
+  text-underline-offset: 0.18em;
 }
 
-.header-top {
-  display: flex;
-  justify-content: space-between;
-  align-items: baseline;
-  flex-wrap: wrap;
-  gap: 0.5rem 1rem;
+:focus-visible {
+  outline: 3px solid var(--ring);
+  outline-offset: 2px;
+  border-radius: 4px;
 }
 
-.header-top h1 {
-  margin-bottom: 0;
+code,
+pre {
+  font-family: var(--mono);
 }
 
-.github-link {
-  font-size: 0.9rem;
+h2 {
+  font-size: 1.2rem;
+  line-height: 1.3;
+  margin: 0 0 0.75rem;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
   white-space: nowrap;
 }
 
-.version-line {
-  font-size: 0.8rem;
-  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
-  color: var(--muted);
-  margin-top: -0.5rem;
-}
+/* Header: the icon and the name are the page's title. */
 
-#tabs {
-  display: flex;
-  gap: 0.5rem;
-  border-bottom: 1px solid var(--border);
-  margin-bottom: 1.5rem;
-}
-
-.tab-btn {
-  background: none;
-  border: none;
-  border-bottom: 2px solid transparent;
-  padding: 0.5rem 0.25rem;
-  font-size: 1rem;
-  cursor: pointer;
-  color: inherit;
-}
-
-.tab-btn.active {
-  border-bottom-color: currentColor;
-  font-weight: 600;
-}
-
-#tab-about p {
-  max-width: 680px;
-}
-
-code {
-  background: var(--surface);
-  padding: 0.1rem 0.3rem;
-  border-radius: 3px;
-}
-
-#upload-form {
-  display: flex;
-  gap: 0.75rem;
+.brand {
+  display: inline-flex;
   align-items: center;
-  flex-wrap: wrap;
+  gap: 0.9rem;
+  color: inherit;
+  text-decoration: none;
 }
 
-button {
-  padding: 0.5rem 1rem;
+.brand img {
+  border-radius: 13px;
+}
+
+.brand-name {
+  font-size: 2.6rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1;
+}
+
+.tagline {
+  max-width: var(--measure);
+  margin: 1rem 0 0.4rem;
+  font-size: 1.15rem;
+}
+
+.meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 1.5rem;
+  margin: 0 0 2rem;
+  color: var(--ink-soft);
+  font-size: 0.9rem;
+}
+
+/* Drop zone: the main action. */
+
+.dropzone {
+  display: grid;
+  justify-items: start;
+  gap: 0.35rem;
+  padding: 2rem 2rem 2.1rem;
+  border: 2px dashed var(--line);
+  border-radius: 14px;
+  background: var(--drop);
+  transition: border-color 120ms ease, background-color 120ms ease;
+}
+
+.dropzone.is-over {
+  border-color: var(--link);
+  border-style: solid;
+}
+
+.dropzone-title {
+  margin: 0;
+  font-size: 1.35rem;
+  font-weight: 700;
+}
+
+.dropzone-hint {
+  margin: 0 0 0.9rem;
+  color: var(--ink-soft);
+}
+
+.button {
+  display: inline-block;
+  padding: 0.6rem 1.2rem;
+  border: 0;
+  border-radius: 8px;
+  font: inherit;
+  background: var(--ink);
+  color: var(--page);
+  font-weight: 700;
   cursor: pointer;
+}
+
+.button:hover {
+  background: var(--link);
+}
+
+.button:disabled {
+  opacity: 0.55;
+  cursor: progress;
 }
 
 #status {
-  min-height: 1.5rem;
-  font-weight: 600;
+  min-height: 1.6rem;
+  margin: 0.75rem 0 2rem;
+  font-weight: 700;
 }
 
 #status.error {
   color: var(--error);
 }
 
-#samples-section {
-  margin-top: 1.5rem;
-}
-
-#samples-section p {
-  color: var(--muted);
-}
+/* Samples: a plain list of files, name first. */
 
 #samples-list {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
-  gap: 0.75rem;
+  grid-template-columns: repeat(auto-fill, minmax(19rem, 1fr));
+  border-top: 1px solid var(--line);
 }
 
 .sample-row {
-  display: flex;
-  flex-direction: column;
-  gap: 0.3rem;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 0.6rem 0.85rem;
+  display: grid;
+  gap: 0.15rem;
+  padding: 0.75rem 0.25rem;
+  border: 0;
+  border-bottom: 1px solid var(--line);
   background: none;
   color: inherit;
   font: inherit;
   text-align: left;
-}
-
-.sample-row:hover:not(:disabled) {
-  border-color: currentColor;
+  cursor: pointer;
 }
 
 .sample-header {
   display: flex;
   justify-content: space-between;
   align-items: baseline;
-  gap: 0.5rem;
+  gap: 1rem;
+}
+
+.sample-row:hover:not(:disabled) .sample-name {
+  color: var(--link);
+  text-decoration: underline;
+  text-underline-offset: 0.18em;
+}
+
+.sample-row:disabled {
+  cursor: progress;
+  opacity: 0.6;
 }
 
 .sample-name {
-  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
-  font-size: 0.85rem;
+  font-family: var(--mono);
   font-weight: 600;
 }
 
 .sample-size {
-  font-size: 0.75rem;
-  color: var(--muted);
-  white-space: nowrap;
+  color: var(--ink-soft);
+  font-family: var(--mono);
+  font-size: 0.85rem;
 }
 
 .sample-description {
-  font-size: 0.8rem;
-  color: var(--muted);
+  color: var(--ink-soft);
+  font-size: 0.92rem;
 }
 
-table#timings-table {
-  border-collapse: collapse;
-  margin-bottom: 1.5rem;
+@media (min-width: 40rem) {
+  #samples-list {
+    column-gap: 2rem;
+  }
 }
 
-table#timings-table td {
-  padding: 0.25rem 0.75rem;
-  border-bottom: 1px solid var(--border);
+/* Results */
+
+#results {
+  margin-top: 3rem;
+  scroll-margin-top: 1.5rem;
 }
 
-table#timings-table td:first-child {
-  font-weight: 600;
+.results-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem 2rem;
+  margin-bottom: 0.75rem;
 }
 
-.frames-hint {
-  font-size: 0.85rem;
-  color: var(--muted);
-  margin-top: -0.5rem;
+.results-head h2 {
+  margin: 0;
 }
 
-#truncated-note {
-  color: var(--error);
+.count {
+  color: var(--ink-soft);
+  font-weight: 400;
+}
+
+#timings {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 1.5rem;
+  margin: 0;
+  font-size: 0.9rem;
+}
+
+#timings div {
+  display: flex;
+  gap: 0.45rem;
+}
+
+#timings dt {
+  color: var(--ink-soft);
+}
+
+#timings dd {
+  margin: 0;
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+
+#timings .total dt,
+#timings .total dd {
+  color: var(--ink);
+  font-weight: 700;
+}
+
+/* The viewer: frames on black, the one dark surface on the page in either theme. */
+
+.viewer {
+  padding: 1.25rem;
+  border-radius: 14px;
+  background: var(--viewer);
+  color: var(--viewer-ink);
 }
 
 #frames-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(160px, 200px));
-  justify-content: start;
-  gap: 1rem;
-  margin-bottom: 1.5rem;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 1.25rem 1rem;
 }
 
 .frame-card {
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 0.5rem;
-  text-align: center;
+  margin: 0;
 }
 
 .frame-thumb-btn {
   display: block;
   width: 100%;
-  /* aspect-ratio is set inline per-frame (real rendered width/height), so the box is never
+  /* aspect-ratio is set inline per frame (the real rendered width/height), so the box is never
      stretched or squashed relative to the image it holds - see app.js. */
-  border: none;
-  border-radius: 4px;
   padding: 0;
-  margin: 0 auto;
+  border: 1px solid #1f2a3a;
+  border-radius: 4px;
   background: #000;
   cursor: zoom-in;
   overflow: hidden;
+}
+
+.frame-thumb-btn:hover {
+  border-color: var(--ring);
 }
 
 .frame-thumb-btn img {
@@ -226,31 +345,87 @@ table#timings-table td:first-child {
   object-fit: contain;
 }
 
-.frame-card .frame-meta {
-  font-size: 0.8rem;
-  color: var(--muted);
+.frame-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
   margin-top: 0.35rem;
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.viewer-hint,
+.viewer-note {
+  margin: 0;
+  font-size: 0.9rem;
+}
+
+.viewer-hint {
+  margin-top: 1rem;
+}
+
+.viewer-note + #frames-grid:empty {
+  display: none;
+}
+
+#truncated-note {
+  margin-bottom: 1rem;
+  color: #ffb4a8;
+}
+
+/* Metadata */
+
+.metadata {
+  margin-top: 2rem;
+}
+
+.metadata summary {
+  cursor: pointer;
+  list-style-position: inside;
+}
+
+.metadata summary h2 {
+  display: inline;
 }
 
 pre#metadata-json {
+  max-height: 32rem;
+  margin: 0.75rem 0 0;
+  padding: 1rem 1.25rem;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 10px;
   background: var(--surface);
-  padding: 1rem;
-  border-radius: 6px;
-  overflow-x: auto;
-  max-height: 500px;
-  overflow-y: auto;
   font-size: 0.85rem;
+  line-height: 1.5;
 }
+
+/* Footer */
+
+.site-footer {
+  margin-top: 4rem;
+  padding-top: 1.25rem;
+  border-top: 1px solid var(--line);
+  color: var(--ink-soft);
+  font-size: 0.92rem;
+}
+
+.site-footer p {
+  max-width: var(--measure);
+}
+
+/* Lightbox */
 
 .lightbox {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.85);
+  z-index: 1000;
   display: flex;
   align-items: center;
   justify-content: center;
   padding: 2rem;
-  z-index: 1000;
+  background: rgba(0, 0, 0, 0.92);
 }
 
 /* Our own `display: flex` above has the same specificity as the UA stylesheet's
@@ -268,6 +443,7 @@ pre#metadata-json {
   gap: 0.75rem;
   max-width: 100%;
   max-height: 100%;
+  margin: 0;
 }
 
 .lightbox-content img {
@@ -275,11 +451,11 @@ pre#metadata-json {
   max-height: 80vh;
   object-fit: contain;
   background: #000;
-  border-radius: 4px;
 }
 
-.lightbox-content p {
-  color: #ddd;
+.lightbox-content figcaption {
+  color: #c8d3e2;
+  font-family: var(--mono);
   font-size: 0.85rem;
   text-align: center;
 }
@@ -287,12 +463,32 @@ pre#metadata-json {
 .lightbox-close {
   position: absolute;
   top: 1rem;
-  right: 1.5rem;
+  right: 1.25rem;
+  padding: 0.25rem 0.6rem;
+  border: 0;
   background: none;
-  border: none;
   color: #fff;
   font-size: 2rem;
   line-height: 1;
   cursor: pointer;
-  padding: 0.25rem 0.5rem;
+}
+
+@media (max-width: 30rem) {
+  body {
+    padding-top: 1.5rem;
+  }
+
+  .brand-name {
+    font-size: 2.1rem;
+  }
+
+  .dropzone {
+    padding: 1.4rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dropzone {
+    transition: none;
+  }
 }

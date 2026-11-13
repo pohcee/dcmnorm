@@ -1,4 +1,4 @@
-<img src="https://raw.githubusercontent.com/pohcee/dcmnorm/main/plugin/.claude-plugin/icon.png" alt="dcmnorm" width="96">
+<img src="https://raw.githubusercontent.com/pohcee/dcmnorm/main/docs/images/dcmnorm-icon.png" alt="dcmnorm" width="96">
 
 # dcmnorm (command-line tools)
 

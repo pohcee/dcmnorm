@@ -30,7 +30,8 @@ transfer syntaxes"). Release builds are stripped (`CARGO_PROFILE_RELEASE_STRIP=s
   from it (version, DICOM to JSON, DICOM to PNG).
 - `pypi-README.md` is the PyPI project description.
 - `make-brand-images.py` draws the dcmnorm icon and everything made from it: the plugin's listing icon
-  (`plugin/.claude-plugin/icon.png`, also the README and PyPI logo), the Node test website's favicon and
+  (`plugin/.claude-plugin/icon.png`), the same icon for the README and PyPI (`docs/images/dcmnorm-icon.png`),
+  the Node test website's favicon and
   `docs/images/social-preview.png`, which is uploaded by hand as the repository's GitHub social preview
   (Settings > General > Social preview). Edit the drawing there, not the PNGs.
 

@@ -5,15 +5,18 @@
 
 writes, relative to the repository root:
 
-    plugin/.claude-plugin/icon.png                        1024 px  Claude plugin listing icon; README and PyPI logo
+    plugin/.claude-plugin/icon.png                        1024 px  the Claude plugin's listing icon
+    docs/images/dcmnorm-icon.png                          1024 px  the same icon for everything else (README, PyPI)
     bindings/node/examples/test-website/public/favicon.png  128 px  the test website's favicon
     docs/images/social-preview.png                        1280x640 GitHub social preview (upload it by hand:
                                                                     Settings > General > Social preview)
 
 The icon: a CT gantry ring around a stack of three image slices (isometric squares), the front
 slice showing a pixel grid, on a deep blue rounded tile. Change the drawing here, not the PNGs.
-The plugin icon is the Claude directory's listing icon: the directory took it when the plugin was
-first submitted, and redrawing it only changes the copy in the repository.
+The plugin keeps its own copy because the Claude directory installs plugin/ alone; links from
+anywhere else use docs/images/dcmnorm-icon.png, so they don't depend on the plugin's layout.
+The plugin icon is the directory's listing icon: the directory took it when the plugin was first
+submitted, and redrawing it only changes the copy in the repository.
 """
 
 import sys
@@ -94,6 +97,7 @@ def main() -> None:
         sys.exit(__doc__)
     outputs = {
         ROOT / "plugin/.claude-plugin/icon.png": draw_icon(1024),
+        ROOT / "docs/images/dcmnorm-icon.png": draw_icon(1024),
         ROOT / "bindings/node/examples/test-website/public/favicon.png": draw_icon(128),
         ROOT / "docs/images/social-preview.png": draw_social_preview(),
     }

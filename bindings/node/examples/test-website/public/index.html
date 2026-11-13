@@ -2,91 +2,81 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>dcmnorm-node test website</title>
+  <title>dcmnorm live demo</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="description" content="Try dcmnorm's Node.js bindings on a DICOM file: its metadata as JSON, every frame rendered, and how long each step took." />
   <link rel="icon" type="image/png" href="favicon.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible+Mono:wght@400;600&family=Atkinson+Hyperlegible:wght@400;700&display=swap" />
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
-  <header>
-    <div class="header-top">
-      <h1>dcmnorm-node test website</h1>
-      <a class="github-link" href="https://github.com/pohcee/dcmnorm" target="_blank" rel="noopener noreferrer">
-        View dcmnorm on GitHub &#8594;
-      </a>
-    </div>
-    <p>Upload a <code>.dcm</code> file to render its JSON metadata and every frame as JPEG, with step timings.</p>
-    <p id="version-line" class="version-line"></p>
-    <nav id="tabs">
-      <button type="button" class="tab-btn" data-tab="about">About</button>
-      <button type="button" class="tab-btn active" data-tab="tester">Tester</button>
-    </nav>
+  <header class="site-header">
+    <a class="brand" href="https://github.com/pohcee/dcmnorm" target="_blank" rel="noopener noreferrer">
+      <img src="favicon.png" alt="" width="56" height="56" />
+      <span class="brand-name">dcmnorm</span>
+    </a>
+    <p class="tagline">Open a DICOM file to see what dcmnorm reads from it, every frame it renders, and how long each step takes.</p>
+    <p class="meta">
+      <span id="version-line"></span>
+      <a href="https://github.com/pohcee/dcmnorm" target="_blank" rel="noopener noreferrer">Source on GitHub</a>
+    </p>
   </header>
 
   <main>
-    <section id="tab-tester" class="tab-panel">
-      <section id="upload-section">
-        <form id="upload-form">
-          <input type="file" id="file-input" accept=".dcm" required />
-          <button type="submit" id="submit-btn">Upload &amp; Process</button>
-        </form>
-        <p id="status"></p>
-      </section>
+    <form id="upload-form" class="dropzone" novalidate>
+      <input type="file" id="file-input" accept=".dcm,application/dicom" class="visually-hidden" />
+      <p class="dropzone-title">Drop a <code>.dcm</code> file here</p>
+      <p class="dropzone-hint">The server processes it and deletes it 10 minutes later.</p>
+      <button type="button" id="submit-btn" class="button">Choose a file</button>
+    </form>
+    <p id="status" role="status" aria-live="polite"></p>
 
-      <section id="samples-section">
-        <h2>Or try a bundled sample file</h2>
-        <p>These <code>.dcm</code> fixtures ship with the site - click one to process it.</p>
-        <div id="samples-list"><p id="samples-loading">Loading sample files...</p></div>
-      </section>
-
-      <section id="results" hidden>
-        <h2>Timings</h2>
-        <table id="timings-table">
-          <tbody></tbody>
-        </table>
-
-        <h2>Frames (<span id="frame-count"></span>)</h2>
-        <p id="no-pixel-data-note" class="frames-hint" hidden>
-          This file has no pixel data (e.g. a Structured Report, encapsulated PDF, or RTSTRUCT) -
-          metadata only, nothing to render.
-        </p>
-        <p id="frames-hint" class="frames-hint">Click a frame to see a larger render (up to 1024x1024).</p>
-        <p id="truncated-note" hidden></p>
-        <div id="frames-grid"></div>
-
-        <h2>Metadata</h2>
-        <pre id="metadata-json"></pre>
-      </section>
+    <section id="samples-section" aria-labelledby="samples-heading">
+      <h2 id="samples-heading">No file at hand? Open a sample</h2>
+      <div id="samples-list"><p id="samples-loading">Loading samples...</p></div>
     </section>
 
-    <section id="tab-about" class="tab-panel" hidden>
-      <h2>About</h2>
-      <p>
-        This site is a small demo/test harness for
-        <a href="https://github.com/pohcee/dcmnorm" target="_blank" rel="noopener noreferrer"><code>dcmnorm</code></a>,
-        an open-source DICOM parsing/normalization library, and its native Node.js bindings
-        (<code>@pohcee/dcmnorm-node</code>). This deployment is testing <span id="version-line-about"></span>.
-      </p>
-      <p>
-        The <strong>Tester</strong> tab lets you upload any <code>.dcm</code> file. The server calls
-        straight into the dcmnorm Rust library (no CLI subprocess) to validate the file, dump its
-        full DICOM JSON metadata, and render every frame to JPEG - reporting how long each step
-        took.
-      </p>
-      <p>
-        dcmnorm is free and open source. Check out the code, file issues, or use it in your own
-        project at
-        <a href="https://github.com/pohcee/dcmnorm" target="_blank" rel="noopener noreferrer">github.com/pohcee/dcmnorm</a>.
-      </p>
+    <section id="results" aria-labelledby="results-heading" hidden>
+      <div class="results-head">
+        <h2 id="results-heading">Frames <span id="frame-count" class="count"></span></h2>
+        <dl id="timings"></dl>
+      </div>
+
+      <div class="viewer">
+        <p id="no-pixel-data-note" class="viewer-note" hidden>
+          This file has no pixel data (a Structured Report, an encapsulated PDF or an RTSTRUCT, for example), so
+          there is nothing to render. Its metadata is below.
+        </p>
+        <p id="truncated-note" class="viewer-note" hidden></p>
+        <div id="frames-grid"></div>
+        <p id="frames-hint" class="viewer-hint">Select a frame to view it larger (up to 1024 pixels).</p>
+      </div>
+
+      <details class="metadata" open>
+        <summary><h2>Metadata</h2></summary>
+        <pre id="metadata-json"></pre>
+      </details>
     </section>
   </main>
 
-  <div id="lightbox" class="lightbox" hidden>
+  <footer class="site-footer">
+    <p>
+      This demo runs <a href="https://github.com/pohcee/dcmnorm" target="_blank" rel="noopener noreferrer">dcmnorm</a>,
+      an open-source DICOM toolkit in Rust, through its Node.js bindings: the server calls the library in process to
+      validate the file, read its full DICOM JSON and render every frame to JPEG. This deployment runs
+      <span id="version-line-about">dcmnorm</span>.
+    </p>
+    <p>Use synthetic or de-identified files: anything you upload here is sent to a public demo server.</p>
+  </footer>
+
+  <div id="lightbox" class="lightbox" hidden role="dialog" aria-modal="true" aria-label="Frame preview">
     <button type="button" id="lightbox-close" class="lightbox-close" aria-label="Close">&times;</button>
-    <div class="lightbox-content">
+    <figure class="lightbox-content">
       <img id="lightbox-img" alt="" />
-      <p id="lightbox-caption"></p>
-    </div>
+      <figcaption id="lightbox-caption"></figcaption>
+    </figure>
   </div>
 
   <script src="app.js"></script>
