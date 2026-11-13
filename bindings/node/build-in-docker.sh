@@ -17,6 +17,21 @@ docker run --rm -v "$SCRIPT_DIR/../..":/repo -w /repo/bindings/node \
   -e HOST_UID="$HOST_UID" -e HOST_GID="$HOST_GID" \
   node:22-bullseye-slim bash -c '
     set -euo pipefail
+    # The container runs as root, so everything it writes on the volume mount (node_modules
+    # from the npm install below, the .node output, the generated index.js/index.d.ts, the
+    # shared workspace target/ dir cargo writes into, a package-lock.json) would otherwise be
+    # left root-owned on the host. Hand back every root-owned path under /repo to whoever
+    # invoked this script, from an EXIT trap so it also runs when a step below fails. A stray
+    # root-owned path breaks the next host-side cargo build, npm install or clean -fdx of the
+    # checkout (a CI runner without sudo cannot remove it at all).
+    hand_back() {
+      local rc=$?
+      if [ "$HOST_UID" != "0" ]; then
+        find /repo -xdev -user 0 -exec chown -h "$HOST_UID:$HOST_GID" {} + || true
+      fi
+      exit "$rc"
+    }
+    trap hand_back EXIT
     # Debian 11 is EOL and its security pool is gone from deb.debian.org (404s), so pin apt to
     # the snapshot.debian.org archive (the same dates the image ships commented out) - this is
     # also reproducible. Release files are old, hence Check-Valid-Until=false.
@@ -102,11 +117,5 @@ docker run --rm -v "$SCRIPT_DIR/../..":/repo -w /repo/bindings/node \
       echo "ERROR: addon needs GLIBCXX_$MAX_GLIBCXX (> 3.4.28)" >&2; exit 1
     fi
 
-    # The container runs as root, so everything it touched on the volume mount -
-    # the .node output here *and* the shared workspace target/ dir cargo writes
-    # into - would otherwise be left root-owned on the host. Hand it all back to
-    # whoever invoked this script (a stray root-owned target/ file breaks the
-    # next host-side `cargo build` with a permission error).
-    chown "$HOST_UID:$HOST_GID" *.node
-    chown -R "$HOST_UID:$HOST_GID" /repo/target
+    # Ownership of everything written under /repo is handed back by the EXIT trap at the top.
   '
