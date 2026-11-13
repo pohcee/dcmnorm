@@ -14,12 +14,21 @@ syntaxes and MP4 output also use the `ffmpeg` command when it's installed.
 
 De-identification (`--set` edits) is only as complete as the edits applied, so verify the output before sharing images.
 
-Install in Claude Code from this repository's marketplace:
+Install it in Claude Code from this repository's marketplace:
 
 ```
 /plugin marketplace add pohcee/dcmnorm
 /plugin install dcmnorm@dcmnorm
 ```
+
+in Gemini CLI as an extension:
+
+```
+gemini extensions install https://github.com/pohcee/dcmnorm
+```
+
+or in Google Antigravity, by importing that Gemini CLI extension (`agy plugin import gemini`) or from
+a checkout of the `claude-plugin` branch (`agy plugin install <directory>`).
 
 ## Privacy
 
