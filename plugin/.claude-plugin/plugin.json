@@ -1,6 +1,6 @@
 {
   "name": "dcmnorm",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "Read, inspect, edit, anonymize, validate, transcode and render DICOM medical images with the dcmnorm CLI, and query, send and receive them over a DICOM network (PACS, C-ECHO/C-STORE/C-FIND/C-MOVE) with dcmtalk. Installs the native CLIs from PyPI on first use; everything runs locally.",
   "author": {
     "name": "Jason Klotzer",
