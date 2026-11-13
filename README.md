@@ -1348,6 +1348,9 @@ One GitHub Actions workflow, [`.github/workflows/release.yml`](.github/workflows
     - the CLI wheels on PyPI as [`dcmnorm`](https://pypi.org/project/dcmnorm/) (both binaries in
       one wheel per platform; see [packaging/README.md](packaging/README.md)). This step runs only
       when the repository variable `PYPI_PUBLISH` is `true`.
+    - the `claude-plugin` branch, rebuilt from this release's `plugin/` folder
+      (`scripts/update-plugin-branch.sh`): the Claude plugin directory tracks that branch, since it
+      downloads a whole ref and this repository is over its size limit.
     - each of `bindings/{node,python,java}`'s rebuilt native artifact (via that binding's own
       `build-in-docker.sh`, plus the Windows Node addon), committed straight to `main`, but only
       if all four builds succeed, so a partial rebuild never lands silently.

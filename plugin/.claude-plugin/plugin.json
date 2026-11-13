@@ -1,7 +1,8 @@
 {
   "name": "dcmnorm",
+  "displayName": "dcmnorm",
   "version": "0.9.0",
-  "description": "Read, inspect, edit, anonymize, validate, transcode and render DICOM medical images with the dcmnorm CLI, and query, send and receive them over a DICOM network (PACS, C-ECHO/C-STORE/C-FIND/C-MOVE) with dcmtalk. Installs the native CLIs from PyPI on first use; everything runs locally.",
+  "description": "Read, inspect, edit, anonymize, validate, transcode and render DICOM medical images with the dcmnorm CLI, and query, send and receive them over a DICOM network (PACS, C-ECHO/C-STORE/C-FIND/C-MOVE) with dcmtalk. Installs the native CLIs from PyPI on first use; files are processed locally, and network operations go only to the DICOM nodes you name.",
   "author": {
     "name": "Jason Klotzer",
     "url": "https://github.com/pohcee"
@@ -9,5 +10,6 @@
   "homepage": "https://github.com/pohcee/dcmnorm",
   "repository": "https://github.com/pohcee/dcmnorm",
   "license": "Apache-2.0",
+  "privacyPolicyUrl": "https://github.com/pohcee/dcmnorm/blob/main/plugin/README.md#privacy",
   "keywords": ["dicom", "medical-imaging", "pacs", "dimse", "anonymization", "radiology"]
 }

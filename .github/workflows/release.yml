@@ -424,6 +424,29 @@ jobs:
         with:
           packages-dir: wheels/
 
+  plugin-branch:
+    name: Update the claude-plugin branch
+    # The Claude plugin directory tracks the claude-plugin branch (plugin/ only; the repository is
+    # over its download size limit). Point it at this release's plugin/, whose version pins
+    # release-tag.sh just set; see scripts/update-plugin-branch.sh.
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [test, cli]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Update and push the branch
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          scripts/update-plugin-branch.sh "$GITHUB_SHA" --push
+
   commit-bindings:
     name: Commit rebuilt binding artifacts
     # Only for main or a release tag: a manual run on a feature branch builds and uploads the
