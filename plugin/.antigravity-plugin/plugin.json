@@ -1,0 +1,13 @@
+{
+  "$schema": "https://antigravity.google/schemas/v1/plugin.json",
+  "name": "dcmnorm",
+  "displayName": "dcmnorm",
+  "version": "0.9.0",
+  "description": "Read, inspect, edit, anonymize, validate, transcode and render DICOM medical images with the dcmnorm CLI, and query, send and receive them over a DICOM network (PACS) with dcmtalk. Installs the native CLIs from PyPI on first use; everything runs locally.",
+  "logo": ".claude-plugin/icon.png",
+  "suggestedPrompts": [
+    "Show the patient, study and series details of this DICOM file",
+    "Render every frame of this DICOM file to PNG",
+    "Check whether my PACS at host:port answers a C-ECHO"
+  ]
+}

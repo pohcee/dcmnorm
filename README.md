@@ -81,17 +81,29 @@ uv tool install dcmnorm        # or: pipx install dcmnorm / pip install dcmnorm
 This installs the native `dcmnorm` and `dcmtalk` binaries for your platform; nothing runs in
 Python. (For in-process use from Python, see [bindings/python](bindings/python/).)
 
-### Claude plugin
+### Agent plugin (Claude, Gemini CLI, Antigravity)
 
-The [`plugin/`](plugin/) directory is a Claude plugin with the dcmnorm skill: Claude uses the CLIs
-for DICOM tasks and installs them from PyPI on first use. In Claude Code:
+The [`plugin/`](plugin/) directory is one plugin with the dcmnorm skill, with a manifest for each of
+Claude, Gemini CLI and Google Antigravity: the agent uses the CLIs for DICOM tasks and installs them
+from PyPI on first use.
 
-```
+```bash
+# Claude Code
 /plugin marketplace add pohcee/dcmnorm
 /plugin install dcmnorm@dcmnorm
+
+# Gemini CLI (from the latest release; --ref claude-plugin installs from the plugin branch)
+gemini extensions install https://github.com/pohcee/dcmnorm
+
+# Antigravity: import the Gemini CLI extension, or install a checkout of the plugin
+agy plugin import gemini
+git clone --branch claude-plugin https://github.com/pohcee/dcmnorm.git dcmnorm-plugin
+agy plugin install "$PWD/dcmnorm-plugin"
 ```
 
-The install scripts below also put the skill into Claude Code, Gemini CLI and Codex CLI.
+The `claude-plugin` branch holds just `plugin/` and is rebuilt on every release; each release also
+attaches it as `<platform>.dcmnorm.tar.gz`, which is what Gemini CLI installs. The install scripts
+below also put the skill into Claude Code, Gemini CLI and Codex CLI.
 
 ### Video transfer syntaxes need `ffmpeg`
 

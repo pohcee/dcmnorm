@@ -4,9 +4,10 @@
     scripts/check-versions.py            check: exit 1 if any pin differs from exec/dcmnorm/Cargo.toml
     scripts/check-versions.py --set X    write X into every pin (scripts/release-tag.sh does this)
 
-The pins: the plugin's version (plugin/.claude-plugin/plugin.json and its marketplace entry in
-.claude-plugin/marketplace.json) and the version the skill installs and names in its Setup
-section (plugin/skills/dcmnorm/SKILL.md). The skill installs `dcmnorm==<pin>` from PyPI, so it
+The pins: the plugin's version in each of its manifests (Claude: plugin/.claude-plugin/plugin.json
+and its marketplace entry in .claude-plugin/marketplace.json; Gemini CLI:
+plugin/gemini-extension.json; Antigravity: plugin/.antigravity-plugin/plugin.json) and the version
+the skill installs and names in its Setup section (plugin/skills/dcmnorm/SKILL.md). The skill installs `dcmnorm==<pin>` from PyPI, so it
 must name a version that is (or, at release time, is about to be) published.
 """
 
@@ -21,6 +22,11 @@ CARGO_TOML = REPO_ROOT / "exec" / "dcmnorm" / "Cargo.toml"
 PLUGIN_JSON = REPO_ROOT / "plugin" / ".claude-plugin" / "plugin.json"
 MARKETPLACE_JSON = REPO_ROOT / ".claude-plugin" / "marketplace.json"
 SKILL_MD = REPO_ROOT / "plugin" / "skills" / "dcmnorm" / "SKILL.md"
+# The same plugin's manifests for other agents; each holds a top-level "version".
+OTHER_MANIFESTS = [
+    REPO_ROOT / "plugin" / "gemini-extension.json",
+    REPO_ROOT / "plugin" / ".antigravity-plugin" / "plugin.json",
+]
 
 VERSION = r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?"  # SemVer, as in Cargo.toml and plugin.json
 PYPI_VERSION = r"\d+\.\d+\.\d+(?:(?:a|b|rc)\d+)?"  # the PyPI form the skill installs
@@ -59,7 +65,10 @@ def json_pins() -> list:
     entries = [p for p in marketplace["plugins"] if p["name"] == plugin["name"]]
     if len(entries) != 1:
         sys.exit(f"{MARKETPLACE_JSON} must list the {plugin['name']} plugin exactly once")
-    return [(PLUGIN_JSON, plugin["version"]), (MARKETPLACE_JSON, entries[0]["version"])]
+    pins = [(PLUGIN_JSON, plugin["version"]), (MARKETPLACE_JSON, entries[0]["version"])]
+    for path in OTHER_MANIFESTS:
+        pins.append((path, json.loads(path.read_text(encoding="utf-8"))["version"]))
+    return pins
 
 
 def skill_pins(text: str) -> list:
@@ -72,7 +81,7 @@ def skill_pins(text: str) -> list:
 
 
 def set_versions(version: str) -> None:
-    for path in (PLUGIN_JSON, MARKETPLACE_JSON):
+    for path in (PLUGIN_JSON, MARKETPLACE_JSON, *OTHER_MANIFESTS):
         text = path.read_text(encoding="utf-8")
         # Only the "version" keys; a textual edit keeps the files' formatting.
         text = re.sub(rf'("version":\s*")({VERSION})(")', rf"\g<1>{version}\g<3>", text)

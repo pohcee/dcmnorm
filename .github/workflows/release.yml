@@ -376,6 +376,10 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Checkout repository
+        # Before the download: checkout cleans the workspace.
+        uses: actions/checkout@v7
+
       - name: Download CLI artifacts
         uses: actions/download-artifact@v8
         with:
@@ -383,9 +387,24 @@ jobs:
           path: dist
           merge-multiple: true
 
+      - name: Package the agent plugin for Gemini CLI
+        # `gemini extensions install https://github.com/pohcee/dcmnorm` (and the extensions
+        # gallery's crawler) installs from the latest release: an asset named
+        # `<platform>.<name>.tar.gz` with gemini-extension.json at its root. The plugin is the
+        # same on every platform, so it ships once per platform name. The CLI archives
+        # (dcmnorm-...) don't start with a platform name, so they are never picked instead.
+        # No .sha256 for these: Gemini CLI takes the first asset whose name starts with
+        # "<platform>.", and a "linux.dcmnorm.tar.gz.sha256" could be that one.
+        run: |
+          set -euo pipefail
+          for platform in linux darwin win32; do
+            tar -czf "dist/${platform}.dcmnorm.tar.gz" -C plugin .
+          done
+          tar -tzf dist/linux.dcmnorm.tar.gz | grep -qx './gemini-extension.json'
+
       - name: Create GitHub release
-        # Archives and .deb packages (each with a .sha256), versioned and "latest" names; the
-        # wheels go to PyPI.
+        # Archives and .deb packages (each with a .sha256), versioned and "latest" names, and the
+        # Gemini CLI extension archives; the wheels go to PyPI.
         uses: softprops/action-gh-release@v3
         with:
           generate_release_notes: true
