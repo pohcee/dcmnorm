@@ -22,6 +22,9 @@ CARGO_TOML = REPO_ROOT / "exec" / "dcmnorm" / "Cargo.toml"
 PLUGIN_JSON = REPO_ROOT / "plugin" / ".claude-plugin" / "plugin.json"
 MARKETPLACE_JSON = REPO_ROOT / ".claude-plugin" / "marketplace.json"
 SKILL_MD = REPO_ROOT / "plugin" / "skills" / "dcmnorm" / "SKILL.md"
+# A copy of the skill at the repository root, where skill indexers (gh skill, skills.sh, crawlers) look
+# for skills/<name>/SKILL.md. It must stay byte-identical to the plugin's copy.
+ROOT_SKILL_MD = REPO_ROOT / "skills" / "dcmnorm" / "SKILL.md"
 # The same plugin's manifests for other agents; each holds a top-level "version".
 OTHER_MANIFESTS = [
     REPO_ROOT / "plugin" / "gemini-extension.json",
@@ -91,6 +94,8 @@ def set_versions(version: str) -> None:
     for pattern in SKILL_PATTERNS:
         text = pattern.sub(rf"\g<1>{pinned}\g<3>", text)
     SKILL_MD.write_text(text, encoding="utf-8")
+    ROOT_SKILL_MD.parent.mkdir(parents=True, exist_ok=True)
+    ROOT_SKILL_MD.write_text(text, encoding="utf-8")
 
 
 def main() -> None:
@@ -110,6 +115,11 @@ def main() -> None:
     for found in skill_pins(SKILL_MD.read_text(encoding="utf-8")):
         if found != expected_skill:
             problems.append(f"{SKILL_MD.relative_to(REPO_ROOT)}: pins {found}, expected {expected_skill}")
+    if not ROOT_SKILL_MD.is_file() or ROOT_SKILL_MD.read_bytes() != SKILL_MD.read_bytes():
+        problems.append(
+            f"{ROOT_SKILL_MD.relative_to(REPO_ROOT)} differs from {SKILL_MD.relative_to(REPO_ROOT)}"
+            " (the skill is edited in plugin/; --set copies it)"
+        )
     if problems:
         print("\n".join(problems), file=sys.stderr)
         sys.exit("version pins are out of step with exec/dcmnorm/Cargo.toml"
