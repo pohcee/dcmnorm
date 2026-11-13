@@ -1,14 +1,17 @@
 # dcmnorm-node test website
 
-A minimal Express app that exercises the `@pohcee/dcmnorm-node` bindings end to end: upload a
-`.dcm` file (or pick one of six bundled sample files) in the browser, and it's processed by a
-small API that validates it, reads its JSON metadata, renders every frame (multiframe-aware) to
-a small JPEG thumbnail, and reports timings for each step. Everything is rendered back on the
-page - metadata, frame thumbnails, and a timings table. Click any thumbnail to re-render that
-frame at a larger size (up to 1024x1024, aspect ratio preserved, never upscaled past the
-source's own resolution) in a lightbox. The header/About tab also report the exact `dcmnorm` and
-`dcmnorm-node` versions the deployment is running, and link back to the OSS project at
-https://github.com/pohcee/dcmnorm.
+A minimal Express app that exercises the `@pohcee/dcmnorm-node` bindings end to end: drop or
+choose a `.dcm` file (or open one of six bundled sample files) in the browser, and it's
+processed by a small API that validates it, reads its JSON metadata, renders every frame
+(multiframe-aware) to a small JPEG thumbnail, and reports timings for each step. Everything is
+rendered back on the page: the timings, the frame thumbnails (on black, as on a reading screen),
+and the metadata. Select any thumbnail to re-render that frame at a larger size (up to
+1024x1024, aspect ratio preserved, never upscaled past the source's own resolution) in a
+lightbox. The header and footer show the exact `dcmnorm` and `dcmnorm-node` versions the
+deployment is running and link back to the OSS project at https://github.com/pohcee/dcmnorm.
+
+The page uses the dcmnorm icon (`public/favicon.png`, drawn by `packaging/make-brand-images.py`)
+and its colours, and the Atkinson Hyperlegible typefaces from Google Fonts.
 
 Not a production service - it's a manual/demo test harness for the Node bindings.
 

@@ -1,4 +1,4 @@
-<p align="center"><img src="plugin/.claude-plugin/icon.png" alt="dcmnorm icon: a scanner ring around a stack of image slices" width="128"></p>
+<p align="center"><img src="docs/images/dcmnorm-icon.png" alt="dcmnorm icon: a scanner ring around a stack of image slices" width="128"></p>
 
 # dcmnorm
 

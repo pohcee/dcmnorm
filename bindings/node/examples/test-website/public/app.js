@@ -3,7 +3,7 @@ const fileInput = document.getElementById("file-input");
 const submitBtn = document.getElementById("submit-btn");
 const statusEl = document.getElementById("status");
 const resultsEl = document.getElementById("results");
-const timingsTableBody = document.querySelector("#timings-table tbody");
+const timingsEl = document.getElementById("timings");
 const frameCountEl = document.getElementById("frame-count");
 const truncatedNoteEl = document.getElementById("truncated-note");
 const noPixelDataNoteEl = document.getElementById("no-pixel-data-note");
@@ -21,17 +21,6 @@ const lightboxCloseBtn = document.getElementById("lightbox-close");
 // Which file the currently-displayed frames came from, so a thumbnail click knows where to
 // fetch a larger render of that same frame from - set by showResult() below.
 let currentSource = null;
-
-for (const tabBtn of document.querySelectorAll(".tab-btn")) {
-  tabBtn.addEventListener("click", () => {
-    for (const btn of document.querySelectorAll(".tab-btn")) {
-      btn.classList.toggle("active", btn === tabBtn);
-    }
-    for (const panel of document.querySelectorAll(".tab-panel")) {
-      panel.hidden = panel.id !== `tab-${tabBtn.dataset.tab}`;
-    }
-  });
-}
 
 function setStatus(message, isError) {
   statusEl.textContent = message;
@@ -55,50 +44,57 @@ function formatBytes(bytes) {
 }
 
 function renderTimings(timings, hasPixelData) {
-  timingsTableBody.innerHTML = "";
+  timingsEl.innerHTML = "";
+  // [label, milliseconds, the binding call it times (shown as a tooltip)]
   const rows = [
-    ["Validate (checkDicom)", timings.validateMs],
-    ["Read metadata (readJson)", timings.metadataMs],
+    ["Validate", timings.validateMs, "checkDicom"],
+    ["Metadata", timings.metadataMs, "readJson"],
   ];
   if (hasPixelData) {
     rows.push(
-      ["Render all frames (renderFrame x N)", timings.renderTotalMs],
-      ["Average per frame", timings.renderAvgMs],
+      ["Render", timings.renderTotalMs, "renderFrame, every frame"],
+      ["Per frame", timings.renderAvgMs, "average renderFrame time"],
     );
   }
-  rows.push(["Total", timings.totalMs]);
-  for (const [label, ms] of rows) {
-    const tr = document.createElement("tr");
-    const tdLabel = document.createElement("td");
-    tdLabel.textContent = label;
-    const tdValue = document.createElement("td");
-    tdValue.textContent = formatMs(ms);
-    tr.append(tdLabel, tdValue);
-    timingsTableBody.append(tr);
+  rows.push(["Total", timings.totalMs, "the whole request"]);
+  for (const [label, ms, call] of rows) {
+    const item = document.createElement("div");
+    item.title = call;
+    if (label === "Total") item.className = "total";
+    const dt = document.createElement("dt");
+    dt.textContent = label;
+    const dd = document.createElement("dd");
+    dd.textContent = formatMs(ms);
+    item.append(dt, dd);
+    timingsEl.append(item);
   }
 }
 
 function renderFrames(frames) {
   framesGridEl.innerHTML = "";
   for (const frame of frames) {
-    const card = document.createElement("div");
+    const card = document.createElement("figure");
     card.className = "frame-card";
 
     const thumbBtn = document.createElement("button");
     thumbBtn.type = "button";
     thumbBtn.className = "frame-thumb-btn";
     thumbBtn.style.aspectRatio = `${frame.width} / ${frame.height}`;
-    thumbBtn.title = "Click to view a larger render (up to 1024x1024)";
+    thumbBtn.title = `View frame ${frame.index + 1} larger`;
     thumbBtn.addEventListener("click", () => openLightbox(frame.index));
 
     const img = document.createElement("img");
     img.src = frame.dataUrl;
-    img.alt = `Frame ${frame.index}`;
+    img.alt = `Frame ${frame.index + 1}`;
     thumbBtn.append(img);
 
-    const meta = document.createElement("div");
+    const meta = document.createElement("figcaption");
     meta.className = "frame-meta";
-    meta.textContent = `#${frame.index} · ${frame.width}x${frame.height} · ${formatMs(frame.timeMs)}`;
+    for (const text of [`${frame.index + 1}`, `${frame.width}×${frame.height}`, formatMs(frame.timeMs)]) {
+      const part = document.createElement("span");
+      part.textContent = text;
+      meta.append(part);
+    }
 
     card.append(thumbBtn, meta);
     framesGridEl.append(card);
@@ -109,21 +105,24 @@ function showResult(body) {
   currentSource =
     body.kind === "upload" ? { kind: "upload", key: body.uploadId } : { kind: "sample", key: body.fileName };
 
-  setStatus(`Processed ${body.fileName} (${body.fileSizeBytes.toLocaleString()} bytes)`);
+  setStatus(`Showing ${body.fileName}, ${formatBytes(body.fileSizeBytes)}`);
   renderTimings(body.timings, body.hasPixelData);
 
-  frameCountEl.textContent = `${body.framesRendered} of ${body.numberOfFrames}`;
+  frameCountEl.textContent =
+    body.framesRendered === body.numberOfFrames ? `${body.numberOfFrames}` : `${body.framesRendered} of ${body.numberOfFrames}`;
   noPixelDataNoteEl.hidden = body.hasPixelData;
   framesHintEl.hidden = !body.hasPixelData;
   truncatedNoteEl.hidden = !body.truncated;
   if (body.truncated) {
-    truncatedNoteEl.textContent = `Only the first ${body.framesRendered} of ${body.numberOfFrames} frames were rendered (server MAX_FRAMES_RENDERED limit).`;
+    truncatedNoteEl.textContent = `Showing the first ${body.framesRendered} of ${body.numberOfFrames} frames: this server renders at most ${body.framesRendered} per file.`;
   }
 
   renderFrames(body.frames);
   metadataJsonEl.textContent = JSON.stringify(body.metadata, null, 2);
 
   resultsEl.hidden = false;
+  const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  resultsEl.scrollIntoView({ behavior: reduceMotion ? "auto" : "smooth", block: "start" });
 }
 
 function closeLightbox() {
@@ -144,7 +143,7 @@ async function openLightbox(frameIndex) {
 
   lightboxEl.hidden = false;
   lightboxImgEl.src = "";
-  lightboxCaptionEl.textContent = "Rendering full-resolution frame...";
+  lightboxCaptionEl.textContent = `Rendering frame ${frameIndex + 1}...`;
 
   const base =
     currentSource.kind === "upload"
@@ -161,7 +160,8 @@ async function openLightbox(frameIndex) {
     }
 
     lightboxImgEl.src = frame.dataUrl;
-    lightboxCaptionEl.textContent = `Frame #${frameIndex} · ${frame.width}x${frame.height} · rendered in ${formatMs(frame.timeMs)}`;
+    lightboxImgEl.alt = `Frame ${frameIndex + 1}`;
+    lightboxCaptionEl.textContent = `Frame ${frameIndex + 1}, ${frame.width}×${frame.height}, rendered in ${formatMs(frame.timeMs)}`;
   } catch (err) {
     lightboxCaptionEl.textContent = err.message || String(err);
   }
@@ -197,14 +197,10 @@ async function runProcessRequest(requestFn, busyMessage) {
   }
 }
 
-form.addEventListener("submit", (event) => {
-  event.preventDefault();
-
-  const file = fileInput.files[0];
+function processFile(file) {
   if (!file) return;
-
   if (!file.name.toLowerCase().endsWith(".dcm")) {
-    setStatus("Please select a file with a .dcm extension.", true);
+    setStatus(`${file.name} isn't a .dcm file. Choose a DICOM file with the .dcm extension.`, true);
     return;
   }
 
@@ -213,8 +209,30 @@ form.addEventListener("submit", (event) => {
 
   runProcessRequest(
     () => fetch("/api/process", { method: "POST", body: formData }),
-    `Uploading ${file.name}...`,
+    `Processing ${file.name}...`,
   );
+}
+
+// The file is processed as soon as it's chosen or dropped: there is nothing else to fill in.
+submitBtn.addEventListener("click", () => fileInput.click());
+fileInput.addEventListener("change", () => {
+  processFile(fileInput.files[0]);
+  fileInput.value = ""; // choosing the same file again processes it again
+});
+form.addEventListener("submit", (event) => event.preventDefault());
+
+form.addEventListener("dragover", (event) => {
+  event.preventDefault();
+  form.classList.add("is-over");
+});
+form.addEventListener("dragleave", (event) => {
+  if (!form.contains(event.relatedTarget)) form.classList.remove("is-over");
+});
+form.addEventListener("drop", (event) => {
+  event.preventDefault();
+  form.classList.remove("is-over");
+  if (submitBtn.disabled) return;
+  processFile(event.dataTransfer.files[0]);
 });
 
 async function loadSamples() {
@@ -225,7 +243,7 @@ async function loadSamples() {
     samplesListEl.innerHTML = "";
 
     if (!Array.isArray(samples) || samples.length === 0) {
-      samplesListEl.textContent = "No bundled sample files are available.";
+      samplesListEl.textContent = "This server has no sample files.";
       return;
     }
 
@@ -255,14 +273,14 @@ async function loadSamples() {
       row.addEventListener("click", () => {
         runProcessRequest(
           () => fetch(`/api/samples/${encodeURIComponent(sample.name)}/process`, { method: "POST" }),
-          `Processing sample ${sample.name}...`,
+          `Processing ${sample.name}...`,
         );
       });
 
       samplesListEl.append(row);
     }
   } catch (err) {
-    samplesListEl.textContent = `Failed to load sample files: ${err.message || err}`;
+    samplesListEl.textContent = `The sample list didn't load (${err.message || err}). Reload the page to try again.`;
   }
 }
 
@@ -271,16 +289,15 @@ async function loadVersion() {
     const response = await fetch("/api/version");
     const { dcmnormVersion, dcmnormNodeVersion } = await response.json();
 
-    const parts = [];
-    if (dcmnormVersion) parts.push(`dcmnorm v${dcmnormVersion}`);
-    if (dcmnormNodeVersion) parts.push(`dcmnorm-node v${dcmnormNodeVersion}`);
-    const text = parts.length > 0 ? `Testing ${parts.join(" · ")}` : "";
-
+    if (!dcmnormVersion) throw new Error("no version");
+    const text = dcmnormNodeVersion
+      ? `dcmnorm ${dcmnormVersion} with dcmnorm-node ${dcmnormNodeVersion}`
+      : `dcmnorm ${dcmnormVersion}`;
     versionLineEl.textContent = text;
-    versionLineAboutEl.textContent = parts.join(" · ") || "an unknown dcmnorm version";
+    versionLineAboutEl.textContent = text;
   } catch {
     versionLineEl.textContent = "";
-    versionLineAboutEl.textContent = "an unknown dcmnorm version";
+    versionLineAboutEl.textContent = "dcmnorm";
   }
 }
 
