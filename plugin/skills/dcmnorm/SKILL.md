@@ -47,6 +47,10 @@ The operation is **inferred from the file extensions** of INPUT and OUTPUT:
 
 When extensions are missing or misleading, override detection with `--input-type dicom|json` and `--output-type dicom|json|raw|png|jpeg|mpeg4|texture`.
 
+## Patient data
+
+dcmnorm is a file and network toolkit, not a medical device: don't present its output as a basis for diagnosis or treatment. DICOM files usually carry protected health information (names, IDs, birth dates, accession numbers). Prefer synthetic or de-identified files, keep files on the user's machine, and don't repeat patient identifiers back in the conversation unless the user asks for them. De-identification with `--set` removes only what the edits name, so check the result (for example `dcmnorm out.dcm | grep -i -E 'name|id|birth'`) before anyone shares it. `dcmtalk` sends data to whatever DICOM node the user names, so confirm the destination before C-STORE or C-MOVE.
+
 ## Reading / inspecting DICOM
 
 Print the whole dataset as flat JSON to stdout (bulk data like PixelData becomes a `BulkDataURI` reference, so output stays small):

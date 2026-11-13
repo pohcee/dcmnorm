@@ -95,13 +95,17 @@ from PyPI on first use.
 # Gemini CLI (from the latest release; --ref claude-plugin installs from the plugin branch)
 gemini extensions install https://github.com/pohcee/dcmnorm
 
+# Any agent that reads Agent Skills (Codex, Cursor, Copilot and others), via skills.sh
+npx skills add pohcee/dcmnorm
+
 # Antigravity: import the Gemini CLI extension, or install a checkout of the plugin
 agy plugin import gemini
 git clone --branch claude-plugin https://github.com/pohcee/dcmnorm.git dcmnorm-plugin
 agy plugin install "$PWD/dcmnorm-plugin"
 ```
 
-The `claude-plugin` branch holds just `plugin/` and is rebuilt on every release; each release also
+The skill itself is also at [`skills/dcmnorm/`](skills/dcmnorm/), a copy of the plugin's (checked in CI),
+where skill indexers look. The `claude-plugin` branch holds just `plugin/` and is rebuilt on every release; each release also
 attaches it as `<platform>.dcmnorm.tar.gz`, which is what Gemini CLI installs. The install scripts
 below also put the skill into Claude Code, Gemini CLI and Codex CLI.
 
