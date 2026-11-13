@@ -255,51 +255,91 @@ h2 {
   scroll-margin-top: 1.5rem;
 }
 
-.results-head {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 0.5rem 2rem;
-  margin-bottom: 0.75rem;
+/* Timings: one bar for the whole request, a segment per step in the order they ran, and a legend
+   with each step's time. Segment colours are the icon's ring and slice blues. */
+
+.timings {
+  margin: 0 0 2rem;
 }
 
-.results-head h2 {
-  margin: 0;
+.timings-bar {
+  display: flex;
+  gap: 2px;
+  height: 0.7rem;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--line);
+}
+
+.timings-bar span {
+  min-width: 3px; /* a 0.2 ms step still shows */
+}
+
+.timings-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 1.75rem;
+  margin: 0.65rem 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: 0.92rem;
+}
+
+.timings-legend li {
+  display: flex;
+  align-items: baseline;
+  gap: 0.45rem;
+}
+
+.swatch {
+  width: 0.7rem;
+  height: 0.7rem;
+  flex: none;
+  align-self: center;
+  border-radius: 3px;
+}
+
+.timings-legend .ms {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+.timings-legend .detail {
+  color: var(--ink-soft);
+}
+
+.timings-legend .total {
+  margin-left: auto;
+  font-weight: 700;
+}
+
+.timings-note {
+  max-width: var(--measure);
+  margin: 0.35rem 0 0;
+  color: var(--ink-soft);
+  font-size: 0.85rem;
+}
+
+.seg-metadata {
+  background: #78c4ff;
+}
+
+.seg-render {
+  background: #4078be;
+}
+
+.seg-other {
+  background: #8fa3bf;
+}
+
+.frames-heading {
+  margin-bottom: 0.75rem;
 }
 
 .count {
   color: var(--ink-soft);
   font-weight: 400;
-}
-
-#timings {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.25rem 1.5rem;
-  margin: 0;
-  font-size: 0.9rem;
-}
-
-#timings div {
-  display: flex;
-  gap: 0.45rem;
-}
-
-#timings dt {
-  color: var(--ink-soft);
-}
-
-#timings dd {
-  margin: 0;
-  font-family: var(--mono);
-  font-variant-numeric: tabular-nums;
-}
-
-#timings .total dt,
-#timings .total dd {
-  color: var(--ink);
-  font-weight: 700;
 }
 
 /* The viewer: frames on black, the one dark surface on the page in either theme. */

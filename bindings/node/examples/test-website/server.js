@@ -178,23 +178,22 @@ async function renderFrameCapped(filePath, frameIndex, nativeWidth, nativeHeight
 }
 
 // Runs the readJson -> renderFrame (thumbnail-sized) pipeline against an already-on-disk DICOM
-// file, shared by both the upload route and the bundled-sample route.
+// file, shared by both the upload route and the bundled-sample route. Every binding call takes a
+// file path, so each one (readJson, then one renderFrame per frame) reads and parses the file
+// itself; the timings are per call, run one after another, and totalMs is the whole pipeline.
+// There is no separate validation call: readJson rejects a file that isn't DICOM.
 async function processDicomFile(filePath) {
   const totalStart = performance.now();
 
-  const validateStart = performance.now();
-  const isDicom = await dcmnorm.checkDicom(filePath);
-  const validateMs = performance.now() - validateStart;
-
-  if (!isDicom) {
-    const err = new Error("File does not look like valid DICOM");
+  const metadataStart = performance.now();
+  let metadataJson;
+  try {
+    metadataJson = await dcmnorm.readJson(filePath);
+  } catch (readErr) {
+    const err = new Error(`This file couldn't be read as DICOM: ${readErr.message || readErr}`);
     err.statusCode = 400;
-    err.timings = { validateMs };
     throw err;
   }
-
-  const metadataStart = performance.now();
-  const metadataJson = await dcmnorm.readJson(filePath);
   const metadataMs = performance.now() - metadataStart;
   const metadata = JSON.parse(metadataJson);
 
@@ -217,6 +216,10 @@ async function processDicomFile(filePath) {
   }
   const renderTotalMs = performance.now() - renderStart;
   const totalMs = performance.now() - totalStart;
+  const frameTimes = frames.map((frame) => frame.timeMs).sort((a, b) => a - b);
+  const mid = Math.floor(frameTimes.length / 2);
+  const renderMedianMs =
+    frameTimes.length === 0 ? 0 : frameTimes.length % 2 ? frameTimes[mid] : (frameTimes[mid - 1] + frameTimes[mid]) / 2;
 
   return {
     hasPixelData,
@@ -226,10 +229,9 @@ async function processDicomFile(filePath) {
     metadata,
     frames,
     timings: {
-      validateMs,
       metadataMs,
       renderTotalMs,
-      renderAvgMs: framesToRender > 0 ? renderTotalMs / framesToRender : 0,
+      renderMedianMs,
       totalMs,
     },
   };
@@ -264,7 +266,7 @@ app.post("/api/process", (req, res) => {
       res.json({ kind: "upload", uploadId, fileName: req.file.originalname, fileSizeBytes: req.file.size, ...result });
     } catch (err) {
       fs.unlink(filePath).catch(() => {});
-      res.status(err.statusCode || 500).json({ error: err.message || String(err), timings: err.timings });
+      res.status(err.statusCode || 500).json({ error: err.message || String(err) });
     }
   });
 });
@@ -305,7 +307,7 @@ app.post("/api/samples/:name/process", async (req, res) => {
     const result = await processDicomFile(path.join(SAMPLES_DIR, sample.name));
     res.json({ kind: "sample", fileName: sample.name, fileSizeBytes: sample.sizeBytes, ...result });
   } catch (err) {
-    res.status(err.statusCode || 500).json({ error: err.message || String(err), timings: err.timings });
+    res.status(err.statusCode || 500).json({ error: err.message || String(err) });
   }
 });
 

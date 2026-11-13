@@ -3,7 +3,8 @@ const fileInput = document.getElementById("file-input");
 const submitBtn = document.getElementById("submit-btn");
 const statusEl = document.getElementById("status");
 const resultsEl = document.getElementById("results");
-const timingsEl = document.getElementById("timings");
+const timingsBarEl = document.getElementById("timings-bar");
+const timingsLegendEl = document.getElementById("timings-legend");
 const frameCountEl = document.getElementById("frame-count");
 const truncatedNoteEl = document.getElementById("truncated-note");
 const noPixelDataNoteEl = document.getElementById("no-pixel-data-note");
@@ -43,31 +44,78 @@ function formatBytes(bytes) {
   return `${value.toFixed(1)} ${units[unitIndex]}`;
 }
 
-function renderTimings(timings, hasPixelData) {
-  timingsEl.innerHTML = "";
-  // [label, milliseconds, the binding call it times (shown as a tooltip)]
-  const rows = [
-    ["Validate", timings.validateMs, "checkDicom"],
-    ["Metadata", timings.metadataMs, "readJson"],
+function renderTimings(timings, framesRendered) {
+  timingsBarEl.innerHTML = "";
+  timingsLegendEl.innerHTML = "";
+
+  const frameWord = framesRendered === 1 ? "frame" : "frames";
+  // Steps in the order they ran; the bar's segments are proportional to their share of the total.
+  const steps = [
+    {
+      cls: "seg-metadata",
+      label: "Read metadata",
+      ms: timings.metadataMs,
+      detail: "",
+      title: "readJson: reads the file and converts its header to DICOM JSON",
+    },
   ];
-  if (hasPixelData) {
-    rows.push(
-      ["Render", timings.renderTotalMs, "renderFrame, every frame"],
-      ["Per frame", timings.renderAvgMs, "average renderFrame time"],
-    );
+  if (framesRendered > 0) {
+    steps.push({
+      cls: "seg-render",
+      label: `Render ${framesRendered} ${frameWord}`,
+      ms: timings.renderTotalMs,
+      detail: framesRendered > 1 ? `${formatMs(timings.renderMedianMs)} each (median)` : "",
+      title: "renderFrame per frame: reads the file, decodes the frame, scales it and encodes a JPEG",
+    });
   }
-  rows.push(["Total", timings.totalMs, "the whole request"]);
-  for (const [label, ms, call] of rows) {
-    const item = document.createElement("div");
-    item.title = call;
-    if (label === "Total") item.className = "total";
-    const dt = document.createElement("dt");
-    dt.textContent = label;
-    const dd = document.createElement("dd");
-    dd.textContent = formatMs(ms);
-    item.append(dt, dd);
-    timingsEl.append(item);
+  // What the server did besides the dcmnorm calls (parsing the JSON, encoding images for the page).
+  const otherMs = timings.totalMs - steps.reduce((sum, step) => sum + step.ms, 0);
+  if (otherMs >= Math.max(0.5, timings.totalMs * 0.02)) {
+    steps.push({
+      cls: "seg-other",
+      label: "Other",
+      ms: otherMs,
+      detail: "",
+      title: "the server's own work around the dcmnorm calls",
+    });
   }
+
+  for (const step of steps) {
+    const segment = document.createElement("span");
+    segment.className = step.cls;
+    segment.style.flexGrow = String(Math.max(step.ms, 0));
+    segment.title = `${step.label}: ${formatMs(step.ms)}`;
+    timingsBarEl.append(segment);
+
+    const item = document.createElement("li");
+    item.title = step.title;
+    const swatch = document.createElement("span");
+    swatch.className = `swatch ${step.cls}`;
+    const label = document.createElement("span");
+    label.textContent = step.label;
+    const ms = document.createElement("span");
+    ms.className = "ms";
+    ms.textContent = formatMs(step.ms);
+    item.append(swatch, label, ms);
+    if (step.detail) {
+      const detail = document.createElement("span");
+      detail.className = "detail";
+      detail.textContent = step.detail;
+      item.append(detail);
+    }
+    timingsLegendEl.append(item);
+  }
+
+  const total = document.createElement("li");
+  total.className = "total";
+  total.title = "the whole request on the server, all steps one after another";
+  const totalLabel = document.createElement("span");
+  totalLabel.textContent = "Total";
+  const totalMs = document.createElement("span");
+  totalMs.className = "ms";
+  totalMs.textContent = formatMs(timings.totalMs);
+  total.append(totalLabel, totalMs);
+  timingsLegendEl.append(total);
 }
 
 function renderFrames(frames) {
@@ -106,7 +154,7 @@ function showResult(body) {
     body.kind === "upload" ? { kind: "upload", key: body.uploadId } : { kind: "sample", key: body.fileName };
 
   setStatus(`Showing ${body.fileName}, ${formatBytes(body.fileSizeBytes)}`);
-  renderTimings(body.timings, body.hasPixelData);
+  renderTimings(body.timings, body.hasPixelData ? body.framesRendered : 0);
 
   frameCountEl.textContent =
     body.framesRendered === body.numberOfFrames ? `${body.numberOfFrames}` : `${body.framesRendered} of ${body.numberOfFrames}`;

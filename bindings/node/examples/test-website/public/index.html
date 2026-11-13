@@ -39,10 +39,18 @@
     </section>
 
     <section id="results" aria-labelledby="results-heading" hidden>
-      <div class="results-head">
-        <h2 id="results-heading">Frames <span id="frame-count" class="count"></span></h2>
-        <dl id="timings"></dl>
-      </div>
+      <figure class="timings">
+        <div id="timings-bar" class="timings-bar" aria-hidden="true"></div>
+        <figcaption>
+          <ul id="timings-legend" class="timings-legend"></ul>
+          <p class="timings-note">
+            Server time for this file. The steps run one after another, and each dcmnorm call reads the
+            file from disk itself.
+          </p>
+        </figcaption>
+      </figure>
+
+      <h2 id="results-heading" class="frames-heading">Frames <span id="frame-count" class="count"></span></h2>
 
       <div class="viewer">
         <p id="no-pixel-data-note" class="viewer-note" hidden>
