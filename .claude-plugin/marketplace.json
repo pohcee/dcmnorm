@@ -11,7 +11,7 @@
     {
       "name": "dcmnorm",
       "source": "./plugin",
-      "version": "0.7.2",
+      "version": "0.8.0",
       "description": "Read, inspect, edit, anonymize, validate, transcode and render DICOM files (dcmnorm) and talk to PACS / DICOM nodes (dcmtalk).",
       "homepage": "https://github.com/pohcee/dcmnorm",
       "license": "Apache-2.0",

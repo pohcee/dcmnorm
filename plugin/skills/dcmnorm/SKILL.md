@@ -9,14 +9,14 @@ description: Read, inspect, edit, anonymize, convert, transcode, and render DICO
 
 ## Setup
 
-This skill is written for **dcmnorm 0.7.2**. Before the first `dcmnorm` or `dcmtalk` command in a session, run `dcmnorm --version` (it prints e.g. `dcmnorm 0.7.2-<build id>`).
+This skill is written for **dcmnorm 0.8.0**. Before the first `dcmnorm` or `dcmtalk` command in a session, run `dcmnorm --version` (it prints e.g. `dcmnorm 0.7.2-<build id>`).
 
-- **Found, version 0.7.2 or newer:** go ahead.
+- **Found, version 0.8.0 or newer:** go ahead.
 - **Not found, or older:** tell the user you're installing the dcmnorm command-line tools (native binaries from PyPI, nothing runs in Python), then install the pinned version with the first of these that's available:
   ```bash
-  uv tool install --force dcmnorm==0.7.2
-  pipx install --force dcmnorm==0.7.2
-  python3 -m pip install dcmnorm==0.7.2
+  uv tool install --force dcmnorm==0.8.0
+  pipx install --force dcmnorm==0.8.0
+  python3 -m pip install dcmnorm==0.8.0
   ```
   If pip refuses with `externally-managed-environment`: on the user's own machine, install uv or pipx instead; in a disposable sandbox, add `--user --break-system-packages`.
   This installs both `dcmnorm` and `dcmtalk`. Run `dcmnorm --version` again; if the command still isn't found, the installer's scripts directory isn't on `PATH` (uv/pipx print it; for pip it's `python3 -m site --user-base` plus `/bin`), so call the binary by its full path.
