@@ -29,6 +29,10 @@ transfer syntaxes"). Release builds are stripped (`CARGO_PROFILE_RELEASE_STRIP=s
 - `smoke_test.py <wheel>` installs the wheel into a fresh virtual environment and runs both CLIs
   from it (version, DICOM to JSON, DICOM to PNG).
 - `pypi-README.md` is the PyPI project description.
+- `make-brand-images.py` draws the dcmnorm icon and everything made from it: the plugin's listing icon
+  (`plugin/.claude-plugin/icon.png`, also the README and PyPI logo), the Node test website's favicon and
+  `docs/images/social-preview.png`, which is uploaded by hand as the repository's GitHub social preview
+  (Settings > General > Social preview). Edit the drawing there, not the PNGs.
 
 The wheel (`dcmnorm` on PyPI) holds both binaries in `dcmnorm-<version>.data/scripts/`, which pip,
 pipx and uv install onto `PATH` as they are. It has no Python code and no Python runtime

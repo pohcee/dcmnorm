@@ -1,3 +1,5 @@
+<img src="https://raw.githubusercontent.com/pohcee/dcmnorm/main/plugin/.claude-plugin/icon.png" alt="dcmnorm" width="96">
+
 # dcmnorm (command-line tools)
 
 Native DICOM command-line tools, installed from PyPI:

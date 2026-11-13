@@ -38,7 +38,7 @@ Done:
 Left (owner steps):
 
 1. Approve or replace the listing icon, `plugin/.claude-plugin/icon.png` (1024 px, drawn by
-   `packaging/make-plugin-icon.py`): it is fixed at the first save or submission in the developer portal.
+   `packaging/make-brand-images.py`): it is fixed at the first save or submission in the developer portal.
    `claude plugin validate --profile directory --strict plugin` passes with it.
 2. PyPI Trusted Publishing: the GitHub side is done (environment `pypi`, `v*` tags only; variable
    `PYPI_PUBLISH=true`); the pending publisher on PyPI is left (`packaging/README.md`, step 1). Then a release tag

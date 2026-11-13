@@ -1,3 +1,5 @@
+<p align="center"><img src="plugin/.claude-plugin/icon.png" alt="dcmnorm icon: a scanner ring around a stack of image slices" width="128"></p>
+
 # dcmnorm
 
 Fast, open-source DICOM toolkit in Rust: parse, render, transcode, reformat, and network.
