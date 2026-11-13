@@ -28,6 +28,10 @@ Done:
   Setup section that installs the pinned version from PyPI. `scripts/check-versions.py` keeps the pins in step
   with Cargo (CI checks it, and `release-tag.sh` sets it). `claude plugin validate --strict` passes. The install
   scripts take the skill from the new path and fall back to `skills/` for older tags.
+- **The directory tracks the `claude-plugin` branch** (added after v0.9.0): the directory downloads a whole ref and
+  rejects archives over 50 MiB compressed, which this repository is (committed binding binaries, fixtures), so a plugin
+  path alone doesn't help. The branch's tree is just `plugin/`, rebuilt by `scripts/update-plugin-branch.sh` on every
+  tag (release job `plugin-branch`).
 - **No SessionStart hook.** The skill's Setup section covers a missing binary when it's actually needed; a hook
   would add a line to every session and is a review risk.
 
