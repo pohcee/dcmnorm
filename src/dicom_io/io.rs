@@ -97,6 +97,16 @@ pub fn jpeg2000_engine_name_for(uid: &str) -> &'static str {
     }
 }
 
+/// The engine for `uid`'s pixel data when it's a video transfer syntax (MPEG-2, MPEG-4 AVC/H.264,
+/// HEVC): `builtin` when FFmpeg is linked in, `ffmpeg` when the `ffmpeg` command does the work
+/// (the default build). `None` for any other transfer syntax.
+pub fn video_engine_name_for(uid: &str) -> Option<&'static str> {
+    if !is_mpeg_transfer_syntax(uid) {
+        return None;
+    }
+    Some(if cfg!(feature = "ffmpeg-codec-linked") { "builtin" } else { "ffmpeg" })
+}
+
 /// One-line summary of the JPEG 2000 codec setup, for diagnostics: classic backend, the OpenHTJ2K
 /// CPU variant in use, and the per-call thread count.
 pub fn jpeg2000_codec_summary() -> String {
@@ -399,12 +409,17 @@ fn is_jpeg_xl_transfer_syntax(uid: &str) -> bool {
     )
 }
 
+/// Whether the `ffmpeg` command runs. Without FFmpeg linked in, the video transfer syntaxes
+/// (MPEG-2, H.264, HEVC) go through it (see `mpeg.rs`); checked once per process.
 fn ffmpeg_available() -> bool {
-    if let Ok(output) = Command::new("ffmpeg").arg("-version").output() {
-        output.status.success()
-    } else {
-        false
-    }
+    static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *AVAILABLE.get_or_init(|| {
+        Command::new("ffmpeg")
+            .arg("-version")
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false)
+    })
 }
 
 fn read_dicom_dataset_without_meta(bytes: &[u8]) -> Option<DefaultDicomObject> {
@@ -1057,12 +1072,12 @@ fn can_write_dataset<D, R, W>(ts: &dcmnorm_encoding::TransferSyntax<D, R, W>) ->
 fn can_decode_pixel_data<D, R, W>(
     ts: &dcmnorm_encoding::TransferSyntax<D, R, W>,
     kakadu_enabled: bool,
-    _ffmpeg_enabled: bool,
+    ffmpeg_enabled: bool,
 ) -> bool {
     let uid = ts.uid();
     matches!(ts.codec(), Codec::EncapsulatedPixelData(Some(_), _))
         || (kakadu_enabled && is_jpeg2000_transfer_syntax(uid))
-        || (cfg!(feature = "ffmpeg-codec-linked") && is_mpeg_transfer_syntax(uid))
+        || ((cfg!(feature = "ffmpeg-codec-linked") || ffmpeg_enabled) && is_mpeg_transfer_syntax(uid))
         || (cfg!(feature = "jpeg-ls-codec") && is_jpeg_ls_transfer_syntax(uid))
         || (cfg!(feature = "jpeg-xl-codec") && is_jpeg_xl_transfer_syntax(uid))
 }
@@ -1070,7 +1085,7 @@ fn can_decode_pixel_data<D, R, W>(
 fn can_encode_pixel_data<D, R, W>(
     ts: &dcmnorm_encoding::TransferSyntax<D, R, W>,
     _kakadu_enabled: bool,
-    _ffmpeg_enabled: bool,
+    ffmpeg_enabled: bool,
 ) -> bool {
     let uid = ts.uid();
     if is_htj2k_transfer_syntax(uid) {
@@ -1084,7 +1099,9 @@ fn can_encode_pixel_data<D, R, W>(
     }
 
     matches!(ts.codec(), Codec::EncapsulatedPixelData(_, Some(_)))
-        || (cfg!(feature = "ffmpeg-codec-linked") && is_mpeg_transfer_syntax(uid))
+        || ((cfg!(feature = "ffmpeg-codec-linked") || ffmpeg_enabled)
+            && is_mpeg_transfer_syntax(uid)
+            && mpeg::can_encode_video(uid))
         || (cfg!(feature = "jpeg-ls-codec") && is_jpeg_ls_transfer_syntax(uid))
 }
 

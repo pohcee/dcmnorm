@@ -8,15 +8,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         build-essential \
         ca-certificates \
-        clang \
         cmake \
-        libc6-dev \
-        libavcodec-dev \
-        libavformat-dev \
-        libavutil-dev \
-        libclang-dev \
-        libswresample-dev \
-        libswscale-dev \
         pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
@@ -29,6 +21,7 @@ RUN cargo build -p dcmnorm-cli -p dcmtalk --release \
 
 FROM debian:bookworm-slim
 
+# ffmpeg: the video transfer syntaxes (MPEG-2, MPEG-4 AVC/H.264, HEVC) and .mp4/.mov output.
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update \

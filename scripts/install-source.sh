@@ -41,24 +41,18 @@ require_command() {
     fi
 }
 
-check_apt_build_deps_for_all_features() {
+check_apt_build_deps() {
     # Apt package checks are only relevant on Debian/Ubuntu style systems.
     if ! command -v dpkg-query >/dev/null 2>&1; then
         return 0
     fi
 
+    # The default build needs only a C/C++ toolchain and CMake (CharLS); FFmpeg is not built or
+    # linked (the video transfer syntaxes use the ffmpeg command at run time, see the README).
     local -a required_packages=(
         build-essential
         ca-certificates
-        clang
         cmake
-        libc6-dev
-        libavcodec-dev
-        libavformat-dev
-        libavutil-dev
-        libclang-dev
-        libswresample-dev
-        libswscale-dev
         pkg-config
     )
     local -a missing_packages=()
@@ -71,34 +65,9 @@ check_apt_build_deps_for_all_features() {
     done
 
     if [[ "${#missing_packages[@]}" -gt 0 ]]; then
-        echo "Missing apt packages required for full-feature exec builds:" >&2
+        echo "Missing apt packages required to build the CLIs:" >&2
         printf '  - %s\n' "${missing_packages[@]}" >&2
         echo "Install them with: sudo apt-get update && sudo apt-get install -y ${missing_packages[*]}" >&2
-        exit 1
-    fi
-}
-
-check_clang_can_find_std_headers() {
-    local tmp_source
-    tmp_source="$(mktemp)"
-    printf '#include <limits.h>\n' > "$tmp_source"
-
-    if ! clang -fsyntax-only -x c "$tmp_source" >/dev/null 2>&1; then
-        rm -f "$tmp_source"
-        echo "Clang is installed but cannot find standard C headers (for example limits.h)." >&2
-        echo "Install the system C toolchain headers, such as build-essential/libc6-dev on Debian or Ubuntu, so bindgen can compile FFmpeg bindings." >&2
-        exit 1
-    fi
-
-    rm -f "$tmp_source"
-}
-
-check_ffmpeg_dev_pkg() {
-    local pkg="$1"
-
-    if ! pkg-config --exists "$pkg"; then
-        echo "Missing FFmpeg development package: $pkg" >&2
-        echo "Default builds now enable dcmnorm/ffmpeg-codec. Install FFmpeg development headers and pkg-config, or build with --no-default-features if you need a reduced build." >&2
         exit 1
     fi
 }
@@ -169,16 +138,13 @@ manifest_has_feature() {
 
 use_kakadu_ffi=0
 
-check_apt_build_deps_for_all_features
+check_apt_build_deps
 require_command cargo "Install Rust and Cargo before running this script."
-require_command pkg-config "Install pkg-config so the default FFmpeg codec support can find system FFmpeg libraries."
-require_command clang "Install clang so bindgen can generate FFmpeg bindings during the default build."
-check_clang_can_find_std_headers
-check_ffmpeg_dev_pkg libavutil
-check_ffmpeg_dev_pkg libavcodec
-check_ffmpeg_dev_pkg libavformat
-check_ffmpeg_dev_pkg libswscale
-check_ffmpeg_dev_pkg libswresample
+require_command cmake "Install CMake; the JPEG-LS codec (CharLS) is built with it."
+if ! command -v ffmpeg >/dev/null 2>&1; then
+    echo "Note: no ffmpeg command found. Everything works without it except the video transfer"
+    echo "syntaxes (MPEG-2, MPEG-4 AVC/H.264, HEVC) and .mp4/.mov output; install FFmpeg for those."
+fi
 
 if kakadu_include_dir="$(find_kakadu_include_dir)" && kakadu_lib_dir="$(find_kakadu_lib_dir)"; then
     use_kakadu_ffi=1
@@ -247,7 +213,7 @@ skill_install_targets=(
 )
 
 install_skill() {
-    local skill_source="$repo_root/skills/dcmnorm"
+    local skill_source="$repo_root/plugin/skills/dcmnorm"
     if [[ ! -f "$skill_source/SKILL.md" ]]; then
         return 0
     fi

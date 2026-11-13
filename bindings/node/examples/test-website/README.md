@@ -118,7 +118,8 @@ Artifact Registry repo name, upload size cap).
 
 The public instance is deployed to Cloud Run by `.github/workflows/deploy-test-website.yml`,
 automatically whenever the Node binding changes on `main`: any push touching `bindings/node/**`,
-and every successful Build Bindings run (whose bot commit can't fire a `push` trigger itself). It
+and every successful release-tag run of the Build and release workflow (whose bot commit of the
+rebuilt `.node` can't fire a `push` trigger itself). It
 can also be run by hand via `workflow_dispatch`. Auth is keyless Workload Identity Federation (no
 SA key); the deployment identifiers come from repository secrets, and the job is skipped when they
 are absent (e.g. on forks). The job finishes by checking that `/api/version` reports the

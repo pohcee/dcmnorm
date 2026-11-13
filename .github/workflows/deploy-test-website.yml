@@ -7,10 +7,11 @@ name: Deploy Test Website
 # Triggers:
 #   - push to main touching bindings/node/** - a human commit (e.g. a "Release 0.1.x" version
 #     bump with its rebuilt .node, or a test-website change).
-#   - workflow_run of Build Bindings - that workflow's own commit of the rebuilt .node is pushed
-#     with GITHUB_TOKEN, which GitHub deliberately excludes from firing `push` triggers (see
-#     release.yml's comment), so `push` above never sees it. workflow_run always runs against
-#     main's tip, i.e. after that commit has landed.
+#   - workflow_run of Build and release (release.yml) for a release tag - its commit of the
+#     rebuilt .node is pushed with GITHUB_TOKEN, which GitHub deliberately excludes from firing
+#     `push` triggers, so `push` above never sees it. workflow_run always runs against main's
+#     tip, i.e. after that commit has landed. That workflow also runs on PRs and main, which
+#     commit nothing; the deploy job skips those.
 #   - workflow_dispatch - on-demand redeploy.
 #
 # Auth is keyless Workload Identity Federation (no SA key). The provider only trusts this repo on
@@ -38,12 +39,13 @@ on:
       - bindings/node/**
       - test/files/**
       - .github/workflows/deploy-test-website.yml
-  # No `branches:` filter here: it matches the *triggering* run's branch, and Build Bindings runs
-  # on the release tag (head_branch = v0.4.1, not main), so a main filter silently skips every
-  # release. This job still checks out main, and the OIDC token's ref is main either way
-  # (workflow_run executes in the default branch's context), which the WIF condition requires.
+  # No `branches:` filter here: it matches the *triggering* run's branch, and a release run is on
+  # the tag (head_branch = v0.4.1, not main), so a main filter silently skips every release. The
+  # deploy job's condition keeps tag runs only. This job still checks out main, and the OIDC
+  # token's ref is main either way (workflow_run executes in the default branch's context), which
+  # the WIF condition requires.
   workflow_run:
-    workflows: [Build Bindings]
+    workflows: [Build and release]
     types: [completed]
   workflow_dispatch: {}
 
@@ -86,10 +88,14 @@ jobs:
   deploy:
     name: Build and deploy
     needs: configured
-    # Build Bindings is triggered by tags; a failed/cancelled run committed nothing new to deploy.
+    # Only a successful release-tag run committed a rebuilt .node; a PR or main run, or a
+    # failed/cancelled one, has nothing new to deploy.
     if: >-
       needs.configured.outputs.ok == 'true' &&
-      (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success')
+      (github.event_name != 'workflow_run' ||
+        (github.event.workflow_run.conclusion == 'success' &&
+         github.event.workflow_run.event != 'pull_request' &&
+         startsWith(github.event.workflow_run.head_branch, 'v')))
     runs-on: ubuntu-24.04
     permissions:
       contents: read

@@ -1,0 +1,22 @@
+{
+  "name": "dcmnorm",
+  "owner": {
+    "name": "Jason Klotzer",
+    "url": "https://github.com/pohcee"
+  },
+  "metadata": {
+    "description": "The dcmnorm plugin: DICOM files and DICOM networking from Claude, through the dcmnorm and dcmtalk CLIs."
+  },
+  "plugins": [
+    {
+      "name": "dcmnorm",
+      "source": "./plugin",
+      "version": "0.7.2",
+      "description": "Read, inspect, edit, anonymize, validate, transcode and render DICOM files (dcmnorm) and talk to PACS / DICOM nodes (dcmtalk).",
+      "homepage": "https://github.com/pohcee/dcmnorm",
+      "license": "Apache-2.0",
+      "category": "healthcare",
+      "keywords": ["dicom", "medical-imaging", "pacs", "dimse"]
+    }
+  ]
+}

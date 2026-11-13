@@ -5,7 +5,24 @@ description: Read, inspect, edit, anonymize, convert, transcode, and render DICO
 
 # dcmnorm — DICOM read / edit / write / render CLI
 
-`dcmnorm` is an installed CLI that converts between DICOM and JSON, edits DICOM elements, transcodes transfer syntaxes, validates files, and renders pixel data to PNG/JPEG/raw/MPEG4. Verify it's available with `dcmnorm --version`; run `dcmnorm --help` for the full option list.
+`dcmnorm` is a CLI that converts between DICOM and JSON, edits DICOM elements, transcodes transfer syntaxes, validates files, and renders pixel data to PNG/JPEG/raw/MPEG4. Make sure it's installed first (see [Setup](#setup)); run `dcmnorm --help` for the full option list.
+
+## Setup
+
+This skill is written for **dcmnorm 0.7.2**. Before the first `dcmnorm` or `dcmtalk` command in a session, run `dcmnorm --version` (it prints e.g. `dcmnorm 0.7.2-<build id>`).
+
+- **Found, version 0.7.2 or newer:** go ahead.
+- **Not found, or older:** tell the user you're installing the dcmnorm command-line tools (native binaries from PyPI, nothing runs in Python), then install the pinned version with the first of these that's available:
+  ```bash
+  uv tool install --force dcmnorm==0.7.2
+  pipx install --force dcmnorm==0.7.2
+  python3 -m pip install dcmnorm==0.7.2
+  ```
+  If pip refuses with `externally-managed-environment`: on the user's own machine, install uv or pipx instead; in a disposable sandbox, add `--user --break-system-packages`.
+  This installs both `dcmnorm` and `dcmtalk`. Run `dcmnorm --version` again; if the command still isn't found, the installer's scripts directory isn't on `PATH` (uv/pipx print it; for pip it's `python3 -m site --user-base` plus `/bin`), so call the binary by its full path.
+- **Install not possible** (no network, no Python, a sandbox that blocks package downloads): say so plainly and point the user at the other install options at https://github.com/pohcee/dcmnorm#install (release archives, `.deb`, Docker). Don't substitute another DICOM tool without asking.
+
+Only the video transfer syntaxes (MPEG-2, MPEG-4 AVC/H.264, HEVC) and `.mp4`/`.mov` output also need the `ffmpeg` command. Check `ffmpeg -version` when a task needs one of those; if it's missing, dcmnorm fails with an install hint, so pass that on (`apt install ffmpeg`, `brew install ffmpeg`, `winget install ffmpeg`). `dcmnorm --list-transfer-syntaxes` shows what the installed build can decode and encode.
 
 For talking to a DICOM network peer (PACS, modality, another node) instead of local files, use the companion `dcmtalk` CLI — see [Network operations with `dcmtalk`](#network-operations-with-dcmtalk) below.
 
@@ -209,7 +226,7 @@ dcmnorm --mpr axial series_dir/*.dcm volume.gputex --texture-compression none  #
 
 ## Network operations with `dcmtalk`
 
-`dcmtalk` is an installed CLI for DICOM network (DIMSE) operations — the same ground as dcmtk's `echoscu`/`storescu`/`findscu`/`movescu`/`storescp`. Verify it's available with `dcmtalk --version`; run `dcmtalk --help` or `dcmtalk <subcommand> --help` for the full option list. Every subcommand takes a peer address as `HOST:PORT` and accepts `-v`/`--verbose` to log association negotiation, presentation contexts, and each DIMSE command/response to stderr — reach for `--verbose` first whenever a connection to a real PACS behaves unexpectedly.
+`dcmtalk` is a CLI for DICOM network (DIMSE) operations — the same ground as dcmtk's `echoscu`/`storescu`/`findscu`/`movescu`/`storescp`. It's installed together with `dcmnorm` (see [Setup](#setup)); run `dcmtalk --help` or `dcmtalk <subcommand> --help` for the full option list. Every subcommand takes a peer address as `HOST:PORT` and accepts `-v`/`--verbose` to log association negotiation, presentation contexts, and each DIMSE command/response to stderr — reach for `--verbose` first whenever a connection to a real PACS behaves unexpectedly.
 
 Check connectivity to a peer (C-ECHO):
 

@@ -1,4 +1,4 @@
-// Windows CI load check (see .github/workflows/build-bindings.yml, build-node-windows).
+// Windows CI load check (see .github/workflows/release.yml, build-node-windows).
 const assert = require("assert");
 const os = require("os");
 const path = require("path");

@@ -5,7 +5,6 @@ INSTALL_DIR="${INSTALL_DIR:-${HOME}/.cargo/bin}"
 DEFAULT_VERSION="latest"
 MIN_SUPPORTED_VERSION="0.1.3"
 GITHUB_REPO="pohcee/dcmnorm"
-PLATFORM="linux-x86_64"
 INSTALL_METHOD="tarball"
 
 # Parse command line arguments: VERSION is the one positional argument, --deb/-h/--help are flags.
@@ -80,7 +79,7 @@ Usage: $0 [VERSION] [--deb]
 Downloads and installs dcmnorm and dcmtalk from GitHub releases.
 
 By default, downloads the platform tarball and copies the binaries into $INSTALL_DIR
-(no root needed). With --deb (Debian/Ubuntu, linux-x86_64 only), downloads the .deb
+(no root needed). With --deb (Debian/Ubuntu, linux-x86_64 or linux-aarch64), downloads the .deb
 package instead and installs it system-wide via 'apt install', which also resolves
 runtime dependencies (ffmpeg, ca-certificates) automatically; this needs root
 (sudo is used automatically if not already running as root).
@@ -119,8 +118,8 @@ fi
 PLATFORM="${DCMNORM_PLATFORM:-$(detect_platform)}"
 
 if [ "$INSTALL_METHOD" = "deb" ]; then
-    if [ "$PLATFORM" != "linux-x86_64" ]; then
-        echo "Error: --deb is only available for linux-x86_64 (detected/forced platform: $PLATFORM)" >&2
+    if [ "$PLATFORM" != "linux-x86_64" ] && [ "$PLATFORM" != "linux-aarch64" ]; then
+        echo "Error: --deb is only available for linux-x86_64 and linux-aarch64 (detected/forced platform: $PLATFORM)" >&2
         exit 1
     fi
     if ! command -v apt-get >/dev/null 2>&1; then
@@ -302,10 +301,14 @@ if [ "${DCMNORM_SKIP_SKILL:-0}" != "1" ]; then
         if [ "$VERSION" != "latest" ]; then
             SKILL_REF="v$VERSION"
         fi
-        SKILL_URL="https://raw.githubusercontent.com/${GITHUB_REPO}/${SKILL_REF}/skills/dcmnorm/SKILL.md"
+        # The skill lives in the Claude plugin directory since it was added; older tags have it at
+        # skills/dcmnorm/.
+        SKILL_BASE="https://raw.githubusercontent.com/${GITHUB_REPO}/${SKILL_REF}"
+        SKILL_URL="${SKILL_BASE}/plugin/skills/dcmnorm/SKILL.md"
 
         SKILL_TEMP="$(mktemp)"
-        if curl -fsSL -o "$SKILL_TEMP" "$SKILL_URL"; then
+        if curl -fsSL -o "$SKILL_TEMP" "$SKILL_URL" 2>/dev/null \
+            || { SKILL_URL="${SKILL_BASE}/skills/dcmnorm/SKILL.md"; curl -fsSL -o "$SKILL_TEMP" "$SKILL_URL"; }; then
             install_skill_target "Claude Code" "$CLAUDE_SKILLS_DIR_RESOLVED" "${HOME}/.claude" "${CLAUDE_SKILLS_DIR:-}" "$SKILL_TEMP"
             install_skill_target "Gemini CLI" "$GEMINI_SKILLS_DIR_RESOLVED" "${HOME}/.gemini" "${GEMINI_SKILLS_DIR:-}" "$SKILL_TEMP"
             install_skill_target "Codex CLI" "$CODEX_SKILLS_DIR_RESOLVED" "${HOME}/.codex" "${CODEX_SKILLS_DIR:-}" "$SKILL_TEMP"
