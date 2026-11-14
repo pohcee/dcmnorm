@@ -2,7 +2,7 @@ use std::borrow::Cow;
 use std::sync::OnceLock;
 
 use crate::perf;
-use dcmnorm_core::value::Value;
+use dcmnorm_core::value::{PixelFragmentSequence, Value};
 use dcmnorm_core::{DataElement, PrimitiveValue, Tag, VR};
 use dcmnorm_dictionary::{tags, uids};
 use dcmnorm_encoding::transfer_syntax::{Codec, TransferSyntaxIndex};
@@ -15,7 +15,8 @@ use lcms2::{Intent, PixelFormat, Profile, Transform};
 use rayon::prelude::*;
 
 use super::io::{
-    apply_jpeg2000_component_correction, is_htj2k_transfer_syntax, is_jpeg2000_transfer_syntax, jpeg2000_component_mismatch,
+    apply_jpeg2000_component_correction, encapsulated_frame_fragment_range, is_htj2k_transfer_syntax,
+    is_jpeg_ls_transfer_syntax, is_jpeg2000_transfer_syntax, jpeg2000_component_mismatch,
     jpeg2000_frame_uses_mct, kakadu_ffi_enabled, normalize_transfer_syntax_uid,
     transcode_dcmnorm_object, JPEG2000_DEBUG_ENV_FLAG,
 };
@@ -3364,6 +3365,15 @@ fn ensure_native_render_object<'a>(
     Ok(Cow::Owned(transcoded))
 }
 
+/// Decodes just frame `frame_index` of an encapsulated (compressed) object, returning a
+/// single-frame Explicit VR Little Endian object holding only that frame's native pixels, or
+/// `Ok(None)` when the transfer syntax has no per-frame decoder here (the caller then
+/// transcodes the whole object instead).
+///
+/// The returned object carries every element of `object` except PixelData (and its offset
+/// tables), so per-frame functional groups stay indexed by the ORIGINAL `frame_index`. It is
+/// built without cloning `object`'s PixelData: on a large compressed multi-frame file (DBT,
+/// cine) copying every fragment for each frame requested cost more than decoding the frame.
 fn try_decode_single_frame_object(
     object: &DefaultDicomObject,
     frame_index: usize,
@@ -3371,6 +3381,10 @@ fn try_decode_single_frame_object(
     let source_uid = normalize_transfer_syntax_uid(object.meta().transfer_syntax());
     if source_uid == uids::EXPLICIT_VR_LITTLE_ENDIAN {
         return Ok(None);
+    }
+
+    if is_jpeg_ls_transfer_syntax(source_uid) {
+        return try_decode_single_jpeg_ls_frame_object(object, frame_index, source_uid);
     }
 
     let source_ts = TransferSyntaxRegistry
@@ -3394,20 +3408,23 @@ fn try_decode_single_frame_object(
     // when the codestream is genuinely single-component grayscale). Decoding
     // against the declared count then leaves unfilled channels zeroed,
     // rendering as solid red - correct the attributes to match the
-    // codestream before decoding.
+    // codestream before decoding. The corrected copy carries only this
+    // frame's fragments (decoded as its frame 0), not all of PixelData.
     let corrected_object;
-    let decode_object: &DefaultDicomObject = if is_jpeg2000_transfer_syntax(source_uid) {
+    let (decode_object, decode_frame_index): (&DefaultDicomObject, usize) = if is_jpeg2000_transfer_syntax(source_uid) {
         match jpeg2000_component_mismatch(object, frame_index) {
             Some(actual_components) => {
-                let mut cloned = object.clone();
-                apply_jpeg2000_component_correction(&mut cloned, actual_components);
-                corrected_object = cloned;
-                &corrected_object
+                let mut corrected = single_frame_encapsulated_object(object, frame_index)
+                    .map(|corrected| (corrected, 0))
+                    .unwrap_or_else(|| (object.clone(), frame_index));
+                apply_jpeg2000_component_correction(&mut corrected.0, actual_components);
+                corrected_object = corrected.0;
+                (&corrected_object, corrected.1)
             }
-            None => object,
+            None => (object, frame_index),
         }
     } else {
-        object
+        (object, frame_index)
     };
 
     let mut decoded = Vec::new();
@@ -3420,7 +3437,7 @@ fn try_decode_single_frame_object(
         ));
     }
     reader
-        .decode_frame(decode_object, frame_index as u32, &mut decoded)
+        .decode_frame(decode_object, decode_frame_index as u32, &mut decoded)
         .map_err(|error| {
             if is_jpeg2000_transfer_syntax(source_uid) {
                 jpeg2000_debug_log(format!(
@@ -3443,10 +3460,90 @@ fn try_decode_single_frame_object(
     }
 
     let jpeg2000_uses_mct = is_jpeg2000_transfer_syntax(source_uid)
-        .then(|| jpeg2000_frame_uses_mct(decode_object, frame_index))
+        .then(|| jpeg2000_frame_uses_mct(object, frame_index))
         .flatten();
 
-    let mut working = decode_object.clone();
+    build_decoded_frame_object(decode_object, decoded, source_uid, jpeg2000_uses_mct).map(Some)
+}
+
+/// `try_decode_single_frame_object` for JPEG-LS, which has no registry reader: decodes only
+/// frame `frame_index`'s fragment(s) with the same charls decoder the full transcode uses, so
+/// the frame's bytes are identical to transcoding everything and picking that frame - without
+/// decoding every frame for each frame requested.
+fn try_decode_single_jpeg_ls_frame_object(
+    object: &DefaultDicomObject,
+    frame_index: usize,
+    source_uid: &str,
+) -> Result<Option<DefaultDicomObject>, RenderError> {
+    if !cfg!(feature = "jpeg-ls-codec") {
+        // The full transcode reports the missing codec.
+        return Ok(None);
+    }
+
+    let _scope = perf::scope("render.decode_single_frame_only");
+    let decoded = super::jpeg_ls::decode_jpeg_ls_frame(object, frame_index).map_err(|message| {
+        let source_ts = TransferSyntaxRegistry.get(source_uid);
+        RenderError::Transcode(super::types::TranscodeError::DecodePixelData {
+            uid: source_ts.map(|ts| ts.uid()).unwrap_or(source_uid).to_owned(),
+            name: source_ts.map(|ts| ts.name()).unwrap_or("JPEG-LS").to_owned(),
+            message,
+        })
+    })?;
+    let Some(decoded) = decoded else {
+        return Ok(None);
+    };
+
+    build_decoded_frame_object(object, decoded, source_uid, None).map(Some)
+}
+
+/// Every element of `object` except PixelData and its offset tables, cloned - the metadata a
+/// decoded frame object needs, without copying the (possibly huge) encapsulated pixel data.
+fn clone_without_pixel_data(object: &DefaultDicomObject) -> DefaultDicomObject {
+    use dcmnorm_core::header::Header as _;
+    let mut working = DefaultDicomObject::new_empty_with_meta(object.meta().clone());
+    for element in object.iter() {
+        if !matches!(
+            element.tag(),
+            tags::PIXEL_DATA | tags::EXTENDED_OFFSET_TABLE | tags::EXTENDED_OFFSET_TABLE_LENGTHS
+        ) {
+            working.put(element.clone());
+        }
+    }
+    working
+}
+
+/// A one-frame encapsulated copy of `object` holding only frame `frame_index`'s fragments (and
+/// NumberOfFrames 1), for decoders that need an object to decode from. `None` when the frame's
+/// fragments can't be located (`encapsulated_frame_fragment_range`).
+fn single_frame_encapsulated_object(object: &DefaultDicomObject, frame_index: usize) -> Option<DefaultDicomObject> {
+    let range = encapsulated_frame_fragment_range(object, frame_index)?;
+    let element = object.get(tags::PIXEL_DATA)?;
+    let fragments = element.fragments()?;
+    let mut single = clone_without_pixel_data(object);
+    single.put(DataElement::new(
+        tags::NUMBER_OF_FRAMES,
+        VR::IS,
+        PrimitiveValue::from("1"),
+    ));
+    single.put(DataElement::new(
+        tags::PIXEL_DATA,
+        element.vr(),
+        PixelFragmentSequence::new(Vec::new(), fragments[range].to_vec()),
+    ));
+    Some(single)
+}
+
+/// The single-frame native object for one decoded frame of `source`: `source`'s elements
+/// without its encapsulated PixelData, the decoded bytes as native PixelData, the attributes a
+/// decode changes (photometric, planar configuration) normalized, NumberOfFrames dropped, and
+/// the transfer syntax relabelled Explicit VR Little Endian.
+fn build_decoded_frame_object(
+    source: &DefaultDicomObject,
+    decoded: Vec<u8>,
+    source_uid: &str,
+    jpeg2000_uses_mct: Option<bool>,
+) -> Result<DefaultDicomObject, RenderError> {
+    let mut working = clone_without_pixel_data(source);
     replace_with_native_frame_pixel_data(&mut working, decoded)?;
     normalize_decoded_render_attributes(&mut working, source_uid, jpeg2000_uses_mct);
     working.remove_element(tags::NUMBER_OF_FRAMES);
@@ -3455,8 +3552,7 @@ fn try_decode_single_frame_object(
             .get(uids::EXPLICIT_VR_LITTLE_ENDIAN)
             .expect("explicit VR little endian transfer syntax must exist"),
     );
-
-    Ok(Some(working))
+    Ok(working)
 }
 
 fn replace_with_native_frame_pixel_data(
@@ -3557,5 +3653,308 @@ fn jpeg2000_debug_enabled() -> bool {
 fn jpeg2000_debug_log(message: impl AsRef<str>) {
     if jpeg2000_debug_enabled() {
         eprintln!("[dcmnorm:jpeg2000] {}", message.as_ref());
+    }
+}
+
+/// The per-frame decode of compressed multi-frame objects (`try_decode_single_frame_object`)
+/// must give exactly what transcoding the whole object and picking the frame gives.
+#[cfg(test)]
+mod per_frame_decode_tests {
+    use super::{
+        build_decoded_frame_object, ensure_native_render_object, get_frame_bytes, read_render_metadata,
+        render_dicom_frame, replace_with_native_frame_pixel_data, normalize_decoded_render_attributes,
+        try_decode_single_frame_object, RenderOutputFormat, RenderPipelineOptions,
+    };
+    use crate::dicom_io::io::{normalize_transfer_syntax_uid, transcode_dcmnorm_object};
+    use dcmnorm_core::value::PixelFragmentSequence;
+    use dcmnorm_core::{DataElement, PrimitiveValue, VR};
+    use dcmnorm_dictionary::{tags, uids};
+    use dcmnorm_object::{DefaultDicomObject, FileMetaTableBuilder, InMemDicomObject};
+    use dcmnorm_transcode::TransferSyntaxRegistry;
+    use dcmnorm_encoding::transfer_syntax::TransferSyntaxIndex;
+
+    const ROWS: u16 = 48;
+    const COLS: u16 = 64;
+    const FRAMES: usize = 5;
+
+    #[derive(Clone, Copy, Debug)]
+    struct Shape {
+        bits_allocated: u16,
+        bits_stored: u16,
+        signed: bool,
+        samples_per_pixel: u16,
+    }
+
+    const GRAY8: Shape = Shape { bits_allocated: 8, bits_stored: 8, signed: false, samples_per_pixel: 1 };
+    const GRAY12: Shape = Shape { bits_allocated: 16, bits_stored: 12, signed: false, samples_per_pixel: 1 };
+    const GRAY16_SIGNED: Shape = Shape { bits_allocated: 16, bits_stored: 16, signed: true, samples_per_pixel: 1 };
+    const RGB8: Shape = Shape { bits_allocated: 8, bits_stored: 8, signed: false, samples_per_pixel: 3 };
+
+    /// A native (Explicit VR LE) multi-frame object with distinct, frame-dependent content.
+    fn native_multi_frame(shape: Shape) -> DefaultDicomObject {
+        let samples = usize::from(ROWS) * usize::from(COLS) * usize::from(shape.samples_per_pixel);
+        let max = (1u32 << shape.bits_stored) - 1;
+        let value = |frame: usize, i: usize| -> u32 {
+            let (y, x) = ((i / usize::from(shape.samples_per_pixel)) / usize::from(COLS), (i / usize::from(shape.samples_per_pixel)) % usize::from(COLS));
+            let smooth = (x * 37 + y * 11 + frame * 101) as u32;
+            let noise = ((i as u32).wrapping_mul(2_654_435_761) >> 7) % 23;
+            (smooth * 13 + noise) % (max + 1)
+        };
+        let pixel_data = if shape.bits_allocated == 8 {
+            let bytes: Vec<u8> = (0..FRAMES).flat_map(|f| (0..samples).map(move |i| value(f, i) as u8)).collect();
+            DataElement::new(tags::PIXEL_DATA, VR::OB, PrimitiveValue::from(bytes))
+        } else {
+            let words: Vec<u16> = (0..FRAMES).flat_map(|f| (0..samples).map(move |i| value(f, i) as u16)).collect();
+            DataElement::new(tags::PIXEL_DATA, VR::OW, PrimitiveValue::U16(words.into()))
+        };
+        let photometric = if shape.samples_per_pixel == 3 { "RGB" } else { "MONOCHROME2" };
+        let mut elements = vec![
+            DataElement::new(tags::SOP_CLASS_UID, VR::UI, PrimitiveValue::from("1.2.840.10008.5.1.4.1.1.7.2")),
+            DataElement::new(tags::SOP_INSTANCE_UID, VR::UI, PrimitiveValue::from("1.2.3.4.5.6.7.8")),
+            DataElement::new(tags::SAMPLES_PER_PIXEL, VR::US, PrimitiveValue::from(shape.samples_per_pixel)),
+            DataElement::new(tags::PHOTOMETRIC_INTERPRETATION, VR::CS, PrimitiveValue::from(photometric)),
+            DataElement::new(tags::NUMBER_OF_FRAMES, VR::IS, PrimitiveValue::from(FRAMES.to_string())),
+            DataElement::new(tags::ROWS, VR::US, PrimitiveValue::from(ROWS)),
+            DataElement::new(tags::COLUMNS, VR::US, PrimitiveValue::from(COLS)),
+            DataElement::new(tags::BITS_ALLOCATED, VR::US, PrimitiveValue::from(shape.bits_allocated)),
+            DataElement::new(tags::BITS_STORED, VR::US, PrimitiveValue::from(shape.bits_stored)),
+            DataElement::new(tags::HIGH_BIT, VR::US, PrimitiveValue::from(shape.bits_stored - 1)),
+            DataElement::new(tags::PIXEL_REPRESENTATION, VR::US, PrimitiveValue::from(u16::from(shape.signed))),
+            pixel_data,
+        ];
+        if shape.samples_per_pixel == 3 {
+            elements.push(DataElement::new(tags::PLANAR_CONFIGURATION, VR::US, PrimitiveValue::from(0u16)));
+        }
+        InMemDicomObject::from_element_iter(elements)
+            .with_meta(FileMetaTableBuilder::new().transfer_syntax(uids::EXPLICIT_VR_LITTLE_ENDIAN))
+            .unwrap()
+    }
+
+    fn with_fragments(native: &DefaultDicomObject, uid: &str, offset_table: Vec<u32>, fragments: Vec<Vec<u8>>) -> DefaultDicomObject {
+        let mut object = native.clone();
+        object.put(DataElement::new(tags::PIXEL_DATA, VR::OB, PixelFragmentSequence::new(offset_table, fragments)));
+        object.meta_mut().set_transfer_syntax(TransferSyntaxRegistry.get(uid).unwrap());
+        object
+    }
+
+    fn jpeg_ls(native: &DefaultDicomObject) -> DefaultDicomObject {
+        let fragments = super::super::jpeg_ls::encode_jpeg_ls_pixel_data(native, true).unwrap();
+        with_fragments(native, "1.2.840.10008.1.2.4.80", Vec::new(), fragments)
+    }
+
+    /// PackBits literal runs (header n-1, then n bytes), padded to even length with a no-op.
+    fn packbits(bytes: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for chunk in bytes.chunks(128) {
+            out.push((chunk.len() - 1) as u8);
+            out.extend_from_slice(chunk);
+        }
+        if out.len() % 2 == 1 {
+            out.push(0x80);
+        }
+        out
+    }
+
+    /// RLE Lossless (PS3.5 Annex G), one fragment per frame: dcmnorm has no RLE encoder.
+    fn rle(native: &DefaultDicomObject, shape: Shape) -> DefaultDicomObject {
+        let bytes = native.element(tags::PIXEL_DATA).unwrap().to_bytes().unwrap().to_vec();
+        let bytes_per_sample = usize::from(shape.bits_allocated / 8);
+        let spp = usize::from(shape.samples_per_pixel);
+        let pixels = usize::from(ROWS) * usize::from(COLS);
+        let frame_len = pixels * spp * bytes_per_sample;
+        let fragments = bytes
+            .chunks_exact(frame_len)
+            .map(|frame| {
+                // Segments: per sample, most significant byte first.
+                let mut segments = Vec::new();
+                for sample in 0..spp {
+                    for byte in (0..bytes_per_sample).rev() {
+                        let plane: Vec<u8> = (0..pixels)
+                            .map(|p| frame[(p * spp + sample) * bytes_per_sample + byte])
+                            .collect();
+                        segments.push(packbits(&plane));
+                    }
+                }
+                let mut header = vec![0u8; 64];
+                header[..4].copy_from_slice(&(segments.len() as u32).to_le_bytes());
+                let mut offset = 64u32;
+                for (i, segment) in segments.iter().enumerate() {
+                    header[4 + i * 4..8 + i * 4].copy_from_slice(&offset.to_le_bytes());
+                    offset += segment.len() as u32;
+                }
+                header.into_iter().chain(segments.into_iter().flatten()).collect()
+            })
+            .collect();
+        with_fragments(native, uids::RLE_LOSSLESS, Vec::new(), fragments)
+    }
+
+    /// What `try_decode_single_frame_object` returned before it stopped cloning PixelData: the
+    /// whole object cloned, then PixelData replaced by the frame.
+    fn frame_object_built_from_a_full_clone(object: &DefaultDicomObject, decoded: Vec<u8>) -> DefaultDicomObject {
+        let mut working = object.clone();
+        replace_with_native_frame_pixel_data(&mut working, decoded).unwrap();
+        let uid = normalize_transfer_syntax_uid(object.meta().transfer_syntax()).to_owned();
+        normalize_decoded_render_attributes(&mut working, &uid, None);
+        working.remove_element(tags::NUMBER_OF_FRAMES);
+        working.meta_mut().set_transfer_syntax(TransferSyntaxRegistry.get(uids::EXPLICIT_VR_LITTLE_ENDIAN).unwrap());
+        working
+    }
+
+    /// Every frame of `encoded` through the per-frame path equals the full transcode's frame
+    /// (raw bytes and the rendered PNG), and the frame object equals the full-clone one.
+    fn assert_per_frame_decode_matches_full_decode(encoded: &DefaultDicomObject, label: &str) {
+        let full = transcode_dcmnorm_object(encoded, uids::EXPLICIT_VR_LITTLE_ENDIAN).unwrap();
+        let full_metadata = read_render_metadata(&full).unwrap();
+        for frame_index in 0..FRAMES {
+            let frame_object = try_decode_single_frame_object(encoded, frame_index)
+                .unwrap()
+                .unwrap_or_else(|| panic!("{label}: expected the per-frame decode path"));
+            assert!(frame_object.get(tags::NUMBER_OF_FRAMES).is_none());
+            let metadata = read_render_metadata(&frame_object).unwrap();
+            let actual = get_frame_bytes(&frame_object, &metadata, 0).unwrap();
+            let expected = get_frame_bytes(&full, &full_metadata, frame_index).unwrap();
+            assert_eq!(actual, expected, "{label} frame {frame_index}: decoded bytes differ from the full decode");
+
+            assert_eq!(
+                frame_object,
+                frame_object_built_from_a_full_clone(encoded, actual.clone()),
+                "{label} frame {frame_index}: frame object differs from the full-clone one"
+            );
+
+            let options = RenderPipelineOptions { frame_index, ..Default::default() };
+            for format in [RenderOutputFormat::Raw, RenderOutputFormat::Png] {
+                let per_frame = render_dicom_frame(encoded, format, &options).unwrap();
+                let native = ensure_native_render_object(&full).unwrap();
+                let via_full = render_dicom_frame(native.as_ref(), format, &options).unwrap();
+                assert_eq!(per_frame.bytes, via_full.bytes, "{label} frame {frame_index} {format:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn jpeg_ls_frames_decode_one_at_a_time_identically_to_the_full_decode() {
+        for shape in [GRAY8, GRAY12, GRAY16_SIGNED, RGB8] {
+            let native = native_multi_frame(shape);
+            let encoded = jpeg_ls(&native);
+            assert_per_frame_decode_matches_full_decode(&encoded, &format!("JPEG-LS {shape:?}"));
+            // Lossless: also equal to the source frames.
+            let full = transcode_dcmnorm_object(&encoded, uids::EXPLICIT_VR_LITTLE_ENDIAN).unwrap();
+            if shape.samples_per_pixel == 1 {
+                assert_eq!(
+                    full.element(tags::PIXEL_DATA).unwrap().to_bytes().unwrap(),
+                    native.element(tags::PIXEL_DATA).unwrap().to_bytes().unwrap()
+                );
+            }
+        }
+    }
+
+    /// Splits every frame's codestream over two fragments, located through either the Basic
+    /// Offset Table or the Extended Offset Table.
+    fn split_fragments(one_per_frame: &DefaultDicomObject, extended: bool) -> DefaultDicomObject {
+        let fragments = one_per_frame.element(tags::PIXEL_DATA).unwrap().fragments().unwrap().to_vec();
+        let mut split = Vec::new();
+        let mut offsets = Vec::new();
+        let mut position = 0u64;
+        for fragment in fragments {
+            offsets.push(position);
+            let middle = (fragment.len() / 2) & !1;
+            let (first, second) = fragment.split_at(middle);
+            for part in [first, second] {
+                position += part.len() as u64 + 8;
+                split.push(part.to_vec());
+            }
+        }
+        let uid = normalize_transfer_syntax_uid(one_per_frame.meta().transfer_syntax()).to_owned();
+        let basic = if extended { Vec::new() } else { offsets.iter().map(|&o| o as u32).collect() };
+        let mut object = with_fragments(one_per_frame, &uid, basic, split);
+        if extended {
+            let bytes: Vec<u8> = offsets.iter().flat_map(|o| o.to_le_bytes()).collect();
+            object.put(DataElement::new(tags::EXTENDED_OFFSET_TABLE, VR::OV, PrimitiveValue::from(bytes)));
+        }
+        object
+    }
+
+    #[test]
+    fn jpeg_ls_frames_split_over_several_fragments_are_found_through_the_offset_tables() {
+        let native = native_multi_frame(GRAY12);
+        let one_per_frame = jpeg_ls(&native);
+        let full = transcode_dcmnorm_object(&one_per_frame, uids::EXPLICIT_VR_LITTLE_ENDIAN).unwrap();
+        let metadata = read_render_metadata(&full).unwrap();
+        for extended in [false, true] {
+            let split = split_fragments(&one_per_frame, extended);
+            assert_eq!(split.element(tags::PIXEL_DATA).unwrap().fragments().unwrap().len(), FRAMES * 2);
+            for frame_index in 0..FRAMES {
+                let frame_object = try_decode_single_frame_object(&split, frame_index).unwrap().unwrap();
+                let frame_metadata = read_render_metadata(&frame_object).unwrap();
+                assert_eq!(
+                    get_frame_bytes(&frame_object, &frame_metadata, 0).unwrap(),
+                    get_frame_bytes(&full, &metadata, frame_index).unwrap(),
+                    "extended={extended} frame {frame_index}"
+                );
+            }
+            // The full decode reassembles them the same way.
+            assert_eq!(
+                super::super::jpeg_ls::decode_jpeg_ls_pixel_data(&split).unwrap(),
+                full.element(tags::PIXEL_DATA).unwrap().to_bytes().unwrap().to_vec(),
+                "extended={extended}"
+            );
+        }
+    }
+
+    #[test]
+    fn jpeg_ls_frames_that_cannot_be_located_fall_back_to_the_full_decode() {
+        let one_per_frame = jpeg_ls(&native_multi_frame(GRAY8));
+        // Two fragments per frame and no offset table: no per-frame mapping.
+        let mut unmapped = split_fragments(&one_per_frame, false);
+        let fragments = unmapped.element(tags::PIXEL_DATA).unwrap().fragments().unwrap().to_vec();
+        unmapped.put(DataElement::new(tags::PIXEL_DATA, VR::OB, PixelFragmentSequence::new(Vec::new(), fragments)));
+        assert!(try_decode_single_frame_object(&unmapped, 0).unwrap().is_none());
+        // Out of range: the full path reports it.
+        assert!(try_decode_single_frame_object(&one_per_frame, FRAMES).unwrap().is_none());
+    }
+
+    #[test]
+    fn jpeg2000_htj2k_and_rle_frames_decode_without_cloning_pixel_data_identically() {
+        for shape in [GRAY8, GRAY12, GRAY16_SIGNED, RGB8] {
+            let native = native_multi_frame(shape);
+            for uid in [uids::JPEG2000_LOSSLESS, "1.2.840.10008.1.2.4.201"] {
+                let encoded = transcode_dcmnorm_object(&native, uid).unwrap();
+                assert_per_frame_decode_matches_full_decode(&encoded, &format!("{uid} {shape:?}"));
+            }
+            assert_per_frame_decode_matches_full_decode(&rle(&native, shape), &format!("RLE {shape:?}"));
+        }
+    }
+
+    #[test]
+    fn jpeg2000_component_correction_decodes_only_the_frames_fragments() {
+        // Grayscale codestreams labelled RGB (the non-conformant encoder case the correction
+        // exists for): every frame still decodes to the grayscale-labelled object's frame.
+        let native = native_multi_frame(GRAY8);
+        let grayscale = transcode_dcmnorm_object(&native, uids::JPEG2000_LOSSLESS).unwrap();
+        let mut mislabelled = grayscale.clone();
+        mislabelled.put(DataElement::new(tags::SAMPLES_PER_PIXEL, VR::US, PrimitiveValue::from(3u16)));
+        mislabelled.put(DataElement::new(tags::PHOTOMETRIC_INTERPRETATION, VR::CS, PrimitiveValue::from("RGB")));
+        mislabelled.put(DataElement::new(tags::PLANAR_CONFIGURATION, VR::US, PrimitiveValue::from(0u16)));
+        for frame_index in 0..FRAMES {
+            let corrected = try_decode_single_frame_object(&mislabelled, frame_index).unwrap().unwrap();
+            let expected = try_decode_single_frame_object(&grayscale, frame_index).unwrap().unwrap();
+            assert_eq!(corrected.get(tags::SAMPLES_PER_PIXEL).unwrap().uint16().unwrap(), 1);
+            assert_eq!(
+                corrected.element(tags::PIXEL_DATA).unwrap().to_bytes().unwrap(),
+                expected.element(tags::PIXEL_DATA).unwrap().to_bytes().unwrap(),
+                "frame {frame_index}"
+            );
+        }
+    }
+
+    #[test]
+    fn decoded_frame_object_keeps_every_non_pixel_element_and_drops_the_offset_tables() {
+        let mut encoded = jpeg_ls(&native_multi_frame(GRAY8));
+        encoded.put(DataElement::new(tags::EXTENDED_OFFSET_TABLE, VR::OV, PrimitiveValue::from(vec![0u8; FRAMES * 8])));
+        encoded.put(DataElement::new(tags::PATIENT_NAME, VR::PN, PrimitiveValue::from("SYN^MF")));
+        let frame_object = build_decoded_frame_object(&encoded, vec![0; usize::from(ROWS) * usize::from(COLS)], "1.2.840.10008.1.2.4.80", None).unwrap();
+        assert!(frame_object.get(tags::EXTENDED_OFFSET_TABLE).is_none());
+        assert_eq!(frame_object.get(tags::PATIENT_NAME), encoded.get(tags::PATIENT_NAME));
+        assert!(matches!(frame_object.get(tags::PIXEL_DATA).unwrap().value(), dcmnorm_core::value::Value::Primitive(_)));
     }
 }
