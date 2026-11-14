@@ -158,6 +158,56 @@ export declare function checkDicom(filePath: string): Promise<unknown>
 export declare function computeHistogram(filePath: string, options?: HistogramOptions | undefined | null): Promise<unknown>
 
 /**
+ * One file of the File-set for `writeDicomdir`: its File ID plus its header, either as DICOM
+ * JSON (`json`) or a file to read it from (`path`; pixel data isn't loaded).
+ */
+export interface DicomdirEntry {
+  /**
+   * File ID components, e.g. `["DICOM", "ST000001", "SE000001", "IM000001"]`: 1-8
+   * components of 1-8 characters from A-Z, 0-9 and _ (PS3.10 8.2).
+   */
+  fileId: Array<string>
+  /**
+   * The referenced file's DICOM JSON (what `readJson` returns; BulkDataURI elements are
+   * ignored). One of `json` and `path` is required.
+   */
+  json?: string
+  /** 'flat' (default, `readJson`'s default) or 'standard', for `json`. */
+  format?: string
+  /** A DICOM file to read the header from instead of `json`. */
+  path?: string
+  /**
+   * The referenced file's transfer syntax. With `json`, defaults to the JSON's
+   * TransferSyntaxUID (0002,0010), else Explicit VR Little Endian; with `path`, the file's.
+   */
+  transferSyntaxUid?: string
+}
+
+export interface DicomdirRecordCount {
+  recordType: string
+  count: number
+}
+
+/**
+ * A value `writeDicomdir` made up (or copied from another attribute) for a Type 1 key the
+ * instances lacked (IHE RAD TF-2 Table 4.47.4-1).
+ */
+export interface DicomdirSynthesized {
+  /** e.g. "STUDY". */
+  recordType: string
+  /**
+   * The Study/Series/SOP Instance UID; for PATIENT the patient's name, or "patient of
+   * study <UID>" when the patient has no name either.
+   */
+  entity: string
+  /** Attribute keyword, e.g. "StudyID". */
+  attribute: string
+  value: string
+  /** Keyword of the instance attribute it was copied from, if any (e.g. "SeriesDate"). */
+  source?: string
+}
+
+/**
  * Performs a C-ECHO (DICOM Verification) against `destination` ("host:port"). Resolves with the
  * response Status code (0 = success); rejects only if the association itself could not be
  * established (unreachable host, no accepted presentation context, etc). `onLog`, if given, is
@@ -681,6 +731,33 @@ export interface TextureExportResult {
  * `dcmnorm --transfer-syntax UID in.dcm out.dcm`.
  */
 export declare function transcode(filePath: string, outputPath: string, transferSyntaxUid: string): Promise<unknown>
+
+/**
+ * Writes a DICOMDIR (Media Storage Directory, Explicit VR Little Endian) for a File-set:
+ * PATIENT > STUDY > SERIES > one record per entry, its type from the SOP Class (IMAGE, SR
+ * DOCUMENT, KEY OBJECT DOC, PRESENTATION, ENCAP DOC, ...; PS3.3 F.5). Type 1 keys the instances
+ * lack are synthesized and reported in `synthesized`. Rejects bad File IDs / File-set IDs, a
+ * Patient ID shared by two patients, a study under two patients, a series in two studies,
+ * duplicate files or SOP Instance UIDs. Mirrors `dcmnorm dicomdir ROOT`, which scans a
+ * directory instead of taking entries.
+ */
+export declare function writeDicomdir(entries: Array<DicomdirEntry>, outputPath: string, options?: WriteDicomdirOptions | undefined | null): Promise<unknown>
+
+export interface WriteDicomdirOptions {
+  /** File-set ID (0004,1130): up to 16 characters from A-Z, 0-9 and _. Default empty. */
+  fileSetId?: string
+  /** SOP Instance UID of the DICOMDIR itself. Generated when not given. */
+  sopInstanceUid?: string
+}
+
+export interface WriteDicomdirResult {
+  /** Total Directory Records written. */
+  records: number
+  /** Records per Directory Record Type, in first-seen order. */
+  recordTypes: Array<DicomdirRecordCount>
+  synthesized: Array<DicomdirSynthesized>
+  warnings: Array<string>
+}
 
 /**
  * Writes a DICOM file from JSON (flat or standard format, auto never guessed -

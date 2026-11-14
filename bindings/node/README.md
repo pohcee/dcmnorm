@@ -45,6 +45,20 @@ npm test             # runs test/smoke.js against the fixtures in ../../test/fil
   — set/remove attributes; writes back in place unless `outputPath` is given.
 - `transcode(filePath, outputPath, transferSyntaxUid): Promise<void>`.
 - `checkDicom(filePath): Promise<boolean>`.
+- `writeDicomdir(entries: { fileId: string[], json?: string, format?: 'flat'|'standard', path?: string, transferSyntaxUid?: string }[], outputPath, options?: { fileSetId?, sopInstanceUid? }): Promise<{ records, recordTypes: { recordType, count }[], synthesized: { recordType, entity, attribute, value, source? }[], warnings: string[] }>`
+  — writes a DICOMDIR (Media Storage Directory, Explicit VR Little Endian) for a File-set, the
+  in-process form of `dcmnorm dicomdir ROOT`. Each entry is one file of the File-set: its File ID
+  components (1-8 of 1-8 characters from `A-Z 0-9 _`, PS3.10 8.2) and its header, either as the
+  DICOM JSON `readJson` returns (`json`; BulkDataURI elements are ignored, so the default `'uri'`
+  output is fine) or a file to read it from (`path`; pixel data isn't loaded). With `json`, the
+  referenced file's transfer syntax is `transferSyntaxUid`, else the JSON's TransferSyntaxUID,
+  else Explicit VR Little Endian. Records are PATIENT > STUDY > SERIES > one per entry, typed by
+  SOP Class (IMAGE, SR DOCUMENT, KEY OBJECT DOC, PRESENTATION, ENCAP DOC, ...; PS3.3 F.5).
+  `synthesized` lists the Type 1 keys the instances lacked and the values written (IHE PDI
+  Table 4.47.4-1: Patient ID, Study ID, Study Date/Time, Modality, Series Number, Instance
+  Number), with `source` naming the attribute a value was copied from, if any. Rejects a bad File
+  ID or File-set ID (at most 16 of `A-Z 0-9 _`), a Patient ID shared by two patients, a study
+  under two patients, a series in two studies, and duplicate files or SOP Instance UIDs.
 - `renderFrame(filePath, options?: { format?: 'jpeg'|'png', outputWidth?, outputHeight?, windowCenter?, windowWidth?, frameIndex?, jpegQuality?, showOverlays?: boolean, overlayIndex?: number, overlayColor?: string }): Promise<{ mimeType, width, height, data: Buffer, overlays: OverlaySummary[], selectedOverlayIndex?: number }>`
   — renders a single frame to JPEG or PNG. If the instance has one or more DICOM overlay planes
   (group `60xx`), the first available overlay composites onto the image by default; `overlayIndex`

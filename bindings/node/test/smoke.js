@@ -251,6 +251,32 @@ const tagsJson = await binding.readTags(fixture, ["StudyInstanceUID", "SOPInstan
   }
   assert.ok(compressionRejected, "an invalid compression value should reject");
 
+  // --- writeDicomdir: one entry from a file, one from readJson's JSON (its PixelData is a
+  // BulkDataURI, which the DICOMDIR writer ignores) ---------------------------------------------
+  const dicomdirPath = path.join(tmpDir, "DICOMDIR");
+  const dicomdir = await binding.writeDicomdir(
+    [
+      { fileId: ["DICOM", "IM000001"], path: ctFixture },
+      { fileId: ["DICOM", "IM000002"], json: fullJson },
+    ],
+    dicomdirPath,
+    { fileSetId: "SMOKE_TEST", sopInstanceUid: "2.25.42" },
+  );
+  assert.ok(dicomdir.records >= 8, `expected PATIENT/STUDY/SERIES/IMAGE records for two files, got ${dicomdir.records}`);
+  assert.strictEqual(dicomdir.recordTypes.find((t) => t.recordType === "IMAGE").count, 2);
+  assert.ok(Array.isArray(dicomdir.synthesized) && Array.isArray(dicomdir.warnings));
+  const dicomdirMeta = JSON.parse(await binding.readTags(dicomdirPath, ["FileSetID"]));
+  assert.strictEqual(dicomdirMeta["00020002"], "1.2.840.10008.1.3.10", "Media Storage Directory Storage");
+  assert.strictEqual(dicomdirMeta["00041130"], "SMOKE_TEST");
+  let badFileIdRejected = false;
+  try {
+    await binding.writeDicomdir([{ fileId: ["dicom", "im1.dcm"], path: ctFixture }], dicomdirPath);
+  } catch (error) {
+    badFileIdRejected = true;
+    assert.ok(error.message.includes("File ID"), `unexpected error message: ${error.message}`);
+  }
+  assert.ok(badFileIdRejected, "a lower-case File ID with an extension should reject");
+
   fs.rmSync(tmpDir, { recursive: true, force: true });
   console.log("smoke test passed");
 }
