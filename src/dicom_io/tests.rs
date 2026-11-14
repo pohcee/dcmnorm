@@ -4804,6 +4804,379 @@ fn scp_stores_a_data_set_whose_first_fragment_shares_the_command_pdu() {
 }
 
 // ---------------------------------------------------------------------------------------------
+// SCP C-FIND SOP classes and C-CANCEL (pohcee/safebridge#1177): a Modality Worklist (or any non-study) C-FIND used to be
+// answered as a Study Root study search, and a C-CANCEL-RQ closed the association.
+// ---------------------------------------------------------------------------------------------
+
+/// Records every C-FIND the SCP hands over, with its SOP class. With a `gate`, the first call waits for the test to signal
+/// before returning (so a C-CANCEL-RQ can be on the wire before the matches go out).
+struct SopClassFindHandlers {
+    calls: std::sync::Mutex<Vec<(String, std::collections::HashMap<String, String>)>>,
+    response: Vec<std::collections::HashMap<String, String>>,
+    gate: std::sync::Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+}
+
+impl SopClassFindHandlers {
+    fn new(response: Vec<std::collections::HashMap<String, String>>, gate: Option<std::sync::mpsc::Receiver<()>>) -> Self {
+        Self { calls: std::sync::Mutex::new(Vec::new()), response, gate: std::sync::Mutex::new(gate) }
+    }
+}
+
+impl ScpHandlers for SopClassFindHandlers {
+    fn on_find(
+        &self,
+        _filter: &std::collections::HashMap<String, String>,
+    ) -> Result<Vec<std::collections::HashMap<String, String>>, String> {
+        panic!("the SCP calls on_find_with_sop_class");
+    }
+
+    fn on_find_with_sop_class(
+        &self,
+        sop_class_uid: &str,
+        filter: &std::collections::HashMap<String, String>,
+    ) -> Result<Vec<std::collections::HashMap<String, String>>, String> {
+        self.calls.lock().unwrap().push((sop_class_uid.to_owned(), filter.clone()));
+        let gate = self.gate.lock().unwrap().take();
+        if let Some(gate) = gate {
+            gate.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+        }
+        Ok(self.response.clone())
+    }
+
+    fn on_move(&self, _study_instance_uid: &str, _move_destination_ae: &str) -> Result<bool, String> {
+        Ok(false)
+    }
+
+    fn on_association_complete(&self, _stored_instances_by_study: &std::collections::HashMap<String, Vec<String>>) {}
+}
+
+fn study_match(study_instance_uid: &str) -> std::collections::HashMap<String, String> {
+    std::collections::HashMap::from([("StudyInstanceUID".to_owned(), study_instance_uid.to_owned())])
+}
+
+fn context_id(association: &dcmnorm_dimse::ClientAssociation<std::net::TcpStream>, abstract_syntax: &str) -> u8 {
+    association
+        .presentation_contexts()
+        .iter()
+        .find(|pc| pc.abstract_syntax == abstract_syntax)
+        .unwrap_or_else(|| panic!("no presentation context for {abstract_syntax}"))
+        .id
+}
+
+/// A C-FIND-RQ for any SOP class (`find_scu` only speaks Study Root), its Identifier in the same PDU.
+fn send_raw_find(
+    association: &mut dcmnorm_dimse::ClientAssociation<std::net::TcpStream>,
+    pc_id: u8,
+    sop_class_uid: &str,
+    message_id: u16,
+    identifier: &InMemDicomObject,
+) {
+    use dcmnorm_dimse::pdu::PDataValueType::{Command, Data};
+    let command = dimse_command_bytes(&InMemDicomObject::command_from_element_iter([
+        DataElement::new(tags::AFFECTED_SOP_CLASS_UID, VR::UI, dicom_value!(Str, sop_class_uid)),
+        DataElement::new(tags::COMMAND_FIELD, VR::US, dicom_value!(U16, [0x0020])),
+        DataElement::new(tags::MESSAGE_ID, VR::US, dicom_value!(U16, [message_id])),
+        DataElement::new(tags::PRIORITY, VR::US, dicom_value!(U16, [0x0000])),
+        DataElement::new(tags::COMMAND_DATA_SET_TYPE, VR::US, dicom_value!(U16, [0x0000])),
+    ]));
+    let mut data = Vec::new();
+    identifier.write_dataset_with_ts(&mut data, dimse_implicit_vr_le()).unwrap();
+    association
+        .send(&dcmnorm_dimse::pdu::Pdu::PData {
+            data: vec![dimse_pdv(pc_id, Command, true, command), dimse_pdv(pc_id, Data, true, data)],
+        })
+        .unwrap();
+}
+
+fn send_raw_cancel(association: &mut dcmnorm_dimse::ClientAssociation<std::net::TcpStream>, pc_id: u8, message_id: u16) {
+    use dcmnorm_dimse::pdu::PDataValueType::Command;
+    let command = dimse_command_bytes(&InMemDicomObject::command_from_element_iter([
+        DataElement::new(tags::COMMAND_FIELD, VR::US, dicom_value!(U16, [0x0FFF])),
+        DataElement::new(tags::MESSAGE_ID_BEING_RESPONDED_TO, VR::US, dicom_value!(U16, [message_id])),
+        DataElement::new(tags::COMMAND_DATA_SET_TYPE, VR::US, dicom_value!(U16, [0x0101])),
+    ]));
+    association.send(&dcmnorm_dimse::pdu::Pdu::PData { data: vec![dimse_pdv(pc_id, Command, true, command)] }).unwrap();
+}
+
+fn receive_raw_command(association: &mut dcmnorm_dimse::ClientAssociation<std::net::TcpStream>) -> InMemDicomObject {
+    match association.receive_command().unwrap() {
+        dcmnorm_dimse::Incoming::Command { data, .. } => {
+            InMemDicomObject::read_dataset_with_ts(data.as_slice(), dimse_implicit_vr_le()).unwrap()
+        }
+        other => panic!("expected a DIMSE response, got {other:?}"),
+    }
+}
+
+/// Reads C-FIND-RSPs up to the final one: (the StudyInstanceUID of each pending match, the final response command).
+fn receive_raw_find_responses(
+    association: &mut dcmnorm_dimse::ClientAssociation<std::net::TcpStream>,
+) -> (Vec<String>, InMemDicomObject) {
+    let mut matches = Vec::new();
+    loop {
+        let response = receive_raw_command(association);
+        assert_eq!(response.element(tags::COMMAND_FIELD).unwrap().to_int::<u16>().unwrap(), 0x8020);
+        let status = response.element(tags::STATUS).unwrap().to_int::<u16>().unwrap();
+        if status != 0xFF00 && status != 0xFF01 {
+            return (matches, response);
+        }
+        let data = association.receive_data_set().unwrap();
+        let identifier = InMemDicomObject::read_dataset_with_ts(data.as_slice(), dimse_implicit_vr_le()).unwrap();
+        matches.push(identifier.element(tags::STUDY_INSTANCE_UID).unwrap().to_str().unwrap().trim_end_matches(['\0', ' ']).to_owned());
+    }
+}
+
+fn response_status(response: &InMemDicomObject) -> u16 {
+    response.element(tags::STATUS).unwrap().to_int::<u16>().unwrap()
+}
+
+fn mwl_identifier() -> InMemDicomObject {
+    // A typical worklist query: no PatientName/PatientID, so as a study search it would have matched every study.
+    let mut identifier = InMemDicomObject::new_empty();
+    identifier.put_str(tags::PATIENT_NAME, VR::PN, "");
+    identifier.put_str(tags::PATIENT_ID, VR::LO, "");
+    identifier.put_str(tags::ACCESSION_NUMBER, VR::SH, "");
+    identifier
+}
+
+fn study_identifier(patient_id: &str) -> InMemDicomObject {
+    let mut identifier = InMemDicomObject::new_empty();
+    identifier.put_str(tags::QUERY_RETRIEVE_LEVEL, VR::CS, "STUDY");
+    identifier.put_str(tags::PATIENT_ID, VR::LO, patient_id);
+    identifier.put_str(tags::STUDY_INSTANCE_UID, VR::UI, "");
+    identifier
+}
+
+#[test]
+fn scp_answers_a_worklist_find_with_sop_class_not_supported_and_keeps_serving_the_association() {
+    let cache_dir = std::env::temp_dir().join(format!(
+        "dcmnorm-scp-mwl-test-{}",
+        SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+    ));
+    fs::create_dir_all(&cache_dir).unwrap();
+    let handlers = std::sync::Arc::new(SopClassFindHandlers::new(vec![study_match("1.2.3.4.5")], None));
+    let logger = std::sync::Arc::new(MockLogger { lines: std::sync::Mutex::new(Vec::new()) });
+    let scp = start_scp(
+        0,
+        cache_dir.clone(),
+        handlers.clone(),
+        ScpOptions { ae_title: "TEST-SCP".to_owned(), on_log: Some(logger.clone()), ..Default::default() },
+    )
+    .unwrap();
+
+    let object = read_dicom_file(&fixture_path("sr.dcm")).unwrap();
+    let storage_sop_class = object.meta().media_storage_sop_class_uid.trim_end_matches(['\0', ' ']).to_owned();
+    let sop_instance_uid = object.meta().media_storage_sop_instance_uid.trim_end_matches(['\0', ' ']).to_owned();
+    let ts_uid = object.meta().transfer_syntax().trim_end_matches('\0').to_owned();
+    let ts = {
+        use dcmnorm_encoding::TransferSyntaxIndex;
+        dcmnorm_transcode::TransferSyntaxRegistry.get(&ts_uid).unwrap()
+    };
+    let implicit = uids::IMPLICIT_VR_LITTLE_ENDIAN.to_owned();
+    let mwl = uids::MODALITY_WORKLIST_INFORMATION_MODEL_FIND;
+    let study_root = uids::STUDY_ROOT_QUERY_RETRIEVE_INFORMATION_MODEL_FIND;
+    let patient_root = uids::PATIENT_ROOT_QUERY_RETRIEVE_INFORMATION_MODEL_FIND;
+
+    // A modality proposing its worklist alongside Storage: the association (and Storage) must still be accepted.
+    let mut association = dcmnorm_dimse::association::client::ClientAssociationOptions::new()
+        .calling_ae_title("MODALITY")
+        .called_ae_title("TEST-SCP")
+        .with_presentation_context(mwl, vec![implicit.clone()])
+        .with_presentation_context(study_root, vec![implicit.clone()])
+        .with_presentation_context(patient_root, vec![implicit.clone()])
+        .with_presentation_context(storage_sop_class.clone(), vec![ts_uid.clone()])
+        .read_timeout(std::time::Duration::from_secs(10))
+        .establish_with(&format!("127.0.0.1:{}", scp.local_port()))
+        .unwrap();
+
+    // MWL C-FIND: 0x0122 with an Error Comment, no matches, the handler never called.
+    let mwl_pc = context_id(&association, mwl);
+    send_raw_find(&mut association, mwl_pc, mwl, 1, &mwl_identifier());
+    let (matches, final_response) = receive_raw_find_responses(&mut association);
+    assert!(matches.is_empty(), "an MWL query must not be answered with studies: {matches:?}");
+    assert_eq!(response_status(&final_response), 0x0122);
+    assert_eq!(final_response.element(tags::MESSAGE_ID_BEING_RESPONDED_TO).unwrap().to_int::<u16>().unwrap(), 1);
+    let comment = final_response.element(tags::ERROR_COMMENT).unwrap().to_str().unwrap().trim().to_owned();
+    assert!(comment.contains(mwl) && comment.len() <= 64, "unexpected Error Comment {comment:?}");
+    assert!(handlers.calls.lock().unwrap().is_empty(), "the handler must not see a worklist query");
+
+    // C-STORE on the same association still works.
+    use dcmnorm_dimse::pdu::PDataValueType::{Command, Data};
+    let store_pc = context_id(&association, &storage_sop_class);
+    let mut data_set = Vec::new();
+    object.write_dataset_with_ts(&mut data_set, ts).unwrap();
+    let store = dimse_command_bytes(&InMemDicomObject::command_from_element_iter([
+        DataElement::new(tags::AFFECTED_SOP_CLASS_UID, VR::UI, dicom_value!(Str, storage_sop_class.as_str())),
+        DataElement::new(tags::COMMAND_FIELD, VR::US, dicom_value!(U16, [0x0001])),
+        DataElement::new(tags::MESSAGE_ID, VR::US, dicom_value!(U16, [2])),
+        DataElement::new(tags::PRIORITY, VR::US, dicom_value!(U16, [0x0000])),
+        DataElement::new(tags::COMMAND_DATA_SET_TYPE, VR::US, dicom_value!(U16, [0x0000])),
+        DataElement::new(tags::AFFECTED_SOP_INSTANCE_UID, VR::UI, dicom_value!(Str, sop_instance_uid.as_str())),
+    ]));
+    association
+        .send(&dcmnorm_dimse::pdu::Pdu::PData {
+            data: vec![dimse_pdv(store_pc, Command, true, store), dimse_pdv(store_pc, Data, true, data_set)],
+        })
+        .unwrap();
+    let store_response = receive_raw_command(&mut association);
+    assert_eq!(store_response.element(tags::COMMAND_FIELD).unwrap().to_int::<u16>().unwrap(), 0x8001);
+    assert_eq!(response_status(&store_response), 0x0000);
+
+    // Study Root and Patient Root still reach the handler, with their SOP class.
+    let study_pc = context_id(&association, study_root);
+    send_raw_find(&mut association, study_pc, study_root, 3, &study_identifier("MRN123"));
+    let (matches, final_response) = receive_raw_find_responses(&mut association);
+    assert_eq!(matches, vec!["1.2.3.4.5".to_owned()]);
+    assert_eq!(response_status(&final_response), 0x0000);
+
+    let patient_pc = context_id(&association, patient_root);
+    send_raw_find(&mut association, patient_pc, patient_root, 4, &study_identifier("MRN456"));
+    let (matches, final_response) = receive_raw_find_responses(&mut association);
+    assert_eq!(matches.len(), 1);
+    assert_eq!(response_status(&final_response), 0x0000);
+    association.release().unwrap();
+
+    let calls = handlers.calls.lock().unwrap().clone();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0].0, study_root);
+    assert_eq!(calls[0].1.get("PatientID").map(String::as_str), Some("MRN123"));
+    assert_eq!(calls[1].0, patient_root);
+    assert_eq!(calls[1].1.get("PatientID").map(String::as_str), Some("MRN456"));
+
+    let lines = wait_for(|| {
+        let lines = logger.lines.lock().unwrap().clone();
+        lines.iter().any(|line| line.contains("released")).then_some(lines)
+    });
+    assert!(
+        lines.iter().any(|line| line == &format!("received C-FIND-RQ (message id 1); SOP class {mwl} not supported")),
+        "{lines:#?}"
+    );
+    assert!(lines.iter().any(|line| line == "sending C-FIND-RSP: 0 match(es), final status=0x0122"), "{lines:#?}");
+    assert!(
+        lines.iter().any(|line| line == &format!("received C-FIND-RQ (message id 3); query key(s): [PatientID]; SOP class {study_root}")),
+        "{lines:#?}"
+    );
+    assert!(!lines.iter().any(|line| line.contains("closed")), "the association must not close: {lines:#?}");
+
+    scp.stop();
+    fs::remove_dir_all(&cache_dir).ok();
+}
+
+#[test]
+fn scp_find_sop_classes_option_controls_which_find_reaches_the_handler() {
+    let cache_dir = std::env::temp_dir().join(format!(
+        "dcmnorm-scp-find-classes-test-{}",
+        SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+    ));
+    fs::create_dir_all(&cache_dir).unwrap();
+    let handlers = std::sync::Arc::new(SopClassFindHandlers::new(vec![study_match("1.2.3")], None));
+    let study_root = uids::STUDY_ROOT_QUERY_RETRIEVE_INFORMATION_MODEL_FIND;
+    let patient_root = uids::PATIENT_ROOT_QUERY_RETRIEVE_INFORMATION_MODEL_FIND;
+    let scp = start_scp(
+        0,
+        cache_dir.clone(),
+        handlers.clone(),
+        ScpOptions { find_sop_classes: vec![study_root.to_owned()], ..Default::default() },
+    )
+    .unwrap();
+    let implicit = uids::IMPLICIT_VR_LITTLE_ENDIAN.to_owned();
+    let mut association = dcmnorm_dimse::association::client::ClientAssociationOptions::new()
+        .calling_ae_title("TEST-SCU")
+        .called_ae_title("ANY-SCP")
+        .with_presentation_context(patient_root, vec![implicit.clone()])
+        .read_timeout(std::time::Duration::from_secs(10))
+        .establish_with(&format!("127.0.0.1:{}", scp.local_port()))
+        .unwrap();
+    let pc = context_id(&association, patient_root);
+    send_raw_find(&mut association, pc, patient_root, 1, &study_identifier("MRN"));
+    let (matches, final_response) = receive_raw_find_responses(&mut association);
+    association.release().unwrap();
+    assert!(matches.is_empty());
+    assert_eq!(response_status(&final_response), 0x0122);
+    assert!(handlers.calls.lock().unwrap().is_empty());
+    scp.stop();
+    fs::remove_dir_all(&cache_dir).ok();
+}
+
+#[test]
+fn scp_c_cancel_during_find_ends_it_with_fe00_and_the_association_stays_usable() {
+    let cache_dir = std::env::temp_dir().join(format!(
+        "dcmnorm-scp-cancel-test-{}",
+        SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+    ));
+    fs::create_dir_all(&cache_dir).unwrap();
+    let (release_handler, gate) = std::sync::mpsc::channel();
+    let handlers = std::sync::Arc::new(SopClassFindHandlers::new(vec![study_match("1.1"), study_match("1.2"), study_match("1.3")], Some(gate)));
+    let logger = std::sync::Arc::new(MockLogger { lines: std::sync::Mutex::new(Vec::new()) });
+    let scp = start_scp(
+        0,
+        cache_dir.clone(),
+        handlers.clone(),
+        ScpOptions { ae_title: "TEST-SCP".to_owned(), on_log: Some(logger.clone()), ..Default::default() },
+    )
+    .unwrap();
+    let implicit = uids::IMPLICIT_VR_LITTLE_ENDIAN.to_owned();
+    let study_root = uids::STUDY_ROOT_QUERY_RETRIEVE_INFORMATION_MODEL_FIND;
+    let mut association = dcmnorm_dimse::association::client::ClientAssociationOptions::new()
+        .calling_ae_title("TEST-SCU")
+        .called_ae_title("TEST-SCP")
+        .with_presentation_context(study_root, vec![implicit.clone()])
+        .with_presentation_context(uids::VERIFICATION, vec![implicit.clone()])
+        .read_timeout(std::time::Duration::from_secs(10))
+        .establish_with(&format!("127.0.0.1:{}", scp.local_port()))
+        .unwrap();
+    let find_pc = context_id(&association, study_root);
+
+    // The handler is still working when the C-CANCEL-RQ arrives: no match may follow, the final status is 0xFE00.
+    send_raw_find(&mut association, find_pc, study_root, 7, &study_identifier(""));
+    wait_for(|| (!handlers.calls.lock().unwrap().is_empty()).then_some(()));
+    send_raw_cancel(&mut association, find_pc, 7);
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    release_handler.send(()).unwrap();
+    let (matches, final_response) = receive_raw_find_responses(&mut association);
+    assert!(matches.is_empty(), "matches sent after the C-CANCEL-RQ: {matches:?}");
+    assert_eq!(response_status(&final_response), 0xFE00);
+    assert_eq!(final_response.element(tags::MESSAGE_ID_BEING_RESPONDED_TO).unwrap().to_int::<u16>().unwrap(), 7);
+
+    // A late C-CANCEL-RQ (after the final response) is ignored: the association keeps working.
+    send_raw_cancel(&mut association, find_pc, 7);
+    let echo_pc = context_id(&association, uids::VERIFICATION);
+    dimse_send_client_echo(&mut association, echo_pc, 8);
+    let echo_response = receive_raw_command(&mut association);
+    assert_eq!(echo_response.element(tags::COMMAND_FIELD).unwrap().to_int::<u16>().unwrap(), 0x8030);
+    assert_eq!(response_status(&echo_response), 0x0000);
+
+    // And a C-FIND that is not cancelled returns every match.
+    send_raw_find(&mut association, find_pc, study_root, 9, &study_identifier(""));
+    let (matches, final_response) = receive_raw_find_responses(&mut association);
+    assert_eq!(matches, vec!["1.1".to_owned(), "1.2".to_owned(), "1.3".to_owned()]);
+    assert_eq!(response_status(&final_response), 0x0000);
+    association.release().unwrap();
+
+    let lines = wait_for(|| {
+        let lines = logger.lines.lock().unwrap().clone();
+        lines.iter().any(|line| line.contains("released")).then_some(lines)
+    });
+    assert!(lines.iter().any(|line| line == "received C-CANCEL-RQ (message id being responded to 7)"), "{lines:#?}");
+    assert!(lines.iter().any(|line| line == "sending C-FIND-RSP: 0 match(es), final status=0xFE00"), "{lines:#?}");
+    assert!(lines.iter().any(|line| line.contains("with no C-FIND in progress; ignored")), "{lines:#?}");
+    assert!(!lines.iter().any(|line| line.contains("closed")), "the association must not close: {lines:#?}");
+
+    scp.stop();
+    fs::remove_dir_all(&cache_dir).ok();
+}
+
+fn dimse_send_client_echo(association: &mut dcmnorm_dimse::ClientAssociation<std::net::TcpStream>, pc_id: u8, message_id: u16) {
+    use dcmnorm_dimse::pdu::PDataValueType::Command;
+    let command = dimse_command_bytes(&InMemDicomObject::command_from_element_iter([
+        DataElement::new(tags::AFFECTED_SOP_CLASS_UID, VR::UI, dicom_value!(Str, uids::VERIFICATION)),
+        DataElement::new(tags::COMMAND_FIELD, VR::US, dicom_value!(U16, [0x0030])),
+        DataElement::new(tags::MESSAGE_ID, VR::US, dicom_value!(U16, [message_id])),
+        DataElement::new(tags::COMMAND_DATA_SET_TYPE, VR::US, dicom_value!(U16, [0x0101])),
+    ]));
+    association.send(&dcmnorm_dimse::pdu::Pdu::PData { data: vec![dimse_pdv(pc_id, Command, true, command)] }).unwrap();
+}
+
+// ---------------------------------------------------------------------------------------------
 // C-MOVE retrieve levels (STUDY / SERIES / IMAGE)
 // ---------------------------------------------------------------------------------------------
 

@@ -2255,6 +2255,18 @@ impl DcmScpHandlers for NapiScpHandlers {
         serde_json::from_str(&response).map_err(|e| e.to_string())
     }
 
+    /// The request's SOP class rides along in the filter object as `AffectedSOPClassUID` (a command-set keyword, so it
+    /// can never collide with an Identifier key); callers that only read the identifier keys are unaffected.
+    fn on_find_with_sop_class(
+        &self,
+        sop_class_uid: &str,
+        filter: &HashMap<String, String>,
+    ) -> std::result::Result<Vec<HashMap<String, String>>, String> {
+        let mut request = filter.clone();
+        request.insert("AffectedSOPClassUID".to_owned(), sop_class_uid.to_owned());
+        self.on_find(&request)
+    }
+
     fn on_move(&self, study_instance_uid: &str, move_destination_ae: &str) -> std::result::Result<bool, String> {
         let response = call_two_string_callback(
             &self.on_move,
@@ -2302,7 +2314,10 @@ impl DicomServerHandle {
 /// delegated to the given `async function` callbacks:
 ///
 /// - `onFind(filterJson)` - `filterJson` has whichever of StudyInstanceUID/StudyDate/
-///   PatientName/PatientID keys the request's Identifier actually had values for. Must resolve
+///   PatientName/PatientID keys the request's Identifier actually had values for, plus
+///   `AffectedSOPClassUID` (Study Root or Patient Root Query/Retrieve FIND; any other C-FIND,
+///   e.g. Modality Worklist, is answered 0x0122 "SOP class not supported" without calling
+///   `onFind`). Must resolve
 ///   to a JSON array of matched-study objects (whichever of StudyInstanceUID/AccessionNumber/
 ///   PatientID/PatientName/PatientBirthDate/StudyDate/StudyTime/StudyDescription/
 ///   ModalitiesInStudy/NumberOfStudyRelatedSeries/NumberOfStudyRelatedInstances each has).
@@ -2318,7 +2333,8 @@ impl DicomServerHandle {
 /// `echoScu`/`storeScu`/`findScu`/`moveScu`.
 ///
 /// Accepts every proposed presentation context regardless of abstract syntax - this is a
-/// permissive "accept anything a real sender proposes" SCP, not a curated allow-list.
+/// permissive "accept anything a real sender proposes" SCP, not a curated allow-list. A
+/// C-CANCEL-RQ during a C-FIND stops the matches and answers 0xFE00.
 #[napi]
 pub fn start_dicom_server(
     port: u32,
@@ -2343,6 +2359,7 @@ pub fn start_dicom_server(
         max_pdu_length: max_pdu_length.unwrap_or(262_144),
         idle_timeout: Duration::from_millis(u64::from(idle_timeout_ms.unwrap_or(300_000))),
         on_log: on_log.map(|callback| std::sync::Arc::new(NapiDimseLogger { callback }) as std::sync::Arc<dyn DimseLogger>),
+        ..Default::default()
     };
 
     let scp = dcm_start_scp(port as u16, PathBuf::from(cache_path), handlers, options).map_err(to_napi_err)?;

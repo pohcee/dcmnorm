@@ -1512,6 +1512,7 @@ fn start_dicom_server(
         max_pdu_length: max_pdu_length.unwrap_or(262_144),
         idle_timeout: Duration::from_millis(u64::from(idle_timeout_ms.unwrap_or(300_000))),
         on_log: dimse_logger_arc(on_log),
+        ..Default::default()
     };
 
     let scp = py
