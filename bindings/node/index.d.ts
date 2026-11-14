@@ -548,7 +548,10 @@ export interface RenderMovieOptions {
  * delegated to the given `async function` callbacks:
  *
  * - `onFind(filterJson)` - `filterJson` has whichever of StudyInstanceUID/StudyDate/
- *   PatientName/PatientID keys the request's Identifier actually had values for. Must resolve
+ *   PatientName/PatientID keys the request's Identifier actually had values for, plus
+ *   `AffectedSOPClassUID` (Study Root or Patient Root Query/Retrieve FIND; any other C-FIND,
+ *   e.g. Modality Worklist, is answered 0x0122 "SOP class not supported" without calling
+ *   `onFind`). Must resolve
  *   to a JSON array of matched-study objects (whichever of StudyInstanceUID/AccessionNumber/
  *   PatientID/PatientName/PatientBirthDate/StudyDate/StudyTime/StudyDescription/
  *   ModalitiesInStudy/NumberOfStudyRelatedSeries/NumberOfStudyRelatedInstances each has).
@@ -564,7 +567,8 @@ export interface RenderMovieOptions {
  * `echoScu`/`storeScu`/`findScu`/`moveScu`.
  *
  * Accepts every proposed presentation context regardless of abstract syntax - this is a
- * permissive "accept anything a real sender proposes" SCP, not a curated allow-list.
+ * permissive "accept anything a real sender proposes" SCP, not a curated allow-list. A
+ * C-CANCEL-RQ during a C-FIND stops the matches and answers 0xFE00.
  */
 export declare function startDicomServer(port: number, cachePath: string, aeTitle: string, maxPduLength: number | undefined | null, idleTimeoutMs: number | undefined | null, onFind: JsonCallback, onMove: TwoStringCallback, onAssociationComplete: JsonCallback, onLog?: (((err: Error | null, arg: string) => any)) | undefined | null): DicomServerHandle
 

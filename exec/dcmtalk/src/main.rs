@@ -435,6 +435,7 @@ fn run_storescp(args: StorescpArgs) -> Result<(), Box<dyn std::error::Error>> {
         max_pdu_length: args.max_pdu,
         idle_timeout: Duration::from_secs(args.idle_timeout),
         on_log: logger_arc(args.verbose),
+        ..Default::default()
     };
 
     let scp = start_scp(args.port, args.cache_path.clone(), Arc::new(StandaloneScpHandlers), options)?;

@@ -44,6 +44,17 @@ pub trait ScpHandlers: Send + Sync {
     /// NumberOfStudyRelatedInstances it has values for.
     fn on_find(&self, filter: &HashMap<String, String>) -> Result<Vec<HashMap<String, String>>, String>;
 
+    /// What the SCP actually calls for a C-FIND: as [`Self::on_find`], plus the request's Affected SOP Class UID (one of
+    /// [`ScpOptions::find_sop_classes`]: Study Root or Patient Root FIND by default). The default ignores the SOP class
+    /// and calls `on_find`, so an implementation that only knows `on_find` keeps working unchanged.
+    fn on_find_with_sop_class(
+        &self,
+        _sop_class_uid: &str,
+        filter: &HashMap<String, String>,
+    ) -> Result<Vec<HashMap<String, String>>, String> {
+        self.on_find(filter)
+    }
+
     /// Returns `Ok(true)` if the move was successfully queued - mirrors a "fire and forget"
     /// C-MOVE that delegates the actual transfer elsewhere and only reports whether it was
     /// accepted for processing, not whether the transfer itself later succeeds.
@@ -73,6 +84,12 @@ pub struct ScpOptions {
     /// `*ScuOptions::on_log` reports on the SCU side (see `DimseLogger`'s doc comment) - `Arc`
     /// rather than `Box` since `ScpOptions` is cloned once per accepted connection.
     pub on_log: Option<Arc<dyn DimseLogger>>,
+    /// C-FIND SOP classes (Affected SOP Class UID of the C-FIND-RQ) answered through
+    /// [`ScpHandlers::on_find_with_sop_class`] as a study-level search. Any other C-FIND (Modality Worklist, General
+    /// Purpose Worklist, ...) is answered with status 0x0122 (SOP class not supported) and an Error Comment without
+    /// calling the handler: the association itself still accepts every abstract syntax, so a modality that proposes
+    /// MWL alongside Storage can still C-STORE. Default: Study Root and Patient Root Query/Retrieve FIND.
+    pub find_sop_classes: Vec<String>,
 }
 
 impl Default for ScpOptions {
@@ -84,6 +101,10 @@ impl Default for ScpOptions {
             max_pdu_length: 262_144,
             idle_timeout: Duration::from_secs(300),
             on_log: None,
+            find_sop_classes: vec![
+                uids::STUDY_ROOT_QUERY_RETRIEVE_INFORMATION_MODEL_FIND.to_owned(),
+                uids::PATIENT_ROOT_QUERY_RETRIEVE_INFORMATION_MODEL_FIND.to_owned(),
+            ],
         }
     }
 }
@@ -148,7 +169,10 @@ impl DicomScp {
 /// C-STORE'd instances are written under `cache_path` as
 /// `S_<StudyInstanceUID>/<Modality>_<SOPInstanceUID>.dcm`. Accepts every proposed presentation
 /// context regardless of abstract syntax (`ServerAssociationOptions::promiscuous`), matching a
-/// permissive "accept anything a real sender proposes" SCP rather than a curated allow-list.
+/// permissive "accept anything a real sender proposes" SCP rather than a curated allow-list; a
+/// C-FIND whose SOP class is not in [`ScpOptions::find_sop_classes`] is refused per message
+/// (0x0122) instead. A C-CANCEL-RQ during a C-FIND ends it with 0xFE00; one after the final
+/// response is ignored.
 pub fn start_scp(
     port: u16,
     cache_path: PathBuf,
@@ -235,11 +259,17 @@ fn handle_association(stream: TcpStream, cache_path: &Path, handlers: &dyn ScpHa
     };
 
     let mut stored_instances_by_study: HashMap<String, Vec<String>> = HashMap::new();
+    // A message read while polling for a C-CANCEL-RQ during a C-FIND that turned out to be something else; handled next.
+    let mut deferred: Option<Incoming> = None;
 
     loop {
         // Message-level (dcmnorm-dimse's `message.rs`): a sender may put the command and the first fragment of its data set
         // in one PDU and the rest in later ones (dcm4che does), so PDU boundaries are never used as message boundaries.
-        let incoming = match association.receive_command() {
+        let received = match deferred.take() {
+            Some(incoming) => Ok(incoming),
+            None => association.receive_command(),
+        };
+        let incoming = match received {
             Ok(incoming) => incoming,
             Err(error) => {
                 log_event(logger, || format!("association with {peer} closed: {error}"));
@@ -284,8 +314,26 @@ fn handle_association(stream: TcpStream, cache_path: &Path, handlers: &dyn ScpHa
                         &mut stored_instances_by_study,
                         logger,
                     ),
-                    0x0020 => handle_find(&mut association, pc_id, &command, negotiated_ts, handlers, logger),
+                    0x0020 => handle_find(
+                        &mut association,
+                        pc_id,
+                        &command,
+                        negotiated_ts,
+                        handlers,
+                        &options.find_sop_classes,
+                        &mut deferred,
+                        logger,
+                    ),
                     0x0021 => handle_move(&mut association, pc_id, &command, negotiated_ts, handlers, logger),
+                    // C-CANCEL-RQ with no C-FIND in progress (it arrived after the final response): nothing to cancel,
+                    // and C-CANCEL has no response (PS3.7 9.3.2.3), so it is ignored rather than closing the association.
+                    0x0FFF => {
+                        let cancelled_id = command_u16(&command, tags::MESSAGE_ID_BEING_RESPONDED_TO);
+                        log_event(logger, || {
+                            format!("received C-CANCEL-RQ (message id being responded to {cancelled_id}) with no C-FIND in progress; ignored")
+                        });
+                        Ok(())
+                    }
                     _ => Err(()),
                 };
                 if outcome.is_err() {
@@ -502,12 +550,88 @@ const FIND_RESPONSE_FIELDS: &[(&str, dcmnorm_core::Tag, VR)] = &[
     ("NumberOfStudyRelatedInstances", tags::NUMBER_OF_STUDY_RELATED_INSTANCES, VR::IS),
 ];
 
+/// Error Comment (0000,0902, LO: at most 64 characters) for a C-FIND whose SOP class is not in `find_sop_classes`.
+fn unsupported_find_error_comment(sop_class_uid: &str) -> String {
+    let mut comment = format!("C-FIND SOP class {sop_class_uid} not supported");
+    if comment.len() > 64 {
+        comment = "C-FIND SOP class not supported".to_owned();
+    }
+    comment
+}
+
+fn find_response_command(sop_class_uid: &str, message_id: u16, status: u16, error_comment: Option<String>) -> InMemDicomObject {
+    let mut elements = vec![
+        DataElement::new(tags::AFFECTED_SOP_CLASS_UID, VR::UI, dicom_value!(Str, sop_class_uid.to_owned())),
+        DataElement::new(tags::COMMAND_FIELD, VR::US, dicom_value!(U16, [0x8020])),
+        DataElement::new(tags::MESSAGE_ID_BEING_RESPONDED_TO, VR::US, dicom_value!(U16, [message_id])),
+        // 0x0001: an Identifier follows (a Pending response); 0x0101: none (the final response).
+        DataElement::new(tags::COMMAND_DATA_SET_TYPE, VR::US, dicom_value!(U16, [if status == 0xFF00 { 0x0001 } else { 0x0101 }])),
+        DataElement::new(tags::STATUS, VR::US, dicom_value!(U16, [status])),
+    ];
+    if let Some(comment) = error_comment {
+        elements.push(DataElement::new(tags::ERROR_COMMENT, VR::LO, dicom_value!(Str, comment)));
+    }
+    InMemDicomObject::command_from_element_iter(elements)
+}
+
+/// Whether the peer has sent a C-CANCEL-RQ for C-FIND `message_id` (PS3.7 9.1.2.1.6), checked without blocking between
+/// responses. Anything else that arrived (a stray C-CANCEL for another message id is ignored) is kept in `deferred` for
+/// the association loop, so polling never loses a message.
+fn find_cancel_requested(
+    association: &mut ServerAssociation<TcpStream>,
+    message_id: u16,
+    deferred: &mut Option<Incoming>,
+    logger: Option<&dyn DimseLogger>,
+) -> Result<bool, ()> {
+    if deferred.is_some() {
+        return Ok(false);
+    }
+    association.inner_stream().set_nonblocking(true).map_err(|_| ())?;
+    let polled = association.receive_command();
+    association.inner_stream().set_nonblocking(false).map_err(|_| ())?;
+    match polled {
+        // Nothing (or only part of a PDU, which the receiver keeps) has arrived.
+        Err(dcmnorm_dimse::Error::Io(error))
+            if matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) =>
+        {
+            Ok(false)
+        }
+        Err(error) => {
+            log_event(logger, || format!("failed to read from the association during C-FIND: {error}"));
+            Err(())
+        }
+        Ok(Incoming::Command { presentation_context_id, data }) => {
+            let parsed = InMemDicomObject::read_dataset_with_ts(data.as_slice(), implicit_vr_le()).ok();
+            if let Some(command) = parsed.filter(|command| command_u16(command, tags::COMMAND_FIELD) == 0x0FFF) {
+                let cancelled_id = command_u16(&command, tags::MESSAGE_ID_BEING_RESPONDED_TO);
+                if cancelled_id == message_id {
+                    log_event(logger, || format!("received C-CANCEL-RQ (message id being responded to {cancelled_id})"));
+                    return Ok(true);
+                }
+                log_event(logger, || {
+                    format!("received C-CANCEL-RQ (message id being responded to {cancelled_id}) for another message; ignored")
+                });
+                return Ok(false);
+            }
+            *deferred = Some(Incoming::Command { presentation_context_id, data });
+            Ok(false)
+        }
+        Ok(other) => {
+            *deferred = Some(other);
+            Ok(false)
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn handle_find(
     association: &mut ServerAssociation<TcpStream>,
     pc_id: u8,
     command: &InMemDicomObject,
     negotiated_ts: &TransferSyntax,
     handlers: &dyn ScpHandlers,
+    find_sop_classes: &[String],
+    deferred: &mut Option<Incoming>,
     logger: Option<&dyn DimseLogger>,
 ) -> Result<(), ()> {
     let message_id = command_u16(command, tags::MESSAGE_ID);
@@ -515,6 +639,23 @@ fn handle_find(
 
     let identifier_bytes = receive_data(association, logger)?;
     let identifier = InMemDicomObject::read_dataset_with_ts(identifier_bytes.as_slice(), negotiated_ts).map_err(|_| ())?;
+
+    // Only study-level searches go to the handler: answering a Modality Worklist (or any other) C-FIND as a study search
+    // would hand archived studies to a device that asked for something else (an MWL query without PatientName/PatientID
+    // would match every study).
+    if !find_sop_classes.iter().any(|sop_class| sop_class == &affected_sop_class_uid) {
+        log_event(logger, || {
+            format!("received C-FIND-RQ (message id {message_id}); SOP class {affected_sop_class_uid} not supported")
+        });
+        // 0x0122: "SOP class not supported" (PS3.7 Annex C, general status).
+        log_event(logger, || "sending C-FIND-RSP: 0 match(es), final status=0x0122".to_owned());
+        let error_comment = unsupported_find_error_comment(&affected_sop_class_uid);
+        return send_command(
+            association,
+            pc_id,
+            &find_response_command(&affected_sop_class_uid, message_id, 0x0122, Some(error_comment)),
+        );
+    }
 
     let mut filter = HashMap::new();
     for (keyword, tag) in FIND_IDENTIFIER_KEYS {
@@ -531,14 +672,23 @@ fn handle_find(
     log_event(logger, || {
         let mut keys: Vec<&str> = filter.keys().map(String::as_str).collect();
         keys.sort_unstable();
-        format!("received C-FIND-RQ (message id {message_id}); query key(s): [{}]", keys.join(", "))
+        format!(
+            "received C-FIND-RQ (message id {message_id}); query key(s): [{}]; SOP class {affected_sop_class_uid}",
+            keys.join(", ")
+        )
     });
 
     let mut match_count = 0usize;
-    let final_status = match handlers.on_find(&filter) {
+    let final_status = match handlers.on_find_with_sop_class(&affected_sop_class_uid, &filter) {
         Ok(studies) => {
-            match_count = studies.len();
+            let mut cancelled = false;
             for study in &studies {
+                // A C-CANCEL-RQ may arrive at any time before the final response (PS3.4 C.4.1.3.1): stop sending
+                // matches and answer 0xFE00. Checked before each match (the handler may have taken a while).
+                if find_cancel_requested(association, message_id, deferred, logger)? {
+                    cancelled = true;
+                    break;
+                }
                 // SpecificCharacterSet is declared unconditionally (not just when a value
                 // actually needs it) - PS3.5 6.1.2.3's default repertoire (used when this is
                 // absent) is 7-bit ASCII, and `on_find` results come from customer data
@@ -559,19 +709,18 @@ fn handle_find(
                 let mut match_bytes = Vec::new();
                 match_dataset.write_dataset_with_ts(&mut match_bytes, negotiated_ts).map_err(|_| ())?;
 
-                let pending = InMemDicomObject::command_from_element_iter([
-                    DataElement::new(tags::AFFECTED_SOP_CLASS_UID, VR::UI, dicom_value!(Str, affected_sop_class_uid.clone())),
-                    DataElement::new(tags::COMMAND_FIELD, VR::US, dicom_value!(U16, [0x8020])),
-                    DataElement::new(tags::MESSAGE_ID_BEING_RESPONDED_TO, VR::US, dicom_value!(U16, [message_id])),
-                    DataElement::new(tags::COMMAND_DATA_SET_TYPE, VR::US, dicom_value!(U16, [0x0001])),
-                    // 0xFF00: Pending, matches follow (PS3.7 C.4.1) - the standard "another match
-                    // is coming next" status for a C-FIND-RSP.
-                    DataElement::new(tags::STATUS, VR::US, dicom_value!(U16, [0xFF00])),
-                ]);
-                send_command(association, pc_id, &pending)?;
+                // 0xFF00: Pending, matches follow (PS3.7 C.4.1) - the standard "another match
+                // is coming next" status for a C-FIND-RSP.
+                send_command(association, pc_id, &find_response_command(&affected_sop_class_uid, message_id, 0xFF00, None))?;
                 send_data(association, pc_id, match_bytes)?;
+                match_count += 1;
             }
-            0x0000u16
+            if cancelled || find_cancel_requested(association, message_id, deferred, logger)? {
+                // 0xFE00: "Matching terminated due to Cancel request" (PS3.4 C.4.1.1.4).
+                0xFE00u16
+            } else {
+                0x0000u16
+            }
         }
         // 0xC000: "Unable to process" (generic C-FIND failure). Logged, not just swallowed - the
         // handler's own error (e.g. a malformed match JS returned, an HTTP failure it hit) is the
@@ -585,14 +734,7 @@ fn handle_find(
 
     log_event(logger, || format!("sending C-FIND-RSP: {match_count} match(es), final status=0x{final_status:04X}"));
 
-    let final_response = InMemDicomObject::command_from_element_iter([
-        DataElement::new(tags::AFFECTED_SOP_CLASS_UID, VR::UI, dicom_value!(Str, affected_sop_class_uid)),
-        DataElement::new(tags::COMMAND_FIELD, VR::US, dicom_value!(U16, [0x8020])),
-        DataElement::new(tags::MESSAGE_ID_BEING_RESPONDED_TO, VR::US, dicom_value!(U16, [message_id])),
-        DataElement::new(tags::COMMAND_DATA_SET_TYPE, VR::US, dicom_value!(U16, [0x0101])),
-        DataElement::new(tags::STATUS, VR::US, dicom_value!(U16, [final_status])),
-    ]);
-    send_command(association, pc_id, &final_response)
+    send_command(association, pc_id, &find_response_command(&affected_sop_class_uid, message_id, final_status, None))
 }
 
 fn handle_move(
