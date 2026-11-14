@@ -239,6 +239,81 @@ fn is_classic_jpeg2000_encode_transfer_syntax(uid: &str) -> bool {
 /// `jpeg_ls::NEAR_LOSSLESS_STEP`'s reasoning for its own default.
 const JPEG2000_LOSSY_COMPRESSION_RATIO: f32 = 10.0;
 
+/// The fragments of encapsulated PixelData that hold `frame_index`'s codestream, as a range of
+/// fragment indices - the same frame-to-fragment mapping the registry's JPEG 2000 adapter uses
+/// (`dcmnorm-transcode`'s `frame_codestream`), extended to the Extended Offset Table:
+///
+/// - one fragment per frame (the common case, and the only layout JPEG-LS and RLE encoders
+///   write in practice): fragment `frame_index`;
+/// - a single frame: every fragment;
+/// - otherwise the frame's first fragment is the one the Extended Offset Table (7FE0,0001), or
+///   failing that a populated Basic Offset Table, points at, and it runs up to the next frame's.
+///
+/// Returns `None` when none of these applies (no encapsulated PixelData, `frame_index` out of
+/// range, several fragments per frame without an offset table, or an offset that doesn't land
+/// on a fragment boundary): callers then take their full-decode path, which reports any error.
+pub(crate) fn encapsulated_frame_fragment_range(
+    object: &DefaultDicomObject,
+    frame_index: usize,
+) -> Option<std::ops::Range<usize>> {
+    let element = object.get(tags::PIXEL_DATA)?;
+    let fragments = element.fragments()?;
+    let number_of_fragments = fragments.len();
+    let number_of_frames = object
+        .get(tags::NUMBER_OF_FRAMES)
+        .and_then(|element| element.to_str().ok())
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(1)
+        .max(1);
+    if number_of_fragments == 0 || frame_index >= number_of_frames {
+        return None;
+    }
+    if number_of_fragments == number_of_frames {
+        return Some(frame_index..frame_index + 1);
+    }
+    if number_of_frames == 1 {
+        return Some(0..number_of_fragments);
+    }
+
+    // Byte offsets of each frame's first fragment, relative to the first fragment's item tag.
+    let extended_offsets = object
+        .get(tags::EXTENDED_OFFSET_TABLE)
+        .and_then(|element| element.to_bytes().ok())
+        .filter(|bytes| bytes.len() == number_of_frames * 8)
+        .map(|bytes| {
+            bytes
+                .chunks_exact(8)
+                .map(|chunk| u64::from_le_bytes(chunk.try_into().expect("8-byte chunk")))
+                .collect::<Vec<u64>>()
+        });
+    let frame_offsets = match extended_offsets {
+        Some(offsets) => offsets,
+        None => {
+            let basic = element.offset_table()?;
+            if basic.len() != number_of_frames {
+                return None;
+            }
+            basic.iter().map(|&offset| u64::from(offset)).collect()
+        }
+    };
+
+    // Each fragment item is an 8-byte item header (tag + length) followed by its bytes.
+    let mut fragment_starts = Vec::with_capacity(number_of_fragments);
+    let mut position = 0u64;
+    for fragment in fragments {
+        fragment_starts.push(position);
+        position += fragment.len() as u64 + 8;
+    }
+    let fragment_at = |offset: u64| fragment_starts.binary_search(&offset).ok();
+
+    let start = fragment_at(frame_offsets[frame_index])?;
+    let end = match frame_offsets.get(frame_index + 1) {
+        Some(&next) => fragment_at(next)?,
+        None => number_of_fragments,
+    };
+    (start < end).then_some(start..end)
+}
+
 /// Determines whether the JPEG 2000 codestream for the given frame uses the
 /// Multiple Component Transformation (MCT).
 ///
@@ -395,7 +470,7 @@ fn is_mpeg_transfer_syntax(uid: &str) -> bool {
     )
 }
 
-fn is_jpeg_ls_transfer_syntax(uid: &str) -> bool {
+pub(super) fn is_jpeg_ls_transfer_syntax(uid: &str) -> bool {
     matches!(
         normalize_transfer_syntax_uid(uid),
         "1.2.840.10008.1.2.4.80" | "1.2.840.10008.1.2.4.81"

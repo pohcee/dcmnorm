@@ -12,6 +12,7 @@ const overlayMultiFixture = path.join(__dirname, "..", "..", "..", "test", "file
 const overlayEmbeddedFixture = path.join(__dirname, "..", "..", "..", "test", "files", "overlay_embedded.dcm");
 const ctFixture = path.join(__dirname, "..", "..", "..", "test", "files", "ct.dcm");
 const wsiFixture = path.join(__dirname, "..", "..", "..", "test", "files", "wsi.dcm");
+const us2Fixture = path.join(__dirname, "..", "..", "..", "test", "files", "us2.dcm");
 
 // The addon must run on the oldest glibc among its consumers: the native Linux edge install
 // (Ubuntu 20.04 / Debian 11, glibc 2.31, libstdc++ GLIBCXX 3.4.28) as well as the bookworm-based
@@ -250,6 +251,24 @@ const tagsJson = await binding.readTags(fixture, ["StudyInstanceUID", "SOPInstan
     assert.ok(error.message.includes("compression"), `unexpected error message: ${error.message}`);
   }
   assert.ok(compressionRejected, "an invalid compression value should reject");
+
+  // computeHistogram with frameIndex reads only that frame of a native multi-frame file (like
+  // renderFrame/exportFrameTexture); the result must equal that frame's entry of the
+  // whole-instance histograms.
+  const allHistograms = await binding.computeHistogram(us2Fixture);
+  assert.strictEqual(allHistograms.length, 227, "us2.dcm is a 227-frame grayscale cine");
+  for (const frameIndex of [0, 113, 226]) {
+    const single = await binding.computeHistogram(us2Fixture, { frameIndex });
+    assert.strictEqual(single.length, 1);
+    assert.deepStrictEqual(single[0], allHistograms[frameIndex], `frame ${frameIndex} histogram differs`);
+  }
+  let histogramRangeRejected = false;
+  try {
+    await binding.computeHistogram(us2Fixture, { frameIndex: 227 });
+  } catch (error) {
+    histogramRangeRejected = true;
+  }
+  assert.ok(histogramRangeRejected, "an out-of-range frameIndex should reject");
 
   fs.rmSync(tmpDir, { recursive: true, force: true });
   console.log("smoke test passed");
