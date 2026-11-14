@@ -862,4 +862,5 @@ module.exports.startFindScu = nativeBinding.startFindScu
 module.exports.startStoreScu = nativeBinding.startStoreScu
 module.exports.storeScu = nativeBinding.storeScu
 module.exports.transcode = nativeBinding.transcode
+module.exports.writeDicomdir = nativeBinding.writeDicomdir
 module.exports.writeJson = nativeBinding.writeJson
