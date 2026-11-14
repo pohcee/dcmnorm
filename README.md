@@ -45,7 +45,7 @@ Cargo, build from source).
 ## What's in this repository
 
 - [`dcmnorm`](src/): a library crate with DICOM file, memory, JSON conversion, and DIMSE network helpers
-- [`exec/dcmnorm`](exec/dcmnorm/): a CLI for converting between DICOM, transcoded DICOM, JSON, and rendered images/raw frames
+- [`exec/dcmnorm`](exec/dcmnorm/): a CLI for converting between DICOM, transcoded DICOM, JSON, and rendered images/raw frames, and for writing a DICOMDIR
 - [`exec/dcmtalk`](exec/dcmtalk/): a DIMSE network CLI (C-ECHO/C-STORE/C-FIND/C-MOVE SCU plus a storage SCP), covering the same ground as [dcmtk](https://dcmtk.org/)'s `echoscu`/`storescu`/`findscu`/`movescu`/`storescp`
 - [`bindings/node`](bindings/node/): Node.js bindings (`@pohcee/dcmnorm-node`) that call the library in-process via napi-rs — see that package's own README for its API
   - [`bindings/node/examples/test-website`](bindings/node/examples/test-website/): the source for the live demo above — also runnable locally, in Docker, or deployed to your own Cloud Run project
@@ -239,6 +239,10 @@ General:
 - `--overwrite`
 - `--input-type <dicom|json>`
 - `--output-type <dicom|json|raw|png|jpeg|mpeg4|texture>`
+
+DICOMDIR (a command of its own, see [Write a DICOMDIR](#write-a-dicomdir)):
+
+- `dcmnorm dicomdir <ROOT> [--file-set-id <ID>] [-o <PATH>] [--json]`
 
 DICOM editing:
 
@@ -972,6 +976,40 @@ Kakadu is an optional override for **classic** JPEG 2000 only.
 The evaluation behind these choices covers OpenJPEG, OpenHTJ2K, OpenJPH, Grok, Kakadu and several
 Rust decoders, with correctness checks and benchmarks on full-field mammograms. See
 [docs/jpeg2000-codec-evaluation.md](docs/jpeg2000-codec-evaluation.md).
+
+### Write a DICOMDIR
+
+`dcmnorm dicomdir ROOT` writes the DICOMDIR of a File-set (DICOM media: CD, DVD, USB): a Basic
+Directory (Media Storage Directory Storage, `1.2.840.10008.1.3.10`, Explicit VR Little Endian)
+with PATIENT, STUDY and SERIES records and one record per file below them, like dcmtk's
+`dcmmkdir`.
+
+```bash
+dcmnorm dicomdir /media/disc --file-set-id DISC_0001           # writes /media/disc/DICOMDIR
+dcmnorm dicomdir /media/disc -o /tmp/DICOMDIR --json           # elsewhere; the report as JSON
+```
+
+- Every file under `ROOT` that starts with the `DICM` prefix is a member of the File-set; other
+  files (a `README.TXT`, say) are skipped. Only headers are read, never pixel data.
+- A file's path below `ROOT` is its File ID, so it must follow PS3.10 8.2: at most 8 levels, each
+  name 1-8 characters of `A-Z`, `0-9` and `_`, no lower case and no extension (for example
+  `DICOM/ST000001/SE000001/IM000001`). A DICOM file with any other name is an error.
+- The record type of each file comes from its SOP Class (PS3.3 F.5): IMAGE, SR DOCUMENT, KEY
+  OBJECT DOC, PRESENTATION, ENCAP DOC, WAVEFORM, RT DOSE/STRUCTURE SET/PLAN/TREAT RECORD,
+  SPECTROSCOPY, REGISTRATION, MEASUREMENT, RADIOTHERAPY and the rest; a SOP Class with no record
+  type that isn't an image is an error. Hanging protocols, color palettes, implant templates and
+  inventories go in the root, beside the patients.
+- Records carry the PS3.3 F.5 keys plus the STD-GEN-CD and STD-GEN-DVD additional keys (PS3.11
+  Tables D.3-2 and H.3-2) when the instances have them. Records with non-ASCII text are written
+  in UTF-8 (`ISO_IR 192`).
+- Type 1 keys the instances lack (Patient ID, Study ID, Study Date/Time, Modality, Series
+  Number, Instance Number, as IHE PDI's Table 4.47.4-1 lists) are synthesized, distinct per
+  patient/study/series, and listed in the output. A Patient ID shared by two differently named
+  patients, a study under two patients, a series in two studies, or a SOP Instance in two files
+  is an error.
+
+The Node binding's `writeDicomdir(entries, outputPath, options)` does the same from a list of
+`{ fileId, json }` or `{ fileId, path }` entries (see `bindings/node/README.md`).
 
 ## dcmtalk CLI Usage
 
