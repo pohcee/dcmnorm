@@ -3878,7 +3878,16 @@ fn scp_on_log_reports_when_an_association_ends_with_no_c_store() {
     scp.stop();
     fs::remove_dir_all(&cache_dir).ok();
 
-    let joined = logger.lines.lock().unwrap().join("\n");
+    // The association's thread logs its summary after the client has seen the release, so
+    // `echo_scu` returning (or `stop`) does not mean the line is there yet: wait for it.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let joined = loop {
+        let joined = logger.lines.lock().unwrap().join("\n");
+        if joined.contains("ended with no C-STORE received") || std::time::Instant::now() > deadline {
+            break joined;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
     assert!(
         joined.contains("ended with no C-STORE received"),
         "missing no-C-STORE association summary log, got: {joined}"

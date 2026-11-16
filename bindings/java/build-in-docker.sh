@@ -65,8 +65,8 @@ docker run --rm -v "$SCRIPT_DIR/../..":/repo -w /repo/bindings/java \
 
     mkdir -p src/main/resources/native/linux-x64
     cp /repo/target/release/libdcmnorm_java.so src/main/resources/native/linux-x64/
-    # The sidecar hash keys NativeLoader's per-user extraction cache, so a JVM start checks the
-    # cache by reading 64 bytes instead of copying or hashing the ~28 MB library (#5).
+    # The sidecar hash keys the per-user extraction cache of NativeLoader, so a JVM start checks
+    # the cache by reading 64 bytes instead of copying or hashing the ~28 MB library.
     (cd src/main/resources/native/linux-x64 && sha256sum libdcmnorm_java.so > libdcmnorm_java.so.sha256)
 
     mvn -q package

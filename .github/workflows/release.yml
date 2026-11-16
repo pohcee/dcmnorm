@@ -363,7 +363,10 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: dcmnorm-java-native
-          path: bindings/java/src/main/resources/native/linux-x64/libdcmnorm_java.so
+          # the .sha256 sidecar keys NativeLoader's extraction cache: it must ship with the library
+          path: |
+            bindings/java/src/main/resources/native/linux-x64/libdcmnorm_java.so
+            bindings/java/src/main/resources/native/linux-x64/libdcmnorm_java.so.sha256
           if-no-files-found: error
 
   # --- Publish ----------------------------------------------------------------------------------
@@ -400,7 +403,8 @@ jobs:
           for platform in linux darwin win32; do
             tar -czf "dist/${platform}.dcmnorm.tar.gz" -C plugin .
           done
-          tar -tzf dist/linux.dcmnorm.tar.gz | grep -qx './gemini-extension.json'
+          # grep -q would exit at the first match and fail tar with a write error under pipefail
+          tar -tzf dist/linux.dcmnorm.tar.gz | grep -x './gemini-extension.json' > /dev/null
 
       - name: Create GitHub release
         # Archives and .deb packages (each with a .sha256), versioned and "latest" names, and the
