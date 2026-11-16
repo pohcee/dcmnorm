@@ -4804,7 +4804,7 @@ fn scp_stores_a_data_set_whose_first_fragment_shares_the_command_pdu() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// SCP C-FIND SOP classes and C-CANCEL (pohcee/safebridge#1177): a Modality Worklist (or any non-study) C-FIND used to be
+// SCP C-FIND SOP classes and C-CANCEL: a Modality Worklist (or any non-study) C-FIND used to be
 // answered as a Study Root study search, and a C-CANCEL-RQ closed the association.
 // ---------------------------------------------------------------------------------------------
 
