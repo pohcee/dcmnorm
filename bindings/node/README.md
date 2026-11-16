@@ -63,7 +63,9 @@ npm test             # runs test/smoke.js against the fixtures in ../../test/fil
   the CLI's `--histogram`/`--histogram-bins`/`--histogram-frame`/`--histogram-min`/`--histogram-max`
   — see the main [README](../../README.md#compute-a-pixel-histogram-with---histogram) for the
   field-by-field output shape. `binCount` defaults to 256; `frameIndex` (0-based) restricts the
-  result to one frame instead of every frame in the instance; `minValue`/`maxValue` (must be set
+  result to one frame instead of every frame in the instance (and, like `renderFrame`, reads only
+  that frame's bytes of a native multi-frame file, and decodes only that frame of a compressed
+  one); `minValue`/`maxValue` (must be set
   together) pin the bin range instead of defaulting to each frame's own observed min/max.
   `FrameHistogram` is `{ frameIndex, channel: 'red'|'green'|'blue'|null, binCount, rangeMin,
   rangeMax, binWidth, counts: number[], pixelCount, minValue, maxValue, mean, stdDev }`.

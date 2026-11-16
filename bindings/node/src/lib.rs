@@ -1441,7 +1441,6 @@ impl Task for ComputeHistogramTask {
 
     fn compute(&mut self) -> Result<Self::Output> {
         guarded(|| {
-            let object = read_dicom_file(&self.file_path).map_err(to_napi_err)?;
             let dcm_options = DcmHistogramOptions {
                 bin_count: self.options.bin_count.unwrap_or(256),
                 min_value: self.options.min_value,
@@ -1449,10 +1448,17 @@ impl Task for ComputeHistogramTask {
             };
 
             let histograms = match self.options.frame_index {
+                // One frame: read only that frame's bytes where the file allows it, like
+                // renderFrame / exportFrameTexture.
                 Some(frame_index) => {
-                    dcm_compute_frame_histogram(&object, frame_index as usize, &dcm_options).map_err(to_napi_err)?
+                    let frame_index = frame_index as usize;
+                    let object = read_dicom_file_for_single_frame(&self.file_path, frame_index)?;
+                    dcm_compute_frame_histogram(&object, frame_index, &dcm_options).map_err(to_napi_err)?
                 }
-                None => dcm_compute_instance_histograms(&object, &dcm_options).map_err(to_napi_err)?,
+                None => {
+                    let object = read_dicom_file(&self.file_path).map_err(to_napi_err)?;
+                    dcm_compute_instance_histograms(&object, &dcm_options).map_err(to_napi_err)?
+                }
             };
 
             Ok(histograms.into_iter().map(FrameHistogram::from).collect())

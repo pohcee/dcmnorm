@@ -196,6 +196,24 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test/files").join(name)
     }
 
+    /// The Node binding's `computeHistogram` with `frameIndex` histograms a
+    /// `read_dicom_file_for_frame` object (only that frame's bytes read): same result as a full
+    /// read.
+    #[test]
+    fn frame_histogram_of_a_single_frame_read_matches_the_full_read() {
+        let path = fixture_path("us2.dcm");
+        let full = read_dicom_file(&path).unwrap();
+        let options = HistogramOptions { bin_count: 64, min_value: None, max_value: None };
+        for frame_index in [0, 113, 226] {
+            let single = crate::dicom_io::read_dicom_file_for_frame(&path, frame_index).unwrap().unwrap();
+            assert_eq!(
+                format!("{:?}", compute_frame_histogram(&single, frame_index, &options).unwrap()),
+                format!("{:?}", compute_frame_histogram(&full, frame_index, &options).unwrap()),
+                "frame {frame_index}"
+            );
+        }
+    }
+
     #[test]
     fn frame_histogram_bins_every_pixel_within_the_observed_range() {
         let object = read_dicom_file(fixture_path("ct.dcm")).unwrap();

@@ -1,5 +1,9 @@
 #[cfg(feature = "jpeg-ls-codec")]
 pub mod jpeg_ls_impl {
+    use std::borrow::Cow;
+    use std::ops::Range;
+
+    use crate::dicom_io::io::encapsulated_frame_fragment_range;
     use dcmnorm_dictionary::tags;
     use dcmnorm_object::DefaultDicomObject;
 
@@ -17,57 +21,127 @@ pub mod jpeg_ls_impl {
     /// allows) is the standard DICOM encapsulation convention for JPEG-LS (PS3.5 A.4), so each
     /// fragment is decoded independently - concatenating the still-*encoded* fragments before a
     /// single decode call would feed multiple independent codestreams into one decode as if they
-    /// were one, silently corrupting every frame after the first on real multi-frame files.
+    /// were one, silently corrupting every frame after the first on real multi-frame files. A
+    /// frame split over several fragments is reassembled through the offset tables when they
+    /// map every frame (`encapsulated_frame_fragment_range`), the same mapping
+    /// `decode_jpeg_ls_frame` uses for a single frame.
     pub fn decode_jpeg_ls_pixel_data(object: &DefaultDicomObject) -> Result<Vec<u8>, String> {
+        let fragments = encapsulated_fragments(object)?;
+        let (rows, cols) = dimensions(object)?;
+
+        // A single frame keeps the historical fragment-by-fragment decode (no reassembly),
+        // whatever its fragment count.
+        let number_of_frames = number_of_frames(object);
+        if number_of_frames > 1 && fragments.len() != number_of_frames {
+            let ranges: Option<Vec<_>> = (0..number_of_frames)
+                .map(|frame_index| encapsulated_frame_fragment_range(object, frame_index))
+                .collect();
+            if let Some(ranges) = ranges {
+                let mut decoded = Vec::new();
+                for range in ranges {
+                    decoded.extend_from_slice(&decode_codestream(&frame_codestream(fragments, range), rows, cols)?);
+                }
+                return Ok(decoded);
+            }
+        }
+
+        // One fragment per frame. charls decodes samples into native (little-endian) byte
+        // order, matching what every other codec here hands to `replace_with_native_pixel_data`.
+        let mut decoded = Vec::new();
+        for fragment in fragments {
+            decoded.extend_from_slice(&decode_codestream(fragment, rows, cols)?);
+        }
+
+        Ok(decoded)
+    }
+
+    /// Decode only frame `frame_index` of multi-frame JPEG-LS pixel data: exactly the bytes
+    /// `decode_jpeg_ls_pixel_data` produces for that frame, without decoding any other frame.
+    ///
+    /// `Ok(None)` when the frame can't be located among the fragments (see
+    /// `encapsulated_frame_fragment_range`): the caller then falls back to the full decode,
+    /// which reports the error for a malformed file.
+    pub fn decode_jpeg_ls_frame(
+        object: &DefaultDicomObject,
+        frame_index: usize,
+    ) -> Result<Option<Vec<u8>>, String> {
+        let Some(range) = encapsulated_frame_fragment_range(object, frame_index) else {
+            return Ok(None);
+        };
+        if number_of_frames(object) == 1 && range.len() > 1 {
+            // `decode_jpeg_ls_pixel_data` decodes these fragment by fragment; leave it to that.
+            return Ok(None);
+        }
+        let fragments = encapsulated_fragments(object)?;
+        let (rows, cols) = dimensions(object)?;
+        decode_codestream(&frame_codestream(fragments, range), rows, cols).map(Some)
+    }
+
+    fn number_of_frames(object: &DefaultDicomObject) -> usize {
+        object
+            .get(tags::NUMBER_OF_FRAMES)
+            .and_then(|e| e.to_str().ok())
+            .and_then(|s| s.trim().parse::<usize>().ok())
+            .unwrap_or(1)
+            .max(1)
+    }
+
+    fn encapsulated_fragments(object: &DefaultDicomObject) -> Result<&[Vec<u8>], String> {
         let fragments = object
             .element(tags::PIXEL_DATA)
             .map_err(|e| format!("missing PixelData: {e}"))?
             .fragments()
             .ok_or_else(|| "expected encapsulated JPEG-LS pixel data".to_owned())?;
-
         if fragments.is_empty() {
             return Err("no JPEG-LS data to decode".to_owned());
         }
+        Ok(fragments)
+    }
 
-        // Get image dimensions to validate against each codestream's own header before decoding
-        // it - a mismatch here means either a corrupt fragment or the wrong PixelData
-        // attributes, and either way is worth a clear error instead of the confusing shape
-        // mismatch that would otherwise surface downstream.
+    fn dimensions(object: &DefaultDicomObject) -> Result<(u32, u32), String> {
         let rows = object
             .get(tags::ROWS)
             .and_then(|e| e.uint16().ok())
             .ok_or_else(|| "missing Rows attribute".to_owned())? as u32;
-
         let cols = object
             .get(tags::COLUMNS)
             .and_then(|e| e.uint16().ok())
             .ok_or_else(|| "missing Columns attribute".to_owned())? as u32;
+        Ok((rows, cols))
+    }
 
-        // charls decodes samples into native (little-endian) byte order, matching what every
-        // other codec in this codebase already hands to `replace_with_native_pixel_data`.
-        let mut decoded = Vec::new();
-        for fragment in fragments {
-            if fragment.is_empty() {
-                return Err("empty JPEG-LS fragment".to_owned());
-            }
+    /// The frame's codestream: its one fragment borrowed, or its fragments joined.
+    fn frame_codestream(fragments: &[Vec<u8>], range: Range<usize>) -> Cow<'_, [u8]> {
+        if range.len() == 1 {
+            Cow::Borrowed(fragments[range.start].as_slice())
+        } else {
+            Cow::Owned(fragments[range].concat())
+        }
+    }
 
-            let frame_info = charls::CharLS::default()
-                .get_frame_info(fragment)
-                .map_err(|e| format!("failed to read JPEG-LS header: {e}"))?;
-            if frame_info.width != cols || frame_info.height != rows {
-                return Err(format!(
-                    "JPEG-LS codestream dimensions ({}x{}) do not match DICOM Rows/Columns ({rows}x{cols})",
-                    frame_info.width, frame_info.height
-                ));
-            }
-
-            let frame_bytes = charls::CharLS::default()
-                .decode(fragment)
-                .map_err(|e| format!("JPEG-LS decode failed: {e}"))?;
-            decoded.extend_from_slice(&frame_bytes);
+    /// Decode one JPEG-LS codestream (one frame), checking its header against Rows/Columns
+    /// first - a mismatch here means either a corrupt fragment or the wrong PixelData
+    /// attributes, and either way is worth a clear error instead of the confusing shape
+    /// mismatch that would otherwise surface downstream. charls decodes samples into native
+    /// (little-endian) byte order.
+    fn decode_codestream(codestream: &[u8], rows: u32, cols: u32) -> Result<Vec<u8>, String> {
+        if codestream.is_empty() {
+            return Err("empty JPEG-LS fragment".to_owned());
         }
 
-        Ok(decoded)
+        let frame_info = charls::CharLS::default()
+            .get_frame_info(codestream)
+            .map_err(|e| format!("failed to read JPEG-LS header: {e}"))?;
+        if frame_info.width != cols || frame_info.height != rows {
+            return Err(format!(
+                "JPEG-LS codestream dimensions ({}x{}) do not match DICOM Rows/Columns ({rows}x{cols})",
+                frame_info.width, frame_info.height
+            ));
+        }
+
+        charls::CharLS::default()
+            .decode(codestream)
+            .map_err(|e| format!("JPEG-LS decode failed: {e}"))
     }
 
     /// Encode raw native pixel data to JPEG-LS, one fragment per frame - the mirror image of
@@ -173,6 +247,13 @@ pub mod jpeg_ls_impl {
         Err("JPEG-LS codec support requires 'jpeg-ls-codec' feature to be enabled".to_owned())
     }
 
+    pub fn decode_jpeg_ls_frame(
+        _object: &DefaultDicomObject,
+        _frame_index: usize,
+    ) -> Result<Option<Vec<u8>>, String> {
+        Err("JPEG-LS codec support requires 'jpeg-ls-codec' feature to be enabled".to_owned())
+    }
+
     pub fn encode_jpeg_ls_pixel_data(
         _object: &DefaultDicomObject,
         _lossless: bool,
@@ -181,7 +262,7 @@ pub mod jpeg_ls_impl {
     }
 }
 
-pub use jpeg_ls_impl::{decode_jpeg_ls_pixel_data, encode_jpeg_ls_pixel_data};
+pub use jpeg_ls_impl::{decode_jpeg_ls_frame, decode_jpeg_ls_pixel_data, encode_jpeg_ls_pixel_data};
 
 #[cfg(test)]
 mod tests {
