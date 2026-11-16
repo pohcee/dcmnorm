@@ -11,6 +11,7 @@ use dcmnorm_core::value::PrimitiveValue;
 use dcmnorm_dictionary::StandardDataDictionary;
 use dcmnorm_encoding::decode::basic::{BasicDecoder, LittleEndianBasicDecoder};
 use dcmnorm_encoding::decode::explicit_le::ExplicitVRLittleEndianDecoder;
+use dcmnorm_encoding::decode::implicit_le::StandardImplicitVRLittleEndianDecoder;
 use dcmnorm_encoding::decode::{BasicDecode, DecodeFrom};
 use dcmnorm_encoding::text::{
     validate_da, validate_dt, validate_tm, DefaultCharacterSetCodec, SpecificCharacterSet,
@@ -213,6 +214,16 @@ pub trait StatefulDecode {
     /// If the stateful decoder was constructed at the beginning of the reader,
     /// this equals to the number of bytes read so far.
     fn position(&self) -> u64;
+
+    /// Enter the content of an undefined-length `UN` element, which PS3.5 6.2.2 requires to be
+    /// encoded as a sequence in Implicit VR Little Endian whatever the transfer syntax: element
+    /// headers are decoded as Implicit VR Little Endian until the matching
+    /// [`leave_implicit_vr`](StatefulDecode::leave_implicit_vr). Calls nest.
+    fn enter_implicit_vr(&mut self) {}
+
+    /// Leave the innermost undefined-length `UN` content entered with
+    /// [`enter_implicit_vr`](StatefulDecode::enter_implicit_vr).
+    fn leave_implicit_vr(&mut self) {}
 }
 
 /// Alias for a dynamically resolved DICOM stateful decoder. Although the data
@@ -263,6 +274,10 @@ pub struct StatefulDecoder<D, S, BD = BasicDecoder, TC = SpecificCharacterSet> {
     /// the assumed position of the reader source
     position: u64,
     signed_pixeldata: Option<bool>,
+    /// how many undefined-length `UN` sequences enclose the current position: their content is
+    /// always Implicit VR Little Endian (PS3.5 6.2.2), decoded with `implicit_vr`
+    implicit_vr_depth: u32,
+    implicit_vr: StandardImplicitVRLittleEndianDecoder,
 }
 
 impl<S> StatefulDecoder<DynDecoder<S>, S> {
@@ -351,6 +366,8 @@ where
             buffer: Vec::with_capacity(PARSER_BUFFER_CAPACITY),
             position: 0,
             signed_pixeldata: None,
+            implicit_vr_depth: 0,
+            implicit_vr: Default::default(),
         }
     }
 }
@@ -395,6 +412,8 @@ where
             buffer: Vec::with_capacity(PARSER_BUFFER_CAPACITY),
             position,
             signed_pixeldata: None,
+            implicit_vr_depth: 0,
+            implicit_vr: Default::default(),
         }
     }
 }
@@ -898,13 +917,11 @@ where
             // Edge case handling strategies for
             // unsupported specific character sets should probably be considered
             // in the future. See #40 for discussion.
-            if let Some(charset) = parts.first().map(|x| x.as_ref()).and_then(|name| {
-                SpecificCharacterSet::from_code(name).or_else(|| {
-                    tracing::warn!("Unsupported character set `{}`, ignoring", name);
-                    None
-                })
-            }) {
-                self.set_character_set(charset)?;
+            // All the values count: `\ISO 2022 IR 87` (an empty value 1) is ISO 2022 code
+            // extension with JIS X 0208, not the default repertoire (pohcee/dcmnorm#24).
+            match SpecificCharacterSet::from_codes(parts) {
+                Some(charset) => self.set_character_set(charset)?,
+                None => tracing::warn!("Unsupported character set `{}`, ignoring", parts.join("\\")),
             }
         }
 
@@ -962,6 +979,14 @@ where
         (**self).position()
     }
 
+    fn enter_implicit_vr(&mut self) {
+        (**self).enter_implicit_vr()
+    }
+
+    fn leave_implicit_vr(&mut self) {
+        (**self).leave_implicit_vr()
+    }
+
     fn seek(&mut self, position: u64) -> Result<()>
     where
         Self::Reader: Seek,
@@ -986,9 +1011,12 @@ where
     type Reader = S;
 
     fn decode_header(&mut self) -> Result<DataElementHeader> {
-        let mut header = self
-            .decoder
-            .decode_header(&mut self.from)
+        let decoded = if self.implicit_vr_depth > 0 {
+            DecodeFrom::<S>::decode_header(&self.implicit_vr, &mut self.from)
+        } else {
+            self.decoder.decode_header(&mut self.from)
+        };
+        let mut header = decoded
             .context(DecodeElementHeaderSnafu {
                 position: self.position,
             })
@@ -999,7 +1027,8 @@ where
 
         //If we are decoding the PixelPadding element, make sure the VR is the same as the pixel
         //representation (US by default, SS for signed data).
-        if let Some(vr) = self.determine_vr_based_on_pixel_representation(header.tag) {
+        let explicit_vr = self.implicit_vr_depth == 0 && self.decoder.is_explicit_vr();
+        if let Some(vr) = self.determine_vr_based_on_pixel_representation(header.tag, explicit_vr) {
             header.vr = vr;
         }
 
@@ -1116,6 +1145,14 @@ where
         self.position
     }
 
+    fn enter_implicit_vr(&mut self) {
+        self.implicit_vr_depth += 1;
+    }
+
+    fn leave_implicit_vr(&mut self) {
+        self.implicit_vr_depth = self.implicit_vr_depth.saturating_sub(1);
+    }
+
     fn read_to_vec(&mut self, length: u32, vec: &mut Vec<u8>) -> Result<()> {
         self.read_to(length, vec)
     }
@@ -1190,9 +1227,18 @@ where
     /// The pixel representation affects the VR for several elements.
     /// Returns `Some(VR::SS)` if the vr needs to be modified to SS. Returns `None`
     /// if this element is not affected _or_ if we have Unsigned Pixel Representation.
-    fn determine_vr_based_on_pixel_representation(&self, tag: Tag) -> Option<VR> {
+    ///
+    /// LUT Descriptors are the exception when their VR is written in the data (explicit VR): the
+    /// signedness of their first value follows the range of the LUT's input, which for a VOI LUT
+    /// is the output of the Modality transform (PS3.3 C.11.2.1.1), not the stored Pixel
+    /// Representation - signed pixels with a Rescale Intercept of 32768 feed a VOI LUT unsigned
+    /// input. A written `US` there is correct and is kept (pohcee/dcmnorm#27).
+    fn determine_vr_based_on_pixel_representation(&self, tag: Tag, explicit_vr: bool) -> Option<VR> {
         use dcmnorm_core::dictionary::DataDictionary;
 
+        if explicit_vr && is_lut_descriptor(tag) {
+            return None;
+        }
         if self.signed_pixeldata == Some(true)
             && StandardDataDictionary.by_tag(tag).map(|e| e.vr) == Some(VirtualVr::Xs)
         {
@@ -1201,6 +1247,13 @@ where
             None
         }
     }
+}
+
+/// The LUT Descriptor attributes (`US or SS` first value): LUT Descriptor (0028,3002) of the
+/// Modality and VOI LUT sequences and the (Large / Segmented) Palette Color LUT Descriptors.
+fn is_lut_descriptor(tag: Tag) -> bool {
+    tag.group() == 0x0028
+        && matches!(tag.element(), 0x3002 | 0x1101..=0x1104 | 0x1111..=0x1113)
 }
 
 /// Remove trailing spaces and null characters.
@@ -1678,6 +1731,54 @@ mod tests {
                 len: Length(2),
             }
         );
+    }
+
+    /// pohcee/dcmnorm#27: with signed pixels, an explicitly written `US` LUT Descriptor is kept
+    /// (a VOI LUT after a Rescale Intercept of 32768 has unsigned input), while an implicit VR one
+    /// still follows Pixel Representation, and other `US or SS` attributes keep the rule.
+    #[test]
+    fn explicit_us_lut_descriptor_is_kept_with_signed_pixel_representation() {
+        #[rustfmt::skip]
+        const EXPLICIT: &[u8] = &[
+            0x28, 0x00, 0x03, 0x01, b'U', b'S', 0x02, 0x00, 0x01, 0x00, // PixelRepresentation 1
+            0x28, 0x00, 0x02, 0x30, b'U', b'S', 0x06, 0x00, // LUTDescriptor US, 6 bytes
+            0x04, 0x00, 0x40, 0x9c, 0x10, 0x00, // [4, 40000, 16]
+            0x28, 0x00, 0x20, 0x01, b'U', b'S', 0x02, 0x00, 0x01, 0x00, // PixelPaddingValue
+        ];
+        let mut cursor = EXPLICIT;
+        let mut decoder = StatefulDecoder::new(
+            &mut cursor,
+            ExplicitVRLittleEndianDecoder::default(),
+            LittleEndianBasicDecoder,
+            SpecificCharacterSet::default(),
+        );
+        let header = decoder.decode_header().unwrap();
+        decoder.read_value(&header).unwrap();
+        let header = decoder.decode_header().unwrap();
+        assert_eq!(header.vr, VR::US, "explicit US LUT Descriptor must be kept");
+        assert_eq!(
+            decoder.read_value(&header).unwrap(),
+            dcmnorm_core::PrimitiveValue::U16([4, 40000, 16].as_ref().into())
+        );
+        let header = decoder.decode_header().unwrap();
+        assert_eq!(header.tag, Tag(0x0028, 0x0120));
+        assert_eq!(header.vr, VR::SS, "Pixel Padding Value still follows Pixel Representation");
+
+        #[rustfmt::skip]
+        const IMPLICIT: &[u8] = &[
+            0x28, 0x00, 0x03, 0x01, 0x02, 0x00, 0x00, 0x00, 0x01, 0x00,
+            0x28, 0x00, 0x02, 0x30, 0x06, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x10, 0x00,
+        ];
+        let mut cursor = IMPLICIT;
+        let mut decoder = StatefulDecoder::new(
+            &mut cursor,
+            ImplicitVRLittleEndianDecoder::default(),
+            LittleEndianBasicDecoder,
+            SpecificCharacterSet::default(),
+        );
+        let header = decoder.decode_header().unwrap();
+        decoder.read_value(&header).unwrap();
+        assert_eq!(decoder.decode_header().unwrap().vr, VR::SS);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 [package]
 name = "dcmnorm"
-version = "0.9.1"
+version = "0.10.0"
 edition = "2021"
 build = "build.rs"
 
@@ -40,7 +40,7 @@ kakadu-ffi = []
 ffmpeg-codec = ["ffmpeg-codec-linked", "ffmpeg-next/build"]
 ffmpeg-codec-linked = ["dep:ffmpeg-next", "ffmpeg-next/static"]
 jpeg-ls-codec = ["dep:charls"]
-jpeg-xl-codec = ["dep:jxl-oxide"]
+jpeg-xl-codec = ["dep:jxl-oxide", "dep:zune-jpegxl", "dep:zune-core"]
 jpeg2000-openjpeg-encode = ["dep:openjpeg-sys"]
 
 [dependencies]
@@ -71,6 +71,10 @@ serde_json = "1.0"
 ffmpeg-next = { version = "8.1", optional = true, default-features = false, features = ["codec", "format", "software-resampling", "software-scaling"] }
 charls = { version = "0.4.2", optional = true }
 jxl-oxide = { version = "0.10", optional = true }
+# Lossless JPEG XL encoding (JPEG XL Lossless, 1.2.840.10008.1.2.4.110): a pure-Rust modular encoder,
+# so the feature adds no C/C++ toolchain requirement (#3). jxl-oxide above decodes.
+zune-jpegxl = { version = "0.5.2", optional = true }
+zune-core = { version = "0.5", optional = true }
 openjpeg-sys = { version = "1.0.12", optional = true, default-features = false }
 rayon = "1.10"
 flate2 = "1.0"

@@ -97,6 +97,12 @@ impl StandardDataDictionary {
         r.by_tag
             .get(&tag)
             .or_else(|| {
+                // Odd groups are private (PS3.5 7.8): a repeating public entry such as
+                // (50xx,0010) or (60xx,0010) must never match them, or a private creator
+                // (50F1,0010) would be read as a public US attribute.
+                if tag.0 & 1 == 1 {
+                    return None;
+                }
                 // check tags repeating in different groups
                 let group_trimmed = Tag(tag.0 & 0xFF00, tag.1);
                 if r.repeating_ggxx.contains(&group_trimmed) {
@@ -405,6 +411,23 @@ mod tests {
                 .parse_selector(&selector.to_string())
                 .unwrap();
             assert_eq!(selector, selector2);
+        }
+    }
+
+    /// pohcee/dcmnorm#25: an odd-group private creator such as (50F1,0010) must not match the
+    /// repeating public (50xx,0010) entry; it is a private creator (LO).
+    #[test]
+    fn odd_group_never_matches_repeating_public_entries() {
+        let dict = StandardDataDictionary;
+        // the public repeating entries still resolve for even groups
+        assert_eq!(dict.by_tag(Tag(0x5000, 0x0010)).map(|e| e.vr), Some(VR::US.into()));
+        assert_eq!(dict.by_tag(Tag(0x6002, 0x0010)).map(|e| e.vr), Some(VR::US.into()));
+        // odd groups: private creators, never the public repeating entries
+        for group in [0x50F1, 0x6001, 0x5001] {
+            let entry = dict.by_tag(Tag(group, 0x0010)).expect("private creator entry");
+            assert_eq!(entry.alias, "PrivateCreator");
+            assert_eq!(entry.vr, VR::LO.into());
+            assert!(dict.by_tag(Tag(group, 0x3000)).is_none(), "({group:04X},3000) is private data");
         }
     }
 }

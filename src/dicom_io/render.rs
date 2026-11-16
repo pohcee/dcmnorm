@@ -15,8 +15,9 @@ use lcms2::{Intent, PixelFormat, Profile, Transform};
 use rayon::prelude::*;
 
 use super::io::{
-    apply_jpeg2000_component_correction, encapsulated_frame_fragment_range, is_htj2k_transfer_syntax,
-    is_jpeg_ls_transfer_syntax, is_jpeg2000_transfer_syntax, jpeg2000_component_mismatch,
+    apply_jpeg2000_component_correction, apply_jpeg2000_precision_correction, encapsulated_frame_fragment_range,
+    is_htj2k_transfer_syntax, is_jpeg_ls_transfer_syntax, is_jpeg2000_transfer_syntax, jpeg2000_component_mismatch,
+    jpeg2000_precision_mismatch,
     jpeg2000_frame_uses_mct, kakadu_ffi_enabled, normalize_transfer_syntax_uid,
     transcode_dcmnorm_object, JPEG2000_DEBUG_ENV_FLAG,
 };
@@ -3412,16 +3413,29 @@ fn try_decode_single_frame_object(
     // frame's fragments (decoded as its frame 0), not all of PixelData.
     let corrected_object;
     let (decode_object, decode_frame_index): (&DefaultDicomObject, usize) = if is_jpeg2000_transfer_syntax(source_uid) {
-        match jpeg2000_component_mismatch(object, frame_index) {
-            Some(actual_components) => {
-                let mut corrected = single_frame_encapsulated_object(object, frame_index)
-                    .map(|corrected| (corrected, 0))
-                    .unwrap_or_else(|| (object.clone(), frame_index));
+        let components = jpeg2000_component_mismatch(object, frame_index);
+        // and a BitsStored below the codestream precision (pohcee/dcmnorm#29)
+        let precision = jpeg2000_precision_mismatch(object, frame_index);
+        if components.is_some() || precision.is_some() {
+            let mut corrected = single_frame_encapsulated_object(object, frame_index)
+                .map(|corrected| (corrected, 0))
+                .unwrap_or_else(|| (object.clone(), frame_index));
+            if let Some(actual_components) = components {
                 apply_jpeg2000_component_correction(&mut corrected.0, actual_components);
-                corrected_object = corrected.0;
-                (&corrected_object, corrected.1)
             }
-            None => (object, frame_index),
+            if let Some(precision) = precision {
+                apply_jpeg2000_precision_correction(&mut corrected.0, precision).map_err(|message| {
+                    RenderError::Transcode(super::types::TranscodeError::DecodePixelData {
+                        uid: source_uid.to_owned(),
+                        name: "JPEG 2000".to_owned(),
+                        message,
+                    })
+                })?;
+            }
+            corrected_object = corrected.0;
+            (&corrected_object, corrected.1)
+        } else {
+            (object, frame_index)
         }
     } else {
         (object, frame_index)

@@ -263,7 +263,8 @@ where
     }
 
     fn try_new_codec(&mut self, name: &str) {
-        if let Some(codec) = SpecificCharacterSet::from_code(name) {
+        let values: Vec<&str> = name.trim_end_matches(['\0', ' ']).split('\\').collect();
+        if let Some(codec) = SpecificCharacterSet::from_codes(&values) {
             self.text = codec;
         } else {
             tracing::warn!("Unsupported character set `{}`, ignoring", name);
@@ -336,9 +337,9 @@ where
         // if element is Specific Character Set,
         // update the text codec
         if de.tag == Tag(0x0008, 0x0005) {
-            if let Some(charset_name) = texts.first() {
-                self.try_new_codec(charset_name.as_ref());
-            }
+            // every value counts: `\ISO 2022 IR 87` is ISO 2022 code extension (#24)
+            let values: Vec<&str> = texts.iter().map(|t| t.as_ref()).collect();
+            self.try_new_codec(&values.join("\\"));
         }
 
         Ok(())
