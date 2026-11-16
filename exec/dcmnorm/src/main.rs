@@ -9,8 +9,8 @@ use dcmnorm::dicom_io::{
     kakadu_ffi_enabled, list_transfer_syntax_support,
     parse_attribute_override, parse_filter_requests, parse_tag_key, read_dicom_bytes, read_dicom_file,
     read_dicom_file_deferring_bulk_data, read_dicom_file_for_frame, read_dicom_json_with_options, read_dcmnorm_object_for_filter,
-    redact_dicom_pixels_to_transfer_syntax, remove_attribute, render_all_dicom_frames,
-    render_dicom_frame, set_attribute, transcode_dcmnorm_object_owned, write_dicom_file,
+    redact_dicom_pixels_to_transfer_syntax, remove_attribute_path, remove_private_tags_inplace,
+    render_all_dicom_frames, render_dicom_frame, set_attribute, set_attribute_path,
     write_dicom_json_with_options, write_dicom_video, BoundingBox, BoxLength, DicomJsonBulkDataMode, DicomJsonFormat,
     DicomJsonKeyStyle, DicomJsonReadOptions, DicomJsonWriteOptions,
     RenderOutputFormat, RenderPipelineOptions, HistogramOptions, JPEG2000_CODEC_ENV_FLAG, JPEG2000_DEBUG_ENV_FLAG,
@@ -2668,6 +2668,13 @@ fn apply_attribute_overrides(
     object: &mut dcmnorm_object::DefaultDicomObject,
 ) -> Result<(), Box<dyn std::error::Error>> {
     for assignment in &cli.set {
+        if let Some((raw_k, raw_v)) = assignment.split_once('=') {
+            if raw_k.contains('.') || raw_k.contains('[') {
+                set_attribute_path(object, raw_k.trim(), None, raw_v.to_string())?;
+                verbose_log(cli, format!("Set {} to {}", raw_k.trim(), raw_v));
+                continue;
+            }
+        }
         let (tag, vr, value) = parse_attribute_override(assignment)?;
         set_attribute(object, tag, vr, value)?;
         verbose_log(
@@ -2686,15 +2693,11 @@ fn apply_attribute_overrides(
     }
 
     for key in &cli.remove {
-        let tag = parse_tag_key(key)?;
-        let was_present = remove_attribute(object, tag);
+        let was_present = remove_attribute_path(object, key)?;
         verbose_log(
             cli,
             format!(
-                "Remove {} ({:04X},{:04X}){}",
-                keyword_for_tag(tag),
-                tag.group(),
-                tag.element(),
+                "Remove {key}{}",
                 if was_present { "" } else { " (not present)" },
             ),
         );

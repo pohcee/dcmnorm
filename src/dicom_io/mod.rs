@@ -83,6 +83,7 @@ pub use texture_export::{
 pub use secondary_capture::{write_reformatted_dicom_slice, SecondaryCaptureError, SliceGeometry};
 pub mod dicom_edit;
 pub use dicom_edit::{
-    parse_attribute_override, parse_tag_key, remove_attribute, remove_private_tags_inplace,
-    set_attribute,
+    parse_attribute_override, parse_tag_key, parse_tag_path, remove_attribute,
+    remove_attribute_path, remove_private_tags_inplace, set_attribute, set_attribute_path,
+    DicomPathSegment,
 };

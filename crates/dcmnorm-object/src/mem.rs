@@ -74,6 +74,11 @@ impl InMemDicomObject {
         self.binary_search(tag).ok().map(|i| &self.elements[i])
     }
 
+    /// Look up a mutable element by tag. Returns `None` if absent.
+    pub fn get_mut(&mut self, tag: Tag) -> Option<&mut InMemElement> {
+        self.binary_search(tag).ok().map(|i| &mut self.elements[i])
+    }
+
     /// Look up an element by tag, returning a `Result` (an `Err` with a descriptive message on
     /// absence) rather than `Option` - for call sites that want to `?`-propagate a hard failure
     /// on a required element.
