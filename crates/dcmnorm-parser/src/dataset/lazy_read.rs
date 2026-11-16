@@ -114,6 +114,9 @@ struct SeqToken {
     /// The number of bytes the parser has read until it reached the
     /// beginning of the sequence or item value data.
     base_offset: u64,
+    /// Whether this is an undefined-length `UN` sequence, whose content the parser decodes as
+    /// Implicit VR Little Endian (PS3.5 6.2.2) until it ends.
+    implicit_vr: bool,
 }
 
 /// An attached iterator for retrieving DICOM object element markers
@@ -279,7 +282,7 @@ where
                                 token = LazyDataToken::ItemEnd;
                             }
                         }
-                        self.seq_delimiters.pop();
+                        self.pop_seq_token();
                         return Ok(Some(token));
                     }
                     Ordering::Less => {
@@ -304,7 +307,18 @@ where
             pixel_data,
             len,
             base_offset: self.parser.position(),
+            implicit_vr: false,
         })
+    }
+
+    /// Pops the innermost sequence/item token, leaving Implicit VR decoding when it closes an
+    /// undefined-length `UN` sequence.
+    fn pop_seq_token(&mut self) -> Option<SeqToken> {
+        let token = self.seq_delimiters.pop()?;
+        if token.implicit_vr {
+            self.parser.leave_implicit_vr();
+        }
+        Some(token)
     }
 
     /// Retrieve the inner stateful decoder from this data set reader.
@@ -385,7 +399,7 @@ where
                         }
                         SequenceItemHeader::ItemDelimiter => {
                             // closed an item
-                            self.seq_delimiters.pop();
+                            self.pop_seq_token();
                             self.in_sequence = true;
                             // sequences can end after an item delimiter
                             self.delimiter_check_pending = true;
@@ -393,7 +407,7 @@ where
                         }
                         SequenceItemHeader::SequenceDelimiter => {
                             // closed a sequence
-                            self.seq_delimiters.pop();
+                            self.pop_seq_token();
                             self.in_sequence = false;
                             // items can end after a nested sequence ends
                             self.delimiter_check_pending = true;
@@ -470,7 +484,7 @@ where
                         }
                         SequenceItemHeader::SequenceDelimiter => {
                             // empty pixel data
-                            self.seq_delimiters.pop();
+                            self.pop_seq_token();
                             self.in_sequence = false;
                             Some(Ok(LazyDataToken::SequenceEnd))
                         }
@@ -531,7 +545,7 @@ where
                 }) => {
                     self.in_sequence = true;
                     // pop item delimiter
-                    self.seq_delimiters.pop();
+                    self.pop_seq_token();
                     // sequences can end after this token
                     self.delimiter_check_pending = true;
                     Some(Ok(LazyDataToken::ItemEnd))
@@ -550,8 +564,16 @@ where
                     // discarding the VR in the process
                     self.in_sequence = true;
 
-                    let DataElementHeader { tag, len, .. } = header;
+                    let DataElementHeader { tag, len, vr } = header;
                     self.push_sequence_token(SeqTokenType::Sequence, len, false);
+                    if vr == VR::UN {
+                        // PS3.5 6.2.2: an undefined-length UN holds a sequence encoded in
+                        // Implicit VR Little Endian, whatever the outer transfer syntax.
+                        if let Some(token) = self.seq_delimiters.last_mut() {
+                            token.implicit_vr = true;
+                        }
+                        self.parser.enter_implicit_vr();
+                    }
 
                     Some(Ok(LazyDataToken::SequenceStart { tag, len }))
                 }

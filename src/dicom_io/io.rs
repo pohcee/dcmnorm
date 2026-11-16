@@ -295,6 +295,11 @@ pub(super) fn jpeg2000_frame_component_count(
     object: &DefaultDicomObject,
     frame_index: usize,
 ) -> Option<u16> {
+    codestream_component_count(jpeg2000_frame_codestream(object, frame_index)?)
+}
+
+/// The (first fragment of the) codestream of a frame.
+fn jpeg2000_frame_codestream(object: &DefaultDicomObject, frame_index: usize) -> Option<&[u8]> {
     let fragments = object.element(tags::PIXEL_DATA).ok()?.fragments()?;
     let number_of_frames = object
         .get(tags::NUMBER_OF_FRAMES)
@@ -308,7 +313,7 @@ pub(super) fn jpeg2000_frame_component_count(
         fragments.first()?
     };
 
-    codestream_component_count(bytes)
+    Some(bytes.as_slice())
 }
 
 /// Scans a raw JPEG 2000 codestream's main header for the SIZ marker segment
@@ -322,6 +327,47 @@ fn codestream_component_count(codestream: &[u8]) -> Option<u16> {
     let csiz_start = marker_start + 38;
     let bytes = window.get(csiz_start..csiz_start + 2)?;
     Some(u16::from_be_bytes([bytes[0], bytes[1]]))
+}
+
+/// The precision (bit depth) of the first component in a raw JPEG 2000 codestream's SIZ marker:
+/// Ssiz follows Csiz, its low 7 bits are the precision minus one (bit 7 is the sign).
+fn codestream_precision(codestream: &[u8]) -> Option<u16> {
+    let window = &codestream[..codestream.len().min(4096)];
+    let marker_start = window.windows(2).position(|pair| pair == [0xFF, 0x51])?;
+    let ssiz = *window.get(marker_start + 40)?;
+    Some(u16::from(ssiz & 0x7F) + 1)
+}
+
+/// Returns the codestream's precision when it is greater than the declared BitsStored but still
+/// fits BitsAllocated (pohcee/dcmnorm#29: BitsStored 8 over a 10-bit codestream). PS3.5 8.2.4
+/// has the codestream govern decoding: the decoded samples carry all of its bits, so a native
+/// result keeping BitsStored 8 would be read wrongly (644 as 132). A precision beyond
+/// BitsAllocated has no consistent native form; decoding reports that as an error.
+pub(super) fn jpeg2000_precision_mismatch(object: &DefaultDicomObject, frame_index: usize) -> Option<u16> {
+    let precision = jpeg2000_frame_codestream(object, frame_index).and_then(codestream_precision)?;
+    let bits_allocated = object.get(tags::BITS_ALLOCATED).and_then(|e| e.uint16().ok())?;
+    let bits_stored = object.get(tags::BITS_STORED).and_then(|e| e.uint16().ok()).unwrap_or(bits_allocated);
+    (precision > bits_stored).then_some(precision)
+}
+
+/// Sets BitsStored/HighBit to the codestream precision found by [`jpeg2000_precision_mismatch`],
+/// or errors when that precision cannot be held in BitsAllocated.
+pub(super) fn apply_jpeg2000_precision_correction(
+    object: &mut DefaultDicomObject,
+    precision: u16,
+) -> Result<(), String> {
+    let bits_allocated = object.get(tags::BITS_ALLOCATED).and_then(|e| e.uint16().ok()).unwrap_or(0);
+    if precision > bits_allocated {
+        return Err(format!(
+            "the JPEG 2000 codestream has {precision}-bit samples, more than BitsAllocated {bits_allocated}"
+        ));
+    }
+    jpeg2000_debug_log(format!(
+        "codestream precision is {precision} bits, correcting BitsStored/HighBit before decode"
+    ));
+    object.put(DataElement::new(tags::BITS_STORED, VR::US, PrimitiveValue::from(precision)));
+    object.put(DataElement::new(tags::HIGH_BIT, VR::US, PrimitiveValue::from(precision - 1)));
+    Ok(())
 }
 
 /// Returns the actual component count when it disagrees with a >1 declared
@@ -1103,6 +1149,13 @@ fn can_encode_pixel_data<D, R, W>(
             && is_mpeg_transfer_syntax(uid)
             && mpeg::can_encode_video(uid))
         || (cfg!(feature = "jpeg-ls-codec") && is_jpeg_ls_transfer_syntax(uid))
+        || (cfg!(feature = "jpeg-xl-codec") && is_jpeg_xl_lossless_transfer_syntax(uid))
+}
+
+/// JPEG XL Lossless, the JPEG XL syntax dcmnorm encodes (`.111` JPEG Recompression needs a source
+/// JPEG and `.112` is the lossy-capable one).
+fn is_jpeg_xl_lossless_transfer_syntax(uid: &str) -> bool {
+    normalize_transfer_syntax_uid(uid) == "1.2.840.10008.1.2.4.110"
 }
 
 fn kakadu_ffi_available_from_backend(backend: &Jpeg2000Backend) -> bool {
@@ -1173,11 +1226,21 @@ fn encode_jpeg2000_pixel_data(
     }
 
     let lossless = normalize_transfer_syntax_uid(target_uid) == "1.2.840.10008.1.2.4.90";
+    let planar = is_planar(object, samples_per_pixel);
+    let pixels = usize::from(rows) * usize::from(cols);
 
     let mut fragments = Vec::with_capacity(number_of_frames);
     for frame_index in 0..number_of_frames {
         let start = frame_index * frame_len;
         let frame_bytes = &pixel_data[start..start + frame_len];
+        // the encoder takes interleaved samples (pohcee/dcmnorm#30)
+        let interleaved;
+        let frame_bytes = if planar {
+            interleaved = interleave_planar_frame(frame_bytes, pixels, usize::from(samples_per_pixel), bytes_per_sample);
+            interleaved.as_slice()
+        } else {
+            frame_bytes
+        };
         let encoded = jpeg2000_openjpeg::encode_jpeg2000_with_openjpeg(
             frame_bytes,
             u32::from(rows),
@@ -1193,6 +1256,34 @@ fn encode_jpeg2000_pixel_data(
     }
 
     Ok(fragments)
+}
+
+/// Whether native multi-sample pixel data is stored colour-by-plane (PlanarConfiguration 1).
+fn is_planar(object: &DefaultDicomObject, samples_per_pixel: u16) -> bool {
+    samples_per_pixel > 1
+        && object.get(tags::PLANAR_CONFIGURATION).and_then(|e| e.uint16().ok()) == Some(1)
+}
+
+/// One frame of colour-by-plane samples (`R..R G..G B..B`) as interleaved pixels (`RGB RGB ..`).
+fn interleave_planar_frame(frame: &[u8], pixels: usize, samples: usize, bytes_per_sample: usize) -> Vec<u8> {
+    let mut out = vec![0u8; pixels * samples * bytes_per_sample];
+    for c in 0..samples {
+        for i in 0..pixels {
+            let from = (c * pixels + i) * bytes_per_sample;
+            let to = (i * samples + c) * bytes_per_sample;
+            out[to..to + bytes_per_sample].copy_from_slice(&frame[from..from + bytes_per_sample]);
+        }
+    }
+    out
+}
+
+/// After encoding to a JPEG 2000 family syntax, a colour image's pixel attributes describe
+/// interleaved samples: PlanarConfiguration is 0 (PS3.5 8.2.4 / 8.2.14).
+fn set_planar_configuration_interleaved(object: &mut DefaultDicomObject) {
+    let samples = object.get(tags::SAMPLES_PER_PIXEL).and_then(|e| e.uint16().ok()).unwrap_or(1);
+    if samples > 1 {
+        object.put(DataElement::new(tags::PLANAR_CONFIGURATION, VR::US, PrimitiveValue::from(0u16)));
+    }
 }
 
 /// Encodes native pixel data to HTJ2K (`.201` / `.203`) with OpenHTJ2K, one fragment per frame.
@@ -1263,18 +1354,32 @@ fn encode_htj2k_pixel_data(object: &DefaultDicomObject) -> Result<Vec<Vec<u8>>, 
         }
     };
 
+    let read_raw = |value: &[u8]| -> u32 {
+        if bytes_per_sample == 2 {
+            u32::from(u16::from_le_bytes([value[0], value[1]]))
+        } else {
+            u32::from(value[0])
+        }
+    };
+    // PlanarConfiguration 1 stores each colour plane in turn (R..R G..G B..B) rather than
+    // interleaved pixels (RGB RGB ..): read the samples where they are (pohcee/dcmnorm#30)
+    let planar = is_planar(object, samples_per_pixel);
+
     let mut planes = vec![vec![0i32; pixels]; spp];
     let mut fragments = Vec::with_capacity(number_of_frames);
     for frame_index in 0..number_of_frames {
         let frame = &pixel_data[frame_index * frame_len..(frame_index + 1) * frame_len];
-        for (i, pixel) in frame.chunks_exact(spp * bytes_per_sample).enumerate() {
-            for (c, value) in pixel.chunks_exact(bytes_per_sample).enumerate() {
-                let raw = if bytes_per_sample == 2 {
-                    u32::from(u16::from_le_bytes([value[0], value[1]]))
-                } else {
-                    u32::from(value[0])
-                };
-                planes[c][i] = sample(raw);
+        if planar {
+            for (c, plane) in frame.chunks_exact(pixels * bytes_per_sample).enumerate() {
+                for (i, value) in plane.chunks_exact(bytes_per_sample).enumerate() {
+                    planes[c][i] = sample(read_raw(value));
+                }
+            }
+        } else {
+            for (i, pixel) in frame.chunks_exact(spp * bytes_per_sample).enumerate() {
+                for (c, value) in pixel.chunks_exact(bytes_per_sample).enumerate() {
+                    planes[c][i] = sample(read_raw(value));
+                }
             }
         }
         let plane_refs: Vec<&[i32]> = planes.iter().map(Vec::as_slice).collect();
@@ -1383,6 +1488,15 @@ fn decode_pixel_data(
     if is_jpeg2000_transfer_syntax(source_ts.uid()) {
         if let Some(actual_components) = jpeg2000_component_mismatch(object, 0) {
             apply_jpeg2000_component_correction(object, actual_components);
+        }
+        if let Some(precision) = jpeg2000_precision_mismatch(object, 0) {
+            apply_jpeg2000_precision_correction(object, precision).map_err(|message| {
+                TranscodeError::DecodePixelData {
+                    uid: source_ts.uid().to_owned(),
+                    name: source_ts.name().to_owned(),
+                    message,
+                }
+            })?;
         }
     }
 
@@ -1684,7 +1798,8 @@ fn encode_pixel_data(
     if is_htj2k_encode_transfer_syntax(target_ts.uid()) {
         match encode_htj2k_pixel_data(object) {
             Ok(fragments) => {
-                replace_with_encapsulated_pixel_data(object, vec![0], fragments);
+                replace_with_encapsulated_frames(object, fragments);
+                set_planar_configuration_interleaved(object);
                 return Ok(());
             }
             Err(error) => {
@@ -1698,7 +1813,8 @@ fn encode_pixel_data(
     } else if is_classic_jpeg2000_encode_transfer_syntax(target_ts.uid()) {
         match encode_jpeg2000_pixel_data(object, target_ts.uid()) {
             Ok(fragments) => {
-                replace_with_encapsulated_pixel_data(object, vec![0], fragments);
+                replace_with_encapsulated_frames(object, fragments);
+                set_planar_configuration_interleaved(object);
                 return Ok(());
             }
             Err(error) => {
@@ -1724,7 +1840,7 @@ fn encode_pixel_data(
     if is_mpeg_transfer_syntax(target_ts.uid()) {
         match mpeg::encode_mpeg_pixel_data(object, target_ts.uid()) {
             Ok(fragments) => {
-                replace_with_encapsulated_pixel_data(object, vec![0], fragments);
+                replace_with_encapsulated_frames(object, fragments);
                 return Ok(());
             }
             Err(error) => {
@@ -1737,12 +1853,27 @@ fn encode_pixel_data(
         }
     }
 
+    if is_jpeg_xl_lossless_transfer_syntax(target_ts.uid()) {
+        return match jpeg_xl::encode_jpeg_xl_lossless_pixel_data(object) {
+            Ok(fragments) => {
+                replace_with_encapsulated_frames(object, fragments);
+                set_planar_configuration_interleaved(object);
+                Ok(())
+            }
+            Err(message) => Err(TranscodeError::EncodePixelData {
+                uid: target_ts.uid().to_owned(),
+                name: target_ts.name().to_owned(),
+                message,
+            }),
+        };
+    }
+
     // Try JPEG-LS encoding
     if is_jpeg_ls_transfer_syntax(target_ts.uid()) {
         let lossless = target_ts.uid() == "1.2.840.10008.1.2.4.80";
         match jpeg_ls::encode_jpeg_ls_pixel_data(object, lossless) {
             Ok(fragments) => {
-                replace_with_encapsulated_pixel_data(object, vec![0], fragments);
+                replace_with_encapsulated_frames(object, fragments);
                 return Ok(());
             }
             Err(error) => {
@@ -1809,6 +1940,51 @@ fn replace_with_native_pixel_data(
     remove_encapsulation_sidecar_attributes(object);
     object.put(DataElement::new(tags::PIXEL_DATA, vr, value));
     Ok(())
+}
+
+/// Encapsulates encoder output, one fragment per frame when there is one per frame. The Basic
+/// Offset Table is complete or empty, never partial (PS3.5 A.4): with a fragment per frame it
+/// has every frame's offset (pohcee/dcmnorm#31: a 2-frame HTJ2K encode used to write just `[0]`),
+/// otherwise (a video stream split into fragments) it is empty. Odd-length fragments get the
+/// trailing NULL byte that A.4 requires.
+fn replace_with_encapsulated_frames(object: &mut DefaultDicomObject, mut fragments: Vec<Vec<u8>>) {
+    for fragment in &mut fragments {
+        if fragment.len() % 2 == 1 {
+            fragment.push(0);
+        }
+    }
+    let frames = number_of_frames(object);
+    let offset_table = basic_offset_table(&fragments, frames);
+    replace_with_encapsulated_pixel_data(object, offset_table, fragments);
+}
+
+fn number_of_frames(object: &DefaultDicomObject) -> usize {
+    object
+        .get(tags::NUMBER_OF_FRAMES)
+        .and_then(|e| e.to_str().ok())
+        .and_then(|s| s.trim().parse::<usize>().ok())
+        .unwrap_or(1)
+        .max(1)
+}
+
+/// The Basic Offset Table for `fragments` holding `frames` frames: the offset of each frame's
+/// first fragment Item, from the first Item after the table, when there is one fragment per
+/// frame; empty otherwise.
+pub(super) fn basic_offset_table(fragments: &[Vec<u8>], frames: usize) -> Vec<u32> {
+    if fragments.len() != frames {
+        return Vec::new();
+    }
+    let mut offsets = Vec::with_capacity(frames);
+    let mut position = 0u64;
+    for fragment in fragments {
+        let Ok(offset) = u32::try_from(position) else {
+            // past 4 GiB a Basic Offset Table cannot index the frames
+            return Vec::new();
+        };
+        offsets.push(offset);
+        position += 8 + fragment.len() as u64;
+    }
+    offsets
 }
 
 fn replace_with_encapsulated_pixel_data(

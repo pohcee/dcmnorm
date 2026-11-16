@@ -31,6 +31,16 @@ public final class Dcmnorm {
     private Dcmnorm() {
     }
 
+    /**
+     * Loads the native library now (it is otherwise loaded on the first use of this class), so
+     * a service pays that cost at startup rather than on its first request. Safe to call any
+     * number of times, from any thread. See {@code NativeLoader} for where the library is loaded
+     * from, and the {@code dcmnorm.library.path} / {@code dcmnorm.cache.dir} system properties.
+     */
+    public static void init() {
+        // the static initializer above has run by the time this body executes
+    }
+
     // -----------------------------------------------------------------------------------------
     // Core: readTags / readJson / writeJson / editTags / transcode / checkDicom
     // -----------------------------------------------------------------------------------------

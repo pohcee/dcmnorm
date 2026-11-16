@@ -922,6 +922,8 @@ is available without extra native imaging libraries:
 - JPEG-LS transfer syntax support via CharLS-backed build integration
 - JPEG 2000 decode, plus encode to `.90`/`.91` (OpenJPEG)
 - High-Throughput JPEG 2000 (HTJ2K) decode for `.201`-`.203`, plus lossless encode to `.201`/`.203` (OpenHTJ2K)
+- JPEG XL decode for `.110`-`.112` (jxl-oxide), plus lossless encode to `.110` (zune-jpegxl,
+  pure Rust; unsigned 8/16-bit samples, 1 or 3 samples per pixel, at least 2x2 pixels)
 - RLE lossless decode-only
 
 Transfer syntaxes which the current build cannot encode or decode are reported explicitly by

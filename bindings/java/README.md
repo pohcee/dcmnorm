@@ -236,11 +236,24 @@ expected to depend on the jar `build-in-docker.sh` produces (e.g. via a local
 have no Rust toolchain of its own.
 
 The jar bundles the compiled `libdcmnorm_java.so` at
-`src/main/resources/native/linux-x64/libdcmnorm_java.so`, extracted to a temp file and
-`System.load()`-ed at class-init time (`com.pohcee.dcmnorm.internal.NativeLoader`) - falling back
-to a plain `System.loadLibrary("dcmnorm_java")` lookup on `java.library.path` for local
-development, where the `.so` was just built straight into a directory already on that path (see
-`build.sh`). **Only linux-x64 is currently packaged** - a consumer on another OS/architecture
+`src/main/resources/native/linux-x64/libdcmnorm_java.so`, with its SHA-256 beside it
+(`libdcmnorm_java.so.sha256`, written by `build-in-docker.sh`). At class-init time
+(`com.pohcee.dcmnorm.internal.NativeLoader`) the library is extracted once per build to a per-user
+cache, `~/.cache/dcmnorm/<sha256>/libdcmnorm_java.so` (`$XDG_CACHE_HOME`, `~/Library/Caches` on
+macOS, `%LOCALAPPDATA%` on Windows), and every later JVM loads that copy: no 28 MB copy per start,
+and no temp file left behind by a JVM that didn't exit normally. The copy is written to a
+temporary name and atomically renamed, so concurrent JVMs never load a partial file; if the cache
+isn't writable, the library goes to a temp file as before. Then, for local development, a plain
+`System.loadLibrary("dcmnorm_java")` lookup on `java.library.path`, where the `.so` was just built
+straight into a directory already on that path (see `build.sh`).
+
+| System property | Effect |
+| --- | --- |
+| `-Ddcmnorm.library.path=/opt/app/libdcmnorm_java.so` | Load this file as is (containers that ship the `.so` on disk: no extraction) |
+| `-Ddcmnorm.cache.dir=/var/cache/dcmnorm` | Cache directory for the extracted library |
+
+`Dcmnorm.init()` loads the library up front, so a service pays the load cost at startup instead of
+on its first request. **Only linux-x64 is currently packaged** - a consumer on another OS/architecture
 needs their own native build on `java.library.path`.
 
 `build-in-docker.sh` builds inside a `debian:bookworm-slim` container rather than on the host,

@@ -108,6 +108,9 @@ struct SeqToken {
     /// The number of bytes the parser has read until it reached the
     /// beginning of the sequence or item value data.
     base_offset: u64,
+    /// Whether this is an undefined-length `UN` sequence, whose content the parser decodes as
+    /// Implicit VR Little Endian (PS3.5 6.2.2) until it ends.
+    implicit_vr: bool,
 }
 
 /// The value reading strategy for the data set reader.
@@ -408,7 +411,7 @@ where
                             }
                             SequenceItemHeader::ItemDelimiter => {
                                 // closed an item
-                                self.seq_delimiters.pop();
+                                self.pop_seq_token();
                                 self.in_sequence = true;
                                 // sequences can end after an item delimiter
                                 self.delimiter_check_pending = true;
@@ -416,7 +419,7 @@ where
                             }
                             SequenceItemHeader::SequenceDelimiter => {
                                 // closed a sequence
-                                self.seq_delimiters.pop();
+                                self.pop_seq_token();
                                 self.in_sequence = false;
                                 // items can end after a nested sequence ends
                                 self.delimiter_check_pending = true;
@@ -428,7 +431,7 @@ where
                         source: dcmnorm_encoding::decode::Error::ReadItemHeader { source, .. },
                         ..
                     }) if source.kind() == std::io::ErrorKind::UnexpectedEof
-                        && self.seq_delimiters.pop().is_some_and(|t| t.pixel_data) =>
+                        && self.pop_seq_token().is_some_and(|t| t.pixel_data) =>
                     {
                         // Note: if `UnexpectedEof` was reached while inside a
                         // PixelData Sequence, then we assume that
@@ -519,7 +522,7 @@ where
                             }
                             SequenceItemHeader::SequenceDelimiter => {
                                 // empty pixel data
-                                self.seq_delimiters.pop();
+                                self.pop_seq_token();
                                 self.in_sequence = false;
                                 Some(Ok(DataToken::SequenceEnd))
                             }
@@ -601,7 +604,7 @@ where
                     }) => {
                         self.in_sequence = true;
                         // pop item delimiter
-                        self.seq_delimiters.pop();
+                        self.pop_seq_token();
                         // sequences can end after this token
                         self.delimiter_check_pending = true;
                         Some(Ok(DataToken::ItemEnd))
@@ -620,8 +623,16 @@ where
                         // discarding the VR in the process
                         self.in_sequence = true;
 
-                        let DataElementHeader { tag, len, .. } = header;
+                        let DataElementHeader { tag, len, vr } = header;
                         self.push_sequence_token(SeqTokenType::Sequence, len, false);
+                        if vr == VR::UN {
+                            // PS3.5 6.2.2: an undefined-length UN holds a sequence encoded in
+                            // Implicit VR Little Endian, whatever the outer transfer syntax.
+                            if let Some(token) = self.seq_delimiters.last_mut() {
+                                token.implicit_vr = true;
+                            }
+                            self.parser.enter_implicit_vr();
+                        }
 
                         Some(Ok(DataToken::SequenceStart { tag, len }))
                     }
@@ -800,7 +811,7 @@ where
                                 token = DataToken::ItemEnd;
                             }
                         }
-                        self.seq_delimiters.pop();
+                        self.pop_seq_token();
                         return Ok(Some(token));
                     }
                     Ordering::Less => {
@@ -825,7 +836,18 @@ where
             pixel_data,
             len,
             base_offset: self.parser.position(),
+            implicit_vr: false,
         })
+    }
+
+    /// Pops the innermost sequence/item token, leaving Implicit VR decoding when it closes an
+    /// undefined-length `UN` sequence.
+    fn pop_seq_token(&mut self) -> Option<SeqToken> {
+        let token = self.seq_delimiters.pop()?;
+        if token.implicit_vr {
+            self.parser.leave_implicit_vr();
+        }
+        Some(token)
     }
 
     fn read_value(&mut self, header: &DataElementHeader) -> Result<PrimitiveValue> {
@@ -1234,6 +1256,57 @@ mod tests {
         ];
 
         validate_read_data_implicit_vr(DATA, ground_truth);
+    }
+
+    /// pohcee/dcmnorm#26: an undefined-length UN element in an Explicit VR data set holds a
+    /// sequence encoded in Implicit VR Little Endian (PS3.5 6.2.2); the element after it is
+    /// Explicit VR again.
+    #[test]
+    fn read_undefined_length_un_as_implicit_vr_sequence_in_explicit_vr() {
+        #[rustfmt::skip]
+        static DATA: &[u8] = &[
+            0x11, 0x00, 0x10, 0x10, // (0011,1010) private
+            b'U', b'N', 0x00, 0x00, // VR UN, reserved
+            0xff, 0xff, 0xff, 0xff, // length: undefined
+            // -- 12 --
+            0xfe, 0xff, 0x00, 0xe0, // item begin
+            0x0c, 0x00, 0x00, 0x00, // item length 12
+            // -- 20 -- implicit VR: (0008,103E) LO, length 4, "TEST"
+            0x08, 0x00, 0x3e, 0x10,
+            0x04, 0x00, 0x00, 0x00,
+            b'T', b'E', b'S', b'T',
+            // -- 32 --
+            0xfe, 0xff, 0xdd, 0xe0,
+            0x00, 0x00, 0x00, 0x00, // sequence end
+            // -- 40 -- explicit VR again: (0020,000D) UI, length 2
+            0x20, 0x00, 0x0d, 0x00,
+            b'U', b'I', 0x02, 0x00,
+            b'1', 0x00,
+        ];
+
+        let ground_truth = vec![
+            DataToken::SequenceStart {
+                tag: Tag(0x0011, 0x1010),
+                len: Length::UNDEFINED,
+            },
+            DataToken::ItemStart { len: Length(12) },
+            DataToken::ElementHeader(DataElementHeader {
+                tag: Tag(0x0008, 0x103E),
+                vr: VR::LO,
+                len: Length(4),
+            }),
+            DataToken::PrimitiveValue(PrimitiveValue::Strs(["TEST".to_owned()].as_ref().into())),
+            DataToken::ItemEnd,
+            DataToken::SequenceEnd,
+            DataToken::ElementHeader(DataElementHeader {
+                tag: Tag(0x0020, 0x000D),
+                vr: VR::UI,
+                len: Length(2),
+            }),
+            DataToken::PrimitiveValue(PrimitiveValue::Strs(["1".to_owned()].as_ref().into())),
+        ];
+
+        validate_read_data_explicit_vr(DATA, ground_truth);
     }
 
     #[test]
