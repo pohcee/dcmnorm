@@ -37,6 +37,8 @@ use dcmnorm::dicom_io::{
     ScpOptions as DcmScpOptions, SlabProjection as DcmSlabProjection,
     StoreScuOptions as DcmStoreScuOptions, TextureCompression as DcmTextureCompression,
     TextureMeta as DcmTextureMeta, Volume as DcmVolume,
+    write_dicomdir as dcm_write_dicomdir, DicomdirEntry as DcmDicomdirEntry,
+    DicomdirOptions as DcmDicomdirOptions, DicomdirReport as DcmDicomdirReport,
 };
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 
@@ -433,6 +435,159 @@ impl Task for CheckDicomTask {
 pub fn check_dicom(file_path: String) -> AsyncTask<CheckDicomTask> {
     AsyncTask::new(CheckDicomTask {
         file_path: PathBuf::from(file_path),
+    })
+}
+
+// ---------------------------------------------------------------------------------------------
+// DICOMDIR: writeDicomdir
+// ---------------------------------------------------------------------------------------------
+
+/// One file of the File-set for `writeDicomdir`: its File ID plus its header, either as DICOM
+/// JSON (`json`) or a file to read it from (`path`; pixel data isn't loaded).
+#[napi(object)]
+pub struct DicomdirEntry {
+    /// File ID components, e.g. `["DICOM", "ST000001", "SE000001", "IM000001"]`: 1-8
+    /// components of 1-8 characters from A-Z, 0-9 and _ (PS3.10 8.2).
+    pub file_id: Vec<String>,
+    /// The referenced file's DICOM JSON (what `readJson` returns; BulkDataURI elements are
+    /// ignored). One of `json` and `path` is required.
+    pub json: Option<String>,
+    /// 'flat' (default, `readJson`'s default) or 'standard', for `json`.
+    pub format: Option<String>,
+    /// A DICOM file to read the header from instead of `json`.
+    pub path: Option<String>,
+    /// The referenced file's transfer syntax. With `json`, defaults to the JSON's
+    /// TransferSyntaxUID (0002,0010), else Explicit VR Little Endian; with `path`, the file's.
+    pub transfer_syntax_uid: Option<String>,
+}
+
+#[napi(object)]
+#[derive(Default)]
+pub struct WriteDicomdirOptions {
+    /// File-set ID (0004,1130): up to 16 characters from A-Z, 0-9 and _. Default empty.
+    pub file_set_id: Option<String>,
+    /// SOP Instance UID of the DICOMDIR itself. Generated when not given.
+    pub sop_instance_uid: Option<String>,
+}
+
+/// A value `writeDicomdir` made up (or copied from another attribute) for a Type 1 key the
+/// instances lacked (IHE RAD TF-2 Table 4.47.4-1).
+#[napi(object)]
+pub struct DicomdirSynthesized {
+    /// e.g. "STUDY".
+    pub record_type: String,
+    /// The Study/Series/SOP Instance UID; for PATIENT the patient's name, or "patient of
+    /// study <UID>" when the patient has no name either.
+    pub entity: String,
+    /// Attribute keyword, e.g. "StudyID".
+    pub attribute: String,
+    pub value: String,
+    /// Keyword of the instance attribute it was copied from, if any (e.g. "SeriesDate").
+    pub source: Option<String>,
+}
+
+#[napi(object)]
+pub struct DicomdirRecordCount {
+    pub record_type: String,
+    pub count: u32,
+}
+
+#[napi(object)]
+pub struct WriteDicomdirResult {
+    /// Total Directory Records written.
+    pub records: u32,
+    /// Records per Directory Record Type, in first-seen order.
+    pub record_types: Vec<DicomdirRecordCount>,
+    pub synthesized: Vec<DicomdirSynthesized>,
+    pub warnings: Vec<String>,
+}
+
+pub struct WriteDicomdirTask {
+    entries: Vec<DicomdirEntry>,
+    output_path: PathBuf,
+    options: DcmDicomdirOptions,
+}
+
+impl Task for WriteDicomdirTask {
+    type Output = DcmDicomdirReport;
+    type JsValue = WriteDicomdirResult;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        guarded(|| {
+            let mut entries = Vec::with_capacity(self.entries.len());
+            for entry in &self.entries {
+                let file_id = entry.file_id.clone();
+                let built = match (&entry.json, &entry.path) {
+                    (Some(json), None) => {
+                        let format = parse_json_format(entry.format.as_deref())?;
+                        DcmDicomdirEntry::from_json(file_id, json, format, entry.transfer_syntax_uid.as_deref())
+                            .map_err(to_napi_err)?
+                    }
+                    (None, Some(path)) => {
+                        let mut built = DcmDicomdirEntry::from_file(file_id, path).map_err(to_napi_err)?;
+                        if let Some(ts) = entry.transfer_syntax_uid.as_deref().filter(|ts| !ts.is_empty()) {
+                            built.transfer_syntax_uid = ts.to_owned();
+                        }
+                        built
+                    }
+                    _ => {
+                        return Err(Error::from_reason(format!(
+                            "DICOMDIR entry {}: give exactly one of json and path",
+                            entry.file_id.join("\\")
+                        )))
+                    }
+                };
+                entries.push(built);
+            }
+            dcm_write_dicomdir(&entries, &self.output_path, &self.options).map_err(to_napi_err)
+        })
+    }
+
+    fn resolve(&mut self, _env: Env, report: Self::Output) -> Result<Self::JsValue> {
+        Ok(WriteDicomdirResult {
+            records: report.record_count as u32,
+            record_types: report
+                .record_types
+                .into_iter()
+                .map(|(record_type, count)| DicomdirRecordCount { record_type, count: count as u32 })
+                .collect(),
+            synthesized: report
+                .synthesized
+                .into_iter()
+                .map(|s| DicomdirSynthesized {
+                    record_type: s.record_type,
+                    entity: s.entity,
+                    attribute: s.attribute,
+                    value: s.value,
+                    source: s.source,
+                })
+                .collect(),
+            warnings: report.warnings,
+        })
+    }
+}
+
+/// Writes a DICOMDIR (Media Storage Directory, Explicit VR Little Endian) for a File-set:
+/// PATIENT > STUDY > SERIES > one record per entry, its type from the SOP Class (IMAGE, SR
+/// DOCUMENT, KEY OBJECT DOC, PRESENTATION, ENCAP DOC, ...; PS3.3 F.5). Type 1 keys the instances
+/// lack are synthesized and reported in `synthesized`. Rejects bad File IDs / File-set IDs, a
+/// Patient ID shared by two patients, a study under two patients, a series in two studies,
+/// duplicate files or SOP Instance UIDs. Mirrors `dcmnorm dicomdir ROOT`, which scans a
+/// directory instead of taking entries.
+#[napi]
+pub fn write_dicomdir(
+    entries: Vec<DicomdirEntry>,
+    output_path: String,
+    options: Option<WriteDicomdirOptions>,
+) -> AsyncTask<WriteDicomdirTask> {
+    let options = options.unwrap_or_default();
+    AsyncTask::new(WriteDicomdirTask {
+        entries,
+        output_path: PathBuf::from(output_path),
+        options: DcmDicomdirOptions {
+            file_set_id: options.file_set_id.unwrap_or_default(),
+            sop_instance_uid: options.sop_instance_uid,
+        },
     })
 }
 

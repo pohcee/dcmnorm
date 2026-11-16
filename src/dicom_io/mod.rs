@@ -1,6 +1,7 @@
 mod bulk_data;
 mod common;
 mod consistency;
+mod dicomdir;
 mod dimse;
 mod filter;
 mod flat_json;
@@ -48,6 +49,11 @@ pub use json::{
     write_dicom_json_with_source,
 };
 pub use histogram::{compute_frame_histogram, compute_instance_histograms, FrameHistogram, HistogramOptions};
+pub use dicomdir::{
+    build_dicomdir, collect_dicomdir_entries, directory_record_type_for_sop_class, file_id_from_relative_path,
+    validate_file_id, validate_file_set_id, write_dicomdir, DicomdirEntry, DicomdirError, DicomdirOptions,
+    DicomdirReport, DicomdirSynthesized, MEDIA_STORAGE_DIRECTORY_STORAGE,
+};
 pub use consistency::{check_dicom_logic, ConsistencyFinding, ConsistencyReport, Severity};
 pub use render::{
     redact_dicom_pixels_to_transfer_syntax, render_all_dicom_frames,

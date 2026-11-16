@@ -15,6 +15,7 @@ use dcmnorm::dicom_io::{
     DicomJsonKeyStyle, DicomJsonReadOptions, DicomJsonWriteOptions,
     RenderOutputFormat, RenderPipelineOptions, HistogramOptions, JPEG2000_CODEC_ENV_FLAG, JPEG2000_DEBUG_ENV_FLAG,
     probe_dicom_file_for_sop_class_uid, check_dicom_logic, ConsistencyReport, Severity,
+    collect_dicomdir_entries, write_dicomdir, DicomdirOptions,
     build_volume, canonical_view_basis, generate_uid, reformat_plane, reformat_plane_values, rotate_basis,
     write_nifti, write_nrrd, write_reformatted_dicom_slice,
     pack_dicom_frame_texture, pack_volume_texture,
@@ -34,7 +35,7 @@ use serde_json::Value as JsonValue;
 #[command(version)]
 #[command(about = "Convert, transcode, and render DICOM data")]
 #[command(
-    long_about = "Convert between DICOM and flattened or standard DICOM JSON, transcode DICOM transfer syntaxes, render DICOM frames to raw/PNG/JPEG/MPEG4 outputs, and list transfer-syntax support for the current build. The CLI infers the operation from the input and output file types unless an explicit mode flag is provided."
+    long_about = "Convert between DICOM and flattened or standard DICOM JSON, transcode DICOM transfer syntaxes, render DICOM frames to raw/PNG/JPEG/MPEG4 outputs, and list transfer-syntax support for the current build. The CLI infers the operation from the input and output file types unless an explicit mode flag is provided. `dcmnorm dicomdir ROOT` writes a DICOMDIR for a File-set instead (see `dcmnorm dicomdir --help`)."
 )]
 #[command(
     after_help = "Environment:\n  DCMNORM_PERF            Enable scoped perf logs (1/true/yes/on)\n  DCMNORM_JPEG2000_CODEC Classic JPEG 2000 decoder preference: auto|openjpeg|kakadu\n                         (set by --jpeg2000-codec; HTJ2K always uses OpenHTJ2K)\n  DCMNORM_JPEG2000_THREADS Threads per JPEG 2000 decode/encode (default min(CPUs, 8))\n  DCMNORM_JPEG2000_DEBUG Enable JPEG 2000 debug logs (1/true/yes/on)\n                         (set to 1 by --verbose)\n  LD_LIBRARY_PATH         Used to discover Kakadu libkdu*.so at runtime\n\nBuild-time Kakadu variables (for --features kakadu-ffi):\n  KAKADU_INCLUDE_DIR      Path containing Kakadu headers\n  KAKADU_LIB_DIR          Path containing libkdu*.so\n  KAKADU_LIB_NAME         Optional Kakadu library base name override"
@@ -650,6 +651,92 @@ enum Direction {
 
 const NEGATIVE_ZERO_ANCHOR: i32 = i32::MIN;
 
+/// `dcmnorm dicomdir ROOT`: a separate command line, dispatched on the first argument before the
+/// main CLI parses (the main CLI takes free-form INPUT/OUTPUT paths, so a clap subcommand would
+/// make every file named like a subcommand ambiguous). A file literally named `dicomdir` in the
+/// working directory can still be converted as `./dicomdir`.
+#[derive(Parser, Debug)]
+#[command(name = "dcmnorm dicomdir")]
+#[command(about = "Write a DICOMDIR for a File-set (Media Storage Directory, PS3.3 Annex F)")]
+#[command(
+    long_about = "Scans ROOT for DICOM files (anything with the DICM prefix; other files such as README.TXT are skipped), reads each header (pixel data is not loaded) and writes a DICOMDIR with PATIENT > STUDY > SERIES > instance records at ROOT/DICOMDIR. Every DICOM file's path below ROOT is its File ID, so it must follow PS3.10: at most 8 directory levels, each name 1-8 characters of A-Z, 0-9 and _ (no lower case, no extension). Type 1 keys the instances lack (Patient ID, Study ID, Study Date/Time, Modality, Series Number, Instance Number) are synthesized as IHE PDI asks, and listed."
+)]
+struct DicomdirCli {
+    #[arg(value_name = "ROOT", help = "Root directory of the File-set")]
+    root: PathBuf,
+
+    #[arg(
+        long,
+        value_name = "ID",
+        default_value = "",
+        help = "File-set ID (0004,1130): up to 16 characters of A-Z, 0-9 and _"
+    )]
+    file_set_id: String,
+
+    #[arg(short = 'o', long, value_name = "PATH", help = "Where to write the DICOMDIR (default ROOT/DICOMDIR)")]
+    output: Option<PathBuf>,
+
+    #[arg(long, help = "Print the report as JSON instead of text")]
+    json: bool,
+}
+
+fn run_dicomdir_command(args: impl IntoIterator<Item = std::ffi::OsString>) -> Result<(), Box<dyn std::error::Error>> {
+    let cli = DicomdirCli::parse_from(args);
+    let (entries, skipped) = collect_dicomdir_entries(&cli.root)?;
+    let output = cli.output.clone().unwrap_or_else(|| cli.root.join("DICOMDIR"));
+    let report = write_dicomdir(
+        &entries,
+        &output,
+        &DicomdirOptions { file_set_id: cli.file_set_id.clone(), sop_instance_uid: None },
+    )?;
+
+    if cli.json {
+        let synthesized: Vec<JsonValue> = report
+            .synthesized
+            .iter()
+            .map(|s| {
+                serde_json::json!({
+                    "recordType": s.record_type, "entity": s.entity, "attribute": s.attribute,
+                    "value": s.value, "source": s.source,
+                })
+            })
+            .collect();
+        let record_types: serde_json::Map<String, JsonValue> =
+            report.record_types.iter().map(|(t, n)| (t.clone(), JsonValue::from(*n))).collect();
+        let value = serde_json::json!({
+            "output": output.display().to_string(),
+            "files": entries.len(),
+            "records": report.record_count,
+            "recordTypes": record_types,
+            "synthesized": synthesized,
+            "warnings": report.warnings,
+            "skipped": skipped,
+        });
+        println!("{}", serde_json::to_string_pretty(&value)?);
+        return Ok(());
+    }
+
+    let counts: Vec<String> = report.record_types.iter().map(|(t, n)| format!("{n} {t}")).collect();
+    println!(
+        "Wrote {}: {} files, {} records ({})",
+        output.display(),
+        entries.len(),
+        report.record_count,
+        counts.join(", ")
+    );
+    for s in &report.synthesized {
+        let from = s.source.as_deref().map(|k| format!(" (from {k})")).unwrap_or_default();
+        println!("synthesized {} {} = {:?} ({}){from}", s.record_type, s.attribute, s.value, s.entity);
+    }
+    for warning in &report.warnings {
+        eprintln!("warning: {warning}");
+    }
+    for path in &skipped {
+        eprintln!("skipped (not a DICOM file of the File-set): {path}");
+    }
+    Ok(())
+}
+
 fn main() {
     if let Err(error) = run() {
         if !error.to_string().is_empty() {
@@ -661,6 +748,9 @@ fn main() {
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let _scope = perf::scope("cli.run");
+    if std::env::args_os().nth(1).is_some_and(|arg| arg == "dicomdir") {
+        return run_dicomdir_command(std::env::args_os().skip(1));
+    }
     // Hashing the running binary means reading all of it (~34MB with FFmpeg statically linked),
     // which used to cost ~30ms on every invocation - only pay that when the version is actually
     // being printed.
@@ -4481,5 +4571,41 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("cannot be combined with an explicit output path"));
+    }
+
+    #[test]
+    fn dicomdir_command_writes_a_directory_for_a_file_tree() {
+        let root = std::env::temp_dir().join(format!(
+            "dcmnorm-dicomdir-{}",
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        fs::create_dir_all(root.join("DICOM").join("SE000001")).unwrap();
+        fs::copy(fixture_path("mr.dcm"), root.join("DICOM").join("SE000001").join("IM000001")).unwrap();
+        fs::copy(fixture_path("pdf.dcm"), root.join("DICOM").join("IM000002")).unwrap();
+        fs::write(root.join("README.TXT"), "not DICOM").unwrap();
+
+        let args = |extra: &[&str]| {
+            let mut args: Vec<std::ffi::OsString> = vec!["dicomdir".into(), root.clone().into_os_string()];
+            args.extend(extra.iter().map(|a| a.into()));
+            args
+        };
+        super::run_dicomdir_command(args(&["--file-set-id", "CLI_TEST"])).unwrap();
+        let dicomdir = read_dicom_file(root.join("DICOMDIR")).unwrap();
+        assert_eq!(dicomdir.meta().media_storage_sop_class_uid(), "1.2.840.10008.1.3.10");
+        let records = dicomdir.get(Tag(0x0004, 0x1220)).unwrap().items().unwrap();
+        let types: Vec<String> = records
+            .iter()
+            .map(|r| r.get(Tag(0x0004, 0x1430)).unwrap().to_str().unwrap().trim().to_owned())
+            .collect();
+        assert!(types.contains(&"IMAGE".to_owned()) && types.contains(&"ENCAP DOC".to_owned()), "{types:?}");
+
+        // rerunning replaces the DICOMDIR (it is not itself taken for a File-set member)
+        super::run_dicomdir_command(args(&[])).unwrap();
+
+        // a DICOM file whose path breaks the File ID rules is an error
+        fs::copy(fixture_path("mr.dcm"), root.join("DICOM").join("im3.dcm")).unwrap();
+        let error = super::run_dicomdir_command(args(&[])).unwrap_err().to_string();
+        assert!(error.contains("File ID"), "{error}");
+        fs::remove_dir_all(&root).unwrap();
     }
 }
