@@ -5897,3 +5897,30 @@ fn issue_3_jpeg_xl_lossless_encode_round_trips() {
     let signed = transcode_dicom_bytes(issue_fixture("voi_lut_unsigned_after_rescale.dcm"), JXL_LOSSLESS).unwrap_err();
     assert!(signed.to_string().contains("unsigned"), "{signed}");
 }
+
+/// IS/DS text values with leading or trailing spaces (which are not part of the number, PS3.5
+/// Table 6.2-1) come out trimmed in flat JSON, the same as in standard JSON, so a consumer
+/// converting one format to the other gets identical values.
+#[test]
+fn flat_and_standard_json_trim_padded_number_strings_alike() {
+    let mut object = read_dicom_bytes(issue_fixture("at_values.dcm")).unwrap();
+    object.put(DataElement::new(tags::SERIES_NUMBER, VR::IS, PrimitiveValue::from(" 107".to_owned())));
+    object.put(DataElement::new(
+        tags::WINDOW_CENTER,
+        VR::DS,
+        PrimitiveValue::Strs(["1.5 ".to_owned(), " 2".to_owned()].as_ref().into()),
+    ));
+
+    let flat: JsonValue = serde_json::from_str(&write_dicom_json(&object).unwrap()).unwrap();
+    assert_eq!(flat["SeriesNumber"], "107");
+    assert_eq!(flat["WindowCenter"], "1.5\\2");
+
+    let standard = write_dicom_json_with_options(
+        &object,
+        DicomJsonWriteOptions { format: DicomJsonFormat::Standard, key_style: DicomJsonKeyStyle::Hex, omit_keyword_vm: true, ..Default::default() },
+    )
+    .unwrap();
+    let standard: JsonValue = serde_json::from_str(&standard).unwrap();
+    assert_eq!(standard["00200011"]["Value"], serde_json::json!(["107"]));
+    assert_eq!(standard["00281050"]["Value"], serde_json::json!(["1.5", "2"]));
+}

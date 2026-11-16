@@ -179,6 +179,11 @@ fn wrap_flat_value(vr: VR, value: JsonValue) -> JsonValue {
 fn flat_primitive_to_json(vr: VR, primitive: &PrimitiveValue) -> JsonValue {
     match primitive {
         PrimitiveValue::Empty => JsonValue::Null,
+        // IS/DS as text: leading and trailing spaces are not part of the number (PS3.5 Table
+        // 6.2-1), trimmed as in standard JSON so the two formats give the same value
+        PrimitiveValue::Str(_) | PrimitiveValue::Strs(_) if matches!(vr, VR::IS | VR::DS) => JsonValue::String(
+            primitive.to_multi_str().iter().map(|value| value.trim()).collect::<Vec<_>>().join("\\"),
+        ),
         PrimitiveValue::Str(_)
         | PrimitiveValue::Strs(_)
         | PrimitiveValue::Date(_)
