@@ -65,6 +65,9 @@ docker run --rm -v "$SCRIPT_DIR/../..":/repo -w /repo/bindings/java \
 
     mkdir -p src/main/resources/native/linux-x64
     cp /repo/target/release/libdcmnorm_java.so src/main/resources/native/linux-x64/
+    # The sidecar hash keys NativeLoader's per-user extraction cache, so a JVM start checks the
+    # cache by reading 64 bytes instead of copying or hashing the ~28 MB library (#5).
+    (cd src/main/resources/native/linux-x64 && sha256sum libdcmnorm_java.so > libdcmnorm_java.so.sha256)
 
     mvn -q package
 
@@ -73,6 +76,7 @@ docker run --rm -v "$SCRIPT_DIR/../..":/repo -w /repo/bindings/java \
     # rather than on the host afterward, for the same glibc-mismatch reason.
     mkdir -p target/test-classes
     javac -d target/test-classes -cp target/classes $(find src/test/java -name "*.java")
+    java -cp target/classes:target/test-classes com.pohcee.dcmnorm.internal.NativeLoaderTest
     java -Djava.library.path=/repo/target/release \
       -cp target/classes:target/test-classes \
       com.pohcee.dcmnorm.Smoke /repo/test/files /repo/target/release/dcmtalk

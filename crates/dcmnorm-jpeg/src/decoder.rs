@@ -110,6 +110,9 @@ pub struct Decoder<R> {
 
     adobe_color_transform: Option<AdobeColorTransform>,
     color_transform: Option<ColorTransform>,
+    /// what a 3-component stream is when nothing in it (component identifiers, JFIF, Adobe)
+    /// says; YCbCr unless set
+    default_color_transform: Option<ColorTransform>,
 
     is_jfif: bool,
     is_mjpeg: bool,
@@ -141,6 +144,7 @@ impl<R: Read> Decoder<R> {
             restart_interval: 0,
             adobe_color_transform: None,
             color_transform: None,
+            default_color_transform: None,
             is_jfif: false,
             is_mjpeg: false,
             icc_markers: Vec::new(),
@@ -157,6 +161,15 @@ impl<R: Read> Decoder<R> {
     /// will be ignored.
     pub fn set_color_transform(&mut self, transform: ColorTransform) {
         self.color_transform = Some(transform);
+    }
+
+    /// Colour transform for a 3-component image whose stream does not declare one: no
+    /// recognised component identifiers (1,2,3 / R,G,B), JFIF or Adobe marker. A standalone
+    /// JPEG then defaults to YCbCr; a DICOM decoder knows the colour space from Photometric
+    /// Interpretation instead (an RGB image with component identifiers 0,1,2 is RGB). Declared
+    /// colour spaces still take precedence.
+    pub fn set_default_color_transform(&mut self, transform: ColorTransform) {
+        self.default_color_transform = Some(transform);
     }
 
     /// Set maximum buffer size allowed for decoded images
@@ -792,7 +805,7 @@ impl<R: Read> Decoder<R> {
         if frame.components.len() == 4 {
             ColorTransform::YCCK
         } else if frame.components.len() == 3 {
-            ColorTransform::YCbCr
+            self.default_color_transform.unwrap_or(ColorTransform::YCbCr)
         } else {
             ColorTransform::Unknown
         }
