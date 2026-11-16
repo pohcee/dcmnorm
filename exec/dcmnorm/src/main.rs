@@ -7,10 +7,10 @@ use clap::{ArgAction, CommandFactory, FromArgMatches, Parser, ValueEnum};
 use dcmnorm::dicom_io::{
     apply_filter_to_object, compute_frame_histogram, compute_instance_histograms, jpeg2000_codec_summary, jpeg2000_engine_name_for,
     kakadu_ffi_enabled, list_transfer_syntax_support,
-    parse_attribute_override, parse_filter_requests, parse_tag_key, read_dicom_bytes, read_dicom_file,
+    parse_attribute_override, parse_filter_requests, read_dicom_bytes, read_dicom_file,
     read_dicom_file_deferring_bulk_data, read_dicom_file_for_frame, read_dicom_json_with_options, read_dcmnorm_object_for_filter,
-    redact_dicom_pixels_to_transfer_syntax, remove_attribute_path, remove_private_tags_inplace,
-    render_all_dicom_frames, render_dicom_frame, set_attribute, set_attribute_path,
+    redact_dicom_pixels_to_transfer_syntax, remove_attribute_path, render_all_dicom_frames,
+    render_dicom_frame, set_attribute, set_attribute_path, transcode_dcmnorm_object_owned, write_dicom_file,
     write_dicom_json_with_options, write_dicom_video, BoundingBox, BoxLength, DicomJsonBulkDataMode, DicomJsonFormat,
     DicomJsonKeyStyle, DicomJsonReadOptions, DicomJsonWriteOptions,
     RenderOutputFormat, RenderPipelineOptions, HistogramOptions, JPEG2000_CODEC_ENV_FLAG, JPEG2000_DEBUG_ENV_FLAG,
