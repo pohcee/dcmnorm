@@ -9,14 +9,14 @@ description: Read, inspect, edit, anonymize, convert, transcode, and render DICO
 
 ## Setup
 
-This skill is written for **dcmnorm 0.9.1**. Before the first `dcmnorm` or `dcmtalk` command in a session, run `dcmnorm --version` (it prints e.g. `dcmnorm 0.7.2-<build id>`).
+This skill is written for **dcmnorm 0.10.0**. Before the first `dcmnorm` or `dcmtalk` command in a session, run `dcmnorm --version` (it prints e.g. `dcmnorm 0.7.2-<build id>`).
 
-- **Found, version 0.9.1 or newer:** go ahead.
+- **Found, version 0.10.0 or newer:** go ahead.
 - **Not found, or older:** tell the user you're installing the dcmnorm command-line tools (native binaries from PyPI, nothing runs in Python), then install the pinned version with the first of these that's available:
   ```bash
-  uv tool install --force dcmnorm==0.9.1
-  pipx install --force dcmnorm==0.9.1
-  python3 -m pip install dcmnorm==0.9.1
+  uv tool install --force dcmnorm==0.10.0
+  pipx install --force dcmnorm==0.10.0
+  python3 -m pip install dcmnorm==0.10.0
   ```
   If pip refuses with `externally-managed-environment`: on the user's own machine, install uv or pipx instead; in a disposable sandbox, add `--user --break-system-packages`.
   This installs both `dcmnorm` and `dcmtalk`. Run `dcmnorm --version` again; if the command still isn't found, the installer's scripts directory isn't on `PATH` (uv/pipx print it; for pip it's `python3 -m site --user-base` plus `/bin`), so call the binary by its full path.
@@ -46,6 +46,10 @@ The operation is **inferred from the file extensions** of INPUT and OUTPUT:
 | `.dcm` | `.gputex` | Lossless GPU texture export — see [GPU texture export](#gpu-texture-export-gputex) below |
 
 When extensions are missing or misleading, override detection with `--input-type dicom|json` and `--output-type dicom|json|raw|png|jpeg|mpeg4|texture`.
+
+## Patient data
+
+dcmnorm is a file and network toolkit, not a medical device: don't present its output as a basis for diagnosis or treatment. DICOM files usually carry protected health information (names, IDs, birth dates, accession numbers). Prefer synthetic or de-identified files, keep files on the user's machine, and don't repeat patient identifiers back in the conversation unless the user asks for them. De-identification with `--set` removes only what the edits name, so check the result (for example `dcmnorm out.dcm | grep -i -E 'name|id|birth'`) before anyone shares it. `dcmtalk` sends data to whatever DICOM node the user names, so confirm the destination before C-STORE or C-MOVE.
 
 ## Reading / inspecting DICOM
 
