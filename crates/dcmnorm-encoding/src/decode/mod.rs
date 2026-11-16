@@ -614,6 +614,14 @@ pub trait DecodeFrom<S: ?Sized + Read> {
 
     /// Decode a DICOM attribute tag from the given source.
     fn decode_tag(&self, source: &mut S) -> Result<Tag>;
+
+    /// Whether the VRs of the headers this decoder returns are the ones written in the data
+    /// (an explicit VR encoding), rather than looked up in a dictionary. A VR written in the data
+    /// is authoritative: it must not be replaced by a dictionary-based guess such as the
+    /// Pixel Representation rule for `US or SS` attributes.
+    fn is_explicit_vr(&self) -> bool {
+        false
+    }
 }
 
 impl<S: ?Sized, T: ?Sized> DecodeFrom<S> for &T
@@ -632,6 +640,10 @@ where
     fn decode_tag(&self, source: &mut S) -> Result<Tag> {
         (**self).decode_tag(source)
     }
+
+    fn is_explicit_vr(&self) -> bool {
+        (**self).is_explicit_vr()
+    }
 }
 
 impl<S: ?Sized, T: ?Sized> DecodeFrom<S> for Box<T>
@@ -649,6 +661,10 @@ where
 
     fn decode_tag(&self, source: &mut S) -> Result<Tag> {
         (**self).decode_tag(source)
+    }
+
+    fn is_explicit_vr(&self) -> bool {
+        (**self).is_explicit_vr()
     }
 }
 

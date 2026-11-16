@@ -138,6 +138,9 @@ where
     object.insert("vr".to_owned(), JsonValue::String(vr.to_string().to_owned()));
 
     match value {
+        // PS3.18 F.2.5: a sequence with no items (zero length) has no "Value"; an empty item
+        // is `{}` in a non-empty "Value"
+        DicomValue::Sequence(sequence) if sequence.items().is_empty() => {}
         DicomValue::Sequence(sequence) => {
             let items = sequence
                 .items()
@@ -225,25 +228,52 @@ fn decorate_standard_element_json(
 /// ..., "Phonetic": ...}` objects and numeric VRs prefer JSON numbers (with
 /// "NaN"/"inf"/"-inf" string tokens for non-finite floats); everything else
 /// is a plain string array.
+///
+/// An empty component of a multi-valued attribute (`one\\three`) is `null` (PS3.18 F.2.5), and
+/// an AT value is the referenced tag as eight uppercase hex digits, `"00181063"` (F.2.3).
 fn standard_primitive_to_json(vr: VR, primitive: &PrimitiveValue) -> JsonValue {
     match vr {
         VR::PN => JsonValue::Array(
             primitive
                 .to_multi_str()
                 .iter()
-                .map(|name| person_name_to_json(name))
+                .map(|name| if name.is_empty() { JsonValue::Null } else { person_name_to_json(name) })
                 .collect(),
         ),
+        VR::AT => match primitive {
+            PrimitiveValue::Tags(tags) => JsonValue::Array(
+                tags.iter()
+                    .map(|tag| JsonValue::String(format!("{:04X}{:04X}", tag.group(), tag.element())))
+                    .collect(),
+            ),
+            // an AT read as raw integers: each pair of 16-bit words is (group, element)
+            PrimitiveValue::U16(words) => JsonValue::Array(
+                words
+                    .chunks_exact(2)
+                    .map(|pair| JsonValue::String(format!("{:04X}{:04X}", pair[0], pair[1])))
+                    .collect(),
+            ),
+            PrimitiveValue::U32(values) => JsonValue::Array(
+                values.iter().map(|v| JsonValue::String(format!("{v:08X}"))).collect(),
+            ),
+            other => text_values_json(other),
+        },
         VR::FD | VR::IS | VR::FL | VR::DS | VR::SL | VR::SS | VR::SV | VR::UL | VR::US
         | VR::UV => standard_numbers_json(primitive),
-        _ => JsonValue::Array(
-            primitive
-                .to_multi_str()
-                .iter()
-                .cloned()
-                .map(JsonValue::String)
-                .collect(),
-        ),
+        _ => text_values_json(primitive),
+    }
+}
+
+/// A string array, with `null` for each empty component (PS3.18 F.2.5).
+fn text_values_json(primitive: &PrimitiveValue) -> JsonValue {
+    JsonValue::Array(primitive.to_multi_str().iter().map(|text| text_or_null(text)).collect())
+}
+
+fn text_or_null(text: &str) -> JsonValue {
+    if text.is_empty() {
+        JsonValue::Null
+    } else {
+        JsonValue::String(text.to_owned())
     }
 }
 
@@ -285,9 +315,9 @@ fn person_name_to_json(raw: &str) -> JsonValue {
 fn standard_numbers_json(primitive: &PrimitiveValue) -> JsonValue {
     match primitive {
         PrimitiveValue::Empty => JsonValue::Array(Vec::new()),
-        PrimitiveValue::Str(text) => JsonValue::Array(vec![JsonValue::String(text.clone())]),
+        PrimitiveValue::Str(text) => JsonValue::Array(vec![text_or_null(text.trim())]),
         PrimitiveValue::Strs(strings) => {
-            JsonValue::Array(strings.iter().cloned().map(JsonValue::String).collect())
+            JsonValue::Array(strings.iter().map(|text| text_or_null(text.trim())).collect())
         }
         PrimitiveValue::U8(values) => {
             JsonValue::Array(values.iter().map(|v| JsonValue::Number((*v).into())).collect())
@@ -540,17 +570,24 @@ fn standard_json_to_primitive(
         return Ok(PrimitiveValue::Empty);
     }
 
+    // a `null` item is an empty component (PS3.18 F.2.5)
     if vr == VR::PN {
         let names = items
             .iter()
-            .map(|item| standard_json_to_person_name(tag_text, item))
+            .map(|item| match item {
+                JsonValue::Null => Ok(String::new()),
+                item => standard_json_to_person_name(tag_text, item),
+            })
             .collect::<Result<Vec<_>, _>>()?;
         return Ok(PrimitiveValue::Strs(names.into()));
     }
 
     let strings = items
         .iter()
-        .map(|item| json_value_to_text(tag_text, item))
+        .map(|item| match item {
+            JsonValue::Null => Ok(String::new()),
+            item => json_value_to_text(tag_text, item),
+        })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(PrimitiveValue::Strs(strings.into()))
 }

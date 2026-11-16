@@ -5614,3 +5614,277 @@ fn omit_keyword_vm_leaves_only_ps3_18_members_at_every_level() {
     );
     fs::remove_file(&path).ok();
 }
+
+// ---------------------------------------------------------------------------------------------
+// Regression tests for the GitHub issues of pohcee/dcmnorm, over the synthetic fixtures in
+// test/files/issues (regenerate them with test/files/issues/make_fixtures.py).
+// ---------------------------------------------------------------------------------------------
+
+fn issue_fixture(name: &str) -> Vec<u8> {
+    fixture_bytes(fixture_path(&format!("issues/{name}")))
+}
+
+/// Standard DICOM JSON with hex keys and no Keyword/VM, as in the issues' reproductions.
+fn issue_standard_json(bytes: &[u8]) -> JsonValue {
+    let object = read_dicom_bytes(bytes).unwrap();
+    let text = write_dicom_json_with_options(
+        &object,
+        DicomJsonWriteOptions {
+            format: DicomJsonFormat::Standard,
+            bulk_data_mode: DicomJsonBulkDataMode::Uri,
+            key_style: DicomJsonKeyStyle::Hex,
+            bulk_data_source: Some(bytes),
+            bulk_data_uri_base: Some("urn:test"),
+            omit_keyword_vm: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    serde_json::from_str(&text).unwrap()
+}
+
+/// Reads standard JSON back (the reader must accept what the writer produces).
+fn issue_standard_json_round_trip(json: &JsonValue) -> dcmnorm_object::DefaultDicomObject {
+    read_dicom_json_with_options(
+        &json.to_string(),
+        DicomJsonReadOptions { format: DicomJsonFormat::Standard, ..Default::default() },
+    )
+    .unwrap()
+}
+
+/// pohcee/dcmnorm#23: AT values are eight uppercase hex digits in standard JSON.
+#[test]
+fn issue_23_standard_json_writes_at_values_as_hex() {
+    let json = issue_standard_json(&issue_fixture("at_values.dcm"));
+    assert_eq!(json["00280009"], serde_json::json!({"vr": "AT", "Value": ["00181063", "00181065"]}));
+
+    let object = issue_standard_json_round_trip(&json);
+    assert_eq!(
+        object.element(tags::FRAME_INCREMENT_POINTER).unwrap().value().primitive().unwrap(),
+        &PrimitiveValue::Tags([Tag(0x0018, 0x1063), Tag(0x0018, 0x1065)].as_ref().into())
+    );
+}
+
+/// pohcee/dcmnorm#24: ISO 2022 code extension (`\ISO 2022 IR 87`, `\ISO 2022 IR 149`) decodes to
+/// Unicode, and writing the object back re-encodes the same bytes.
+#[test]
+fn issue_24_iso_2022_person_names_decode_to_unicode() {
+    for (name, text) in [
+        ("charset_iso2022_ir87.dcm", "試験^文字"),
+        ("charset_iso2022_ir149.dcm", "테스트^문자"),
+    ] {
+        let bytes = issue_fixture(name);
+        let json = issue_standard_json(&bytes);
+        assert_eq!(
+            json["00100010"],
+            serde_json::json!({"vr": "PN", "Value": [{"Alphabetic": text}]}),
+            "{name}"
+        );
+
+        let mut object = read_dicom_bytes(&bytes).unwrap();
+        assert_eq!(object.element(tags::PATIENT_NAME).unwrap().to_str().unwrap(), text);
+        let written = write_dicom_bytes(&mut object).unwrap();
+        let reread = read_dicom_bytes(&written).unwrap();
+        assert_eq!(reread.element(tags::PATIENT_NAME).unwrap().to_str().unwrap(), text, "{name}");
+        // the encoded bytes are the ones pydicom wrote
+        let needle: &[u8] = if name.contains("87") { b"\x1b$B;n83\x1b(B^\x1b$BJ8;z\x1b(B" } else { b"\x1b$)C\xc5\xd7\xbd\xba\xc6\xae^\x1b$)C\xb9\xae\xc0\xda" };
+        assert!(bytes.windows(needle.len()).any(|w| w == needle), "{name}: fixture bytes");
+        assert!(written.windows(needle.len()).any(|w| w == needle), "{name}: written bytes");
+    }
+}
+
+/// pohcee/dcmnorm#25: (50F1,0010) in Implicit VR is a private creator (LO), not (50xx,0010) US.
+#[test]
+fn issue_25_odd_group_private_creator_is_lo_in_implicit_vr() {
+    let json = issue_standard_json(&issue_fixture("private_creator_50f1_implicit.dcm"));
+    assert_eq!(json["50F10010"], serde_json::json!({"vr": "LO", "Value": ["SYNTHETIC"]}));
+}
+
+/// pohcee/dcmnorm#26: an undefined-length UN in Explicit VR holds an Implicit VR sequence.
+#[test]
+fn issue_26_undefined_length_un_reads_as_implicit_vr_sequence() {
+    let bytes = issue_fixture("un_undefined_length_sequence.dcm");
+    let object = read_dicom_bytes(&bytes).unwrap();
+    let sequence = object.element(Tag(0x0011, 0x1010)).unwrap();
+    let items = sequence.items().expect("a sequence");
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].element(tags::SERIES_DESCRIPTION).unwrap().to_str().unwrap(), "TEST");
+    // the elements after it are read again as Explicit VR
+    assert_eq!(object.element(tags::STUDY_INSTANCE_UID).unwrap().to_str().unwrap(), "2.25.91002");
+    assert_eq!(object.element(tags::SERIES_INSTANCE_UID).unwrap().to_str().unwrap(), "2.25.91003");
+    issue_standard_json(&bytes);
+}
+
+/// pohcee/dcmnorm#27: an explicit `US` VOI LUT Descriptor stays `US [4, 40000, 16]` with signed
+/// pixels whose rescale output is unsigned.
+#[test]
+fn issue_27_explicit_unsigned_voi_lut_descriptor_is_kept() {
+    let json = issue_standard_json(&issue_fixture("voi_lut_unsigned_after_rescale.dcm"));
+    assert_eq!(
+        json["00283010"]["Value"][0]["00283002"],
+        serde_json::json!({"vr": "US", "Value": [4, 40000, 16]})
+    );
+}
+
+/// pohcee/dcmnorm#28: a zero-length SQ has no "Value"; an empty multi-value component is null.
+#[test]
+fn issue_28_standard_json_empty_sequence_and_null_components() {
+    let json = issue_standard_json(&issue_fixture("empty_values.dcm"));
+    assert_eq!(json["00081111"], serde_json::json!({"vr": "SQ"}));
+    assert_eq!(json["00111010"], serde_json::json!({"vr": "LO", "Value": ["one", null, "three"]}));
+
+    let object = issue_standard_json_round_trip(&json);
+    assert_eq!(object.element(Tag(0x0011, 0x1010)).unwrap().to_multi_str().unwrap().as_ref(), ["one", "", "three"]);
+    assert_eq!(object.element(Tag(0x0008, 0x1111)).unwrap().items().unwrap().len(), 0);
+
+    // a PN empty component is null too, and a sequence with one empty item is [{}]
+    let mut object = object;
+    object.put(DataElement::new(tags::PATIENT_NAME, VR::PN, PrimitiveValue::Strs(["A^B".to_owned(), String::new()].as_ref().into())));
+    object.put(DataElement::new(
+        tags::REFERENCED_SERIES_SEQUENCE,
+        VR::SQ,
+        dcmnorm_core::value::DataSetSequence::from(vec![InMemDicomObject::new_empty()]),
+    ));
+    let text = write_dicom_json_with_options(
+        &object,
+        DicomJsonWriteOptions { format: DicomJsonFormat::Standard, key_style: DicomJsonKeyStyle::Hex, omit_keyword_vm: true, ..Default::default() },
+    )
+    .unwrap();
+    let json: JsonValue = serde_json::from_str(&text).unwrap();
+    assert_eq!(json["00100010"]["Value"], serde_json::json!([{"Alphabetic": "A^B"}, null]));
+    assert_eq!(json["00081115"], serde_json::json!({"vr": "SQ", "Value": [{}]}));
+}
+
+/// pohcee/dcmnorm#29: decoding a 10-bit JPEG 2000 codestream declared as BitsStored 8 gives a
+/// native object whose BitsStored/HighBit describe the decoded samples.
+#[test]
+fn issue_29_jpeg2000_decode_corrects_bits_stored_to_codestream_precision() {
+    let output = transcode_dicom_bytes(issue_fixture("j2k_codestream_precision_above_bits_stored.dcm"), uids::EXPLICIT_VR_LITTLE_ENDIAN).unwrap();
+    let object = read_dicom_bytes(&output).unwrap();
+    assert_eq!(object.element(tags::BITS_STORED).unwrap().to_int::<u16>().unwrap(), 10);
+    assert_eq!(object.element(tags::HIGH_BIT).unwrap().to_int::<u16>().unwrap(), 9);
+    assert_eq!(object.element(tags::BITS_ALLOCATED).unwrap().to_int::<u16>().unwrap(), 16);
+    let words: Vec<u16> = object.element(tags::PIXEL_DATA).unwrap().to_bytes().unwrap().chunks_exact(2).map(|w| u16::from_le_bytes([w[0], w[1]])).collect();
+    assert_eq!(words, [0, 1, 256, 644]);
+}
+
+/// The fragments of an encapsulated Pixel Data, after reading `bytes`.
+fn issue_fragments(bytes: &[u8]) -> (Vec<u32>, Vec<Vec<u8>>) {
+    let object = read_dicom_bytes(bytes).unwrap();
+    let element = object.element(tags::PIXEL_DATA).unwrap();
+    let dcmnorm_core::value::Value::PixelSequence(sequence) = element.value() else {
+        panic!("expected encapsulated pixel data");
+    };
+    (sequence.offset_table().to_vec(), sequence.fragments().iter().map(|f| f.to_vec()).collect())
+}
+
+/// Decodes a JPEG 2000 family codestream with OpenJPEG (independent of the OpenHTJ2K encoder)
+/// into interleaved samples.
+fn issue_decode_interleaved(codestream: &[u8]) -> Vec<i32> {
+    let image = dcmnorm_jpeg2000::openjpeg::decode(codestream).unwrap();
+    let pixels = image.components[0].data.len();
+    (0..pixels).flat_map(|i| image.components.iter().map(move |c| c.data[i])).collect()
+}
+
+/// pohcee/dcmnorm#30: planar RGB is encoded to HTJ2K and classic JPEG 2000 with every sample at
+/// its pixel and channel, and the output is PlanarConfiguration 0.
+#[test]
+fn issue_30_planar_rgb_encodes_to_jpeg2000_with_samples_in_place() {
+    for target in ["1.2.840.10008.1.2.4.201", "1.2.840.10008.1.2.4.90"] {
+        let output = transcode_dicom_bytes(issue_fixture("rgb_planar_1x2.dcm"), target).unwrap();
+        let object = read_dicom_bytes(&output).unwrap();
+        assert_eq!(object.element(tags::PLANAR_CONFIGURATION).unwrap().to_int::<u16>().unwrap(), 0, "{target}");
+        let (_, fragments) = issue_fragments(&output);
+        assert_eq!(fragments.len(), 1);
+        assert_eq!(issue_decode_interleaved(&fragments[0]), [1, 2, 255, 4, 5, 254], "{target}");
+
+        // and back to native: the interleaved samples of the source image
+        let native = transcode_dicom_bytes(&output, uids::EXPLICIT_VR_LITTLE_ENDIAN).unwrap();
+        let native = read_dicom_bytes(&native).unwrap();
+        assert_eq!(native.element(tags::PIXEL_DATA).unwrap().to_bytes().unwrap().as_ref(), [1, 2, 255, 4, 5, 254]);
+    }
+}
+
+/// pohcee/dcmnorm#31: a multi-frame encode writes a Basic Offset Table with every frame.
+#[test]
+fn issue_31_multiframe_jpeg2000_encode_writes_complete_basic_offset_table() {
+    for target in ["1.2.840.10008.1.2.4.201", "1.2.840.10008.1.2.4.90"] {
+        let output = transcode_dicom_bytes(issue_fixture("rgb_interleaved_1x2_2frames.dcm"), target).unwrap();
+        let (offsets, fragments) = issue_fragments(&output);
+        assert_eq!(fragments.len(), 2, "{target}");
+        assert!(fragments.iter().all(|f| f.len() % 2 == 0), "{target}: even fragments");
+        assert_eq!(offsets, [0, 8 + fragments[0].len() as u32], "{target}");
+        assert_eq!(issue_decode_interleaved(&fragments[0]), [1, 2, 255, 4, 5, 254]);
+        assert_eq!(issue_decode_interleaved(&fragments[1]), [0, 1, 254, 3, 4, 253]);
+    }
+}
+
+#[test]
+fn issue_31_basic_offset_table_is_complete_or_empty() {
+    use super::io::basic_offset_table;
+    let fragments = vec![vec![0u8; 10], vec![0u8; 4], vec![0u8; 6]];
+    assert_eq!(basic_offset_table(&fragments, 3), [0, 18, 30]);
+    assert_eq!(basic_offset_table(&fragments[..1], 1), [0]);
+    // fragments that are not one per frame (a video stream): empty, never partial
+    assert!(basic_offset_table(&fragments, 1).is_empty());
+    assert!(basic_offset_table(&fragments[..1], 4).is_empty());
+}
+
+/// pohcee/dcmnorm#32: a JPEG Baseline RGB stream with component identifiers 0,1,2 and no
+/// JFIF/Adobe marker is RGB (Photometric Interpretation), not YCbCr; the Adobe control agrees.
+#[test]
+fn issue_32_jpeg_baseline_rgb_without_color_marker_is_not_ycbcr_converted() {
+    for name in ["jpeg_rgb_adobe_transform0.dcm", "jpeg_rgb_no_color_marker.dcm"] {
+        let output = transcode_dicom_bytes(issue_fixture(name), uids::EXPLICIT_VR_LITTLE_ENDIAN).unwrap();
+        let object = read_dicom_bytes(&output).unwrap();
+        assert_eq!(object.element(tags::PHOTOMETRIC_INTERPRETATION).unwrap().to_str().unwrap(), "RGB");
+        let pixels = object.element(tags::PIXEL_DATA).unwrap().to_bytes().unwrap().to_vec();
+        assert_eq!(pixels.len(), 8 * 8 * 3);
+        for (i, pixel) in pixels.chunks_exact(3).enumerate() {
+            for (channel, expected) in [200i32, 50, 10].into_iter().enumerate() {
+                let delta = (i32::from(pixel[channel]) - expected).abs();
+                assert!(delta <= 1, "{name}: pixel {i} channel {channel} is {}, expected {expected}", pixel[channel]);
+            }
+        }
+    }
+}
+
+/// pohcee/dcmnorm#3: lossless JPEG XL encoding (`.110`), checked by decoding with jxl-oxide (a
+/// separate implementation from the zune-jpegxl encoder): 12-bit samples in 16 bits, several
+/// frames, planar RGB.
+#[cfg(feature = "jpeg-xl-codec")]
+#[test]
+fn issue_3_jpeg_xl_lossless_encode_round_trips() {
+    const JXL_LOSSLESS: &str = "1.2.840.10008.1.2.4.110";
+    for name in ["mono12_3x4_2frames.dcm", "rgb_planar_2x2.dcm"] {
+        let source = issue_fixture(name);
+        let encoded = transcode_dicom_bytes(&source, JXL_LOSSLESS).unwrap();
+        let object = read_dicom_bytes(&encoded).unwrap();
+        assert_eq!(object.meta().transfer_syntax().trim_end_matches('\0'), JXL_LOSSLESS);
+        let (offsets, fragments) = issue_fragments(&encoded);
+        let frames = if name.contains("2frames") { 2 } else { 1 };
+        assert_eq!(fragments.len(), frames, "{name}");
+        assert_eq!(offsets.len(), frames, "{name}: complete Basic Offset Table");
+        assert!(fragments.iter().all(|f| f.starts_with(&[0xFF, 0x0A])), "{name}: JPEG XL codestreams");
+
+        let decoded = transcode_dicom_bytes(&encoded, uids::EXPLICIT_VR_LITTLE_ENDIAN).unwrap();
+        let decoded = read_dicom_bytes(&decoded).unwrap();
+        let original = read_dicom_bytes(&source).unwrap();
+        let expected = if name.starts_with("rgb") {
+            // planar in, interleaved out
+            vec![255, 0, 0, 0, 255, 0, 0, 0, 255, 17, 128, 250]
+        } else {
+            original.element(tags::PIXEL_DATA).unwrap().to_bytes().unwrap().to_vec()
+        };
+        assert_eq!(decoded.element(tags::PIXEL_DATA).unwrap().to_bytes().unwrap().as_ref(), expected.as_slice(), "{name}");
+        if name.starts_with("rgb") {
+            assert_eq!(decoded.element(tags::PLANAR_CONFIGURATION).unwrap().to_int::<u16>().unwrap(), 0);
+        }
+    }
+
+    // unsupported inputs fail explicitly instead of producing changed samples
+    let one_row = transcode_dicom_bytes(issue_fixture("rgb_planar_1x2.dcm"), JXL_LOSSLESS).unwrap_err();
+    assert!(one_row.to_string().contains("2x2"), "{one_row}");
+    let signed = transcode_dicom_bytes(issue_fixture("voi_lut_unsigned_after_rescale.dcm"), JXL_LOSSLESS).unwrap_err();
+    assert!(signed.to_string().contains("unsigned"), "{signed}");
+}

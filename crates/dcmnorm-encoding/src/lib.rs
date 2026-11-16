@@ -19,6 +19,7 @@
 pub mod adapters;
 pub mod decode;
 pub mod encode;
+mod iso2022;
 pub mod text;
 pub mod transfer_syntax;
 

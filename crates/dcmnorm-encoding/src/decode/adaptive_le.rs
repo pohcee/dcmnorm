@@ -360,6 +360,11 @@ where
     fn decode_tag(&self, source: &mut S) -> Result<Tag> {
         Decode::decode_tag(self, source)
     }
+
+    #[inline]
+    fn is_explicit_vr(&self) -> bool {
+        self.state.get() == VrState::Explicit
+    }
 }
 
 #[cfg(test)]
