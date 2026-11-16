@@ -306,6 +306,11 @@ impl<S: std::io::Read + std::io::Write> ServerAssociation<S> {
         )
     }
 
+    /// The underlying stream, e.g. to switch a `TcpStream` to non-blocking for a moment and poll for a C-CANCEL-RQ
+    /// (a read that fails with `WouldBlock` is resumable, see [`Self::receive_command`]).
+    pub fn inner_stream(&mut self) -> &mut S {
+        &mut self.stream
+    }
 }
 
 #[cfg(test)]
