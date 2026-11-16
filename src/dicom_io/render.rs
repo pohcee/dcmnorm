@@ -15,7 +15,7 @@ use lcms2::{Intent, PixelFormat, Profile, Transform};
 use rayon::prelude::*;
 
 use super::io::{
-    apply_jpeg2000_component_correction, is_htj2k_transfer_syntax, is_jpeg2000_transfer_syntax, jpeg2000_component_mismatch,
+    apply_jpeg2000_component_correction, apply_jpeg2000_precision_correction, jpeg2000_precision_mismatch, is_htj2k_transfer_syntax, is_jpeg2000_transfer_syntax, jpeg2000_component_mismatch,
     jpeg2000_frame_uses_mct, kakadu_ffi_enabled, normalize_transfer_syntax_uid,
     transcode_dcmnorm_object, JPEG2000_DEBUG_ENV_FLAG,
 };
@@ -3397,14 +3397,27 @@ fn try_decode_single_frame_object(
     // codestream before decoding.
     let corrected_object;
     let decode_object: &DefaultDicomObject = if is_jpeg2000_transfer_syntax(source_uid) {
-        match jpeg2000_component_mismatch(object, frame_index) {
-            Some(actual_components) => {
-                let mut cloned = object.clone();
+        let components = jpeg2000_component_mismatch(object, frame_index);
+        // and a BitsStored below the codestream precision (pohcee/dcmnorm#29)
+        let precision = jpeg2000_precision_mismatch(object, frame_index);
+        if components.is_some() || precision.is_some() {
+            let mut cloned = object.clone();
+            if let Some(actual_components) = components {
                 apply_jpeg2000_component_correction(&mut cloned, actual_components);
-                corrected_object = cloned;
-                &corrected_object
             }
-            None => object,
+            if let Some(precision) = precision {
+                apply_jpeg2000_precision_correction(&mut cloned, precision).map_err(|message| {
+                    RenderError::Transcode(super::types::TranscodeError::DecodePixelData {
+                        uid: source_uid.to_owned(),
+                        name: "JPEG 2000".to_owned(),
+                        message,
+                    })
+                })?;
+            }
+            corrected_object = cloned;
+            &corrected_object
+        } else {
+            object
         }
     } else {
         object

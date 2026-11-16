@@ -56,6 +56,10 @@ if [ "$RUN_TEST" = true ]; then
   javac -d "$SCRIPT_DIR/target/test-classes" -cp "$SCRIPT_DIR/target/classes" \
     $(find "$SCRIPT_DIR/src/test/java" -name '*.java')
 
+  echo "==> java com.pohcee.dcmnorm.internal.NativeLoaderTest"
+  java -cp "$SCRIPT_DIR/target/classes:$SCRIPT_DIR/target/test-classes" \
+    com.pohcee.dcmnorm.internal.NativeLoaderTest
+
   echo "==> java com.pohcee.dcmnorm.Smoke"
   java -Djava.library.path="$NATIVE_LIB_DIR" \
     -cp "$SCRIPT_DIR/target/classes:$SCRIPT_DIR/target/test-classes" \

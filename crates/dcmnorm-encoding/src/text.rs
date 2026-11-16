@@ -172,6 +172,30 @@ impl SpecificCharacterSet {
     pub fn from_code(code: &str) -> Option<Self> {
         CharsetImpl::from_code(code).map(SpecificCharacterSet)
     }
+
+    /// Obtain the specific character set for all the values of a Specific Character Set
+    /// (0008,0005) element. A single value is the same as [`from_code`](Self::from_code); more
+    /// than one (`\ISO 2022 IR 87`, `ISO 2022 IR 6\ISO 2022 IR 149`) selects ISO 2022 code
+    /// extension, where text switches between the declared character sets with escape
+    /// sequences (PS3.5 6.1.2.5). An empty first value is the default repertoire.
+    /// Unsupported values are left out; `None` when no value is supported.
+    ///
+    /// ```
+    /// use dcmnorm_encoding::text::{SpecificCharacterSet, TextCodec};
+    ///
+    /// let charset = SpecificCharacterSet::from_codes(&["", "ISO 2022 IR 87"]).unwrap();
+    /// assert_eq!(charset.decode(b"\x1b$B;n83\x1b(B").unwrap(), "試験");
+    /// ```
+    pub fn from_codes<S: AsRef<str>>(codes: &[S]) -> Option<Self> {
+        match codes {
+            [] => None,
+            [code] => Self::from_code(code.as_ref()).or_else(|| {
+                code.as_ref().trim().is_empty().then(SpecificCharacterSet::default)
+            }),
+            codes => crate::iso2022::Iso2022::from_codes(codes)
+                .map(|charset| SpecificCharacterSet(CharsetImpl::Iso2022(charset))),
+        }
+    }
 }
 
 impl TextCodec for SpecificCharacterSet {
@@ -229,6 +253,8 @@ enum CharsetImpl {
     Gb18030,
     /// **Gbk**: The Simplified Chinese character set.
     Gbk,
+    /// A multi-valued Specific Character Set using ISO 2022 code extension.
+    Iso2022(crate::iso2022::Iso2022),
     // Support for more text encodings is tracked in issue #40.
 }
 
@@ -263,7 +289,11 @@ impl CharsetImpl {
 
 impl TextCodec for CharsetImpl {
     fn name(&self) -> Cow<'static, str> {
+        if let CharsetImpl::Iso2022(charset) = self {
+            return Cow::Owned(charset.name());
+        }
         Cow::Borrowed(match self {
+            CharsetImpl::Iso2022(_) => unreachable!(),
             CharsetImpl::Default => "ISO_IR 6",
             CharsetImpl::IsoIr13 => "ISO_IR 13",
             CharsetImpl::IsoIr87 => "ISO_IR 87",
@@ -301,6 +331,7 @@ impl TextCodec for CharsetImpl {
             CharsetImpl::IsoIr192 => Utf8CharacterSetCodec.decode(text),
             CharsetImpl::Gb18030 => Gb18030CharacterSetCodec.decode(text),
             CharsetImpl::Gbk => GBKCharacterSetCodec.decode(text),
+            CharsetImpl::Iso2022(charset) => Ok(charset.decode(text)),
         }
     }
 
@@ -322,6 +353,9 @@ impl TextCodec for CharsetImpl {
             CharsetImpl::IsoIr192 => Utf8CharacterSetCodec.encode(text),
             CharsetImpl::Gb18030 => Gb18030CharacterSetCodec.encode(text),
             CharsetImpl::Gbk => GBKCharacterSetCodec.encode(text),
+            CharsetImpl::Iso2022(charset) => charset
+                .encode(text)
+                .map_err(|message| EncodeCustomSnafu { message }.build()),
         }
     }
 }

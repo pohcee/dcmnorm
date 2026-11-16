@@ -1,4 +1,8 @@
 #[cfg(feature = "jpeg-xl-codec")]
+use dcmnorm_dictionary::tags;
+use dcmnorm_object::DefaultDicomObject;
+
+#[cfg(feature = "jpeg-xl-codec")]
 pub mod jpeg_xl_impl {
     use dcmnorm_dictionary::tags;
     use dcmnorm_object::DefaultDicomObject;
@@ -70,7 +74,6 @@ pub mod jpeg_xl_impl {
         }
 
         let bytes_per_sample = (bits_allocated / 8) as usize;
-        let max_sample_value = ((1u32 << bits_stored) - 1) as f32;
 
         let mut decoded = Vec::new();
         for fragment in fragments {
@@ -89,6 +92,16 @@ pub mod jpeg_xl_impl {
                     image.height()
                 ));
             }
+
+            // Samples come back normalized to [0, 1] over the codestream's own bit depth, which
+            // can exceed BitsStored (12-bit CT encoded at 16 bits): scale by that, not BitsStored.
+            let codestream_bits = image.image_header().metadata.bit_depth.bits_per_sample();
+            if codestream_bits == 0 || codestream_bits > u32::from(bits_allocated) {
+                return Err(format!(
+                    "JPEG XL codestream has {codestream_bits}-bit samples, BitsAllocated is {bits_allocated}"
+                ));
+            }
+            let max_sample_value = ((1u32 << codestream_bits) - 1) as f32;
 
             let render = image
                 .render_frame(0)
@@ -128,6 +141,111 @@ pub mod jpeg_xl_impl {
 
         Ok(decoded)
     }
+}
+
+/// Lossless JPEG XL encoding (JPEG XL Lossless, `1.2.840.10008.1.2.4.110`) with zune-jpegxl,
+/// a pure-Rust modular encoder (pohcee/dcmnorm#3). One codestream per frame, like every
+/// JPEG-family syntax. The codestream bit depth is BitsAllocated (8 or 16); a 12-bit image is
+/// stored as 16-bit samples whose values stay below 4096, and decoding scales by the codestream
+/// depth, so the samples come back unchanged. JPEG XL samples are unsigned, so signed pixel data
+/// is rejected (as on decode). Photometric Interpretation is kept: the encoder's colour transform
+/// (YCoCg-R) is reversible. zune-jpegxl needs at least 2 rows and 2 columns.
+#[cfg(feature = "jpeg-xl-codec")]
+pub fn encode_jpeg_xl_lossless_pixel_data(object: &DefaultDicomObject) -> Result<Vec<Vec<u8>>, String> {
+    use zune_core::bit_depth::BitDepth;
+    use zune_core::colorspace::ColorSpace;
+    use zune_core::options::EncoderOptions;
+    use zune_jpegxl::JxlSimpleEncoder;
+
+    let uint = |tag, name: &str| {
+        object
+            .get(tag)
+            .and_then(|e| e.uint16().ok())
+            .ok_or_else(|| format!("missing {name} attribute"))
+    };
+    let rows = uint(tags::ROWS, "Rows")?;
+    let cols = uint(tags::COLUMNS, "Columns")?;
+    let samples_per_pixel = object.get(tags::SAMPLES_PER_PIXEL).and_then(|e| e.uint16().ok()).unwrap_or(1);
+    let bits_allocated = uint(tags::BITS_ALLOCATED, "BitsAllocated")?;
+    let bits_stored = object.get(tags::BITS_STORED).and_then(|e| e.uint16().ok()).unwrap_or(bits_allocated);
+    let signed = object.get(tags::PIXEL_REPRESENTATION).and_then(|e| e.uint16().ok()).unwrap_or(0) != 0;
+    let planar = samples_per_pixel > 1
+        && object.get(tags::PLANAR_CONFIGURATION).and_then(|e| e.uint16().ok()) == Some(1);
+    let frames = object
+        .get(tags::NUMBER_OF_FRAMES)
+        .and_then(|e| e.to_str().ok())
+        .and_then(|s| s.trim().parse::<usize>().ok())
+        .unwrap_or(1)
+        .max(1);
+
+    if signed {
+        return Err("JPEG XL encoding only supports unsigned (PixelRepresentation 0) pixel data".to_owned());
+    }
+    let (depth, bytes_per_sample) = match bits_allocated {
+        8 => (BitDepth::Eight, 1usize),
+        16 => (BitDepth::Sixteen, 2usize),
+        other => return Err(format!("unsupported BitsAllocated for JPEG XL encoding: {other}")),
+    };
+    if bits_stored == 0 || bits_stored > bits_allocated {
+        return Err(format!("invalid BitsStored ({bits_stored}) for BitsAllocated ({bits_allocated})"));
+    }
+    let colorspace = match samples_per_pixel {
+        1 => ColorSpace::Luma,
+        3 => ColorSpace::RGB,
+        other => return Err(format!("unsupported SamplesPerPixel for JPEG XL encoding: {other}")),
+    };
+    if rows < 2 || cols < 2 {
+        return Err(format!("JPEG XL encoding needs at least 2x2 pixels, the image is {rows}x{cols}"));
+    }
+
+    let pixel_data = object
+        .element(tags::PIXEL_DATA)
+        .map_err(|e| format!("missing PixelData: {e}"))?
+        .to_bytes()
+        .map_err(|e| format!("failed to access pixel data: {e}"))?;
+    let pixels = usize::from(rows) * usize::from(cols);
+    let spp = usize::from(samples_per_pixel);
+    let frame_len = pixels * spp * bytes_per_sample;
+    if pixel_data.len() < frame_len * frames {
+        return Err(format!(
+            "PixelData too short for {frames} frame(s): expected at least {} bytes, got {}",
+            frame_len * frames,
+            pixel_data.len()
+        ));
+    }
+    // bits above BitsStored (overlays) are not image samples
+    let mask: u16 = if bits_stored >= 16 { u16::MAX } else { (1u16 << bits_stored) - 1 };
+
+    let mut fragments = Vec::with_capacity(frames);
+    let mut samples = vec![0u8; frame_len];
+    for frame_index in 0..frames {
+        let frame = &pixel_data[frame_index * frame_len..(frame_index + 1) * frame_len];
+        // interleaved samples, 16-bit ones in native byte order (what zune-jpegxl reads)
+        for c in 0..spp {
+            for i in 0..pixels {
+                let from = if planar { c * pixels + i } else { i * spp + c } * bytes_per_sample;
+                let to = (i * spp + c) * bytes_per_sample;
+                if bytes_per_sample == 1 {
+                    samples[to] = frame[from] & (mask as u8);
+                } else {
+                    let value = u16::from_le_bytes([frame[from], frame[from + 1]]) & mask;
+                    samples[to..to + 2].copy_from_slice(&value.to_ne_bytes());
+                }
+            }
+        }
+        let options = EncoderOptions::new(usize::from(cols), usize::from(rows), colorspace, depth);
+        let mut encoded = Vec::new();
+        JxlSimpleEncoder::new(&samples, options)
+            .encode(&mut encoded)
+            .map_err(|e| format!("JPEG XL encode failed for frame {frame_index}: {e:?}"))?;
+        fragments.push(encoded);
+    }
+    Ok(fragments)
+}
+
+#[cfg(not(feature = "jpeg-xl-codec"))]
+pub fn encode_jpeg_xl_lossless_pixel_data(_object: &DefaultDicomObject) -> Result<Vec<Vec<u8>>, String> {
+    Err("JPEG XL codec support requires 'jpeg-xl-codec' feature to be enabled".to_owned())
 }
 
 #[cfg(not(feature = "jpeg-xl-codec"))]

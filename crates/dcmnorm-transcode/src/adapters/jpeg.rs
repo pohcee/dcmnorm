@@ -7,7 +7,7 @@ use dcmnorm_encoding::adapters::{
     PixelDataReader, PixelDataWriter,
 };
 use dcmnorm_encoding::snafu::prelude::*;
-use dcmnorm_jpeg::Decoder;
+use dcmnorm_jpeg::{ColorTransform, Decoder};
 use jpeg_encoder::ColorType;
 use std::borrow::Cow;
 use std::io::Cursor;
@@ -68,6 +68,7 @@ impl PixelDataReader for JpegAdapter {
 
         'frame_loop: for i in 0..nr_frames {
             let mut decoder = Decoder::new(&mut cursor);
+            set_default_color_transform(&mut decoder, src);
             let decoded = decoder
                 .decode()
                 .map_err(|e| Box::new(e) as Box<_>)
@@ -224,6 +225,7 @@ impl PixelDataReader for JpegAdapter {
         let dst_offset = base_offset;
 
         let mut decoder = Decoder::new(&mut cursor);
+            set_default_color_transform(&mut decoder, src);
         let decoded = decoder
             .decode()
             .map_err(|e| Box::new(e) as Box<_>)
@@ -233,6 +235,15 @@ impl PixelDataReader for JpegAdapter {
         dst[dst_offset..(dst_offset + decoded_len)].copy_from_slice(&decoded);
 
         Ok(())
+    }
+}
+
+/// The colour space of a stream that declares none comes from Photometric Interpretation
+/// (pohcee/dcmnorm#32): RGB with component identifiers 0,1,2 and no JFIF/Adobe marker is RGB,
+/// not the YCbCr a standalone JPEG would default to.
+fn set_default_color_transform<R: std::io::Read>(decoder: &mut Decoder<R>, src: &dyn PixelDataObject) {
+    if src.photometric_interpretation().map(str::trim) == Some("RGB") {
+        decoder.set_default_color_transform(ColorTransform::RGB);
     }
 }
 
