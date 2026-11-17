@@ -18,10 +18,12 @@ Not a production service - it's a manual/demo test harness for the Node bindings
 ## Run locally
 
 ```sh
-(cd ../.. && npm install && npm run build)   # or ../../build-in-docker.sh: the addon is not committed
-npm install   # resolves dcmnorm via the file:../.. reference to bindings/node
+npm install   # dcmnorm and its @dcmnorm/<platform> addon from npm
 npm start
 ```
+
+To try an unreleased binding instead, build it (see `../../README.md`) and run
+`npm install --no-save ../..` before `npm start`.
 
 Then open http://localhost:3000. Sample files are read straight from the repo's own
 `test/files/` in this mode (no copy step needed) - see `CURATED_SAMPLES` in `server.js`.
@@ -82,20 +84,21 @@ under Cloud Run's own 32MB request-body limit) caps upload size.
 ## Docker
 
 Build context must be the **dcmnorm repo root**, not this directory or `bindings/node` - the
-image needs the node binding, this app, and a curated handful of `test/files/*.dcm` fixtures
+image needs this app and a curated handful of `test/files/*.dcm` fixtures
 (see `CURATED_SAMPLES` in `server.js`), which only a repo-root context can see all of at once:
 
 ```sh
 cd ../../../..   # dcmnorm repo root, from here
-docker build -f bindings/node/examples/test-website/Dockerfile -t dcmnorm-test-website .
+docker build -f bindings/node/examples/test-website/Dockerfile \
+  --build-arg DCMNORM_VERSION="$(npm view dcmnorm version)" -t dcmnorm-test-website .
 docker run --rm -p 3000:3000 dcmnorm-test-website
 ```
 
 Then open http://localhost:3000.
 
-The image is `node:22-slim` with no Rust toolchain - it copies the addon's already-committed
-`.node` binary (see `../../README.md`'s Packaging section for why it's prebuilt rather than
-compiled at image build time) rather than rebuilding it. `Dockerfile.dockerignore` (next to the
+The image is `node:22-slim` with no Rust toolchain: it installs `dcmnorm` at `DCMNORM_VERSION`
+from npm, which brings the prebuilt addon for the image's platform (`@dcmnorm/linux-x64-gnu`).
+`Dockerfile.dockerignore` (next to the
 Dockerfile) overrides the repo's root `.dockerignore` for this build only, since that root file
 excludes `test/`/`*.json`/`*.dcm` for the main Rust CLI build - exactly what this Dockerfile
 needs to copy.
