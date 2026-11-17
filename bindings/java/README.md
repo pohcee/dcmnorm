@@ -5,14 +5,59 @@ straight into the `dcmnorm` lib crate in-process (no CLI subprocess, no stdio/JS
 This is the Java counterpart of `bindings/node` (napi-rs) and `bindings/python` (PyO3) - same
 underlying crate, same feature set, adapted to Java/JNI conventions.
 
+## Install
+
+Two artifacts on Maven Central: `com.pohcee:dcmnorm-java`, the Java API (no native code), and
+`com.pohcee:dcmnorm-java-natives`, the native library, one jar per platform classifier. Depend on
+the API plus the one natives jar for the platform you run on:
+
+| Classifier | Platform |
+| --- | --- |
+| `linux-x86_64` | Linux x86_64, glibc 2.28+ |
+| `linux-aarch64` | Linux aarch64, glibc 2.28+ |
+| `osx-aarch64` | macOS arm64, 11+ |
+| `osx-x86_64` | macOS x86_64, 10.15+ |
+| `windows-x86_64` | Windows x64 |
+
+Maven:
+
+```xml
+<dependency>
+  <groupId>com.pohcee</groupId>
+  <artifactId>dcmnorm-java</artifactId>
+  <version>${dcmnorm.version}</version>
+</dependency>
+<dependency>
+  <groupId>com.pohcee</groupId>
+  <artifactId>dcmnorm-java-natives</artifactId>
+  <version>${dcmnorm.version}</version>
+  <classifier>linux-x86_64</classifier>
+  <scope>runtime</scope>
+</dependency>
+```
+
+Gradle (Kotlin DSL):
+
+```kotlin
+dependencies {
+    implementation("com.pohcee:dcmnorm-java:$dcmnormVersion")
+    runtimeOnly("com.pohcee:dcmnorm-java-natives:$dcmnormVersion:linux-x86_64")
+}
+```
+
+For an application that ships to several platforms, add one `dcmnorm-java-natives` dependency per
+classifier: each jar holds only its own platform's library, under a different path, and
+`NativeLoader` picks the one for the running JVM. The version is the dcmnorm release version
+(`0.11.2` for `v0.11.2`). Java 11+.
+
 ## Build
 
 ```sh
-./build.sh              # debug build -> target/debug/libdcmnorm_java.so + target/dcmnorm-java-0.1.0.jar
+./build.sh              # debug build -> target/debug/libdcmnorm_java.so + target/dcmnorm-java-<v>.jar
 ./build.sh --release     # release build, slower to compile but faster to run
 ./build.sh test           # also builds exec/dcmtalk and runs the smoke test against it
 ./build.sh --release test # release build + smoke test
-./build-in-docker.sh      # release build inside debian:bookworm-slim - see Packaging below
+./build-in-docker.sh      # Linux release library in manylinux_2_28 - see Packaging below
 ```
 
 Unlike `bindings/node` (napi-rs's own build tool) and `bindings/python` (maturin), there is no
@@ -229,47 +274,61 @@ native memory.
 
 ## Packaging
 
-Like `bindings/node` and `bindings/python`, this isn't published to Maven Central. Consumers are
-expected to depend on the jar `build-in-docker.sh` produces (e.g. via a local
-`<systemPath>`/`mvn install:install-file` into their own local repository, or a Gradle
-`files(...)` dependency) rather than building from source - a consumer's Docker builder stage may
-have no Rust toolchain of its own.
+Published to Maven Central (through the Sonatype Central Portal) by the
+[`Build and release`](../../.github/workflows/release.yml) workflow on every `v*.*.*` release tag:
 
-The jar bundles the compiled `libdcmnorm_java.so` at
-`src/main/resources/native/linux-x64/libdcmnorm_java.so`, with its SHA-256 beside it
-(`libdcmnorm_java.so.sha256`, written by `build-in-docker.sh`). At class-init time
-(`com.pohcee.dcmnorm.internal.NativeLoader`) the library is extracted once per build to a per-user
-cache, `~/.cache/dcmnorm/<sha256>/libdcmnorm_java.so` (`$XDG_CACHE_HOME`, `~/Library/Caches` on
-macOS, `%LOCALAPPDATA%` on Windows), and every later JVM loads that copy: no 28 MB copy per start,
-and no temp file left behind by a JVM that didn't exit normally. The copy is written to a
-temporary name and atomically renamed, so concurrent JVMs never load a partial file; if the cache
-isn't writable, the library goes to a temp file as before. Then, for local development, a plain
-`System.loadLibrary("dcmnorm_java")` lookup on `java.library.path`, where the `.so` was just built
-straight into a directory already on that path (see `build.sh`).
+| Artifact | Contents |
+| --- | --- |
+| `com.pohcee:dcmnorm-java:<v>` (`pom.xml`) | the API classes; `-sources` and `-javadoc` jars; no native code |
+| `com.pohcee:dcmnorm-java-natives:<v>` (`natives/pom.xml`, packaging `pom`) | one attached jar per classifier, `native/<classifier>/<library>` + `<library>.sha256` |
+
+`<library>` is `libdcmnorm_java.so` (Linux), `libdcmnorm_java.dylib` (macOS) or
+`dcmnorm_java.dll` (Windows). Every file is GPG-signed. `NativeLoader`
+(`com.pohcee.dcmnorm.internal`) maps `os.name`/`os.arch` to the classifier (`linux`/`osx`/`windows`
++ `x86_64`/`aarch64`) and finds the library on the classpath at `/native/<classifier>/<library>`.
+It is extracted once per build to a per-user cache, `~/.cache/dcmnorm/<sha256>/<library>`
+(`$XDG_CACHE_HOME`, `~/Library/Caches` on macOS, `%LOCALAPPDATA%` on Windows), keyed by the
+`.sha256` sidecar so a JVM start reads 64 bytes instead of hashing the ~30 MB library, and every
+later JVM loads that copy. The copy is written to a temporary name and atomically renamed, so
+concurrent JVMs never load a partial file; if the cache isn't writable, the library goes to a temp
+file. Then, for local development, a plain `System.loadLibrary("dcmnorm_java")` lookup on
+`java.library.path`, where the library was just built straight into a directory already on that
+path (see `build.sh`).
 
 | System property | Effect |
 | --- | --- |
-| `-Ddcmnorm.library.path=/opt/app/libdcmnorm_java.so` | Load this file as is (containers that ship the `.so` on disk: no extraction) |
+| `-Ddcmnorm.library.path=/opt/app/libdcmnorm_java.so` | Load this file as is (containers that ship the library on disk: no extraction, no natives jar needed) |
 | `-Ddcmnorm.cache.dir=/var/cache/dcmnorm` | Cache directory for the extracted library |
 
 `Dcmnorm.init()` loads the library up front, so a service pays the load cost at startup instead of
-on its first request. **Only linux-x64 is currently packaged** - a consumer on another OS/architecture
-needs their own native build on `java.library.path`.
+on its first request.
 
-`build-in-docker.sh` builds inside a `debian:bookworm-slim` container rather than on the host,
-specifically to match that image's glibc (2.36) - the same baseline `bindings/node`'s
-`node:22-slim` and `bindings/python`'s `python:3.12-slim-bookworm` build containers already pin
-to, so all three bindings' native code stays safe on the same deploy targets. Building on an
-arbitrary host risks a `GLIBC_X.XX not found` failure that only surfaces once deployed. `./build.sh`
-(plain host build) is for fast local iteration only - don't commit its output; only the
-`.so`/jar `build-in-docker.sh` produces is meant to be committed.
+How each library is built (FFmpeg linked in statically with the same codec set everywhere, no
+fallback to a smaller one; nothing native is committed):
 
-The [`Build and release`](../../.github/workflows/release.yml) GitHub Actions workflow runs
-`build-in-docker.sh` (for all three bindings) on every pushed `v*.*.*` release tag (cut with
-`scripts/release-tag.sh`), as well as on manual dispatch, and commits whatever changed - this is what actually produces and commits
-`src/main/resources/native/linux-x64/libdcmnorm_java.so` in practice, rather than a maintainer
-needing to run the script by hand from a machine with Docker.
+- **Linux**: `build-in-docker.sh` (`packaging/build-binding-linux.sh java`) builds in
+  `quay.io/pypa/manylinux_2_28_<arch>` (glibc 2.28) on a runner of the same architecture, fails if
+  the library needs a newer glibc or links anything outside the manylinux policy (FFmpeg
+  included), and stages it in `natives/target/natives/linux-<arch>/`.
+- **macOS**: `cargo build -p dcmnorm-java` on `macos-15` / `macos-15-intel` with
+  `packaging/macos-link.py` as the linker and `packaging/portable-cc` on `PATH`, staged by
+  `stage-native.py`.
+- **Windows**: `cargo build -p dcmnorm-java --no-default-features --features
+  ffmpeg-codec-linked,jpeg-ls-codec,jpeg-xl-codec,jpeg2000-openjpeg-encode` against vcpkg's static
+  FFmpeg (`.github/actions/ffmpeg-vcpkg`); fails if the DLL imports an FFmpeg DLL.
 
-If that build fails, the workflow's `Bindings (Java)` job log is the place to start (most likely
-culprit: an apt package name that has moved, or a step that assumed something about the container
-beyond what `debian:bookworm-slim` actually provides).
+`check-natives.sh <classifier> [<dcmtalk>]` then packages the API jar and that classifier's natives
+jar and runs, with nothing on `java.library.path`, `NativeLoaderTest`, `LoadCheck` (a parse and an
+MPEG-2 round trip from the jar's library) and, on Linux, the full `Smoke` test against `dcmtalk`.
+Locally, for Linux x86_64 (Docker, a JDK 11+ and Maven; `Smoke` also needs the `ffmpeg` command):
+
+```sh
+bindings/java/build-in-docker.sh
+cargo build --release -p dcmtalk
+bindings/java/check-natives.sh linux-x86_64 "$PWD/target/release/dcmtalk"
+```
+
+The release's `maven` job downloads every platform's staged library and runs
+`mvn -Prelease deploy` for `natives/pom.xml` (which requires all five) and then `pom.xml`.
+Publishing setup (namespace verification, the Central Portal token, the GPG key, the
+`MAVEN_PUBLISH` variable): [`packaging/README.md`](../../packaging/README.md).
