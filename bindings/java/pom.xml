@@ -1,13 +1,13 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  Builds only the Java side (src/main/java -> target/classes -> target/dcmnorm-java-0.1.0.jar).
-  The native library (src/lib.rs) is a separate Cargo crate, built with `cargo build -p
-  dcmnorm-java` (see build.sh/build-in-docker.sh in this directory) - Maven never invokes Cargo
-  itself. This mirrors how bindings/python keeps Cargo (PyO3/maturin) and bindings/node keeps
-  Cargo (napi-rs) as the sole build driver for their own native artifact; here the two toolchains
-  (Cargo for the .so, Maven for the .jar) are just driven side by side instead of one wrapping
-  the other, since there's no Java-ecosystem equivalent of maturin/napi-rs that drives Cargo for
-  you.
+  com.pohcee:dcmnorm-java: the Java API (src/main/java), with no native code in it. The native
+  library (src/lib.rs, a separate Cargo crate built with `cargo build -p dcmnorm-java`) ships in
+  com.pohcee:dcmnorm-java-natives, one jar per platform classifier (natives/pom.xml). Maven never
+  invokes Cargo itself: the release workflow builds the library per platform, then packages both.
+
+  The `release` profile adds what Maven Central requires (sources and javadoc jars, GPG
+  signatures) and publishes through the Sonatype Central Portal; see the README, "Packaging".
+  The version is the dcmnorm release version, written by scripts/release-tag.sh.
 -->
 <project xmlns="http://maven.apache.org/POM/4.0.0"
          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
@@ -16,11 +16,35 @@
 
   <groupId>com.pohcee</groupId>
   <artifactId>dcmnorm-java</artifactId>
-  <version>0.1.0</version>
+  <version>0.11.2</version>
   <packaging>jar</packaging>
 
   <name>dcmnorm-java</name>
-  <description>Native Java bindings for dcmnorm (in-process, no CLI subprocess)</description>
+  <description>Java bindings for dcmnorm: DICOM read/edit/transcode/render and DIMSE networking in-process (JNI). Add com.pohcee:dcmnorm-java-natives with your platform's classifier.</description>
+  <url>https://github.com/pohcee/dcmnorm</url>
+
+  <licenses>
+    <license>
+      <name>Apache-2.0</name>
+      <url>https://www.apache.org/licenses/LICENSE-2.0.txt</url>
+      <distribution>repo</distribution>
+    </license>
+  </licenses>
+  <developers>
+    <developer>
+      <name>Jason Klotzer</name>
+      <url>https://github.com/pohcee</url>
+    </developer>
+  </developers>
+  <scm>
+    <connection>scm:git:https://github.com/pohcee/dcmnorm.git</connection>
+    <developerConnection>scm:git:git@github.com:pohcee/dcmnorm.git</developerConnection>
+    <url>https://github.com/pohcee/dcmnorm</url>
+  </scm>
+  <issueManagement>
+    <system>GitHub</system>
+    <url>https://github.com/pohcee/dcmnorm/issues</url>
+  </issueManagement>
 
   <properties>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
@@ -29,6 +53,16 @@
 
   <build>
     <finalName>dcmnorm-java-${project.version}</finalName>
+    <resources>
+      <resource>
+        <directory>src/main/resources</directory>
+        <!-- Native libraries live in the natives jars only; a stray local build here must never
+             end up in the API jar. -->
+        <excludes>
+          <exclude>native/**</exclude>
+        </excludes>
+      </resource>
+    </resources>
     <plugins>
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
@@ -36,12 +70,10 @@
         <version>3.13.0</version>
       </plugin>
       <plugin>
-        <!-- Smoke.java (src/test/java) has a plain main() - like test/smoke.js and
-             test/smoke.py in the other two bindings, it is a standalone script, not a JUnit
-             suite, run manually via build.sh after packaging (see that script and this
-             directory's README). surefire is skipped so `mvn test`/`mvn package` doesn't try to
-             run it as a JUnit test class and fail for lack of a test framework/the native
-             library not yet being on java.library.path. -->
+        <!-- Smoke.java, NativeLoaderTest.java and LoadCheck.java (src/test/java) have plain
+             main()s - like test/smoke.js and test/smoke.py in the other two bindings they are
+             standalone scripts, not a JUnit suite, run by build.sh and the release workflow.
+             surefire is skipped so `mvn package` doesn't try to run them as JUnit tests. -->
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-surefire-plugin</artifactId>
         <version>3.2.5</version>
@@ -51,4 +83,78 @@
       </plugin>
     </plugins>
   </build>
+
+  <profiles>
+    <profile>
+      <id>release</id>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-source-plugin</artifactId>
+            <version>3.3.1</version>
+            <executions>
+              <execution>
+                <id>attach-sources</id>
+                <goals>
+                  <goal>jar-no-fork</goal>
+                </goals>
+              </execution>
+            </executions>
+          </plugin>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-javadoc-plugin</artifactId>
+            <version>3.11.2</version>
+            <configuration>
+              <doclint>none</doclint>
+              <quiet>true</quiet>
+            </configuration>
+            <executions>
+              <execution>
+                <id>attach-javadocs</id>
+                <goals>
+                  <goal>jar</goal>
+                </goals>
+              </execution>
+            </executions>
+          </plugin>
+          <plugin>
+            <!-- Signs with the key actions/setup-java imported (MAVEN_GPG_PRIVATE_KEY); the
+                 passphrase comes from the MAVEN_GPG_PASSPHRASE environment variable. -->
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-gpg-plugin</artifactId>
+            <version>3.2.7</version>
+            <executions>
+              <execution>
+                <id>sign-artifacts</id>
+                <phase>verify</phase>
+                <goals>
+                  <goal>sign</goal>
+                </goals>
+                <configuration>
+                  <gpgArguments>
+                    <arg>--pinentry-mode</arg>
+                    <arg>loopback</arg>
+                  </gpgArguments>
+                </configuration>
+              </execution>
+            </executions>
+          </plugin>
+          <plugin>
+            <groupId>org.sonatype.central</groupId>
+            <artifactId>central-publishing-maven-plugin</artifactId>
+            <version>0.8.0</version>
+            <extensions>true</extensions>
+            <configuration>
+              <publishingServerId>central</publishingServerId>
+              <autoPublish>true</autoPublish>
+              <waitUntil>published</waitUntil>
+              <deploymentName>dcmnorm-java ${project.version}</deploymentName>
+            </configuration>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+  </profiles>
 </project>

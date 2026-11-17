@@ -23,3 +23,18 @@ target
 # Release artifacts written by packaging/package.py (local runs)
 /dist/
 __pycache__/
+
+# Binding build outputs: published to npm, PyPI and Maven Central by the release workflow, never
+# committed (packaging/README.md).
+/bindings/node/*.node
+/bindings/node/npm/
+/bindings/node/node_modules/
+/bindings/node/package-lock.json
+/bindings/node/LICENSE
+/bindings/node/artifacts/
+/bindings/python/dist/
+/bindings/python/data/
+/bindings/java/src/main/resources/native/
+/bindings/java/natives/target/
+/bindings/java/target/
+/bindings/python/LICENSE

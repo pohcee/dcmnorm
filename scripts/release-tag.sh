@@ -13,16 +13,17 @@ Examples:
   ./scripts/release-tag.sh major --dry-run
 
 This script:
-  0) Fast-forwards onto origin (CI pushes rebuilt binding artifacts after each tag)
+  0) Fast-forwards onto origin
   1) Computes the next SemVer tag from existing v* tags
-    2) Updates crate versions in Cargo.toml files, the Node binding's package.json and the
-       Claude plugin/skill version pins
+  2) Updates the crate versions in the Cargo.toml files, the Claude plugin/skill version pins
+     and the binding package versions (npm package.json + loader, pyproject.toml, the Maven
+     poms) via scripts/check-versions.py --set
     3) Commits the version bump
     4) Creates an annotated tag on that commit
     5) Pushes the commit and tag to origin
 
-Pushing the tag triggers .github/workflows/release.yml (tests, then the GitHub release, PyPI
-wheels and the bindings' rebuilt native artifacts).
+Pushing the tag triggers .github/workflows/release.yml (tests and every build, then the GitHub
+release and the npm, PyPI and Maven Central packages).
 EOF
 }
 
@@ -194,8 +195,7 @@ fi
 require_clean_tree
 
 git fetch --tags --force --quiet
-# The tag-triggered release workflow pushes a "rebuild native artifacts" commit to main
-# after every release; build on top of it rather than failing the push below.
+# Build on top of whatever landed on origin since the last pull rather than failing the push below.
 if git rev-parse --abbrev-ref '@{u}' >/dev/null 2>&1; then
     git fetch --quiet
     git merge --ff-only --quiet '@{u}'
@@ -224,7 +224,7 @@ fi
 echo "Current version (${version_source}): ${latest_tag}"
 echo "Next tag:    ${next_tag}"
 
-# The CLI wheels go to PyPI, whose versions only allow alpha/beta/rc prereleases; check before
+# The wheels go to PyPI, whose versions only allow alpha/beta/rc prereleases; check before
 # changing any file.
 python3 -c 'import sys; sys.path.insert(0, "packaging"); import package; print("PyPI version:", package.pep440_version(sys.argv[1]))' "$next_version"
 
@@ -236,27 +236,9 @@ fi
 update_manifest_version "Cargo.toml" "$next_version"
 update_manifest_version "exec/dcmnorm/Cargo.toml" "$next_version"
 update_manifest_version "exec/dcmtalk/Cargo.toml" "$next_version"
-# The Claude plugin's version and the version its skill installs from PyPI.
+# The Claude plugin's version and the version its skill installs from PyPI, and the binding
+# packages (npm, PyPI, Maven), which publish with the release version.
 python3 scripts/check-versions.py --set "$next_version"
-# The Node binding (@pohcee/dcmnorm-node) carries the release version too; the workflow this
-# tag starts builds its native addons and commits them.
-python3 - "$next_version" <<'PY'
-import json, sys
-version = sys.argv[1]
-for path in ("bindings/node/package.json", "bindings/node/package-lock.json"):
-    try:
-        with open(path) as f:
-            data = json.load(f)
-    except FileNotFoundError:
-        continue
-    data["version"] = version
-    root = data.get("packages", {}).get("")
-    if isinstance(root, dict):
-        root["version"] = version
-    with open(path, "w") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
-        f.write("\n")
-PY
 
 # Only the workspace's own version entries: `cargo generate-lockfile` would re-resolve every
 # dependency to its newest compatible version as a side effect of each release.

@@ -10,13 +10,13 @@ publish = false
 name = "dcmnorm_java"
 crate-type = ["cdylib"]
 
-# Mirrors dcmnorm's own default feature set (Cargo.toml) and bindings/node's own copy of this same
-# comment - forwarded explicitly rather than inherited via a plain path dependency, so
-# build-in-docker.sh can opt out of just ffmpeg-codec when git/nasm are unavailable in the build
-# container, the same way bindings/node/build-in-docker.sh already does.
+# dcmnorm's codec features, forwarded explicitly (as in bindings/node and bindings/python) rather
+# than inherited through a plain path dependency, so the Windows build can swap ffmpeg-codec (an
+# FFmpeg source build, Linux and macOS) for ffmpeg-codec-linked (vcpkg's static FFmpeg).
 [features]
 default = ["ffmpeg-codec", "jpeg-ls-codec", "jpeg-xl-codec", "jpeg2000-openjpeg-encode"]
 ffmpeg-codec = ["dcmnorm/ffmpeg-codec"]
+ffmpeg-codec-linked = ["dcmnorm/ffmpeg-codec-linked"]
 jpeg-ls-codec = ["dcmnorm/jpeg-ls-codec"]
 jpeg-xl-codec = ["dcmnorm/jpeg-xl-codec"]
 jpeg2000-openjpeg-encode = ["dcmnorm/jpeg2000-openjpeg-encode"]

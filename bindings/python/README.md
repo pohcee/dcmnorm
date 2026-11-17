@@ -1,4 +1,4 @@
-# dcmnorm-python
+# dcmnorm (Python binding)
 
 Native Python bindings for dcmnorm, built with [PyO3](https://pyo3.rs) +
 [maturin](https://www.maturin.rs). Calls straight into the `dcmnorm` lib crate in-process (no CLI
@@ -7,6 +7,23 @@ doesn't stall other Python threads. This is the Python counterpart of `bindings/
 underlying crate, same feature set, adapted to Python conventions (synchronous/blocking calls
 instead of Promises, snake_case keyword arguments instead of camelCase options objects).
 
+## Install
+
+```sh
+pip install dcmnorm        # or: uv add dcmnorm / uv tool install dcmnorm / pipx install dcmnorm
+```
+
+```python
+import dcmnorm
+print(dcmnorm.read_json("image.dcm"))
+```
+
+The `dcmnorm` package on PyPI is both this binding and the `dcmnorm`/`dcmtalk` command-line tools:
+one wheel per platform (Linux x86_64 and aarch64 with glibc 2.28+, macOS arm64 11+ and x86_64
+10.15+, Windows x64) holds the `import dcmnorm` extension module for CPython 3.9+ (stable ABI) and
+both CLIs, which installers put on `PATH`. FFmpeg is linked into the module, so the video transfer
+syntaxes need no `ffmpeg` command in process. See Packaging below.
+
 ## Build
 
 ```sh
@@ -14,7 +31,7 @@ python -m venv .venv && source .venv/bin/activate
 pip install maturin
 maturin develop           # debug build, installed into the active venv - fast iteration
 maturin develop --release # release build, installed into the active venv
-./build-in-docker.sh      # release wheel built inside python:3.12-slim-bookworm - see Packaging below
+./build-in-docker.sh      # Linux release wheel (module + CLIs) in manylinux_2_28 - see Packaging below
 python test/smoke.py         # core / render / MPR / texture-export smoke test
 python test/smoke_dimse.py   # DIMSE SCU + SCP smoke test (echo/store/find/move, callbacks)
 ```
@@ -210,33 +227,58 @@ long-running `move` can't starve an unrelated concurrent `abort()`/`release()`; 
 
 ## Packaging
 
-Like `bindings/node`, this isn't published to PyPI. Consumers are expected to install the
-committed wheel directly (e.g. `pip install /path/to/dcmnorm/bindings/python/dist/*.whl`, or a
-`file:` / local-path entry in a `requirements.txt`/`pyproject.toml` pointing at that wheel)
-rather than building from source at install time - a consumer's Docker builder stage may have no
-Rust toolchain, no `libclang`, and none of the ffmpeg/openjpeg dev headers this crate needs to
-compile.
+Published to PyPI as `dcmnorm` by the [`Build and release`](../../.github/workflows/release.yml)
+workflow on every `v*.*.*` release tag, with the release version (PEP 440 form: `v0.12.0-rc.1` is
+`0.12.0rc1`). Each platform gets two wheels of the same name and version:
 
-The wheel **is committed** to this repo under `dist/` (see `.gitignore`) rather than built at
-Docker-image time, for the same reason `bindings/node` commits its compiled `.node` file.
-`build-in-docker.sh` builds it inside a `python:3.12-slim-bookworm` container rather than on the host,
-specifically to match that image's glibc (2.36, same Debian bookworm baseline the Node bindings'
-own `node:22-slim` container uses) - building on an arbitrary host risks a `GLIBC_X.XX not found`
-failure that only surfaces once deployed. `python test/smoke.py` checks this automatically
-(`check_glibc_compatibility()`) against whatever wheel is currently in `dist/`, so a host-built
-wheel accidentally left in `dist/` fails the test rather than silently shipping. `maturin develop`
-(plain host builds, installed straight into the active venv) is for fast local iteration only -
-don't commit its output; only `dist/*.whl` from `build-in-docker.sh` is meant to be committed.
+| Wheel | Contents | Picked by |
+| --- | --- | --- |
+| `dcmnorm-<v>-cp39-abi3-<plat>.whl` (this directory, maturin) | `dcmnorm/` (the extension module), `dcmnorm-<v>.data/scripts/{dcmnorm,dcmtalk}` | CPython 3.9+ (non-free-threaded) |
+| `dcmnorm-<v>-py3-none-<plat>.whl` (`packaging/package.py`) | `dcmnorm-<v>.data/scripts/{dcmnorm,dcmtalk}` only | everything else: CPython 3.8, free-threaded 3.13t/3.14t, other implementations |
 
-Built with `abi3-py39` (PyO3's stable-ABI feature): one compiled wheel
-(`dcmnorm_python-*-cp39-abi3-manylinux_2_XX_x86_64.whl` - the exact `manylinux_2_XX` tag is
-whatever glibc symbol versions the compiled `.so` actually references, auto-detected by maturin,
-not something to hardcode or rely on staying the same across builds) works unmodified against any
-CPython >= 3.9, rather than needing one wheel per Python minor version - the Python analog of `bindings/node`
-committing a single `.node` binary per platform/arch rather than per Node version.
+`<plat>` is `manylinux_2_28_x86_64`, `manylinux_2_28_aarch64`, `macosx_11_0_arm64`,
+`macosx_10_15_x86_64` or `win_amd64`. Installers prefer the abi3 wheel wherever it fits, so
+`pip install dcmnorm`, `uv tool install dcmnorm` and `pipx install dcmnorm` put both CLIs on `PATH`
+on every Python, and `import dcmnorm` works on CPython 3.9+. The CLI binaries in both wheels are
+the same files, byte for byte: the release builds them once (the CLI matrix, `packaging/build-linux.sh`
+on Linux), and `packaging/stage_cli.py` copies them out of the CLI-only wheel into `data/scripts/`
+(`[tool.maturin] data = "data"`) before maturin builds this one; `packaging/smoke_test.py
+--same-cli-as` checks it. `data/`, `dist/` and the copied `LICENSE` are build outputs
+(`.gitignore`); no wheel is committed. No sdist is published: building from source needs Rust,
+libclang, git and nasm and compiles FFmpeg.
 
-The [`Build and release`](../../.github/workflows/release.yml) GitHub Actions workflow also
-runs `build-in-docker.sh` (for all three bindings) on every pushed `v*.*.*` release tag (cut with
-`scripts/release-tag.sh`) and commits whatever changed - so the
-committed wheel is rebuilt as part of cutting a release rather than relying on a maintainer to
-remember to re-run this script by hand.
+Built with `abi3-py39` (PyO3's stable ABI): one extension per platform works unmodified on every
+CPython >= 3.9.
+
+How each wheel is built (FFmpeg linked in statically with the same codec set everywhere, no
+fallback to a smaller one):
+
+- **Linux**: `build-in-docker.sh` (`packaging/build-binding-linux.sh python`) builds in
+  `quay.io/pypa/manylinux_2_28_<arch>` on a runner of the same architecture with
+  `maturin build --compatibility manylinux_2_28`, and fails if the module needs a glibc newer than
+  2.28 or links anything outside the manylinux policy (FFmpeg included).
+- **macOS**: `maturin build` on `macos-15` / `macos-15-intel` (deployment targets 11.0 / 10.15),
+  with `packaging/macos-link.py` as the linker and `packaging/portable-cc` on `PATH`; fails if the
+  module links an FFmpeg dylib.
+- **Windows**: `maturin build` with `--no-default-features --features
+  pyo3/extension-module,ffmpeg-codec-linked,jpeg-ls-codec,jpeg-xl-codec,jpeg2000-openjpeg-encode`
+  against vcpkg's static FFmpeg (`.github/actions/ffmpeg-vcpkg`); fails if the `.pyd` imports an
+  FFmpeg DLL.
+
+Every wheel then goes through `packaging/smoke_test.py` in a fresh venv: both CLIs on `PATH` and
+working, `import dcmnorm`, a parse and an in-process MPEG-2 round trip. The local equivalent, for
+Linux x86_64:
+
+```sh
+packaging/build-linux.sh
+python3 packaging/package.py --platform linux-x86_64 --bin-dir target/manylinux_2_28-x86_64/release --out-dir dist
+python3 packaging/stage_cli.py dist/dcmnorm-*-py3-none-manylinux_2_28_x86_64.whl
+bindings/python/build-in-docker.sh
+python3 packaging/smoke_test.py bindings/python/dist/*.whl --same-cli-as dist/dcmnorm-*-py3-none-manylinux_2_28_x86_64.whl
+```
+
+`maturin develop` (a host build installed into the active venv, without the CLIs) is for local
+iteration only. `python test/smoke.py` checks the glibc floor of whatever wheel is in `dist/`.
+
+Publishing setup (trusted publisher, the `PYPI_PUBLISH` variable):
+[`packaging/README.md`](../../packaging/README.md).

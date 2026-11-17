@@ -1,6 +1,6 @@
 # dcmnorm-node test website
 
-A minimal Express app that exercises the `@pohcee/dcmnorm-node` bindings end to end: drop or
+A minimal Express app that exercises the `dcmnorm` Node bindings (`bindings/node`) end to end: drop or
 choose a `.dcm` file (or open one of six bundled sample files) in the browser, and it's
 processed by a small API that validates it, reads its JSON metadata, renders every frame
 (multiframe-aware) to a small JPEG thumbnail, and reports timings for each step. Everything is
@@ -18,7 +18,8 @@ Not a production service - it's a manual/demo test harness for the Node bindings
 ## Run locally
 
 ```sh
-npm install   # resolves @pohcee/dcmnorm-node via the file:../.. reference to bindings/node
+(cd ../.. && npm install && npm run build)   # or ../../build-in-docker.sh: the addon is not committed
+npm install   # resolves dcmnorm via the file:../.. reference to bindings/node
 npm start
 ```
 

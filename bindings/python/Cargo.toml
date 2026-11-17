@@ -10,10 +10,20 @@ name = "dcmnorm"
 # crate itself; "cdylib" is what maturin actually loads as the Python extension module.
 crate-type = ["cdylib", "rlib"]
 
+# Forwarded like bindings/node and bindings/java: FFmpeg is linked in, so `import dcmnorm`
+# handles the video transfer syntaxes without an `ffmpeg` command at run time. ffmpeg-codec builds
+# FFmpeg from source (Linux, macOS); Windows builds swap it for ffmpeg-codec-linked with vcpkg's
+# static FFmpeg (.github/workflows/release.yml, the bindings' Windows builds).
+[features]
+default = ["ffmpeg-codec", "jpeg-ls-codec", "jpeg-xl-codec", "jpeg2000-openjpeg-encode"]
+ffmpeg-codec = ["dcmnorm/ffmpeg-codec"]
+ffmpeg-codec-linked = ["dcmnorm/ffmpeg-codec-linked"]
+jpeg-ls-codec = ["dcmnorm/jpeg-ls-codec"]
+jpeg-xl-codec = ["dcmnorm/jpeg-xl-codec"]
+jpeg2000-openjpeg-encode = ["dcmnorm/jpeg2000-openjpeg-encode"]
+
 [dependencies]
-# FFmpeg linked in (built from source), so `import dcmnorm` handles the video transfer syntaxes
-# without an `ffmpeg` command at run time.
-dcmnorm = { path = "../..", features = ["ffmpeg-codec"] }
+dcmnorm = { path = "../..", default-features = false }
 dcmnorm-object = { path = "../../crates/dcmnorm-object" }
 # abi3-py39: one compiled extension works unmodified against any CPython >= 3.9 (stable ABI) -
 # the Python analog of napi-rs's own single-binary-per-platform story (see this crate's

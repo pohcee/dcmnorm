@@ -7,6 +7,9 @@ Ships as a CLI, a Rust library, and Node.js/Python/Java bindings.
 
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Latest release](https://img.shields.io/github/v/release/pohcee/dcmnorm)](https://github.com/pohcee/dcmnorm/releases/latest)
+[![PyPI](https://img.shields.io/pypi/v/dcmnorm?label=pypi)](https://pypi.org/project/dcmnorm/)
+[![npm](https://img.shields.io/npm/v/dcmnorm?label=npm)](https://www.npmjs.com/package/dcmnorm)
+[![Maven Central](https://img.shields.io/maven-central/v/com.pohcee/dcmnorm-java?label=maven%20central)](https://central.sonatype.com/artifact/com.pohcee/dcmnorm-java)
 [![Live demo](https://img.shields.io/badge/live%20demo-try%20it-brightgreen)](https://dcmnorm-test-website-spzcbrdjlq-uc.a.run.app)
 
 <!-- TODO: add a hero image, e.g. a rendered WSI tile next to an MPR reformat:
@@ -47,10 +50,10 @@ Cargo, build from source).
 - [`dcmnorm`](src/): a library crate with DICOM file, memory, JSON conversion, and DIMSE network helpers
 - [`exec/dcmnorm`](exec/dcmnorm/): a CLI for converting between DICOM, transcoded DICOM, JSON, and rendered images/raw frames, and for writing a DICOMDIR
 - [`exec/dcmtalk`](exec/dcmtalk/): a DIMSE network CLI (C-ECHO/C-STORE/C-FIND/C-MOVE SCU plus a storage SCP), covering the same ground as [dcmtk](https://dcmtk.org/)'s `echoscu`/`storescu`/`findscu`/`movescu`/`storescp`
-- [`bindings/node`](bindings/node/): Node.js bindings (`@pohcee/dcmnorm-node`) that call the library in-process via napi-rs — see that package's own README for its API
+- [`bindings/node`](bindings/node/): Node.js bindings (`npm i dcmnorm`) that call the library in-process via napi-rs — see that package's own README for its API
   - [`bindings/node/examples/test-website`](bindings/node/examples/test-website/): the source for the live demo above — also runnable locally, in Docker, or deployed to your own Cloud Run project
-- [`bindings/python`](bindings/python/): Python bindings (`dcmnorm-python`) that call the library in-process via PyO3 — see that package's own README for its API
-- [`bindings/java`](bindings/java/): Java bindings (`com.pohcee:dcmnorm-java`) that call the library in-process via the [jni](https://docs.rs/jni) crate — see that package's own README for its API
+- [`bindings/python`](bindings/python/): Python bindings (`import dcmnorm`, in the `dcmnorm` PyPI package) that call the library in-process via PyO3 — see that package's own README for its API
+- [`bindings/java`](bindings/java/): Java bindings (`com.pohcee:dcmnorm-java` + `com.pohcee:dcmnorm-java-natives` on Maven Central) that call the library in-process via the [jni](https://docs.rs/jni) crate — see that package's own README for its API
 
 ## Contents
 
@@ -78,8 +81,9 @@ Intel) and Windows (x86_64), on PyPI and as GitHub release archives.
 uv tool install dcmnorm        # or: pipx install dcmnorm / pip install dcmnorm
 ```
 
-This installs the native `dcmnorm` and `dcmtalk` binaries for your platform; nothing runs in
-Python. (For in-process use from Python, see [bindings/python](bindings/python/).)
+This installs the native `dcmnorm` and `dcmtalk` binaries for your platform; the CLIs don't run
+in Python. On CPython 3.9+ the same package also provides `import dcmnorm`, the in-process
+binding (see [bindings/python](bindings/python/)).
 
 ### Agent plugin (Claude, Gemini CLI, Antigravity)
 
@@ -1242,9 +1246,9 @@ tool can't "win" by failing fast (e.g. a dcmtk built without libpng rejects
 │                      # dcmnorm-jpeg2000: OpenJPEG + vendored OpenHTJ2K)
 ├── docs/              # design notes and evaluations
 ├── bindings/
-│   ├── node/          # @pohcee/dcmnorm-node napi-rs bindings
-│   ├── python/        # dcmnorm-python PyO3 bindings
-│   └── java/          # dcmnorm-java jni bindings
+│   ├── node/          # napi-rs bindings (npm: dcmnorm, @dcmnorm/<platform>)
+│   ├── python/        # PyO3 bindings (PyPI: dcmnorm, with the CLIs)
+│   └── java/          # jni bindings (Maven: com.pohcee:dcmnorm-java + -natives)
 ├── scripts/           # install / release helper scripts
 └── test/
     └── files/         # sample DICOM fixtures used by docs and tests
@@ -1392,10 +1396,13 @@ cargo test --workspace
 One GitHub Actions workflow, [`.github/workflows/release.yml`](.github/workflows/release.yml)
 ("Build and release"), builds, tests and publishes everything:
 
-- **On every pull request and push to `main`**, it runs the test suite and builds every CLI
-  artifact for every platform (archives, `.deb` packages, PyPI wheels, each smoke-tested), but
-  publishes nothing. A packaging change is therefore proven before a release.
-- **On a pushed `v*.*.*` tag**, after the tests and every build pass, it publishes:
+- **On every pull request and push to `main`**, it runs the test suite, checks the binding
+  packages' metadata (`npm pack` contents, the Maven POMs, the wheel metadata, every version pin)
+  and builds every CLI artifact for every platform (archives, `.deb` packages, CLI wheels, each
+  smoke-tested), but publishes nothing. The bindings themselves (FFmpeg compiled from source) are
+  built only for a tag or a manual run.
+- **On a pushed `v*.*.*` tag**, it also builds the three bindings for the same five platforms and,
+  after the tests and every build pass, publishes:
     - a GitHub release with, for each of `dcmnorm` and `dcmtalk` and each platform
       (`linux-x86_64`, `linux-aarch64`, `macos-x86_64`, `macos-aarch64`, `windows-x86_64`):
       `<name>-<tag>-<platform>.tar.gz` (`.zip` on Windows) plus a rolling `<name>-<platform>.tar.gz`
@@ -1403,15 +1410,17 @@ One GitHub Actions workflow, [`.github/workflows/release.yml`](.github/workflows
       `<name>-<tag>-<platform>.deb` (+ alias), built with [`cargo-deb`](https://github.com/kornelski/cargo-deb)
       from each exec crate's `[package.metadata.deb]` and installed for real by the workflow
       before upload.
-    - the CLI wheels on PyPI as [`dcmnorm`](https://pypi.org/project/dcmnorm/) (both binaries in
-      one wheel per platform; see [packaging/README.md](packaging/README.md)). This step runs only
-      when the repository variable `PYPI_PUBLISH` is `true`.
+    - [`dcmnorm`](https://pypi.org/project/dcmnorm/) on PyPI: per platform, a `cp39-abi3` wheel
+      with the `import dcmnorm` module and both CLIs, and a `py3-none` wheel with the CLIs only
+      (for Pythons the first doesn't fit). Only when the repository variable `PYPI_PUBLISH` is `true`.
+    - [`dcmnorm`](https://www.npmjs.com/package/dcmnorm) and its five `@dcmnorm/<platform>` addon
+      packages on npm (`NPM_PUBLISH`), and `com.pohcee:dcmnorm-java` with
+      `com.pohcee:dcmnorm-java-natives` (one jar per platform classifier) on Maven Central
+      (`MAVEN_PUBLISH`). The GitHub release carries the addons, wheels and natives jars too.
+      Setup for each registry: [packaging/README.md](packaging/README.md).
     - the `claude-plugin` branch, rebuilt from this release's `plugin/` folder
       (`scripts/update-plugin-branch.sh`): the Claude plugin directory tracks that branch, since it
       downloads a whole ref and this repository is over its size limit.
-    - each of `bindings/{node,python,java}`'s rebuilt native artifact (via that binding's own
-      `build-in-docker.sh`, plus the Windows Node addon), committed straight to `main`, but only
-      if all four builds succeed, so a partial rebuild never lands silently.
 
 The Linux CLIs are built in a manylinux_2_28 container and run on any glibc 2.28+ distribution;
 the same binaries go into the archives, the `.deb` packages and the wheels.
@@ -1424,10 +1433,11 @@ To cut a release, run the local helper script:
 ./scripts/release-tag.sh patch --dry-run  # preview the computed next tag only
 ```
 
-The script first fast-forwards onto `origin`, which picks up the previous release's bindings
-commit. It then updates versions in `Cargo.toml`, `exec/dcmnorm/Cargo.toml` and
-`exec/dcmtalk/Cargo.toml`, plus the Claude plugin's version and the version its skill installs
-(`scripts/check-versions.py --set`; CI fails if these drift), and refreshes only the workspace's
+The script first fast-forwards onto `origin`. It then updates versions in `Cargo.toml`,
+`exec/dcmnorm/Cargo.toml` and `exec/dcmtalk/Cargo.toml`, plus the Claude plugin's version, the
+version its skill installs and every binding package version (`bindings/node/package.json` and
+its loader, `bindings/python/pyproject.toml`, `bindings/java/pom.xml` and
+`bindings/java/natives/pom.xml`; `scripts/check-versions.py --set`, and CI fails if any drifts), and refreshes only the workspace's
 own entries in `Cargo.lock` (`cargo update --workspace`, so a release never silently upgrades
 dependencies). Finally it creates a release commit and pushes both the commit and the version tag
 to `origin`, which starts the workflow. The script is non-interactive, so release automation can
@@ -1438,10 +1448,6 @@ ones PyPI versions allow (`v0.8.0-rc.1` is `0.8.0rc1` on PyPI).
 The tag must be pushed with your own git credentials: GitHub doesn't start workflows for a tag
 pushed with a workflow run's own token. If a tag ever ends up without a run, start **Build and
 release** by hand from the Actions tab with the tag as the ref.
-
-Cutting a release does **not** bump the version numbers inside `bindings/node/package.json`,
-`bindings/python/pyproject.toml`, or `bindings/java/pom.xml`: each binding keeps its own
-independent version.
 
 ## Contributing
 

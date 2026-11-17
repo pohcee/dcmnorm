@@ -1,0 +1,76 @@
+name: FFmpeg from vcpkg (Windows, static)
+description: >-
+  Installs a static, LGPL-only FFmpeg with vcpkg for the Windows builds of the bindings and points
+  ffmpeg-sys-next at it (VCPKG_ROOT, VCPKGRS_TRIPLET, LIBCLANG_PATH). Used with the bindings'
+  ffmpeg-codec-linked feature in place of ffmpeg-codec, whose FFmpeg source build (./configure +
+  make) MSVC targets can't do.
+
+# vcpkg is checked out at a pinned commit rather than using the runner's preinstalled (unpinned,
+# usually stale) one: the ffmpeg port there must be the same 8.x line that ffmpeg-sys-next 8.1
+# builds on Linux and macOS (release/8.1), and vcpkg master has moved on to 9.x, which the
+# ffmpeg-next 8.1 bindings don't target. cf1f98216 = ffmpeg 8.1.2.
+inputs:
+  vcpkg-commit:
+    description: The microsoft/vcpkg commit to install from
+    default: cf1f98216ddd83d3dc838e96ba1143801992f71e
+  triplet:
+    description: >-
+      x64-windows-static-md = static libs (no FFmpeg DLLs next to the binary) against the dynamic
+      CRT, which Node's and Python's own extensions and the JVM use too
+    default: x64-windows-static-md
+
+runs:
+  using: composite
+  steps:
+    - name: Restore vcpkg binary cache
+      # The FFmpeg compile is the slow part (tens of minutes). vcpkg's files-based binary cache
+      # keys each package by an ABI hash of its port, triplet, compiler and dependencies, so
+      # restoring this directory turns a repeat run's install into a copy. Restore and save are
+      # separate steps so a good FFmpeg is cached even when a later build step fails.
+      uses: actions/cache/restore@v4
+      with:
+        path: ${{ runner.temp }}\vcpkg-binary-cache
+        key: vcpkg-ffmpeg-${{ inputs.vcpkg-commit }}-${{ inputs.triplet }}
+        restore-keys: |
+          vcpkg-ffmpeg-${{ inputs.vcpkg-commit }}-${{ inputs.triplet }}-
+
+    - name: Install FFmpeg (vcpkg, static)
+      shell: pwsh
+      # Only the libraries dcmnorm links (ffmpeg-next features codec, format,
+      # software-resampling, software-scaling = avcodec, avformat, swresample, swscale; avutil
+      # comes with them). No optional ffmpeg features and no GPL/nonfree ports, so it is LGPL-only
+      # with FFmpeg's native decoders/encoders, the same as the Linux and macOS source builds
+      # (--disable-autodetect, no external codec libraries).
+      env:
+        VCPKG_COMMIT: ${{ inputs.vcpkg-commit }}
+        VCPKG_TRIPLET: ${{ inputs.triplet }}
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $root = Join-Path $env:RUNNER_TEMP 'vcpkg'
+        $cache = Join-Path $env:RUNNER_TEMP 'vcpkg-binary-cache'
+        New-Item -ItemType Directory -Force $cache | Out-Null
+        if (-not (Test-Path "$root\vcpkg.exe")) {
+          git init $root
+          git -C $root fetch --depth 1 https://github.com/microsoft/vcpkg.git $env:VCPKG_COMMIT
+          git -C $root checkout FETCH_HEAD
+          & "$root\bootstrap-vcpkg.bat" -disableMetrics
+          if ($LASTEXITCODE -ne 0) { throw 'bootstrap-vcpkg failed' }
+        }
+        $env:VCPKG_BINARY_SOURCES = "clear;files,$cache,readwrite"
+        & "$root\vcpkg.exe" install "ffmpeg[core,avcodec,avformat,swresample,swscale]:$env:VCPKG_TRIPLET" --clean-after-build
+        if ($LASTEXITCODE -ne 0) { throw 'vcpkg install ffmpeg failed' }
+        # Read by ffmpeg-sys-next's build.rs (try_vcpkg -> the vcpkg crate): VCPKG_ROOT locates
+        # the install tree, VCPKGRS_TRIPLET picks the static triplet (the ffmpeg-next "static"
+        # feature, enabled by ffmpeg-codec-linked, makes it link statically), and LIBCLANG_PATH
+        # is bindgen's libclang (LLVM ships on the Windows runners).
+        "VCPKG_ROOT=$root" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+        "VCPKGRS_TRIPLET=$env:VCPKG_TRIPLET" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+        "LIBCLANG_PATH=C:\Program Files\LLVM\bin" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+        if (-not (Test-Path 'C:\Program Files\LLVM\bin\libclang.dll')) { throw 'libclang.dll not found on runner' }
+
+    - name: Save vcpkg binary cache
+      if: ${{ !cancelled() }}
+      uses: actions/cache/save@v4
+      with:
+        path: ${{ runner.temp }}\vcpkg-binary-cache
+        key: vcpkg-ffmpeg-${{ inputs.vcpkg-commit }}-${{ inputs.triplet }}

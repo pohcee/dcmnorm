@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# C compiler wrapper that drops -march=native and -mtune=native. Put this directory first on PATH
+# for binding builds (packaging/build-binding-linux.sh, bindings/node/build-in-docker.sh, the
+# release workflow's macOS builds); gcc, cc, clang, g++, c++ and clang++ here all point at it.
+#
+# Why: when not cross-compiling, ffmpeg-sys-next 8.1 configures its FFmpeg source build with
+# --extra-cflags="-march=native -mtune=native", tuning FFmpeg's C code for the CPU of the build
+# machine. A CI runner's CPU (AVX-512, say) is newer than many users' machines, and code the
+# compiler auto-vectorized for it dies with SIGILL elsewhere. FFmpeg's hand-written assembly picks
+# SIMD at run time either way, so without those flags the build is portable to every CPU of the
+# target architecture and loses little. Everything else passes through to the real compiler,
+# found on PATH after this directory. bash 3.2 compatible (macOS).
+self_dir="$(cd "$(dirname "$0")" && pwd)"
+name="$(basename "$0")"
+path_rest=""
+IFS=: read -r -a parts <<< "$PATH"
+for p in "${parts[@]}"; do
+  if [ -n "$p" ] && [ "$(cd "$p" 2>/dev/null && pwd)" != "$self_dir" ]; then
+    path_rest="${path_rest:+$path_rest:}$p"
+  fi
+done
+args=()
+for arg in "$@"; do
+  case "$arg" in
+    -march=native|-mtune=native|-mcpu=native) ;;
+    *) args+=("$arg") ;;
+  esac
+done
+PATH="$path_rest" exec "$name" ${args[@]+"${args[@]}"}
