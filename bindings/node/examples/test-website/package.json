@@ -11,7 +11,7 @@
     "node": ">= 18"
   },
   "dependencies": {
-    "@pohcee/dcmnorm-node": "file:../..",
+    "dcmnorm": "file:../..",
     "express": "^4.21.2",
     "multer": "^2.0.2"
   }

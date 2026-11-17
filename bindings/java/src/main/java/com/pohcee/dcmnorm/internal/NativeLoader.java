@@ -22,36 +22,33 @@ import java.util.regex.Pattern;
  *
  * <ol>
  *   <li>The file named by the system property {@code dcmnorm.library.path}, when set - for
- *       containers that ship the {@code .so} on disk and want no extraction at all.
- *   <li>A resource bundled on the classpath at {@code /native/<os>-<arch>/libdcmnorm_java.so}
- *       (the shape a consumer gets from a jar built by {@code build-in-docker.sh} - mirrors
- *       {@code bindings/node} committing a prebuilt {@code .node} file and {@code
- *       bindings/python} committing a prebuilt wheel, so a consumer with no Rust toolchain can
- *       still use this binding). It is extracted once per library build to a per-user cache,
- *       {@code <cache>/dcmnorm/<sha256>/libdcmnorm_java.so}, and loaded from there by every
- *       later JVM - copying the ~28 MB library on every start was nearly all of the binding's
- *       first-use cost (pohcee/dcmnorm#5). The SHA-256 comes from the sidecar resource
- *       {@code libdcmnorm_java.so.sha256} written at build time, so checking the cache reads a
- *       few bytes, not the library. The file is written to a temporary name in the same
+ *       containers that ship the library on disk and want no extraction at all.
+ *   <li>A resource on the classpath at {@code /native/<platform>/<library>}, where
+ *       {@code <platform>} is {@code linux-x86_64}, {@code linux-aarch64}, {@code osx-aarch64},
+ *       {@code osx-x86_64} or {@code windows-x86_64} and {@code <library>} is
+ *       {@code libdcmnorm_java.so}, {@code libdcmnorm_java.dylib} or {@code dcmnorm_java.dll}.
+ *       That is what the {@code com.pohcee:dcmnorm-java-natives} jar with the platform's
+ *       classifier contains (one platform per jar; see this module's README). It is extracted
+ *       once per library build to a per-user cache, {@code <cache>/dcmnorm/<sha256>/<library>},
+ *       and loaded from there by every later JVM - copying the ~28 MB library on every start was
+ *       nearly all of the binding's first-use cost (pohcee/dcmnorm#5). The SHA-256 comes from the
+ *       sidecar resource {@code <library>.sha256} written at build time, so checking the cache
+ *       reads a few bytes, not the library. The file is written to a temporary name in the same
  *       directory and atomically renamed, so concurrent JVMs never load a half-written copy.
- *       When the cache is not writable, the library is extracted to a temporary file instead
- *       (the previous behaviour).
+ *       When the cache is not writable, the library is extracted to a temporary file instead.
  *   <li>A plain {@code System.loadLibrary("dcmnorm_java")} lookup on {@code java.library.path} -
- *       the fast path for local development, where the {@code .so} was just built straight into
- *       a directory already on that path.
+ *       the fast path for local development, where the library was just built straight into a
+ *       directory already on that path.
  * </ol>
  *
  * <p>The cache directory is {@code dcmnorm.cache.dir} when set, else {@code
  * $XDG_CACHE_HOME/dcmnorm} or {@code ~/.cache/dcmnorm} (Linux), {@code ~/Library/Caches/dcmnorm}
  * (macOS), {@code %LOCALAPPDATA%\dcmnorm} (Windows).
- *
- * <p><strong>Only linux-x64 is currently packaged.</strong> A consumer on another OS/architecture
- * needs a native library built for their platform on {@code java.library.path} (see this
- * module's own README).
  */
 public final class NativeLoader {
     private static final String LIBRARY_NAME = "dcmnorm_java";
-    private static final String LIBRARY_FILE = "lib" + LIBRARY_NAME + ".so";
+    /** The platform's file name: libdcmnorm_java.so, libdcmnorm_java.dylib or dcmnorm_java.dll. */
+    private static final String LIBRARY_FILE = System.mapLibraryName(LIBRARY_NAME);
     /** System property: an absolute path to the native library, loaded as is. */
     public static final String LIBRARY_PATH_PROPERTY = "dcmnorm.library.path";
     /** System property: the directory to cache the extracted native library in. */
@@ -87,10 +84,11 @@ public final class NativeLoader {
             throw new UnsatisfiedLinkError(
                 "Could not load the native dcmnorm_java library: no bundled resource for this platform ("
                     + resourceFailure.getMessage() + "), and System.loadLibrary(\"" + LIBRARY_NAME
-                    + "\") failed (" + linkError.getMessage() + "). Build it with bindings/java/build.sh "
-                    + "(or build-in-docker.sh) and put the resulting .so on java.library.path, or on the "
-                    + "classpath at /native/<os>-<arch>/libdcmnorm_java.so, or set -D"
-                    + LIBRARY_PATH_PROPERTY + "=/path/to/libdcmnorm_java.so.");
+                    + "\") failed (" + linkError.getMessage() + "). Add the dependency "
+                    + "com.pohcee:dcmnorm-java-natives with the classifier " + platformDirectoryName()
+                    + " (the platforms published are linux-x86_64, linux-aarch64, osx-aarch64, osx-x86_64 "
+                    + "and windows-x86_64), put " + LIBRARY_FILE + " on java.library.path, or set -D"
+                    + LIBRARY_PATH_PROPERTY + "=/path/to/" + LIBRARY_FILE + ".");
         }
     }
 
@@ -150,7 +148,7 @@ public final class NativeLoader {
                 // not writable (read-only home, sandbox): fall through to a temporary file
             }
         }
-        Path tempFile = Files.createTempFile(LIBRARY_NAME, ".so");
+        Path tempFile = Files.createTempFile(LIBRARY_NAME, LIBRARY_FILE.substring(LIBRARY_FILE.lastIndexOf('.')));
         tempFile.toFile().deleteOnExit();
         if (!copyResource(library, tempFile)) {
             Files.deleteIfExists(tempFile);
@@ -248,12 +246,19 @@ public final class NativeLoader {
         return home == null || home.isEmpty() ? null : Paths.get(home, ".cache", "dcmnorm");
     }
 
-    private static String platformDirectoryName() {
+    /**
+     * The classpath directory (and the natives jar's Maven classifier) for this JVM's platform:
+     * {@code <os>-<arch>} with os {@code linux}, {@code osx} or {@code windows} and arch {@code
+     * x86_64} or {@code aarch64}. Other values pass through, so the error names what was looked for.
+     */
+    static String platformDirectoryName() {
         String os = System.getProperty("os.name", "").toLowerCase(Locale.ROOT);
         String arch = System.getProperty("os.arch", "").toLowerCase(Locale.ROOT);
-        String osName = os.contains("linux") ? "linux" : os.contains("mac") ? "darwin" : os.contains("win") ? "win32" : os;
-        String archName = (arch.equals("amd64") || arch.equals("x86_64")) ? "x64"
-            : (arch.equals("aarch64") || arch.equals("arm64")) ? "arm64" : arch;
+        String osName = os.contains("linux") ? "linux"
+            : (os.contains("mac") || os.contains("darwin")) ? "osx"
+            : os.contains("win") ? "windows" : os.replaceAll("[^a-z0-9]", "");
+        String archName = (arch.equals("amd64") || arch.equals("x86_64") || arch.equals("x64")) ? "x86_64"
+            : (arch.equals("aarch64") || arch.equals("arm64")) ? "aarch64" : arch;
         return osName + "-" + archName;
     }
 }

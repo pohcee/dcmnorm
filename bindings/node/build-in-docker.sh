@@ -1,12 +1,12 @@
 #!/bin/bash
-# Builds the release .node binary inside a node:22-bullseye-slim container (Debian 11:
-# glibc 2.31, GCC 10 -> GLIBCXX <= 3.4.28) so it's linked against an OLD glibc, not the
-# host's - the compiled addon is committed to this repo (see .gitignore) and consumed by
-# service Docker builds that have no Rust toolchain of their own (bookworm-based images,
-# glibc 2.36) AND by the native Linux edge install (no Docker) on any host with
-# glibc >= 2.31 (Ubuntu 20.04+, Debian 11+). A binary linked against a newer glibc risks a
-# `GLIBC_X.XX not found` failure that only surfaces once deployed. A hard symbol-version
-# check below fails the build if the floor is ever raised by accident.
+# Builds the release .node addon for this machine's architecture (x64 or arm64) inside a
+# node:22-bullseye-slim container (Debian 11: glibc 2.31, GCC 10 -> GLIBCXX <= 3.4.28), so it's
+# linked against an OLD glibc, not the host's. The addon is published to npm as
+# @dcmnorm/linux-<arch>-gnu and runs on any host with glibc >= 2.31 (Ubuntu 20.04+,
+# Debian 11+, and the bookworm-based Node images). A binary linked against a newer glibc risks a
+# `GLIBC_X.XX not found` failure that only surfaces once deployed, so a hard symbol-version check
+# below fails the build if the floor is ever raised by accident. Docker must run the image
+# natively (GitHub's ubuntu-24.04 runner for x64, ubuntu-24.04-arm for arm64).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -55,57 +55,46 @@ docker run --rm -v "$SCRIPT_DIR/../..":/repo -w /repo/bindings/node \
     # slipping in silently closes that outer quote, and everything after becomes literal
     # host-shell syntax instead of container script text.
     #
-    # ffmpeg-codec (dcmnorm/Cargo.toml, on by default) builds FFmpeg from source and statically
-    # links it (ffmpeg-next/ffmpeg-sys-next "build" feature) rather than dynamically linking
-    # whatever FFmpeg happens to be on the machine - a dynamically linked builds exact required
-    # SONAMEs (e.g. libavutil.so.57) only match a different machine (a dev host, or production
-    # container) by coincidence, which is exactly what broke here once already: a bookworm
-    # container built dcmnorm-node addon dlopen-failed on an Ubuntu dev host, and would have in
-    # production too, since Docker.tmpl final image never installed matching runtime libs.
-    # Static linking needs git (ffmpeg-sys-next shallow-clones FFmpeg source) and nasm (x86 asm
-    # optimizations - FFmpeg own ./configure hard-fails without it on x86_64) in addition to the
-    # compiler/pkg-config already installed above. Everything else in default (jpeg-ls-codec,
-    # jpeg-xl-codec, jpeg2000-openjpeg-encode) is a plain Rust/static dependency and always
-    # builds regardless. Rather than let git/nasm being unavailable (or a future Debian point
-    # release dropping/renaming either package) hard-fail the whole release (set -e would abort
-    # the script here), probe for them and build without ffmpeg-codec if unavailable - the
-    # resulting addon still works for everything else, and dcmnorm already reports MPEG transfer
-    # syntaxes as unsupported ("no") in --list-transfer-syntaxes and rejects them at runtime
-    # with a clear error (src/dicom_io/mpeg.rs, src/dicom_io/io.rs cfg feature ffmpeg-codec
-    # checks) rather than silently misbehaving, so this is a real degrade gracefully path,
-    # not a silent gap.
-    NAPI_FEATURES=()
-    if apt-get install -y -qq git nasm > /dev/null 2>&1; then
-      : # ffmpeg-codec stays in the default feature set
-    else
-      echo "WARNING: git/nasm unavailable in this build container - building dcmnorm-node" >&2
-      echo "WARNING: WITHOUT ffmpeg-codec. MPEG transfer syntaxes will report as unsupported" >&2
-      echo "WARNING: (see --list-transfer-syntaxes) in this build." >&2
-      NAPI_FEATURES=(--no-default-features --features "jpeg-ls-codec,jpeg-xl-codec,jpeg2000-openjpeg-encode")
-    fi
+    # ffmpeg-codec (on by default) builds FFmpeg from source and links it statically
+    # (ffmpeg-next/ffmpeg-sys-next "build" feature) rather than dynamically linking whatever FFmpeg
+    # is on the build machine, whose SONAMEs (e.g. libavutil.so.57) only match another machine by
+    # coincidence. The source build needs git (shallow-clones FFmpeg) and nasm (x86 assembly;
+    # FFmpeg own ./configure fails without it on x86_64). There is deliberately no fallback to a
+    # build without FFmpeg: a missing package fails the build, as it does for the other bindings.
+    apt-get install -y -qq git nasm > /dev/null
 
     curl --proto "=https" --tlsv1.2 -sSf --retry 5 --retry-all-errors https://sh.rustup.rs | sh -s -- -y -q
     . "$HOME/.cargo/env"
+    # Compilers that drop -march=native: ffmpeg-sys-next would otherwise tune FFmpeg for the CPU
+    # of this build machine (packaging/portable-cc/cc-filter).
+    export PATH="/repo/packaging/portable-cc:$PATH"
     npm install --no-save --no-audit --no-fund @napi-rs/cli
     # Dedicated target dir: cargo fingerprints do not track the system glibc, so reusing a
     # target/ populated by host or bookworm builds could silently link objects built against
     # a newer glibc (and mixed-toolchain caches broke builds with E0463).
-    export CARGO_TARGET_DIR=/repo/target/node-bullseye
-    npx napi build --platform --release "${NAPI_FEATURES[@]}"
+    export CARGO_TARGET_DIR="/repo/target/node-bullseye-$(uname -m)"
+    npx napi build --platform --release
+    # napi names the platform packages dcmnorm-<platform>; the loader requires @dcmnorm/<platform>.
+    node prepare-npm.js --fix-loader
+    # FFmpeg must be in the addon: no libav*/libsw* shared-library dependency.
+    if objdump -p dcmnorm-node.linux-*-gnu.node | grep -E "NEEDED +lib(av|sw|postproc)"; then
+      echo "ERROR: addon links FFmpeg dynamically" >&2; exit 1
+    fi
 
-    # Run the smoke test here, inside the exact container the addon was just built for,
-    # rather than leaving it to release-it before:init hook to run on the host afterward
-    # (package.json only runs `npm run build:docker` there now). A host run would dlopen-fail
-    # for a reason that has nothing to do with the addon itself: the host system FFmpeg
-    # SONAMEs (e.g. Ubuntu libavutil.so.58) do not match whatever this bullseye-based
-    # container linked against, even though both are perfectly valid FFmpeg installs.
-    # FFmpeg is statically linked, so the only runtime requirement is glibc/libstdc++:
-    # the addon runs natively on hosts with glibc >= 2.31 and in the bookworm-based service images.
+    # Run the smoke test here, inside the container the addon was just built in, rather than on
+    # the host. FFmpeg is statically linked, so the only runtime requirement is glibc/libstdc++;
+    # load-check.js also round-trips a file through MPEG-2, which fails without FFmpeg linked in.
     node test/smoke.js
+    node load-check.js
 
     # Hard glibc floor check: fail if the addon references any GLIBC_ symbol version above 2.31
     # or GLIBCXX_ above 3.4.28 (Ubuntu 20.04 libstdc++). Run on the binary just built.
-    ADDON=dcmnorm-node.linux-x64-gnu.node
+    case "$(uname -m)" in
+      x86_64) ADDON=dcmnorm-node.linux-x64-gnu.node ;;
+      aarch64) ADDON=dcmnorm-node.linux-arm64-gnu.node ;;
+      *) echo "ERROR: unsupported architecture $(uname -m)" >&2; exit 1 ;;
+    esac
+    test -f "$ADDON"
     SYMS="$(objdump -T "$ADDON")"
     MAX_GLIBC="$(echo "$SYMS" | grep -oE "GLIBC_[0-9.]+" | sed s/GLIBC_// | sort -Vu | tail -1)"
     MAX_GLIBCXX="$(echo "$SYMS" | grep -oE "GLIBCXX_[0-9.]+" | sed s/GLIBCXX_// | sort -Vu | tail -1)"

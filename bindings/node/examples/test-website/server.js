@@ -6,7 +6,7 @@ const os = require("os");
 const path = require("path");
 const crypto = require("crypto");
 const { performance } = require("perf_hooks");
-const dcmnorm = require("@pohcee/dcmnorm-node");
+const dcmnorm = require("dcmnorm");
 
 const PORT = process.env.PORT || 3000;
 const MAX_UPLOAD_BYTES = Number(process.env.MAX_UPLOAD_BYTES) || 1024 * 1024 * 1024; // 1GB
@@ -67,9 +67,9 @@ const CURATED_SAMPLES = [
   },
 ];
 
-// The @pohcee/dcmnorm-node npm package version - always resolvable, since it's the very
+// The dcmnorm npm package version - always resolvable, since it's the very
 // package we just required above.
-const dcmnormNodeVersion = require("@pohcee/dcmnorm-node/package.json").version;
+const dcmnormNodeVersion = require("dcmnorm/package.json").version;
 
 // The underlying dcmnorm Rust library version (root Cargo.toml's [package] version - the first
 // `version = "..."` line in the file). The Dockerfile copies just that one file in alongside

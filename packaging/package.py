@@ -10,10 +10,12 @@ For each CLI it writes the GitHub release archives (versioned and "latest" names
     dcmtalk-v0.7.3-linux-x86_64.tar.gz      dcmtalk-linux-x86_64.tar.gz
     dcmnorm-0.7.3-py3-none-manylinux_2_28_x86_64.whl
 
-The wheel is how `pip install dcmnorm` / `uv tool install dcmnorm` deliver the native CLIs: the
-binaries sit in `<name>.data/scripts/`, which installers put on PATH as-is. There is no Python
-code in it and no Python at run time (the in-process Python binding is a separate package,
-bindings/python). Only the standard library is used, so this runs on any runner's Python 3.8+.
+The wheel is the CLI-only one of the two `dcmnorm` wheels each platform gets on PyPI: the
+binaries sit in `<name>.data/scripts/`, which installers put on PATH as-is, and there is no Python
+code in it. The other wheel (cp39-abi3, built from bindings/python) adds the `import dcmnorm`
+extension module and carries these same binaries (packaging/stage_cli.py); installers take this
+one where that one doesn't fit (CPython 3.8, free-threaded builds). Only the standard library is
+used, so this runs on any runner's Python 3.8+.
 
 The version comes from exec/dcmnorm/Cargo.toml. When GITHUB_REF is a tag, it must match.
 """
@@ -112,7 +114,7 @@ def wheel_metadata(version: str) -> str:
         "Metadata-Version: 2.1",
         f"Name: {WHEEL_NAME}",
         f"Version: {version}",
-        "Summary: DICOM read/edit/transcode/render (dcmnorm) and DICOM network (dcmtalk) command-line tools",
+        "Summary: DICOM read/edit/transcode/render (dcmnorm) and DICOM network (dcmtalk) command-line tools, with an in-process Python binding",
         "Author: Jason Klotzer",
         "License: Apache-2.0",
         "Project-URL: Homepage, https://github.com/pohcee/dcmnorm",

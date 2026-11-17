@@ -1,20 +1,59 @@
 [build-system]
-requires = ["maturin>=1.5,<2.0"]
+requires = ["maturin>=1.8,<2.0"]
 build-backend = "maturin"
 
+# The `dcmnorm` distribution on PyPI. Each platform gets two wheels with the same name and
+# version (packaging/README.md, "PyPI"):
+#
+#   dcmnorm-<v>-cp39-abi3-<plat>.whl   built from this file: the `import dcmnorm` extension module
+#                                      plus the dcmnorm and dcmtalk CLIs in dcmnorm-<v>.data/scripts
+#   dcmnorm-<v>-py3-none-<plat>.whl    packaging/package.py: the CLIs only, for interpreters the
+#                                      abi3 wheel does not fit (CPython 3.8, free-threaded builds)
+#
+# Installers prefer the abi3 wheel wherever it fits. The CLI binaries are not built here:
+# packaging/stage_cli.py copies them out of the CLI-only wheel into data/scripts/ first, so both
+# wheels carry the same binaries, byte for byte.
 [project]
-name = "dcmnorm-python"
-version = "0.1.0"
-description = "Native Python bindings for dcmnorm (in-process, no CLI subprocess)"
-requires-python = ">=3.9"
+name = "dcmnorm"
+# The PEP 440 form of the release version; written by scripts/release-tag.sh
+# (scripts/check-versions.py --set) and checked in CI.
+version = "0.11.2"
+description = "DICOM read/edit/transcode/render (dcmnorm) and DICOM network (dcmtalk) command-line tools, with an in-process Python binding"
+readme = "../../packaging/pypi-README.md"
+# The extension module itself needs CPython 3.9+ (its cp39-abi3 tag says so); 3.8 matches the
+# CLI-only wheel, so both wheels of a release carry the same metadata.
+requires-python = ">=3.8"
+license = "Apache-2.0"
+# Copied from the repository root by packaging/stage_cli.py (PEP 639 license files must be inside
+# this directory).
+license-files = ["LICENSE"]
+authors = [{ name = "Jason Klotzer" }]
+keywords = ["dicom", "medical-imaging", "pacs", "dimse", "anonymization", "cli"]
 classifiers = [
-    "Programming Language :: Rust",
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Healthcare Industry",
+    "Intended Audience :: Science/Research",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
     "Programming Language :: Python :: Implementation :: CPython",
-    "Private :: Do Not Upload",
+    "Programming Language :: Rust",
+    "Topic :: Scientific/Engineering :: Medical Science Apps.",
 ]
+
+[project.urls]
+Homepage = "https://github.com/pohcee/dcmnorm"
+Source = "https://github.com/pohcee/dcmnorm"
+Issues = "https://github.com/pohcee/dcmnorm/issues"
 
 [tool.maturin]
 # The compiled extension module is imported as `import dcmnorm` - see `#[pymodule] fn dcmnorm`
 # in src/lib.rs. Matches `[lib] name = "dcmnorm"` in Cargo.toml.
 module-name = "dcmnorm"
 features = ["pyo3/extension-module"]
+# data/scripts/{dcmnorm,dcmtalk}[.exe] -> dcmnorm-<v>.data/scripts/, which pip, pipx and uv put
+# on PATH as they are. Staged by packaging/stage_cli.py, never committed (.gitignore).
+data = "data"

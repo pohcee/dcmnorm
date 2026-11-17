@@ -1,44 +1,61 @@
 {
-  "name": "@pohcee/dcmnorm-node",
-  "version": "0.11.3",
-  "private": true,
-  "description": "Native Node.js bindings for dcmnorm (in-process, no CLI subprocess)",
+  "name": "dcmnorm",
+  "version": "0.11.2",
+  "description": "Native Node.js bindings for dcmnorm: DICOM read/edit/transcode/render and DIMSE networking in-process (no CLI subprocess)",
+  "license": "Apache-2.0",
+  "author": "Jason Klotzer",
+  "homepage": "https://github.com/pohcee/dcmnorm/tree/main/bindings/node#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pohcee/dcmnorm.git",
+    "directory": "bindings/node"
+  },
+  "bugs": {
+    "url": "https://github.com/pohcee/dcmnorm/issues"
+  },
+  "keywords": [
+    "dicom",
+    "medical-imaging",
+    "pacs",
+    "dimse",
+    "napi-rs"
+  ],
   "main": "index.js",
   "types": "index.d.ts",
+  "files": [
+    "index.js",
+    "index.d.ts"
+  ],
   "napi": {
     "binaryName": "dcmnorm-node",
     "targets": [
       "x86_64-unknown-linux-gnu",
       "aarch64-unknown-linux-gnu",
-      "x86_64-pc-windows-msvc"
+      "x86_64-pc-windows-msvc",
+      "aarch64-apple-darwin",
+      "x86_64-apple-darwin"
     ]
   },
   "engines": {
     "node": ">= 18"
   },
-  "scripts": {
-    "build": "napi build --platform --release",
-    "build:debug": "napi build --platform",
-    "build:docker": "./build-in-docker.sh",
-    "test": "node test/smoke.js",
-    "release": "release-it --ci",
-    "release-dryrun": "release-it --verbose --dry-run --ci"
+  "publishConfig": {
+    "access": "public"
   },
-  "release-it": {
-    "git": {
-      "requireCleanWorkingDir": false,
-      "tagName": "dcmnorm-node-v${version}",
-      "tagAnnotation": "dcmnorm-node release v${version}"
-    },
-    "npm": {
-      "publish": false
-    },
-    "hooks": {
-      "before:init": "npm run build:docker"
-    }
+  "scripts": {
+    "build": "napi build --platform --release && node prepare-npm.js --fix-loader",
+    "build:debug": "napi build --platform && node prepare-npm.js --fix-loader",
+    "build:docker": "./build-in-docker.sh",
+    "test": "node test/smoke.js"
+  },
+  "optionalDependencies": {
+    "@dcmnorm/linux-x64-gnu": "0.11.2",
+    "@dcmnorm/linux-arm64-gnu": "0.11.2",
+    "@dcmnorm/win32-x64-msvc": "0.11.2",
+    "@dcmnorm/darwin-arm64": "0.11.2",
+    "@dcmnorm/darwin-x64": "0.11.2"
   },
   "devDependencies": {
-    "@napi-rs/cli": "^3.7.3",
-    "release-it": "^19.0.4"
+    "@napi-rs/cli": "^3.7.3"
   }
 }

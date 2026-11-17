@@ -1,4 +1,4 @@
-// Windows CI load check (see .github/workflows/release.yml, build-node-windows).
+// Release load check for a freshly built addon (build-in-docker.sh, and the macOS and Windows builds in .github/workflows/release.yml).
 const assert = require("assert");
 const os = require("os");
 const path = require("path");

@@ -2,15 +2,16 @@
 # and the top-level test/files fixtures, which live outside bindings/node), e.g. from the repo
 # root: `docker build -f bindings/node/examples/test-website/Dockerfile -t dcmnorm-test-website .`
 #
-# The prebuilt dcmnorm-node.*.node addon is linked against node:22-slim's glibc (see
-# ../../build-in-docker.sh) - this image uses the same base for that reason, and needs no Rust
-# toolchain since the addon ships prebuilt rather than compiled here.
+# Build the addon first: bindings/node/build-in-docker.sh writes
+# bindings/node/dcmnorm-node.linux-<arch>-gnu.node (glibc 2.31, so it runs on this bookworm-based
+# image); no .node file is committed. This image needs no Rust toolchain since the addon is
+# copied in prebuilt rather than compiled here.
 FROM node:22-slim
 
 WORKDIR /opt/dcmnorm-node
 
-# Only the files @pohcee/dcmnorm-node needs at runtime (see its README's "Packaging" section) -
-# not node_modules (napi-rs/cli, release-it - build-only), not target/ or src/ (Rust sources).
+# Only the files the dcmnorm package needs at runtime (see its README's "Packaging" section) -
+# not node_modules (napi-rs/cli - build-only), not target/ or src/ (Rust sources).
 COPY bindings/node/package.json bindings/node/index.js bindings/node/index.d.ts ./
 COPY bindings/node/*.node ./
 
