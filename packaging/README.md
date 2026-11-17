@@ -135,9 +135,16 @@ generates and checks the layout (see `bindings/node/README.md`, "Packaging").
 
 Classifiers: `linux-x86_64`, `linux-aarch_64`, `osx-aarch_64`, `osx-x86_64`, `windows-x86_64`. A
 consumer depends on the API and the one classifier it runs on (`bindings/java/README.md`,
-"Install"). Every file is GPG-signed. `dcmnorm-java-natives` is published first, then
-`dcmnorm-java`, each as its own Central Portal deployment that the job waits on until it is
-published.
+"Install"). Every file is GPG-signed. Both artifacts go to Central as one deployment
+(`natives/pom.xml`'s release profile builds `../pom.xml` in the same reactor), so the portal
+validates and publishes them together or not at all; the job waits until it is published. Before
+uploading, the job builds the bundle with `-DskipUpload=true` and checks it with
+`bindings/java/check-bundle.py` (the portal's rules: a `.pom` per component, sources and javadoc
+for the API, `.md5`/`.sha1`/`.asc` for every file, nothing else); pull requests run the same check
+on an unsigned bundle with placeholder natives. central-publishing-maven-plugin must be 0.12.0 or
+newer: with Maven 3.10, 0.8.0 to 0.11.x put Maven's `maven-metadata-local.xml` and
+`_remote.repositories` into the bundle, which the portal rejects ("Bundle has content that does
+NOT have a .pom file"; the v0.12.0 release hit this).
 
 ### GitHub release
 

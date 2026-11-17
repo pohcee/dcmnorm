@@ -128,6 +128,12 @@
   <profiles>
     <profile>
       <id>release</id>
+      <!-- A release builds the API (../pom.xml) in the same reactor, so the Central Portal gets both
+           artifacts as one bundle: one deployment that is validated and published as a whole,
+           never the natives without the API or the other way round. -->
+      <modules>
+        <module>..</module>
+      </modules>
       <build>
         <plugins>
           <plugin>
@@ -188,13 +194,13 @@
           <plugin>
             <groupId>org.sonatype.central</groupId>
             <artifactId>central-publishing-maven-plugin</artifactId>
-            <version>0.8.0</version>
+            <version>0.12.0</version>
             <extensions>true</extensions>
             <configuration>
               <publishingServerId>central</publishingServerId>
               <autoPublish>true</autoPublish>
               <waitUntil>published</waitUntil>
-              <deploymentName>dcmnorm-java-natives ${project.version}</deploymentName>
+              <deploymentName>dcmnorm-java ${project.version}</deploymentName>
             </configuration>
           </plugin>
         </plugins>

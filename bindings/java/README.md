@@ -353,6 +353,8 @@ bindings/java/check-natives.sh linux-x86_64 "$PWD/target/release/dcmtalk"
 ```
 
 The release's `maven` job downloads every platform's staged library and runs
-`mvn -Prelease deploy` for `natives/pom.xml` (which requires all five) and then `pom.xml`.
+`mvn -Prelease deploy` for `natives/pom.xml`, whose release profile requires all five and also
+builds `pom.xml`, so both artifacts reach Central as one deployment (checked first by
+`check-bundle.py`).
 Publishing setup (namespace verification, the Central Portal token, the GPG key, the
 `MAVEN_PUBLISH` variable): [`packaging/README.md`](../../packaging/README.md).

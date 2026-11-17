@@ -112,6 +112,30 @@ jobs:
           fi
           mvn -B -q -f bindings/java/natives/pom.xml package
 
+      - name: Maven Central bundle (placeholder natives, unsigned)
+        # The bundle the maven job uploads, built with this runner's Maven and checked against the
+        # Central Portal's rules (bindings/java/check-bundle.py): one component directory per
+        # artifact with its .pom, sources and javadoc for the API, checksums for every file, and
+        # nothing else. skipUpload never contacts Central; the server entry only satisfies the
+        # plugin.
+        run: |
+          set -euo pipefail
+          for entry in linux-x86_64:libdcmnorm_java.so linux-aarch_64:libdcmnorm_java.so \
+                       osx-aarch_64:libdcmnorm_java.dylib osx-x86_64:libdcmnorm_java.dylib \
+                       windows-x86_64:dcmnorm_java.dll; do
+            classifier="${entry%%:*}"
+            library="${entry#*:}"
+            dir="bindings/java/natives/target/natives/$classifier/native/$classifier"
+            mkdir -p "$dir"
+            echo placeholder > "$dir/$library"
+            (cd "$dir" && sha256sum "$library" > "$library.sha256")
+          done
+          printf '%s' '<settings><servers><server><id>central</id><username>x</username><password>x</password></server></servers></settings>' > "$RUNNER_TEMP/settings.xml"
+          mvn -v | head -1
+          mvn -B -q -s "$RUNNER_TEMP/settings.xml" -f bindings/java/natives/pom.xml -Prelease -Dgpg.skip -DskipUpload=true deploy
+          python3 bindings/java/check-bundle.py bindings/java/target/central-publishing/central-bundle.zip --unsigned
+          rm -rf bindings/java/natives/target bindings/java/target
+
       - name: Python package metadata
         # The metadata maturin would put in the wheel (no compile).
         run: |
@@ -792,18 +816,30 @@ jobs:
           for dir in java-natives-*; do mv "$dir" "${dir#java-natives-}"; done
           find . -type f | sort
 
-      - name: Publish dcmnorm-java-natives, then dcmnorm-java
-        # Natives first, so the API is never on Central without them. -Prelease requires all five
-        # platforms, signs every file and publishes through the Central Portal, waiting until
-        # Central reports the deployment published.
+      - name: Build and check the bundle
+        # One reactor (natives/pom.xml's release profile includes ../pom.xml), so both artifacts go
+        # to Central as a single deployment that is validated and published as a whole.
+        # -Prelease requires all five platforms and signs every file. Checked against the portal's
+        # rules before anything is uploaded (bindings/java/check-bundle.py).
         env:
           MAVEN_CENTRAL_USERNAME: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
           MAVEN_CENTRAL_PASSWORD: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
           MAVEN_GPG_PASSPHRASE: ${{ secrets.MAVEN_GPG_PASSPHRASE }}
         run: |
           set -euo pipefail
-          mvn -B -f bindings/java/natives/pom.xml -Prelease deploy
-          mvn -B -f bindings/java/pom.xml -Prelease deploy
+          mvn -v | head -1
+          mvn -B -f bindings/java/natives/pom.xml -Prelease -DskipUpload=true deploy
+          python3 bindings/java/check-bundle.py bindings/java/target/central-publishing/central-bundle.zip
+          rm -rf bindings/java/target/central-* bindings/java/natives/target/central-*
+
+      - name: Publish dcmnorm-java and dcmnorm-java-natives
+        # The same build again, now uploading; waits until Central reports the deployment
+        # published.
+        env:
+          MAVEN_CENTRAL_USERNAME: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+          MAVEN_CENTRAL_PASSWORD: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+          MAVEN_GPG_PASSPHRASE: ${{ secrets.MAVEN_GPG_PASSPHRASE }}
+        run: mvn -B -f bindings/java/natives/pom.xml -Prelease deploy
 
   plugin-branch:
     name: Update the claude-plugin branch
