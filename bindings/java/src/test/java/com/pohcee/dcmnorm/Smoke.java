@@ -53,6 +53,7 @@ public final class Smoke {
         testRendering();
         Path tempDir = Files.createTempDirectory("dcmnorm-java-smoke-");
         testMpr(tempDir);
+        testDicomdir(tempDir);
         testDimse(tempDir);
 
         System.out.println("smoke test passed");
@@ -109,6 +110,119 @@ public final class Smoke {
         }
 
         System.out.println("core: OK");
+    }
+
+    // -------------------------------------------------------------------------------------------
+
+    /** writeDicomdir over a small File-set: two CT images in one series, an MR (by path) and a US
+     * (by readJson's JSON), then read the DICOMDIR back and walk its records. */
+    private static void testDicomdir(Path tempDir) throws Exception {
+        Path root = tempDir.resolve("fileset");
+        List<String> ct1 = List.of("DICOM", "ST000001", "SE000001", "IM000001");
+        List<String> ct2 = List.of("DICOM", "ST000001", "SE000001", "IM000002");
+        List<String> mr = List.of("DICOM", "ST000002", "SE000001", "IM000001");
+        List<String> us = List.of("DICOM", "ST000003", "SE000001", "IM000001");
+        String ctFixture = fixtures.resolve("ct.dcm").toString();
+
+        Dcmnorm.editTags(ctFixture, new EditTagsOptions().outputPath(place(root, ct1)));
+        Dcmnorm.editTags(ctFixture, new EditTagsOptions().outputPath(place(root, ct2)).set(Map.of("SOPInstanceUID", "2.25.1234567890")));
+        Dcmnorm.editTags(fixtures.resolve("mr.dcm").toString(), new EditTagsOptions().outputPath(place(root, mr)));
+        Dcmnorm.editTags(fixtures.resolve("us.dcm").toString(), new EditTagsOptions().outputPath(place(root, us)));
+
+        String output = root.resolve("DICOMDIR").toString();
+        WriteDicomdirResult result = Dcmnorm.writeDicomdir(
+            List.of(
+                DicomdirEntry.fromFile(ct1, filePath(root, ct1)),
+                DicomdirEntry.fromFile(ct2, filePath(root, ct2)),
+                DicomdirEntry.fromFile(mr, filePath(root, mr)),
+                DicomdirEntry.fromJson(us, Dcmnorm.readJson(filePath(root, us)))),
+            output,
+            new WriteDicomdirOptions().fileSetId("SMOKE_TEST").sopInstanceUid("2.25.42"));
+        Map<String, Integer> counts = result.getRecordCounts();
+        check(counts.get("IMAGE") == 4, "expected 4 IMAGE records, got " + counts);
+        check(counts.get("STUDY") == 3 && counts.get("SERIES") == 3, "expected 3 studies/series, got " + counts);
+        check(result.getRecords() == counts.values().stream().mapToInt(Integer::intValue).sum(), "records should be the sum of recordTypes");
+        check(List.of("PATIENT", "STUDY", "SERIES", "IMAGE").equals(
+            result.getRecordTypes().subList(0, 4).stream().map(DicomdirRecordCount::getRecordType).collect(java.util.stream.Collectors.toList())),
+            "record types should come in first-seen order");
+        for (DicomdirSynthesized synthesized : result.getSynthesized()) {
+            check(synthesized.getAttribute() != null && !synthesized.getAttribute().isEmpty(), "synthesized entries should carry an attribute keyword");
+        }
+        check(result.getWarnings() != null, "warnings should be a list");
+
+        Map<String, Object> dicomdir = Json.asMap(Json.parse(Dcmnorm.readJson(output)));
+        check("1.2.840.10008.1.3.10".equals(dicomdir.get("MediaStorageSOPClassUID")), "Media Storage Directory Storage");
+        check("2.25.42".equals(dicomdir.get("MediaStorageSOPInstanceUID")), "sopInstanceUid should be used");
+        check("SMOKE_TEST".equals(dicomdir.get("FileSetID")), "fileSetId should be written");
+        List<Object> records = Json.asList(dicomdir.get("DirectoryRecordSequence"));
+        check(records.size() == result.getRecords(), "DirectoryRecordSequence should hold every record");
+
+        // Records are written depth-first: each IMAGE sits under the last SERIES, STUDY and PATIENT.
+        List<String> levels = List.of("PATIENT", "STUDY", "SERIES", "IMAGE");
+        Map<String, Object>[] path = newPath();
+        Map<String, String[]> placed = new java.util.HashMap<>();
+        for (Object item : records) {
+            Map<String, Object> record = Json.asMap(item);
+            int level = levels.indexOf(Json.asString(record.get("DirectoryRecordType")));
+            check(level >= 0, "unexpected record type " + record.get("DirectoryRecordType"));
+            for (int i = 0; i < level; i++) {
+                check(path[i] != null, record.get("DirectoryRecordType") + " record outside its parent");
+            }
+            int lower = Json.asInt(record.get("OffsetOfReferencedLowerLevelDirectoryEntity"));
+            if (level < 3) {
+                path[level] = record;
+                for (int i = level + 1; i < 3; i++) {
+                    path[i] = null;
+                }
+                check(lower > 0, "a non-leaf record should point to its children");
+            } else {
+                check(lower == 0, "an IMAGE record has no children");
+                placed.put(Json.asString(record.get("ReferencedFileID")), new String[] {
+                    Json.asString(path[1].get("StudyInstanceUID")), Json.asString(path[2].get("SeriesInstanceUID")),
+                    Json.asString(record.get("ReferencedSOPInstanceUIDInFile"))});
+            }
+        }
+        for (List<String> fileId : List.of(ct1, ct2, mr, us)) {
+            String key = String.join("\\", fileId);
+            check(placed.containsKey(key), "no IMAGE record for " + key);
+            Map<String, Object> tags = Json.asMap(Json.parse(Dcmnorm.readTags(filePath(root, fileId),
+                List.of("StudyInstanceUID", "SeriesInstanceUID", "SOPInstanceUID"))));
+            String[] where = placed.get(key);
+            check(where[0].equals(tags.get("0020000D")) && where[1].equals(tags.get("0020000E")), key + " is under the wrong study/series");
+            check(where[2].equals(tags.get("00080018")), key + " references the wrong instance");
+        }
+        check(placed.get(String.join("\\", ct1))[1].equals(placed.get(String.join("\\", ct2))[1]), "both CT images should share one series");
+
+        String bad = tempDir.resolve("BAD_DICOMDIR").toString();
+        expectDicomdirError(List.of(DicomdirEntry.fromFile(List.of("dicom", "im1.dcm"), ctFixture)), bad, "File ID");
+        expectDicomdirError(List.of(DicomdirEntry.fromFile(ct1, ctFixture), DicomdirEntry.fromFile(ct2, ctFixture)), bad, "SOP Instance UID");
+        expectDicomdirError(List.of(DicomdirEntry.fromJson(ct1, "{\"PatientName\":")), bad, "JSON");
+
+        System.out.println("dicomdir: OK");
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object>[] newPath() {
+        return (Map<String, Object>[]) new Map[3];
+    }
+
+    private static String filePath(Path root, List<String> fileId) {
+        return root.resolve(String.join("/", fileId)).toString();
+    }
+
+    private static String place(Path root, List<String> fileId) throws IOException {
+        Path target = root.resolve(String.join("/", fileId));
+        Files.createDirectories(target.getParent());
+        return target.toString();
+    }
+
+    private static void expectDicomdirError(List<DicomdirEntry> entries, String output, String needle) {
+        try {
+            Dcmnorm.writeDicomdir(entries, output);
+            throw new AssertionError("writeDicomdir should raise for " + entries);
+        } catch (DcmnormException error) {
+            check(error.getMessage().contains(needle), "unexpected error message: " + error.getMessage());
+        }
     }
 
     // -------------------------------------------------------------------------------------------

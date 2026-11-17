@@ -1014,8 +1014,13 @@ dcmnorm dicomdir /media/disc -o /tmp/DICOMDIR --json           # elsewhere; the 
   patients, a study under two patients, a series in two studies, or a SOP Instance in two files
   is an error.
 
-The Node binding's `writeDicomdir(entries, outputPath, options)` does the same from a list of
-`{ fileId, json }` or `{ fileId, path }` entries (see `bindings/node/README.md`).
+The bindings do the same in-process from a list of entries, each a File ID plus the file's header
+as DICOM JSON or a path to read it from: Node's `writeDicomdir(entries, outputPath, options)`
+(`{ fileId, json }` / `{ fileId, path }`, see `bindings/node/README.md`), Python's
+`write_dicomdir(entries, output_path, file_set_id=..., sop_instance_uid=...)`
+(`DicomdirEntry(file_id, json=...)` / `path=...`, or dicts; see `bindings/python/README.md`) and
+Java's `Dcmnorm.writeDicomdir(entries, outputPath, options)` (`DicomdirEntry.fromJson` /
+`fromFile`, see `bindings/java/README.md`).
 
 ## dcmtalk CLI Usage
 

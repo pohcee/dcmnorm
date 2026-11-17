@@ -119,11 +119,43 @@ than crashing the JVM - every entry point runs the actual dcmnorm call through R
   unless `EditTagsOptions.outputPath` is given.
 - `Dcmnorm.transcode(filePath, outputPath, transferSyntaxUid)`.
 - `Dcmnorm.checkDicom(filePath) -> boolean`.
+- `Dcmnorm.writeDicomdir(List<DicomdirEntry> entries, outputPath[, WriteDicomdirOptions]) -> WriteDicomdirResult`
+  - writes a DICOMDIR (Media Storage Directory, Explicit VR Little Endian) for a File-set, the
+  in-process form of `dcmnorm dicomdir ROOT` (same as the Node binding's `writeDicomdir`). Each
+  entry is `DicomdirEntry.fromFile(List<String> fileId, path)` (the header is read from the file;
+  pixel data isn't loaded) or `DicomdirEntry.fromJson(fileId, json)` (the DICOM JSON `readJson`
+  returns; BulkDataURI elements are ignored, so the default `"uri"` output is fine), with fluent
+  `.format("flat"|"standard")` (for `fromJson`, default `"flat"`) and `.transferSyntaxUid(uid)`.
+  The File ID is 1-8 components of 1-8 characters from `A-Z 0-9 _` (PS3.10 8.2). For `fromJson`
+  the referenced file's transfer syntax is `transferSyntaxUid`, else the JSON's
+  TransferSyntaxUID, else Explicit VR Little Endian. `WriteDicomdirOptions` has `fileSetId` and
+  `sopInstanceUid` (the DICOMDIR's own, generated when not given). `WriteDicomdirResult` has
+  `getRecords()` (total), `getRecordTypes()` (`DicomdirRecordCount`: `getRecordType()`,
+  `getCount()`, in first-seen order; `getRecordCounts()` gives them as an ordered map),
+  `getSynthesized()` (`DicomdirSynthesized`: `getRecordType()`, `getEntity()`, `getAttribute()`,
+  `getValue()`, `getSource()`) and `getWarnings()`.
+  Records are PATIENT > STUDY > SERIES > one per entry, typed by SOP Class (IMAGE, SR DOCUMENT,
+  KEY OBJECT DOC, PRESENTATION, ENCAP DOC, ...; PS3.3 F.5), written depth-first.
+  `synthesized` lists the Type 1 keys the instances lacked and the values written (IHE PDI Table
+  4.47.4-1: Patient ID, Study ID, Study Date/Time, Modality, Series Number, Instance Number), with
+  `source` naming the attribute a value was copied from, if any. Raises `DcmnormException` for a bad File ID
+  or File-set ID (at most 16 of `A-Z 0-9 _`), a Patient ID shared by two patients, a study under
+  two patients, a series in two studies, and duplicate files or SOP Instance UIDs.
+
+  ```java
+  WriteDicomdirResult result = Dcmnorm.writeDicomdir(
+      List.of(
+          DicomdirEntry.fromFile(List.of("DICOM", "ST000001", "SE000001", "IM000001"), "/media/disc/DICOM/ST000001/SE000001/IM000001"),
+          DicomdirEntry.fromJson(List.of("DICOM", "ST000001", "SE000001", "IM000002"), Dcmnorm.readJson(otherPath))),
+      "/media/disc/DICOMDIR",
+      new WriteDicomdirOptions().fileSetId("DISC_0001"));
+  result.getRecordCounts(); // {PATIENT=1, STUDY=1, SERIES=1, IMAGE=2}
+  ```
 
 All return values that carry structured data are plain JSON strings (`readTags`/`readJson`/
 `findScu`) - parse them with whatever JSON library your application already uses. Every other
 structured result (`RenderedFrame`, `TextureExportResult`, `StoreScuResult`, `MoveScuResult`,
-`DicomVolumeHandle`'s getters, ...) is a real typed Java object/getter - see "Why JSON for
+`WriteDicomdirResult`, `DicomVolumeHandle`'s getters, ...) is a real typed Java object/getter - see "Why JSON for
 options, not results" below for why only the options side of this binding leans on JSON text.
 
 ### Rendering
