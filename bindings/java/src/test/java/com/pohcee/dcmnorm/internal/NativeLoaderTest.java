@@ -41,6 +41,9 @@ public final class NativeLoaderTest {
         System.out.println("NativeLoaderTest: " + checks + " checks passed");
     }
 
+    /** The platform's library file name, as NativeLoader caches it. */
+    private static final String LIBRARY_FILE = System.mapLibraryName("dcmnorm_java");
+
     private static final byte[] LIBRARY = "not really a shared library, only bytes to cache".getBytes(StandardCharsets.US_ASCII);
 
     private static NativeLoader.ResourceOpener bytes(byte[] content, AtomicInteger opens) {
@@ -60,7 +63,7 @@ public final class NativeLoaderTest {
     private static void extractsOnceAndReusesTheCachedCopy(Path cache) throws Exception {
         AtomicInteger opens = new AtomicInteger();
         Path first = NativeLoader.extractLibrary(bytes(LIBRARY, opens), sidecarFor(LIBRARY), cache);
-        check(first.equals(cache.resolve(sha256(LIBRARY)).resolve("libdcmnorm_java.so")), "cache path keyed by hash: " + first);
+        check(first.equals(cache.resolve(sha256(LIBRARY)).resolve(LIBRARY_FILE)), "cache path keyed by hash: " + first);
         check(java.util.Arrays.equals(Files.readAllBytes(first), LIBRARY), "cached copy has the library's bytes");
         check(opens.get() == 1, "first start copies the library once");
 
@@ -75,7 +78,7 @@ public final class NativeLoaderTest {
     private static void withoutSidecarHashesTheResource(Path cache) throws Exception {
         AtomicInteger opens = new AtomicInteger();
         Path path = NativeLoader.extractLibrary(bytes(LIBRARY, opens), NO_SIDECAR, cache);
-        check(path.equals(cache.resolve(sha256(LIBRARY)).resolve("libdcmnorm_java.so")), "hash computed when no sidecar");
+        check(path.equals(cache.resolve(sha256(LIBRARY)).resolve(LIBRARY_FILE)), "hash computed when no sidecar");
         NativeLoader.extractLibrary(bytes(LIBRARY, opens), NO_SIDECAR, cache);
         check(opens.get() == 3, "hash (1) + copy (1), then hash only (1)");
     }
@@ -106,7 +109,7 @@ public final class NativeLoaderTest {
         NativeLoader.ResourceOpener absent = () -> null;
         check(NativeLoader.extractLibrary(absent, NO_SIDECAR, cache) == null, "absent resource, no sidecar");
         check(NativeLoader.extractLibrary(absent, sidecarFor(LIBRARY), cache) == null, "absent resource, with sidecar");
-        check(!Files.exists(cache.resolve(sha256(LIBRARY)).resolve("libdcmnorm_java.so")), "nothing cached");
+        check(!Files.exists(cache.resolve(sha256(LIBRARY)).resolve(LIBRARY_FILE)), "nothing cached");
     }
 
     private static void concurrentExtractionsAgree(Path cache) throws Exception {
@@ -116,7 +119,7 @@ public final class NativeLoaderTest {
             for (int i = 0; i < 32; i++) {
                 tasks.add(() -> NativeLoader.extractLibrary(bytes(LIBRARY, new AtomicInteger()), sidecarFor(LIBRARY), cache));
             }
-            Path expected = cache.resolve(sha256(LIBRARY)).resolve("libdcmnorm_java.so");
+            Path expected = cache.resolve(sha256(LIBRARY)).resolve(LIBRARY_FILE);
             for (Future<Path> result : pool.invokeAll(tasks)) {
                 check(result.get().equals(expected), "every concurrent extraction returns the cached path");
             }
