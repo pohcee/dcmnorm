@@ -1,23 +1,19 @@
-# Build context must be the dcmnorm repo root (this file needs both the node binding directory
-# and the top-level test/files fixtures, which live outside bindings/node), e.g. from the repo
-# root: `docker build -f bindings/node/examples/test-website/Dockerfile -t dcmnorm-test-website .`
+# Build context must be the dcmnorm repo root (this file needs the site and the top-level
+# test/files fixtures), e.g. from the repo root:
+#   docker build -f bindings/node/examples/test-website/Dockerfile \
+#     --build-arg DCMNORM_VERSION=0.12.0 -t dcmnorm-test-website .
 #
-# Build the addon first: bindings/node/build-in-docker.sh writes
-# bindings/node/dcmnorm-node.linux-<arch>-gnu.node (glibc 2.31, so it runs on this bookworm-based
-# image); no .node file is committed. This image needs no Rust toolchain since the addon is
-# copied in prebuilt rather than compiled here.
+# The binding comes from npm: `dcmnorm` plus the @dcmnorm/<platform> package npm picks for this
+# image (linux-x64-gnu on Cloud Run). No Rust toolchain and no locally built addon are needed.
 FROM node:22-slim
 
-WORKDIR /opt/dcmnorm-node
-
-# Only the files the dcmnorm package needs at runtime (see its README's "Packaging" section) -
-# not node_modules (napi-rs/cli - build-only), not target/ or src/ (Rust sources).
-COPY bindings/node/package.json bindings/node/index.js bindings/node/index.d.ts ./
-COPY bindings/node/*.node ./
-
-WORKDIR /opt/dcmnorm-node/examples/test-website
+ARG DCMNORM_VERSION
+WORKDIR /opt/dcmnorm-test-website
 COPY bindings/node/examples/test-website/package.json ./
-RUN npm install --omit=dev
+RUN test -n "$DCMNORM_VERSION" || { echo "build with --build-arg DCMNORM_VERSION=<version>" >&2; exit 1; } \
+ && npm pkg set "dependencies.dcmnorm=${DCMNORM_VERSION}" \
+ && npm install --omit=dev --no-audit --no-fund \
+ && node -e "require('dcmnorm')"
 
 COPY bindings/node/examples/test-website/server.js ./
 COPY bindings/node/examples/test-website/public ./public

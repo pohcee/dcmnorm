@@ -34,7 +34,7 @@ if [[ -z "$PROJECT_ID" ]]; then
   exit 1
 fi
 
-for cmd in gcloud docker; do
+for cmd in gcloud docker npm; do
   if ! command -v "$cmd" >/dev/null 2>&1; then
     echo "error: '$cmd' is required but not found on PATH" >&2
     exit 1
@@ -70,7 +70,10 @@ echo "==> Configuring Docker auth for ${REGION}-docker.pkg.dev..."
 gcloud auth configure-docker "${REGION}-docker.pkg.dev" --quiet --project="$PROJECT_ID"
 
 echo "==> Building image (context: repo root, see Dockerfile comment)..."
-docker build -f "$DOCKERFILE" -t "${IMAGE}:${TAG}" -t "${IMAGE}:latest" "$REPO_ROOT"
+DCMNORM_VERSION="${DCMNORM_VERSION:-$(npm view dcmnorm version)}"
+echo "==> dcmnorm from npm: ${DCMNORM_VERSION}"
+docker build -f "$DOCKERFILE" --build-arg "DCMNORM_VERSION=${DCMNORM_VERSION}" \
+  -t "${IMAGE}:${TAG}" -t "${IMAGE}:latest" "$REPO_ROOT"
 
 echo "==> Pushing image..."
 docker push "${IMAGE}:${TAG}"
