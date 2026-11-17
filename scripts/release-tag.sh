@@ -15,7 +15,8 @@ Examples:
 This script:
   0) Fast-forwards onto origin (CI pushes rebuilt binding artifacts after each tag)
   1) Computes the next SemVer tag from existing v* tags
-    2) Updates crate versions in Cargo.toml files, and the Claude plugin/skill version pins
+    2) Updates crate versions in Cargo.toml files, the Node binding's package.json and the
+       Claude plugin/skill version pins
     3) Commits the version bump
     4) Creates an annotated tag on that commit
     5) Pushes the commit and tag to origin
@@ -237,6 +238,25 @@ update_manifest_version "exec/dcmnorm/Cargo.toml" "$next_version"
 update_manifest_version "exec/dcmtalk/Cargo.toml" "$next_version"
 # The Claude plugin's version and the version its skill installs from PyPI.
 python3 scripts/check-versions.py --set "$next_version"
+# The Node binding (@pohcee/dcmnorm-node) carries the release version too; the workflow this
+# tag starts builds its native addons and commits them.
+python3 - "$next_version" <<'PY'
+import json, sys
+version = sys.argv[1]
+for path in ("bindings/node/package.json", "bindings/node/package-lock.json"):
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        continue
+    data["version"] = version
+    root = data.get("packages", {}).get("")
+    if isinstance(root, dict):
+        root["version"] = version
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+PY
 
 # Only the workspace's own version entries: `cargo generate-lockfile` would re-resolve every
 # dependency to its newest compatible version as a side effect of each release.
