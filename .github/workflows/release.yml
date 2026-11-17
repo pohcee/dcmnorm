@@ -119,6 +119,9 @@ jobs:
           python3 -m venv /tmp/venv
           /tmp/venv/bin/pip install --quiet "maturin>=1.8,<2.0"
           cp LICENSE bindings/python/LICENSE
+          # pyproject's data dir is staged from the CLI wheel in release builds; maturin only
+          # needs it to exist here.
+          mkdir -p bindings/python/data/scripts
           /tmp/venv/bin/maturin pep517 write-dist-info -m bindings/python/Cargo.toml --metadata-directory /tmp/meta
           cat /tmp/meta/*.dist-info/METADATA | head -30
           grep -qx 'Name: dcmnorm' /tmp/meta/*.dist-info/METADATA

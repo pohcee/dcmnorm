@@ -7,6 +7,9 @@ Ships as a CLI, a Rust library, and Node.js/Python/Java bindings.
 
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Latest release](https://img.shields.io/github/v/release/pohcee/dcmnorm)](https://github.com/pohcee/dcmnorm/releases/latest)
+[![PyPI](https://img.shields.io/pypi/v/dcmnorm?label=pypi)](https://pypi.org/project/dcmnorm/)
+[![npm](https://img.shields.io/npm/v/dcmnorm?label=npm)](https://www.npmjs.com/package/dcmnorm)
+[![Maven Central](https://img.shields.io/maven-central/v/com.pohcee/dcmnorm-java?label=maven%20central)](https://central.sonatype.com/artifact/com.pohcee/dcmnorm-java)
 [![Live demo](https://img.shields.io/badge/live%20demo-try%20it-brightgreen)](https://dcmnorm-test-website-spzcbrdjlq-uc.a.run.app)
 
 <!-- TODO: add a hero image, e.g. a rendered WSI tile next to an MPR reformat:
