@@ -465,10 +465,10 @@ jobs:
           - classifier: linux-x86_64
             os: ubuntu-24.04
             cli: linux-x86_64
-          - classifier: linux-aarch64
+          - classifier: linux-aarch_64
             os: ubuntu-24.04-arm
             cli: linux-aarch64
-          - classifier: osx-aarch64
+          - classifier: osx-aarch_64
             os: macos-15
             macos_target: "11.0"
             library: libdcmnorm_java.dylib

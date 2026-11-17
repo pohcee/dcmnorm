@@ -24,7 +24,7 @@ import java.util.regex.Pattern;
  *   <li>The file named by the system property {@code dcmnorm.library.path}, when set - for
  *       containers that ship the library on disk and want no extraction at all.
  *   <li>A resource on the classpath at {@code /native/<platform>/<library>}, where
- *       {@code <platform>} is {@code linux-x86_64}, {@code linux-aarch64}, {@code osx-aarch64},
+ *       {@code <platform>} is {@code linux-x86_64}, {@code linux-aarch_64}, {@code osx-aarch_64},
  *       {@code osx-x86_64} or {@code windows-x86_64} and {@code <library>} is
  *       {@code libdcmnorm_java.so}, {@code libdcmnorm_java.dylib} or {@code dcmnorm_java.dll}.
  *       That is what the {@code com.pohcee:dcmnorm-java-natives} jar with the platform's
@@ -86,7 +86,7 @@ public final class NativeLoader {
                     + resourceFailure.getMessage() + "), and System.loadLibrary(\"" + LIBRARY_NAME
                     + "\") failed (" + linkError.getMessage() + "). Add the dependency "
                     + "com.pohcee:dcmnorm-java-natives with the classifier " + platformDirectoryName()
-                    + " (the platforms published are linux-x86_64, linux-aarch64, osx-aarch64, osx-x86_64 "
+                    + " (the platforms published are linux-x86_64, linux-aarch_64, osx-aarch_64, osx-x86_64 "
                     + "and windows-x86_64), put " + LIBRARY_FILE + " on java.library.path, or set -D"
                     + LIBRARY_PATH_PROPERTY + "=/path/to/" + LIBRARY_FILE + ".");
         }
@@ -249,7 +249,8 @@ public final class NativeLoader {
     /**
      * The classpath directory (and the natives jar's Maven classifier) for this JVM's platform:
      * {@code <os>-<arch>} with os {@code linux}, {@code osx} or {@code windows} and arch {@code
-     * x86_64} or {@code aarch64}. Other values pass through, so the error names what was looked for.
+     * x86_64} or {@code aarch_64} - the os-maven-plugin convention, so {@code
+     * ${os.detected.classifier}} names the right jar. Other values pass through, so the error names what was looked for.
      */
     static String platformDirectoryName() {
         String os = System.getProperty("os.name", "").toLowerCase(Locale.ROOT);
@@ -258,7 +259,7 @@ public final class NativeLoader {
             : (os.contains("mac") || os.contains("darwin")) ? "osx"
             : os.contains("win") ? "windows" : os.replaceAll("[^a-z0-9]", "");
         String archName = (arch.equals("amd64") || arch.equals("x86_64") || arch.equals("x64")) ? "x86_64"
-            : (arch.equals("aarch64") || arch.equals("arm64")) ? "aarch64" : arch;
+            : (arch.equals("aarch64") || arch.equals("arm64")) ? "aarch_64" : arch;
         return osName + "-" + archName;
     }
 }

@@ -2,7 +2,7 @@
 """Stages a built native library where natives/pom.xml packages it, with its SHA-256 sidecar.
 
     bindings/java/stage-native.py <classifier> <library>
-    bindings/java/stage-native.py osx-aarch64 target/release/libdcmnorm_java.dylib
+    bindings/java/stage-native.py osx-aarch_64 target/release/libdcmnorm_java.dylib
 
 Writes natives/target/natives/<classifier>/native/<classifier>/<library name> and
 <library name>.sha256 (`sha256sum` format; NativeLoader keys its extraction cache by it). The

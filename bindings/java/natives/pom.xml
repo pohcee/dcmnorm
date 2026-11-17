@@ -6,8 +6,8 @@
 
     classifier       jar contents (NativeLoader looks there)
     linux-x86_64     native/linux-x86_64/libdcmnorm_java.so     (+ .sha256)  glibc 2.28+
-    linux-aarch64    native/linux-aarch64/libdcmnorm_java.so    (+ .sha256)  glibc 2.28+
-    osx-aarch64      native/osx-aarch64/libdcmnorm_java.dylib   (+ .sha256)  macOS 11+
+    linux-aarch_64    native/linux-aarch_64/libdcmnorm_java.so    (+ .sha256)  glibc 2.28+
+    osx-aarch_64      native/osx-aarch_64/libdcmnorm_java.dylib   (+ .sha256)  macOS 11+
     osx-x86_64       native/osx-x86_64/libdcmnorm_java.dylib    (+ .sha256)  macOS 10.15+
     windows-x86_64   native/windows-x86_64/dcmnorm_java.dll     (+ .sha256)
 
@@ -28,7 +28,7 @@
   <packaging>pom</packaging>
 
   <name>dcmnorm-java-natives</name>
-  <description>Native libraries for dcmnorm-java, one jar per platform classifier: linux-x86_64, linux-aarch64, osx-aarch64, osx-x86_64, windows-x86_64.</description>
+  <description>Native libraries for dcmnorm-java, one jar per platform classifier: linux-x86_64, linux-aarch_64, osx-aarch_64, osx-x86_64, windows-x86_64.</description>
   <url>https://github.com/pohcee/dcmnorm</url>
 
   <licenses>
@@ -77,25 +77,25 @@
             </configuration>
           </execution>
           <execution>
-            <id>linux-aarch64</id>
+            <id>linux-aarch_64</id>
             <phase>package</phase>
             <goals>
               <goal>jar</goal>
             </goals>
             <configuration>
-              <classifier>linux-aarch64</classifier>
-              <classesDirectory>${natives.dir}/linux-aarch64</classesDirectory>
+              <classifier>linux-aarch_64</classifier>
+              <classesDirectory>${natives.dir}/linux-aarch_64</classesDirectory>
             </configuration>
           </execution>
           <execution>
-            <id>osx-aarch64</id>
+            <id>osx-aarch_64</id>
             <phase>package</phase>
             <goals>
               <goal>jar</goal>
             </goals>
             <configuration>
-              <classifier>osx-aarch64</classifier>
-              <classesDirectory>${natives.dir}/osx-aarch64</classesDirectory>
+              <classifier>osx-aarch_64</classifier>
+              <classesDirectory>${natives.dir}/osx-aarch_64</classesDirectory>
             </configuration>
           </execution>
           <execution>
@@ -148,10 +148,10 @@
                       <files>
                         <file>${natives.dir}/linux-x86_64/native/linux-x86_64/libdcmnorm_java.so</file>
                         <file>${natives.dir}/linux-x86_64/native/linux-x86_64/libdcmnorm_java.so.sha256</file>
-                        <file>${natives.dir}/linux-aarch64/native/linux-aarch64/libdcmnorm_java.so</file>
-                        <file>${natives.dir}/linux-aarch64/native/linux-aarch64/libdcmnorm_java.so.sha256</file>
-                        <file>${natives.dir}/osx-aarch64/native/osx-aarch64/libdcmnorm_java.dylib</file>
-                        <file>${natives.dir}/osx-aarch64/native/osx-aarch64/libdcmnorm_java.dylib.sha256</file>
+                        <file>${natives.dir}/linux-aarch_64/native/linux-aarch_64/libdcmnorm_java.so</file>
+                        <file>${natives.dir}/linux-aarch_64/native/linux-aarch_64/libdcmnorm_java.so.sha256</file>
+                        <file>${natives.dir}/osx-aarch_64/native/osx-aarch_64/libdcmnorm_java.dylib</file>
+                        <file>${natives.dir}/osx-aarch_64/native/osx-aarch_64/libdcmnorm_java.dylib.sha256</file>
                         <file>${natives.dir}/osx-x86_64/native/osx-x86_64/libdcmnorm_java.dylib</file>
                         <file>${natives.dir}/osx-x86_64/native/osx-x86_64/libdcmnorm_java.dylib.sha256</file>
                         <file>${natives.dir}/windows-x86_64/native/windows-x86_64/dcmnorm_java.dll</file>

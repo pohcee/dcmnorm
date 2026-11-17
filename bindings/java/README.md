@@ -14,8 +14,8 @@ the API plus the one natives jar for the platform you run on:
 | Classifier | Platform |
 | --- | --- |
 | `linux-x86_64` | Linux x86_64, glibc 2.28+ |
-| `linux-aarch64` | Linux aarch64, glibc 2.28+ |
-| `osx-aarch64` | macOS arm64, 11+ |
+| `linux-aarch_64` | Linux aarch64, glibc 2.28+ |
+| `osx-aarch_64` | macOS arm64, 11+ |
 | `osx-x86_64` | macOS x86_64, 10.15+ |
 | `windows-x86_64` | Windows x64 |
 
@@ -45,6 +45,30 @@ dependencies {
 }
 ```
 
+The classifiers follow the [os-maven-plugin](https://github.com/trustin/os-maven-plugin)
+convention, so a Maven build can pick the one for the machine it builds on:
+
+```xml
+<build>
+  <extensions>
+    <extension>
+      <groupId>kr.motd.maven</groupId>
+      <artifactId>os-maven-plugin</artifactId>
+      <version>1.7.1</version>
+    </extension>
+  </extensions>
+</build>
+<!-- ... -->
+<dependency>
+  <groupId>com.pohcee</groupId>
+  <artifactId>dcmnorm-java-natives</artifactId>
+  <version>${dcmnorm.version}</version>
+  <classifier>${os.detected.classifier}</classifier>
+  <scope>runtime</scope>
+</dependency>
+```
+
+(Gradle: the `com.google.osdetector` plugin gives the same value as `osdetector.classifier`.)
 For an application that ships to several platforms, add one `dcmnorm-java-natives` dependency per
 classifier: each jar holds only its own platform's library, under a different path, and
 `NativeLoader` picks the one for the running JVM. The version is the dcmnorm release version
@@ -285,7 +309,7 @@ Published to Maven Central (through the Sonatype Central Portal) by the
 `<library>` is `libdcmnorm_java.so` (Linux), `libdcmnorm_java.dylib` (macOS) or
 `dcmnorm_java.dll` (Windows). Every file is GPG-signed. `NativeLoader`
 (`com.pohcee.dcmnorm.internal`) maps `os.name`/`os.arch` to the classifier (`linux`/`osx`/`windows`
-+ `x86_64`/`aarch64`) and finds the library on the classpath at `/native/<classifier>/<library>`.
++ `x86_64`/`aarch_64`, the os-maven-plugin names) and finds the library on the classpath at `/native/<classifier>/<library>`.
 It is extracted once per build to a per-user cache, `~/.cache/dcmnorm/<sha256>/<library>`
 (`$XDG_CACHE_HOME`, `~/Library/Caches` on macOS, `%LOCALAPPDATA%` on Windows), keyed by the
 `.sha256` sidecar so a JVM start reads 64 bytes instead of hashing the ~30 MB library, and every
@@ -309,7 +333,7 @@ fallback to a smaller one; nothing native is committed):
 - **Linux**: `build-in-docker.sh` (`packaging/build-binding-linux.sh java`) builds in
   `quay.io/pypa/manylinux_2_28_<arch>` (glibc 2.28) on a runner of the same architecture, fails if
   the library needs a newer glibc or links anything outside the manylinux policy (FFmpeg
-  included), and stages it in `natives/target/natives/linux-<arch>/`.
+  included), and stages it in `natives/target/natives/<classifier>/`.
 - **macOS**: `cargo build -p dcmnorm-java` on `macos-15` / `macos-15-intel` with
   `packaging/macos-link.py` as the linker and `packaging/portable-cc` on `PATH`, staged by
   `stage-native.py`.

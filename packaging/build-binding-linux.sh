@@ -7,8 +7,9 @@
 #       -> bindings/python/dist/dcmnorm-<v>-cp39-abi3-manylinux_2_28_<arch>.whl
 #          Needs the CLI binaries in bindings/python/data/scripts/ first (packaging/stage_cli.py).
 #   packaging/build-binding-linux.sh java [x86_64|aarch64]
-#       -> bindings/java/natives/target/natives/linux-<arch>/native/linux-<arch>/libdcmnorm_java.so
-#          (+ .sha256), the layout of the dcmnorm-java-natives jar (bindings/java/README.md)
+#       -> bindings/java/natives/target/natives/<classifier>/native/<classifier>/libdcmnorm_java.so
+#          (+ .sha256), the layout of the dcmnorm-java-natives jar (bindings/java/README.md);
+#          <classifier> is linux-x86_64 or linux-aarch_64 (the os-maven-plugin names)
 #
 # FFmpeg is built from source and linked in statically (the ffmpeg-codec feature, which needs git
 # and nasm), with the codec set every binding uses: the crates' default features. There is no
@@ -115,7 +116,8 @@ docker run --rm \
       cargo build --release --locked -p dcmnorm-java
       lib="$CARGO_TARGET_DIR/release/libdcmnorm_java.so"
       check_policy "$lib"
-      out="bindings/java/natives/target/natives/linux-$ARCH/native/linux-$ARCH"
+      classifier="linux-${ARCH/aarch64/aarch_64}"
+      out="bindings/java/natives/target/natives/$classifier/native/$classifier"
       rm -rf "$out" && mkdir -p "$out"
       cp "$lib" "$out/"
       # The sidecar hash keys NativeLoader s extraction cache (a JVM start reads 64 bytes instead

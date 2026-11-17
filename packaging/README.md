@@ -133,7 +133,7 @@ generates and checks the layout (see `bindings/node/README.md`, "Packaging").
 | `dcmnorm-java-natives-<v>.pom` (packaging `pom`) | metadata only | |
 | `dcmnorm-java-natives-<v>-<classifier>.jar` | `native/<classifier>/<library>` + `.sha256` | 13 MB for `linux-x86_64` |
 
-Classifiers: `linux-x86_64`, `linux-aarch64`, `osx-aarch64`, `osx-x86_64`, `windows-x86_64`. A
+Classifiers: `linux-x86_64`, `linux-aarch_64`, `osx-aarch_64`, `osx-x86_64`, `windows-x86_64`. A
 consumer depends on the API and the one classifier it runs on (`bindings/java/README.md`,
 "Install"). Every file is GPG-signed. `dcmnorm-java-natives` is published first, then
 `dcmnorm-java`, each as its own Central Portal deployment that the job waits on until it is
