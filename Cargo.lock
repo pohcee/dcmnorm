@@ -416,6 +416,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "dcmnorm-codegen"
+version = "0.1.0"
+dependencies = [
+ "dcmnorm-core",
+ "dcmnorm-dictionary",
+ "dcmnorm-encoding",
+ "dcmnorm-transcode",
+]
+
+[[package]]
 name = "dcmnorm-core"
 version = "0.1.0"
 dependencies = [

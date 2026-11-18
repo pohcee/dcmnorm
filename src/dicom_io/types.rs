@@ -367,9 +367,47 @@ pub struct DicomJsonWriteOptions<'a> {
     /// top-level attribute (they aren't in PS3.18 Annex F; sequence items never have them). No
     /// effect on `DicomJsonFormat::Flat`.
     pub omit_keyword_vm: bool,
+    /// Builds each `BulkDataURI` instead of the default `{bulk_data_uri_base}?offset=…&length=…`
+    /// form - e.g. a DICOMweb server's own bulk data URL. Gets the element and where its value
+    /// is in the source; only consulted in `Uri` mode, for values written as a reference.
+    pub bulk_data_uri_builder: Option<BulkDataUriBuilder<'a>>,
+}
+
+/// Where a value written as a `BulkDataURI` lives: the element and its value's byte range in the
+/// source (see [`DicomJsonWriteOptions::bulk_data_uri_builder`]).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BulkDataUriRequest {
+    pub tag: Tag,
+    pub vr: VR,
+    pub offset: u64,
+    /// `None` for encapsulated pixel data whose end isn't known (a data set read only up to its
+    /// PixelData header).
+    pub length: Option<u64>,
+}
+
+/// A caller's `BulkDataURI` builder (a function reference, so the options stay `Copy`).
+#[derive(Clone, Copy)]
+pub struct BulkDataUriBuilder<'a>(pub &'a dyn Fn(&BulkDataUriRequest) -> String);
+
+impl fmt::Debug for BulkDataUriBuilder<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("BulkDataUriBuilder(..)")
+    }
 }
 
 impl<'a> DicomJsonWriteOptions<'a> {
+    /// The `BulkDataURI` for a value at `offset`/`length` of the source.
+    pub(crate) fn bulk_data_uri(&self, tag: Tag, vr: VR, offset: u64, length: Option<u64>) -> String {
+        if let Some(BulkDataUriBuilder(builder)) = self.bulk_data_uri_builder {
+            return builder(&BulkDataUriRequest { tag, vr, offset, length });
+        }
+        let base = self.bulk_data_uri_base.unwrap_or("");
+        match length {
+            Some(length) => format!("{base}?offset={offset}&length={length}"),
+            None => format!("{base}?offset={offset}"),
+        }
+    }
+
     /// These options for writing item `index` of sequence `tag` - identical except that
     /// `deferred_bulk_data` narrows to that item's scope (or `None` if nothing in it was
     /// deferred), so a nested element can never pick up a same-tagged location from an
@@ -394,6 +432,7 @@ impl Default for DicomJsonWriteOptions<'_> {
             bulk_scan_cursor: None,
             deferred_bulk_data: None,
             omit_keyword_vm: false,
+            bulk_data_uri_builder: None,
         }
     }
 }

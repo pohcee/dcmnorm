@@ -196,6 +196,32 @@ pub fn render_dicom_frames(
     output_format: RenderOutputFormat,
     options: &RenderPipelineOptions,
 ) -> Result<Vec<RenderFrameOutput>, RenderError> {
+    render_dicom_frames_impl(object, output_format, options, false)
+}
+
+/// Render one frame through the whole display pipeline (modality LUT, VOI window/LUT,
+/// presentation LUT shape / MONOCHROME1 inversion, palette color and YBR conversion, ICC profile,
+/// overlay, resize, bounding boxes, padding) exactly as for PNG/JPEG output, but return the
+/// 8-bit pixels themselves instead of an encoded image: `samples_per_pixel` 1 (grayscale) or 3
+/// (RGB, interleaved), `width * height * samples_per_pixel` bytes, rows top to bottom.
+/// `format` is [`RenderOutputFormat::Raw`] and `bits_allocated` 8. (Plain `Raw` output from
+/// [`render_dicom_frame`] is the frame's stored pixel data instead, before any of that.)
+pub fn render_dicom_frame_pixels(
+    object: &DefaultDicomObject,
+    options: &RenderPipelineOptions,
+) -> Result<RenderFrameOutput, RenderError> {
+    render_dicom_frames_impl(object, RenderOutputFormat::Raw, options, true)?
+        .into_iter()
+        .next()
+        .ok_or(RenderError::InvalidFrameIndex { requested: options.frame_index, number_of_frames: 0 })
+}
+
+fn render_dicom_frames_impl(
+    object: &DefaultDicomObject,
+    output_format: RenderOutputFormat,
+    options: &RenderPipelineOptions,
+    rendered_pixels: bool,
+) -> Result<Vec<RenderFrameOutput>, RenderError> {
     let _scope = perf::scope("render.render_dicom_frames");
     validate_user_window_overrides(options)?;
 
@@ -206,7 +232,7 @@ pub fn render_dicom_frames(
         let overlays = discover_overlays(&frame_object);
         validate_overlay_index(options, &overlays)?;
 
-        if output_format == RenderOutputFormat::Raw {
+        if output_format == RenderOutputFormat::Raw && !rendered_pixels {
             let _raw_scope = perf::scope("render.raw_frame_extract");
             let bytes = get_frame_bytes(&frame_object, &metadata, 0)?;
             return Ok(vec![RenderFrameOutput {
@@ -248,7 +274,7 @@ pub fn render_dicom_frames(
     let overlays = discover_overlays(working.as_ref());
     validate_overlay_index(options, &overlays)?;
 
-    if output_format == RenderOutputFormat::Raw {
+    if output_format == RenderOutputFormat::Raw && !rendered_pixels {
         let _raw_scope = perf::scope("render.raw_frame_extract");
         let bytes = get_frame_bytes(working.as_ref(), &metadata, options.frame_index)?;
         return Ok(vec![RenderFrameOutput {

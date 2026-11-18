@@ -228,8 +228,6 @@ impl OpenFileOptions {
         defer: &dyn Fn(&dcmnorm_core::header::DataElementHeader) -> bool,
         defer_pixel_sequences: bool,
     ) -> Result<Option<(DefaultDicomObject, crate::mem::DeferredValues)>, ReadError> {
-        use std::io::Seek;
-
         let file = File::open(path.as_ref()).map_err(|source| ReadError::Io {
             source,
             context: "opening file",
@@ -238,7 +236,27 @@ impl OpenFileOptions {
             .metadata()
             .map_err(|source| ReadError::Io { source, context: "reading file metadata" })?
             .len();
-        let mut source = BufReader::new(file);
+        self.from_reader_deferring(BufReader::new(file), Some(file_len), defer, defer_pixel_sequences, false)
+    }
+
+    /// [`Self::open_file_deferring`] over any seekable Part 10 source, positioned at its
+    /// preamble: a byte slice in a `Cursor`, or a forward-only stream behind an adapter that
+    /// implements forward `Seek` by reading and discarding (the reader only ever seeks forward,
+    /// relative to its current position). `source_len`, when known, is checked against the
+    /// deferred ranges as the file length is; with `None` that check is the caller's.
+    ///
+    /// With `stop_at_pixel_data`, nothing past the top-level PixelData header is read: PixelData
+    /// is recorded as deferred where its value starts (length
+    /// [`crate::DeferredValueLocation::UNDEFINED_LENGTH`] when encapsulated) and later elements
+    /// are left out, as `dcm4che`'s `readDatasetUntilPixelData` does.
+    pub fn from_reader_deferring<R: Read + std::io::Seek>(
+        self,
+        mut source: R,
+        source_len: Option<u64>,
+        defer: &dyn Fn(&dcmnorm_core::header::DataElementHeader) -> bool,
+        defer_pixel_sequences: bool,
+        stop_at_pixel_data: bool,
+    ) -> Result<Option<(DefaultDicomObject, crate::mem::DeferredValues)>, ReadError> {
         let mut meta = self.read_meta(&mut source)?;
         let ts = meta.transfer_syntax_ts().ok_or_else(|| ReadError::UnsupportedTransferSyntax {
             uid: meta.transfer_syntax.clone(),
@@ -252,9 +270,15 @@ impl OpenFileOptions {
 
         let mut reader = dcmnorm_parser::dataset::DataSetReader::new_with_ts(source, ts)
             .map_err(|source| ReadError::Dataset { source })?;
-        let (object, deferred) =
-            crate::mem::build_dataset_deferring(&mut reader, false, defer, defer_pixel_sequences, base_offset)?;
-        if deferred.max_end() > file_len {
+        let (object, deferred) = crate::mem::build_dataset_deferring(
+            &mut reader,
+            false,
+            defer,
+            defer_pixel_sequences,
+            stop_at_pixel_data,
+            base_offset,
+        )?;
+        if source_len.is_some_and(|len| deferred.max_end() > len) {
             return Ok(None);
         }
         backfill_media_storage_uids(&mut meta, &object);

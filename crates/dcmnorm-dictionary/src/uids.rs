@@ -1473,7 +1473,7 @@ type E = UidDictionaryEntryRef<'static>;
 
 #[rustfmt::skip]
 #[cfg(feature = "sop-class")]
-pub(crate) const SOP_CLASSES: &[E] = &[
+pub const SOP_CLASSES: &[E] = &[
     E::new("1.2.840.10008.1.1", "Verification SOP Class", "Verification", SopClass, false),
     E::new("1.2.840.10008.1.20.1", "Storage Commitment Push Model SOP Class", "StorageCommitmentPushModel", SopClass, false),
     E::new("1.2.840.10008.1.20.2", "Storage Commitment Pull Model SOP Class (Retired)", "StorageCommitmentPullModel", SopClass, true),
@@ -1787,7 +1787,7 @@ pub(crate) const SOP_CLASSES: &[E] = &[
 
 #[rustfmt::skip]
 #[cfg(feature = "transfer-syntax")]
-pub(crate) const TRANSFER_SYNTAXES: &[E] = &[
+pub const TRANSFER_SYNTAXES: &[E] = &[
     E::new("1.2.840.10008.1.2", "Implicit VR Little Endian: Default Transfer Syntax for DICOM", "ImplicitVRLittleEndian", TransferSyntax, false),
     E::new("1.2.840.10008.1.2.1", "Explicit VR Little Endian", "ExplicitVRLittleEndian", TransferSyntax, false),
     E::new("1.2.840.10008.1.2.1.98", "Encapsulated Uncompressed Explicit VR Little Endian", "EncapsulatedUncompressedExplicitVRLittleEndian", TransferSyntax, false),

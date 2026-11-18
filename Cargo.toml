@@ -15,6 +15,7 @@ members = [
 	"crates/dcmnorm-dimse",
 	"crates/dcmnorm-jpeg",
 	"crates/dcmnorm-jpeg2000",
+	"crates/dcmnorm-codegen",
 	"exec/dcmnorm",
 	"exec/dcmtalk",
 	"bindings/node",

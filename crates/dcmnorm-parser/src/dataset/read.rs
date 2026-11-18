@@ -773,6 +773,13 @@ impl<S> DataSetReader<S>
 where
     S: StatefulDecode,
 {
+    /// The decoder's position in the data set (bytes consumed from the source since the data
+    /// set started). Right after an `ElementHeader` token this is where the element's value
+    /// begins; right after a `PixelSequenceStart` token, where its first item header begins.
+    pub fn source_position(&self) -> u64 {
+        self.parser.position()
+    }
+
     /// Peek the next token from the source by
     /// reading a new token in the first call.
     /// Subsequent calls to `peek` will return the same token
