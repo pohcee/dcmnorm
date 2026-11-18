@@ -1581,6 +1581,7 @@ fn run_dicom_to_json_with_deferred(
             bulk_scan_cursor: Some(&bulk_scan_cursor),
             deferred_bulk_data: deferred,
             omit_keyword_vm: cli.omit_keyword_vm,
+            bulk_data_uri_builder: None,
         },
     )?
     };

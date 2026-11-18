@@ -16536,7 +16536,7 @@ pub const ZONAL_MAP: Tag = Tag(0x1010, 0x0004);
 type E = DataDictionaryEntryRef<'static>;
 
 #[rustfmt::skip]
-pub(crate) const ENTRIES: &[E] = &[
+pub const ENTRIES: &[E] = &[
     E { tag: Single(COMMAND_GROUP_LENGTH), alias: "CommandGroupLength", vr: Exact(UL) }, // DICOM
     E { tag: Single(AFFECTED_SOP_CLASS_UID), alias: "AffectedSOPClassUID", vr: Exact(UI) }, // DICOM
     E { tag: Single(REQUESTED_SOP_CLASS_UID), alias: "RequestedSOPClassUID", vr: Exact(UI) }, // DICOM

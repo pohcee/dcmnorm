@@ -2,9 +2,16 @@ package com.pohcee.dcmnorm;
 
 import com.pohcee.dcmnorm.internal.Json;
 import com.pohcee.dcmnorm.internal.NativeLoader;
+import java.awt.image.BufferedImage;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.function.Function;
 
 /**
  * Native Java bindings for dcmnorm, built with the <a href="https://docs.rs/jni">jni</a> crate.
@@ -107,9 +114,250 @@ public final class Dcmnorm {
     }
 
     /** Transcodes a DICOM file to the given transfer syntax UID. Mirrors {@code dcmnorm
-     * --transfer-syntax UID in.dcm out.dcm}. */
+     * --transfer-syntax UID in.dcm out.dcm}. Failures are typed: {@link
+     * UnsupportedTransferSyntaxException}, {@link DecodeException} / {@link EncodeException}
+     * (with the source/target UIDs), {@link InvalidDicomException}. */
     public static void transcode(String filePath, String outputPath, String transferSyntaxUid) throws DcmnormException {
         nativeTranscode(filePath, outputPath, transferSyntaxUid);
+    }
+
+    /** {@link #transcode(String, String, String)} for {@code Path}s. */
+    public static void transcode(Path input, Path output, String transferSyntaxUid) throws DcmnormException {
+        nativeTranscodeSource(input.toString(), null, null, output.toString(), null, transferSyntaxUid);
+    }
+
+    /** Transcodes a DICOM object in memory, returning the transcoded file's bytes. */
+    public static byte[] transcode(byte[] input, String transferSyntaxUid) throws DcmnormException {
+        return nativeTranscodeSource(null, Objects.requireNonNull(input, "input"), null, null, null, transferSyntaxUid);
+    }
+
+    /** Transcodes a DICOM stream (read to its end, not closed), returning the transcoded file's
+     * bytes. */
+    public static byte[] transcode(InputStream input, String transferSyntaxUid) throws DcmnormException {
+        return nativeTranscodeSource(null, null, Objects.requireNonNull(input, "input"), null, null, transferSyntaxUid);
+    }
+
+    /** Transcodes a DICOM stream into {@code output} (neither is closed). */
+    public static void transcode(InputStream input, OutputStream output, String transferSyntaxUid)
+        throws DcmnormException {
+        nativeTranscodeSource(null, null, Objects.requireNonNull(input, "input"), null,
+            Objects.requireNonNull(output, "output"), transferSyntaxUid);
+    }
+
+    /** What this build can read, write, decode and encode, per transfer syntax UID (ascending). */
+    public static List<TransferSyntaxSupport> transferSyntaxSupport() {
+        String json;
+        try {
+            json = nativeTransferSyntaxSupport();
+        } catch (RuntimeException failure) {
+            throw failure;
+        } catch (Exception impossible) {
+            throw new IllegalStateException(impossible);
+        }
+        List<TransferSyntaxSupport> support = new ArrayList<>();
+        for (Object entry : Json.asList(Json.parse(json))) {
+            Map<String, Object> ts = Json.asMap(entry);
+            support.add(new TransferSyntaxSupport(Json.asString(ts.get("uid")), Json.asString(ts.get("name")),
+                Json.asBoolean(ts.get("encapsulated")), Json.asBoolean(ts.get("canReadDataset")),
+                Json.asBoolean(ts.get("canWriteDataset")), Json.asBoolean(ts.get("canDecode")),
+                Json.asBoolean(ts.get("canEncode")), Json.asBoolean(ts.get("canTranscodeTo"))));
+        }
+        return Collections.unmodifiableList(support);
+    }
+
+    /** The {@link TransferSyntaxSupport} for one UID, or {@code null} if this build doesn't know it. */
+    public static TransferSyntaxSupport transferSyntaxSupport(String uid) {
+        for (TransferSyntaxSupport support : transferSyntaxSupport()) {
+            if (support.getUid().equals(uid)) {
+                return support;
+            }
+        }
+        return null;
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Typed datasets: read / toDicomJson / write - see GUIDE.md. Every source is a file (path),
+    // the complete object as a byte[], or an InputStream read front to back (never closed).
+    // -----------------------------------------------------------------------------------------
+
+    /** Reads the whole data set, bulk values left in the file ({@link ReadOptions#full()}). */
+    public static DicomDataset read(Path file) throws DcmnormException {
+        return read(file, ReadOptions.full());
+    }
+
+    /**
+     * Reads a DICOM file into a typed, read-only {@link DicomDataset}. With {@link
+     * ReadOptions#untilPixelData()} the file is read up to the PixelData header only - the
+     * dcm4che {@code readDatasetUntilPixelData()} path for ingest metadata.
+     */
+    public static DicomDataset read(Path file, ReadOptions options) throws DcmnormException {
+        String path = file.toAbsolutePath().toString();
+        return DatasetCodec.decode(
+            nativeReadDataset(path, null, null, options.isUntilPixelData(), options.isLoadBulkData()), path);
+    }
+
+    public static DicomDataset read(String filePath) throws DcmnormException {
+        return read(Path.of(filePath), ReadOptions.full());
+    }
+
+    public static DicomDataset read(String filePath, ReadOptions options) throws DcmnormException {
+        return read(Path.of(filePath), options);
+    }
+
+    public static DicomDataset read(byte[] bytes) throws DcmnormException {
+        return read(bytes, ReadOptions.full());
+    }
+
+    /** Reads a DICOM object in memory. The dataset keeps a reference to {@code bytes} (not a copy)
+     * so {@link #write} can resolve its {@link BulkDataRef}s: don't modify the array afterwards. */
+    public static DicomDataset read(byte[] bytes, ReadOptions options) throws DcmnormException {
+        Objects.requireNonNull(bytes, "bytes");
+        return DatasetCodec.decode(
+            nativeReadDataset(null, bytes, null, options.isUntilPixelData(), options.isLoadBulkData()), bytes);
+    }
+
+    public static DicomDataset read(InputStream stream) throws DcmnormException {
+        return read(stream, ReadOptions.full());
+    }
+
+    /**
+     * Reads a DICOM stream (e.g. an object-storage download) front to back, without buffering it
+     * whole. With {@link ReadOptions#untilPixelData()} nothing past the PixelData header is
+     * consumed. The stream isn't closed. Its bytes are gone afterwards, so {@link BulkDataRef}s
+     * of the result can only be resolved from elsewhere ({@link WriteOptions#bulkDataSource}, or
+     * a ranged read of the object they point into); read with {@link
+     * ReadOptions#loadBulkData(boolean) loadBulkData(true)} to keep the values instead.
+     */
+    public static DicomDataset read(InputStream stream, ReadOptions options) throws DcmnormException {
+        Objects.requireNonNull(stream, "stream");
+        return DatasetCodec.decode(
+            nativeReadDataset(null, null, stream, options.isUntilPixelData(), options.isLoadBulkData()), null);
+    }
+
+    /** DICOM JSON (PS3.18 Annex F) of a file - see {@link JsonOptions}. Bulk values are never
+     * read in the default {@code BulkDataURI} mode. */
+    public static String toDicomJson(Path file, JsonOptions options) throws DcmnormException {
+        return nativeSourceToDicomJson(file.toAbsolutePath().toString(), null, null, options.toJson(),
+            options.getIncludeTags(), options.getExcludeTags(), options.getBulkDataUriBuilder());
+    }
+
+    public static String toDicomJson(String filePath, JsonOptions options) throws DcmnormException {
+        return toDicomJson(Path.of(filePath), options);
+    }
+
+    public static String toDicomJson(byte[] bytes, JsonOptions options) throws DcmnormException {
+        return nativeSourceToDicomJson(null, Objects.requireNonNull(bytes, "bytes"), null, options.toJson(),
+            options.getIncludeTags(), options.getExcludeTags(), options.getBulkDataUriBuilder());
+    }
+
+    /** DICOM JSON of a stream, read front to back (bulk values read and discarded, not kept). */
+    public static String toDicomJson(InputStream stream, JsonOptions options) throws DcmnormException {
+        return nativeSourceToDicomJson(null, null, Objects.requireNonNull(stream, "stream"), options.toJson(),
+            options.getIncludeTags(), options.getExcludeTags(), options.getBulkDataUriBuilder());
+    }
+
+    /** DICOM JSON of a (possibly edited) dataset. Its {@link BulkDataRef}s are written as {@code
+     * BulkDataURI}s, or read from its source in {@link JsonOptions.BulkData#INLINE} mode. */
+    public static String toDicomJson(DicomDataset dataset, JsonOptions options) throws DcmnormException {
+        Object source = dataset.source();
+        return nativeDatasetToDicomJson(DatasetCodec.encode(dataset), source instanceof String ? (String) source : null,
+            source instanceof byte[] ? (byte[]) source : null, options.toJson(), options.getIncludeTags(),
+            options.getExcludeTags(), options.getBulkDataUriBuilder());
+    }
+
+    /**
+     * Writes {@code dataset} as a DICOM Part 10 file, with File Meta Information created for it
+     * (see {@link WriteOptions}). {@link BulkDataRef}s - PixelData included - are read by the
+     * native writer straight from the source the dataset was read from (or {@link
+     * WriteOptions#bulkDataSource}): pixel data is streamed through native memory, never copied
+     * into the JVM heap. With {@link WriteOptions#transferSyntax} the output is transcoded.
+     */
+    public static void write(DicomDataset dataset, Path output, WriteOptions options) throws DcmnormException {
+        writeNative(dataset, output.toAbsolutePath().toString(), null, options);
+    }
+
+    public static void write(DicomDataset dataset, String outputPath, WriteOptions options) throws DcmnormException {
+        write(dataset, Path.of(outputPath), options);
+    }
+
+    /** {@link #write(DicomDataset, Path, WriteOptions)} to a stream (written in 64 KiB chunks;
+     * not closed). */
+    public static void write(DicomDataset dataset, OutputStream output, WriteOptions options) throws DcmnormException {
+        writeNative(dataset, null, Objects.requireNonNull(output, "output"), options);
+    }
+
+    /** {@link #write(DicomDataset, Path, WriteOptions)} into a new {@code byte[]}. */
+    public static byte[] toBytes(DicomDataset dataset, WriteOptions options) throws DcmnormException {
+        return writeNative(dataset, null, null, options);
+    }
+
+    private static byte[] writeNative(DicomDataset dataset, String outputPath, OutputStream output, WriteOptions options)
+        throws DcmnormException {
+        Object source = dataset.source();
+        String sourcePath = source instanceof String ? (String) source : null;
+        byte[] sourceBytes = source instanceof byte[] ? (byte[]) source : null;
+        if (options.getBulkDataPath() != null) {
+            sourcePath = options.getBulkDataPath().toAbsolutePath().toString();
+            sourceBytes = null;
+        } else if (options.getBulkDataBytes() != null) {
+            sourcePath = null;
+            sourceBytes = options.getBulkDataBytes();
+        }
+        return nativeWriteDataset(DatasetCodec.encode(dataset), sourcePath, sourceBytes, outputPath, output,
+            options.getTransferSyntaxUid());
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Rendering into Java imaging: renderImage / renderPixels - see RenderParams and
+    // RenderedPixels (buffer ownership).
+    // -----------------------------------------------------------------------------------------
+
+    /**
+     * Renders frame {@code frameIndex} (0-based; the count is {@link DicomDataset#numberOfFrames()})
+     * to a {@link BufferedImage} built directly over the rendered 8-bit pixels - no PNG/JPEG
+     * encode and decode: {@code TYPE_BYTE_GRAY} for grayscale, {@code TYPE_3BYTE_BGR} for color.
+     * See {@link RenderParams} for the pipeline. A file source reads only that frame's pixel data
+     * where it can (native, uncompressed pixel data).
+     */
+    public static BufferedImage renderImage(Path file, int frameIndex, RenderParams params) throws DcmnormException {
+        return nativeRenderPixels(file.toAbsolutePath().toString(), null, null, frameIndex, params.toJson(), true)
+            .toBufferedImage();
+    }
+
+    public static BufferedImage renderImage(String filePath, int frameIndex, RenderParams params) throws DcmnormException {
+        return renderImage(Path.of(filePath), frameIndex, params);
+    }
+
+    public static BufferedImage renderImage(byte[] bytes, int frameIndex, RenderParams params) throws DcmnormException {
+        return nativeRenderPixels(null, Objects.requireNonNull(bytes, "bytes"), null, frameIndex, params.toJson(), true)
+            .toBufferedImage();
+    }
+
+    /** Renders from a stream (read to its end: the pixel data is needed). */
+    public static BufferedImage renderImage(InputStream stream, int frameIndex, RenderParams params)
+        throws DcmnormException {
+        return nativeRenderPixels(null, null, Objects.requireNonNull(stream, "stream"), frameIndex, params.toJson(), true)
+            .toBufferedImage();
+    }
+
+    /** As {@link #renderImage(Path, int, RenderParams)}, as raw R,G,B (or gray) pixels with their
+     * overlay information. */
+    public static RenderedPixels renderPixels(Path file, int frameIndex, RenderParams params) throws DcmnormException {
+        return nativeRenderPixels(file.toAbsolutePath().toString(), null, null, frameIndex, params.toJson(), false);
+    }
+
+    public static RenderedPixels renderPixels(String filePath, int frameIndex, RenderParams params)
+        throws DcmnormException {
+        return renderPixels(Path.of(filePath), frameIndex, params);
+    }
+
+    public static RenderedPixels renderPixels(byte[] bytes, int frameIndex, RenderParams params) throws DcmnormException {
+        return nativeRenderPixels(null, Objects.requireNonNull(bytes, "bytes"), null, frameIndex, params.toJson(), false);
+    }
+
+    public static RenderedPixels renderPixels(InputStream stream, int frameIndex, RenderParams params)
+        throws DcmnormException {
+        return nativeRenderPixels(null, null, Objects.requireNonNull(stream, "stream"), frameIndex, params.toJson(), false);
     }
 
     /** Reports whether a file looks like valid DICOM. Mirrors {@code dcmnorm --check-dicom}.
@@ -362,6 +610,28 @@ public final class Dcmnorm {
         throws DcmnormException;
 
     private static native boolean nativeCheckDicom(String filePath);
+
+    private static native String nativeTransferSyntaxSupport() throws DcmnormException;
+
+    private static native byte[] nativeTranscodeSource(String path, byte[] bytes, InputStream stream, String outputPath,
+        OutputStream output, String transferSyntaxUid) throws DcmnormException;
+
+    private static native byte[] nativeReadDataset(String path, byte[] bytes, InputStream stream, boolean untilPixelData,
+        boolean loadBulkData) throws DcmnormException;
+
+    private static native String nativeSourceToDicomJson(String path, byte[] bytes, InputStream stream,
+        String optionsJson, int[] includeTags, int[] excludeTags, Function<BulkDataRef, String> uriBuilder)
+        throws DcmnormException;
+
+    private static native String nativeDatasetToDicomJson(byte[] dataset, String sourcePath, byte[] sourceBytes,
+        String optionsJson, int[] includeTags, int[] excludeTags, Function<BulkDataRef, String> uriBuilder)
+        throws DcmnormException;
+
+    private static native byte[] nativeWriteDataset(byte[] dataset, String sourcePath, byte[] sourceBytes,
+        String outputPath, OutputStream output, String transferSyntaxUid) throws DcmnormException;
+
+    private static native RenderedPixels nativeRenderPixels(String path, byte[] bytes, InputStream stream, int frameIndex,
+        String optionsJson, boolean bgr) throws DcmnormException;
 
     private static native String nativeWriteDicomdir(String entriesJson, String outputPath, String optionsJson)
         throws DcmnormException;

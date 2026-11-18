@@ -1,0 +1,12 @@
+[package]
+name = "dcmnorm-codegen"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Generates the language bindings' DICOM constants (Tag, VR, TransferSyntax, SOPClassUID) from dcmnorm's own data dictionary and transfer syntax registry."
+
+[dependencies]
+dcmnorm-core = { path = "../dcmnorm-core" }
+dcmnorm-dictionary = { path = "../dcmnorm-dictionary", features = ["sop-class", "transfer-syntax"] }
+dcmnorm-encoding = { path = "../dcmnorm-encoding" }
+dcmnorm-transcode = { path = "../dcmnorm-transcode", default-features = false, features = ["native", "deflate", "jpeg2000"] }

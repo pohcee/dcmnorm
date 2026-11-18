@@ -98,6 +98,29 @@ single Java-ecosystem tool that drives Cargo for you, so `build.sh`/`build-in-do
 Cargo (for `src/lib.rs`, the native library) and Maven (for `src/main/java`, the Java API)
 side by side - see the comment at the top of `pom.xml`.
 
+## Typed datasets (start here)
+
+[GUIDE.md](GUIDE.md) walks through ingest metadata, DICOMweb JSON, rendering into a
+`BufferedImage`, transcoding, mutation/rewrite and DIMSE retrieve, each next to its dcm4che
+idiom. In short:
+
+```java
+DicomDataset ds = Dcmnorm.read(input, ReadOptions.untilPixelData());   // Path, byte[] or InputStream
+String studyUid = ds.getString(Tag.StudyInstanceUID);
+int frames = ds.getInt(Tag.NumberOfFrames, 1);
+List<DicomDataset> items = ds.getSequence(Tag.ReferencedSeriesSequence);
+
+String json = Dcmnorm.toDicomJson(input, new JsonOptions().bulkDataUriBuilder(ref -> url + ref.getOffset()));
+BufferedImage image = Dcmnorm.renderImage(input, 0, new RenderParams().window(40, 400));
+Dcmnorm.write(ds.toBuilder().set(Tag.PatientName, VR.PN, "Doe^Jane").build(), out,
+    WriteOptions.transferSyntax(TransferSyntax.ExplicitVRLittleEndian));
+```
+
+`Tag`, `VR`, `TransferSyntax` and `SOPClassUID` are generated from the native library's own
+dictionary (`crates/dcmnorm-codegen`). Failures are typed `DcmnormException` subclasses
+(`InvalidDicomException`, `UnsupportedTransferSyntaxException`, `DecodeException`,
+`EncodeException`, `RenderException`, `DimseException`). The path/JSON-string calls below remain.
+
 ## API
 
 Every method on `Dcmnorm` blocks the calling thread until it completes - there is no JS event
@@ -215,7 +238,7 @@ Packs a volume, a single frame, or several independent frames as a lossless, GPU
 payload (16-bit samples, row-major, optionally gzip-compressed) instead of an 8-bit windowed
 render - the client does its own window/level and oblique reslicing in a GPU shader instead of
 round-tripping to the server per interaction. Mirrors the CLI's `--output-type texture`/`.gputex`
-- see the main [README](../../README.md#export-a-gpu-texture-gputex) and
+- see the [CLI docs](../../docs/cli.md#export-a-gpu-texture-gputex) and
 `dcmnorm::dicom_io::texture_export`'s own module doc for the full format contract.
 
 - `DicomVolumeHandle.exportTexture([TextureExportOptions]) -> TextureExportResult` - packs the

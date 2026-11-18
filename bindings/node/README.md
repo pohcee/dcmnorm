@@ -43,6 +43,61 @@ npm run build:docker # Linux release build inside node:22-bullseye-slim (glibc 2
 npm test             # runs test/smoke.js against the fixtures in ../../test/files
 ```
 
+## Typed datasets
+
+`require("dcmnorm")` (the package entry point, `dcmnorm.js`) adds a typed dataset API to the
+calls below (#6). A source is a path, a `Buffer`/`Uint8Array`, or a readable stream (collected
+into a Buffer first: the native reader needs the bytes).
+
+```js
+const { read, toDicomJson, write, renderPixels, Tag, VR, TransferSyntax } = require("dcmnorm");
+
+const ds = await read("in.dcm", { untilPixelData: true });   // DicomDataset, no native handles
+ds.getString(Tag.StudyInstanceUID);
+ds.getInt(Tag.NumberOfFrames, 1);
+ds.getSequence(Tag.ReferencedSeriesSequence);                // DicomDataset[]
+ds.getPersonName(Tag.PatientName).familyName;
+ds.getBulkDataRef(Tag.PixelData);                            // { tag, vr, offset, length }
+
+const json = await toDicomJson("in.dcm", {                   // PS3.18 Annex F, PixelData never read
+  excludeTags: [Tag.PatientComments],
+  bulkDataUriBuilder: (ref) => `${base}/bulk/${ref.offset}/${ref.length}`,
+});
+
+const edited = (await read("in.dcm")).toBuilder().set(Tag.PatientName, VR.PN, "Doe^Jane").build();
+await write(edited, "out.dcm", { transferSyntax: TransferSyntax.ExplicitVRLittleEndian });
+
+const { width, height, channels, pixels } = await renderPixels("in.dcm", 0, { windowCenter: 40, windowWidth: 400 });
+```
+
+- `read(source, { untilPixelData, loadBulkData })`: `untilPixelData` stops at the PixelData
+  header; bulk values (PixelData, binary values over 32 bytes) stay in the source as references
+  unless `loadBulkData`. Accessors: `getString`, `getStrings`, `getInt`, `getFloat`,
+  `getNumbers`, `getBytes`, `getSequence`, `getNestedDataset`, `getPersonName`,
+  `getBulkDataRef`, `vr`, `tags`, `fileMeta`, `transferSyntaxUid`, `numberOfFrames`,
+  `frameTimeMillis`, `pixelAspectRatio`; iterate for `{ tag, vr, type, value }` elements.
+  Integers are JS numbers (SV/UV beyond 2^53 lose precision).
+- `toDicomJson(source | dataset, options)`: `includeTags`, `excludeTags`, `bulkData`
+  (`"uri"` | `"inline"`), `bulkDataUriBase`, `bulkDataUriBuilder(ref)`, `includeFileMeta`,
+  `keywordAndVM`.
+- `toBuilder()` → `set(tag, vr, ...values)` / `set(tag, [values])` (dictionary VR), `setInt`,
+  `setDouble`, `setTags`, `setBytes`, `setSequence`, `addSequenceItem`, `editSequenceItem`,
+  `remove`, `removePrivateTags`, `build()`. `write(dataset, path | null, { transferSyntax,
+  bulkDataSource })` / `toBuffer`: File Meta Information is created; references (PixelData) are
+  read natively from the source, not passed through JS.
+- `renderPixels(source, frame, params)`: 8-bit pixels without image encoding, `pixels` a
+  Buffer of `width * height * channels` (1 gray, 3 RGB). Params: `windowCenter`/`windowWidth`,
+  `voiLut`, `modalityLut`, `iccProfile`, `outputWidth`, `outputHeight`, `showOverlays`,
+  `overlayIndex`, `overlayColor`. The pipeline is the one described in
+  [the Java guide](../java/GUIDE.md#3-frame-rendering).
+- `transcodeTo(source, uid, path?)`, `transferSyntaxSupport()`, `keywordOf` / `vrOf` /
+  `tagForKeyword`, `sopClassName(uid)`.
+- Generated constants: `Tag`, `VR`, `VR_KIND`, `TransferSyntax`, `TRANSFER_SYNTAX_INFO`
+  (`lossy`, `encapsulated`, `explicitVR`, ...), `SOPClassUID`.
+- Errors: `DcmnormError` and `InvalidDicomError`, `UnsupportedTransferSyntaxError`,
+  `DecodeError`, `EncodeError`, `RenderError`, `DimseError`, with `kind`, `code`
+  (`ERR_DCMNORM_<KIND>`), `sourceTransferSyntaxUid`, `targetTransferSyntaxUid`, `frameIndex`.
+
 ## API
 
 - `readTags(filePath, tags: string[]): Promise<string>` — JSON (flat, hex-keyed,
@@ -93,7 +148,7 @@ npm test             # runs test/smoke.js against the fixtures in ../../test/fil
   — computes a pixel-value histogram per frame, over the same modality-LUT-applied grayscale
   values `renderFrame` decodes from (so e.g. a CT frame's bins are in Hounsfield units). Mirrors
   the CLI's `--histogram`/`--histogram-bins`/`--histogram-frame`/`--histogram-min`/`--histogram-max`
-  — see the main [README](../../README.md#compute-a-pixel-histogram-with---histogram) for the
+  — see the [CLI docs](../../docs/cli.md#compute-a-pixel-histogram-with---histogram) for the
   field-by-field output shape. `binCount` defaults to 256; `frameIndex` (0-based) restricts the
   result to one frame instead of every frame in the instance (and, like `renderFrame`, reads only
   that frame's bytes of a native multi-frame file, and decodes only that frame of a compressed
@@ -136,7 +191,7 @@ Packs a volume, a single frame, or several independent frames as a lossless, GPU
 payload (16-bit samples, row-major, optionally gzip-compressed) instead of an 8-bit windowed
 render — the client does its own window/level and oblique reslicing in a GPU shader instead of
 round-tripping to the server per interaction. Mirrors the CLI's `--output-type texture`/`.gputex`
-(`exportTexture`/`exportFrameTexture`) — see the main [README](../../README.md#export-a-gpu-texture-gputex)
+(`exportTexture`/`exportFrameTexture`) — see the [CLI docs](../../docs/cli.md#export-a-gpu-texture-gputex)
 and `dcmnorm::dicom_io::texture_export`'s own module doc for the full format contract.
 
 - `DicomVolumeHandle.exportTexture(options?: { targetMaxDim?, compression?: 'gzip'|'none', windowCenter?, windowWidth? }): Promise<TextureExportResult>`

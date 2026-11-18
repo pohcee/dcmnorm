@@ -53,10 +53,7 @@ where
                 "{tag} was deferred (not loaded) but must be written inline"
             )));
         }
-        let uri = match options.bulk_data_uri_base {
-            Some(base) => format!("{}?offset={}&length={}", base, location.offset, location.length),
-            None => format!("?offset={}&length={}", location.offset, location.length),
-        };
+        let uri = options.bulk_data_uri(tag, vr, location.offset, location.defined_length());
         return Ok(BulkRepresentation::Uri(uri));
     }
 
@@ -118,13 +115,8 @@ where
                                 cell.set(end);
                             }
                         }
-                        let uri = match options.bulk_data_uri_base {
-                            Some(base) => format!(
-                                "{}?offset={}&length={}",
-                                base, location.offset, location.length
-                            ),
-                            None => format!("?offset={}&length={}", location.offset, location.length),
-                        };
+                        let uri =
+                            options.bulk_data_uri(tag, vr, location.offset as u64, Some(location.length as u64));
                         return Ok(BulkRepresentation::Uri(uri));
                     }
                     Ok(None) => {}

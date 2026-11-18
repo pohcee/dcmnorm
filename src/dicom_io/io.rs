@@ -637,27 +637,28 @@ where
         return Ok(None);
     }
 
-    // Exactly the values the JSON writer would emit as a BulkDataURI: a bulk VR (WaveformData
-    // excepted - always inlined), more than INLINE_BINARY_URI_THRESHOLD bytes, and a whole
-    // number of that VR's elements (a value with a trailing partial element doesn't parse to
-    // its file bytes, so a scan of the source never referenced it either).
-    let defer = |header: &dcmnorm_core::header::DataElementHeader| {
-        let Some(length) = header.len.get() else { return false };
-        let element_size = match header.vr {
-            VR::OB | VR::UN => 1,
-            VR::OW => 2,
-            VR::OF | VR::OL => 4,
-            VR::OD | VR::OV => 8,
-            _ => return false,
-        };
-        header.tag != tags::WAVEFORM_DATA
-            && length as usize > super::bulk_data::INLINE_BINARY_URI_THRESHOLD
-            && length % element_size == 0
-    };
-
     OpenFileOptions::new()
         .read_preamble(ReadPreamble::Always)
-        .open_file_deferring(path, &defer, true)
+        .open_file_deferring(path, &defer_bulk_value, true)
+}
+
+/// Whether a deferring read skips this element's value: exactly the values the JSON writer would
+/// emit as a BulkDataURI - a bulk VR (WaveformData excepted - always inlined), more than
+/// INLINE_BINARY_URI_THRESHOLD bytes, and a whole number of that VR's elements (a value with a
+/// trailing partial element doesn't parse to its file bytes, so a scan of the source never
+/// referenced it either).
+pub(crate) fn defer_bulk_value(header: &dcmnorm_core::header::DataElementHeader) -> bool {
+    let Some(length) = header.len.get() else { return false };
+    let element_size = match header.vr {
+        VR::OB | VR::UN => 1,
+        VR::OW => 2,
+        VR::OF | VR::OL => 4,
+        VR::OD | VR::OV => 8,
+        _ => return false,
+    };
+    header.tag != tags::WAVEFORM_DATA
+        && length as usize > super::bulk_data::INLINE_BINARY_URI_THRESHOLD
+        && length % element_size == 0
 }
 
 pub fn probe_dicom_file_for_sop_class_uid<P>(path: P) -> Result<bool, std::io::Error>

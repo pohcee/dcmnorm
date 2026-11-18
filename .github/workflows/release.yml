@@ -69,6 +69,11 @@ jobs:
           cargo test --release --locked --workspace
           --exclude dcmnorm-node --exclude dcmnorm-python --exclude dcmnorm-java
 
+      - name: Check generated binding constants
+        # Tag/VR/TransferSyntax/SOPClassUID in every binding are generated from the Rust
+        # dictionary by crates/dcmnorm-codegen; this fails if the committed files differ.
+        run: cargo run --release --locked -p dcmnorm-codegen -- --check
+
       - name: Check version pins
         # The plugin/skill pins and every binding package version (npm, PyPI, Maven).
         run: python3 scripts/check-versions.py

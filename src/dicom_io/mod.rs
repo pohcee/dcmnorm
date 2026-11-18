@@ -1,6 +1,9 @@
+pub mod api_error;
 mod bulk_data;
 mod common;
 mod consistency;
+pub mod dataset_api;
+pub mod dataset_tree;
 mod dicomdir;
 mod dimse;
 mod filter;
@@ -56,15 +59,24 @@ pub use dicomdir::{
 };
 pub use consistency::{check_dicom_logic, ConsistencyFinding, ConsistencyReport, Severity};
 pub use render::{
-    redact_dicom_pixels_to_transfer_syntax, render_all_dicom_frames,
+    redact_dicom_pixels_to_transfer_syntax, render_all_dicom_frames, render_dicom_frame_pixels,
     render_all_dicom_video_frames, render_dicom_frame, render_dicom_frames,
     read_dicom_file_for_frame, render_dicom_to_recompressed_object, try_extract_passthrough_jpeg_frame,
     write_dicom_video,
     BoundingBox, BoxLength, OverlaySummary, RenderFrameOutput, RenderOutputFormat,
     RenderPipelineOptions,
 };
+pub use api_error::{catch_api_panic, ApiError, ApiErrorKind};
+pub use dataset_api::{
+    dictionary_vr, document_to_dicom_json, document_to_file_object, keyword_for_tag, read_dataset_document,
+    render_source_frame, source_to_dicom_json, tag_for_keyword, transcode_source, write_document,
+    write_document_to_path, DatasetReadOptions, DicomJsonExportOptions, DicomSource, WriteDocumentOptions,
+};
+pub use dataset_tree::{
+    decode_document, encode_document, BulkDataRef, BulkSource, DatasetDocument, DatasetTree, TreeElement, TreeValue,
+};
 pub use types::{
-    DicomIoError, DicomJsonBulkDataMode, DicomJsonError, DicomJsonFormat, DicomJsonKeyStyle,
+    BulkDataUriBuilder, BulkDataUriRequest, DicomIoError, DicomJsonBulkDataMode, DicomJsonError, DicomJsonFormat, DicomJsonKeyStyle,
     DicomJsonReadOptions, DicomJsonWriteOptions, ReadError, RenderError, TranscodeError,
     TransferSyntaxSupport, WithMetaError, WriteError,
 };

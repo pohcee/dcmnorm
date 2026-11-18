@@ -338,6 +338,11 @@ impl<D, R, W> TransferSyntax<D, R, W> {
         self.byte_order
     }
 
+    /// Whether data sets in this transfer syntax are encoded with explicit VR.
+    pub const fn explicit_vr(&self) -> bool {
+        self.explicit_vr
+    }
+
     /// Obtain this transfer syntax' codec specification.
     pub fn codec(&self) -> &Codec<D, R, W> {
         &self.codec

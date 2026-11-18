@@ -513,7 +513,18 @@ pub(crate) fn read_dataset_until_pixel_data_header<'r>(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DeferredValueLocation {
     pub offset: u64,
+    /// [`Self::UNDEFINED_LENGTH`] for a value whose end isn't known: encapsulated pixel data a
+    /// read stopped at (`stop_at_pixel_data`) without walking its fragments.
     pub length: u64,
+}
+
+impl DeferredValueLocation {
+    pub const UNDEFINED_LENGTH: u64 = u64::MAX;
+
+    /// The value's length, or `None` for [`Self::UNDEFINED_LENGTH`].
+    pub fn defined_length(&self) -> Option<u64> {
+        (self.length != Self::UNDEFINED_LENGTH).then_some(self.length)
+    }
 }
 
 /// The values a deferring read (`OpenFileOptions::open_file_deferring`) skipped rather than
@@ -557,13 +568,28 @@ impl DeferredValues {
         self.entries.is_empty()
     }
 
+    /// Record `tag`'s value at this level as deferred to `location` - for building the same
+    /// description from another source of locations (e.g. a data set a caller already holds as
+    /// references into its file), to write it with the deferred-aware JSON writer.
+    pub fn insert_value(&mut self, tag: Tag, location: DeferredValueLocation) {
+        self.entries.insert(tag, DeferredEntry::Value(location));
+    }
+
+    /// Record the per-item scopes of sequence `tag` (one per item, in item order; empty scopes
+    /// for items with nothing deferred). Nothing is recorded when every scope is empty.
+    pub fn insert_items(&mut self, tag: Tag, items: Vec<DeferredValues>) {
+        if items.iter().any(|item| !item.is_empty()) {
+            self.entries.insert(tag, DeferredEntry::Items(items));
+        }
+    }
+
     /// The end offset of the furthest deferred value, at any depth - lets a caller confirm the
     /// file really holds every deferred range (skipping by seeking can't detect truncation).
     pub fn max_end(&self) -> u64 {
         self.entries
             .values()
             .map(|entry| match entry {
-                DeferredEntry::Value(location) => location.offset + location.length,
+                DeferredEntry::Value(location) => location.offset + location.defined_length().unwrap_or(0),
                 DeferredEntry::Items(items) => items.iter().map(DeferredValues::max_end).max().unwrap_or(0),
             })
             .max()
@@ -575,11 +601,17 @@ impl DeferredValues {
 /// when `defer_pixel_sequences` is set, every encapsulated pixel data value - recording where
 /// each one was in [`DeferredValues`] instead. `base_offset` is the data set's offset in the
 /// file, turning the reader's data-set-relative positions into absolute file offsets.
+///
+/// With `stop_at_pixel_data`, reading ends at the top-level PixelData header: its value is
+/// recorded where it starts (with [`DeferredValueLocation::UNDEFINED_LENGTH`] for encapsulated
+/// pixel data, whose end is only known by walking it) and nothing after it is read - the source
+/// is never read past that header.
 pub(crate) fn build_dataset_deferring<R: Read + std::io::Seek>(
     reader: &mut DataSetReader<dcmnorm_parser::stateful::decode::DynStatefulDecoder<R>>,
     in_item: bool,
     defer: &dyn Fn(&dcmnorm_core::header::DataElementHeader) -> bool,
     defer_pixel_sequences: bool,
+    stop_at_pixel_data: bool,
     base_offset: u64,
 ) -> Result<(InMemDicomObject, DeferredValues), ReadError> {
     let mut elements = Vec::new();
@@ -599,6 +631,28 @@ pub(crate) fn build_dataset_deferring<R: Read + std::io::Seek>(
 
         match token? {
             DataToken::ItemEnd if in_item => break,
+
+            DataToken::ElementHeader(header) if stop_at_pixel_data && !in_item && header.tag == Tag(0x7FE0, 0x0010) => {
+                let location = DeferredValueLocation {
+                    offset: base_offset + reader.source_position(),
+                    length: header.len.get().map(u64::from).unwrap_or(DeferredValueLocation::UNDEFINED_LENGTH),
+                };
+                deferred.entries.insert(header.tag, DeferredEntry::Value(location));
+                elements.push(DataElement::new(header.tag, header.vr, PrimitiveValue::U8(C::new())));
+                break;
+            }
+
+            DataToken::PixelSequenceStart if stop_at_pixel_data && !in_item => {
+                let tag = Tag(0x7FE0, 0x0010);
+                let location = DeferredValueLocation {
+                    offset: base_offset + reader.source_position(),
+                    length: DeferredValueLocation::UNDEFINED_LENGTH,
+                };
+                deferred.entries.insert(tag, DeferredEntry::Value(location));
+                let placeholder = PixelFragmentSequence::new(C::<u32>::new(), C::<InMemFragment>::new());
+                elements.push(DataElement::new(tag, VR::OB, Value::PixelSequence(placeholder)));
+                break;
+            }
 
             DataToken::ElementHeader(header) if header.len.is_defined() && defer(&header) => {
                 let skipped = reader.skip_value()?;
@@ -622,6 +676,7 @@ pub(crate) fn build_dataset_deferring<R: Read + std::io::Seek>(
                                 true,
                                 defer,
                                 defer_pixel_sequences,
+                                false,
                                 base_offset,
                             )?;
                             items.push(item);

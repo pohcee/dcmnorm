@@ -42,6 +42,8 @@ use dcmnorm::dicom_io::{
 };
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 
+mod dataset;
+
 /// Read `path` to render (or texture-export) frame `frame_index` and nothing else: for a native
 /// multi-frame file, only that frame's bytes are read (see dcmnorm's `read_dicom_file_for_frame`)
 /// - e.g. ~130KB of a 29MB, 227-frame ultrasound cine instead of all of it. Anything that
