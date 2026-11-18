@@ -24,7 +24,7 @@
 
   <groupId>com.pohcee</groupId>
   <artifactId>dcmnorm-natives</artifactId>
-  <version>0.13.1</version>
+  <version>0.14.0</version>
   <packaging>pom</packaging>
 
   <name>dcmnorm-natives</name>
