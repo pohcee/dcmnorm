@@ -53,7 +53,7 @@ if [ "$RUN_TEST" = true ]; then
 
   echo "==> compiling src/test/java/.../Smoke.java"
   mkdir -p "$SCRIPT_DIR/target/test-classes"
-  javac -d "$SCRIPT_DIR/target/test-classes" -cp "$SCRIPT_DIR/target/classes" \
+  javac -encoding UTF-8 -d "$SCRIPT_DIR/target/test-classes" -cp "$SCRIPT_DIR/target/classes" \
     $(find "$SCRIPT_DIR/src/test/java" -name '*.java')
 
   echo "==> java com.pohcee.dcmnorm.internal.NativeLoaderTest"
