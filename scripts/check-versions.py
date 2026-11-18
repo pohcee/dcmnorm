@@ -14,7 +14,8 @@ The binding packages publish with the release version too (packaging/README.md):
 (bindings/node/package.json: its version and every optionalDependencies platform package, and the
 version the napi-generated bindings/node/index.js expects of them), the PyPI wheel
 (bindings/python/pyproject.toml, in its PEP 440 form) and the Maven artifacts
-(bindings/java/pom.xml and bindings/java/natives/pom.xml).
+(bindings/java/pom.xml and bindings/java/natives/pom.xml, plus the relocation POMs for their
+pre-0.14 names in bindings/java/relocation/, whose relocation target version is pinned too).
 """
 
 import argparse
@@ -42,7 +43,15 @@ PYPI_VERSION = r"\d+\.\d+\.\d+(?:(?:a|b|rc)\d+)?"  # the PyPI form the skill ins
 NODE_PACKAGE_JSON = REPO_ROOT / "bindings" / "node" / "package.json"
 NODE_INDEX_JS = REPO_ROOT / "bindings" / "node" / "index.js"
 PYPROJECT = REPO_ROOT / "bindings" / "python" / "pyproject.toml"
-POMS = [REPO_ROOT / "bindings" / "java" / "pom.xml", REPO_ROOT / "bindings" / "java" / "natives" / "pom.xml"]
+JAVA_DIR = REPO_ROOT / "bindings" / "java"
+# Each POM with the number of versions it pins: its own project version, and for a relocation POM
+# also its <relocation>'s target version (com.pohcee:dcmnorm-java -> com.pohcee:dcmnorm).
+POMS = [
+    (JAVA_DIR / "pom.xml", 1),
+    (JAVA_DIR / "natives" / "pom.xml", 1),
+    (JAVA_DIR / "relocation" / "dcmnorm-java" / "pom.xml", 2),
+    (JAVA_DIR / "relocation" / "dcmnorm-java-natives" / "pom.xml", 2),
+]
 # napi's loader checks each platform package's version against this (when
 # NAPI_RS_ENFORCE_VERSION_CHECK is set): `bindingPackageVersion !== '0.11.2'` and its message.
 INDEX_JS_PATTERNS = [
@@ -50,8 +59,11 @@ INDEX_JS_PATTERNS = [
     re.compile(rf"(expected )({VERSION})( but got)"),
 ]
 PYPROJECT_VERSION = re.compile(rf'(?m)^(version = ")({PYPI_VERSION})(")')
-# The project's own <version>: the first one after </artifactId> at the top level.
-POM_VERSION = re.compile(rf"(<artifactId>dcmnorm-java(?:-natives)?</artifactId>\s*<version>)({VERSION})(</version>)")
+# A <version> right after one of our <artifactId>s: the project's own version and a relocation's
+# target version (the POMs have no dependencies or parents on these artifacts).
+POM_VERSION = re.compile(
+    rf"(<artifactId>dcmnorm(?:-java)?(?:-natives)?</artifactId>\s*<version>)({VERSION})(</version>)"
+)
 # Every place the skill names its version: "**dcmnorm X**", "version X or newer", "dcmnorm==X".
 SKILL_PATTERNS = [
     re.compile(rf"(\*\*dcmnorm )({PYPI_VERSION})(\*\*)"),
@@ -109,11 +121,11 @@ def binding_pins() -> list:
     if not match:
         sys.exit(f"no [project] version in {PYPROJECT}")
     pins.append((PYPROJECT, match.group(2), "pypi"))
-    for pom in POMS:
-        match = POM_VERSION.search(pom.read_text(encoding="utf-8"))
-        if not match:
-            sys.exit(f"no project version in {pom}")
-        pins.append((pom, match.group(2), "semver"))
+    for pom, count in POMS:
+        found = [m.group(2) for m in POM_VERSION.finditer(pom.read_text(encoding="utf-8"))]
+        if len(found) != count:
+            sys.exit(f"{pom}: {len(found)} dcmnorm artifact version(s), expected {count}")
+        pins.extend((pom, version, "semver") for version in found)
     return pins
 
 
@@ -129,9 +141,9 @@ def set_binding_versions(version: str) -> None:
     NODE_INDEX_JS.write_text(text, encoding="utf-8")
     text = PYPROJECT.read_text(encoding="utf-8")
     PYPROJECT.write_text(PYPROJECT_VERSION.sub(rf"\g<1>{pypi_version(version)}\g<3>", text, count=1), encoding="utf-8")
-    for pom in POMS:
+    for pom, count in POMS:
         text = pom.read_text(encoding="utf-8")
-        pom.write_text(POM_VERSION.sub(rf"\g<1>{version}\g<3>", text, count=1), encoding="utf-8")
+        pom.write_text(POM_VERSION.sub(rf"\g<1>{version}\g<3>", text, count=count), encoding="utf-8")
 
 
 def skill_pins(text: str) -> list:

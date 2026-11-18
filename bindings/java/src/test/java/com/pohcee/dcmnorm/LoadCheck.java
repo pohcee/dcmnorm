@@ -9,7 +9,7 @@ import java.nio.file.Path;
  * classpath and nothing on {@code java.library.path}, so the library must come out of the jar:
  *
  * <pre>
- * java -cp target/classes:target/test-classes:natives/target/dcmnorm-java-natives-*-linux-x86_64.jar \
+ * java -cp target/classes:target/test-classes:natives/target/dcmnorm-natives-*-linux-x86_64.jar \
  *   com.pohcee.dcmnorm.LoadCheck ../../test/files
  * </pre>
  *

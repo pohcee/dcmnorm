@@ -1,9 +1,11 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  com.pohcee:dcmnorm-java: the Java API (src/main/java), with no native code in it. The native
+  com.pohcee:dcmnorm: the Java API (src/main/java), with no native code in it. The native
   library (src/lib.rs, a separate Cargo crate built with `cargo build -p dcmnorm-java`) ships in
-  com.pohcee:dcmnorm-java-natives, one jar per platform classifier (natives/pom.xml). Maven never
+  com.pohcee:dcmnorm-natives, one jar per platform classifier (natives/pom.xml). Maven never
   invokes Cargo itself: the release workflow builds the library per platform, then packages both.
+  Up to 0.13.x these were com.pohcee:dcmnorm-java and com.pohcee:dcmnorm-java-natives; every
+  release also publishes relocation POMs under the old names (relocation/).
 
   The `release` profile adds what Maven Central requires (sources and javadoc jars, GPG
   signatures) and publishes through the Sonatype Central Portal; see the README, "Packaging".
@@ -15,12 +17,12 @@
   <modelVersion>4.0.0</modelVersion>
 
   <groupId>com.pohcee</groupId>
-  <artifactId>dcmnorm-java</artifactId>
+  <artifactId>dcmnorm</artifactId>
   <version>0.13.1</version>
   <packaging>jar</packaging>
 
-  <name>dcmnorm-java</name>
-  <description>Java bindings for dcmnorm: DICOM read/edit/transcode/render and DIMSE networking in-process (JNI). Add com.pohcee:dcmnorm-java-natives with your platform's classifier.</description>
+  <name>dcmnorm</name>
+  <description>Java bindings for dcmnorm: DICOM read/edit/transcode/render and DIMSE networking in-process (JNI). Add com.pohcee:dcmnorm-natives with your platform's classifier.</description>
   <url>https://github.com/pohcee/dcmnorm</url>
 
   <licenses>
@@ -52,7 +54,6 @@
   </properties>
 
   <build>
-    <finalName>dcmnorm-java-${project.version}</finalName>
     <resources>
       <resource>
         <directory>src/main/resources</directory>
@@ -150,7 +151,14 @@
               <publishingServerId>central</publishingServerId>
               <autoPublish>true</autoPublish>
               <waitUntil>published</waitUntil>
-              <deploymentName>dcmnorm-java ${project.version}</deploymentName>
+              <deploymentName>dcmnorm ${project.version}</deploymentName>
+              <!-- The plugin's deferred and staging directories and the bundle default to the
+                   first reactor project's target/, and the reactor order of these unrelated
+                   modules is not their declaration order: every module names the same place,
+                   bindings/java/target/. -->
+              <forcedDeferredDirectory>${project.basedir}/target/central-deferred</forcedDeferredDirectory>
+              <forcedStagingDirectory>${project.basedir}/target/central-staging</forcedStagingDirectory>
+              <forcedOutputDirectory>${project.basedir}/target/central-publishing</forcedOutputDirectory>
             </configuration>
           </plugin>
         </plugins>

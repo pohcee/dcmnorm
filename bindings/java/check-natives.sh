@@ -28,9 +28,9 @@ esac
 
 mvn -B -q -f "$DIR/pom.xml" package
 mvn -B -q -f "$DIR/natives/pom.xml" package
-# dcmnorm-java-<version>.jar, not its -sources/-javadoc jars (a version always ends in a digit).
-API_JAR="$(echo "$DIR"/target/dcmnorm-java-*[0-9].jar)"
-NATIVES_JAR="$(echo "$DIR"/natives/target/dcmnorm-java-natives-*-"$CLASSIFIER".jar)"
+# dcmnorm-<version>.jar, not its -sources/-javadoc jars (a version always ends in a digit).
+API_JAR="$(echo "$DIR"/target/dcmnorm-*[0-9].jar)"
+NATIVES_JAR="$(echo "$DIR"/natives/target/dcmnorm-natives-*-"$CLASSIFIER".jar)"
 for jar in "$API_JAR" "$NATIVES_JAR"; do
   [ -f "$jar" ] || { echo "not built: $jar" >&2; exit 1; }
 done

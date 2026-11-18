@@ -8,7 +8,7 @@
 #          Needs the CLI binaries in bindings/python/data/scripts/ first (packaging/stage_cli.py).
 #   packaging/build-binding-linux.sh java [x86_64|aarch64]
 #       -> bindings/java/natives/target/natives/<classifier>/native/<classifier>/libdcmnorm_java.so
-#          (+ .sha256), the layout of the dcmnorm-java-natives jar (bindings/java/README.md);
+#          (+ .sha256), the layout of the com.pohcee:dcmnorm-natives jar (bindings/java/README.md);
 #          <classifier> is linux-x86_64 or linux-aarch_64 (the os-maven-plugin names)
 #
 # FFmpeg is built from source and linked in statically (the ffmpeg-codec feature, which needs git

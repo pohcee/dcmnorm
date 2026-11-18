@@ -1,3 +1,5 @@
+<img src="https://raw.githubusercontent.com/pohcee/dcmnorm/main/docs/images/dcmnorm-icon.png" alt="dcmnorm" width="96">
+
 # dcmnorm (Node.js binding)
 
 Native Node.js bindings for dcmnorm, built with [napi-rs](https://napi.rs). Calls

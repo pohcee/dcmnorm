@@ -125,22 +125,29 @@ published first, then `dcmnorm`; a version already on npm is skipped (so a re-ru
 partial publish); prerelease versions get the `next` dist-tag. `bindings/node/prepare-npm.js`
 generates and checks the layout (see `bindings/node/README.md`, "Packaging").
 
-### Maven Central: `com.pohcee:dcmnorm-java` + `com.pohcee:dcmnorm-java-natives`
+### Maven Central: `com.pohcee:dcmnorm` + `com.pohcee:dcmnorm-natives`
 
 | Artifact | Contents | Size |
 |---|---|---|
-| `dcmnorm-java-<v>.jar` | the API classes (no native code), plus `-sources.jar` and `-javadoc.jar` | 43 kB |
-| `dcmnorm-java-natives-<v>.pom` (packaging `pom`) | metadata only | |
-| `dcmnorm-java-natives-<v>-<classifier>.jar` | `native/<classifier>/<library>` + `.sha256` | 13 MB for `linux-x86_64` |
+| `dcmnorm-<v>.jar` | the API classes (no native code), plus `-sources.jar` and `-javadoc.jar` | 43 kB |
+| `dcmnorm-natives-<v>.pom` (packaging `pom`) | metadata only | |
+| `dcmnorm-natives-<v>-<classifier>.jar` | `native/<classifier>/<library>` + `.sha256` | 13 MB for `linux-x86_64` |
+| `dcmnorm-java-<v>.pom`, `dcmnorm-java-natives-<v>.pom` (packaging `pom`) | relocation POMs only | |
+
+Up to 0.13.x the two artifacts were `com.pohcee:dcmnorm-java` and `com.pohcee:dcmnorm-java-natives`
+(those versions stay on Central). Every release since 0.14.0 also publishes a relocation POM under
+each old name at the release version (`bindings/java/relocation/`), pointing to the new artifact at
+the same version, with no end date (see the comment in those POMs).
 
 Classifiers: `linux-x86_64`, `linux-aarch_64`, `osx-aarch_64`, `osx-x86_64`, `windows-x86_64`. A
 consumer depends on the API and the one classifier it runs on (`bindings/java/README.md`,
-"Install"). Every file is GPG-signed. Both artifacts go to Central as one deployment
-(`natives/pom.xml`'s release profile builds `../pom.xml` in the same reactor), so the portal
-validates and publishes them together or not at all; the job waits until it is published. Before
+"Install"). Every file is GPG-signed. All four artifacts go to Central as one deployment
+(`natives/pom.xml`'s release profile builds `../pom.xml` and `../relocation/*` in the same
+reactor), so the portal validates and publishes them together or not at all; the job waits until it is published. Before
 uploading, the job builds the bundle with `-DskipUpload=true` and checks it with
-`bindings/java/check-bundle.py` (the portal's rules: a `.pom` per component, sources and javadoc
-for the API, `.md5`/`.sha1`/`.asc` for every file, nothing else); pull requests run the same check
+`bindings/java/check-bundle.py` (the portal's rules: a `.pom` with the required metadata per
+component, sources and javadoc for the API, `.md5`/`.sha1`/`.asc` for every file, nothing else;
+and exactly the four artifacts, the relocations pointing at the release version); pull requests run the same check
 on an unsigned bundle with placeholder natives. central-publishing-maven-plugin must be 0.12.0 or
 newer: with Maven 3.10, 0.8.0 to 0.11.x put Maven's `maven-metadata-local.xml` and
 `_remote.repositories` into the bundle, which the portal rejects ("Bundle has content that does
