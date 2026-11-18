@@ -133,7 +133,7 @@ common workflow to its dcm4che idiom.
 
 ## Why dcmnorm
 
-- **Fast:** fastest of dcmtk, dcm4che, and dcmnorm in every parse, render, and transcode benchmark; DICOM → JSON takes ~3 ms whether the file is 90 KB or 29 MB ([benchmarks](docs/benchmarks.md#benchmarks))
+- **Fast:** faster than dcmtk and dcm4che in every parse, render, and transcode benchmark; DICOM → JSON takes ~3 ms whether the file is 90 KB or 29 MB ([benchmarks](docs/benchmarks.md#benchmarks))
 - **Broad:** renders most DICOM imaging SOP classes, including WSI, with modality/VOI LUTs, windowing, and overlays; cine → MP4; MPR reformats; NIfTI/NRRD volume export
 - **Networked:** `dcmtalk` covers C-ECHO/C-STORE/C-FIND/C-MOVE plus a storage SCP, with no dcmtk dependency
 - **Embeddable:** in-process Node.js, Python, and Java bindings, plus a Rust library crate
