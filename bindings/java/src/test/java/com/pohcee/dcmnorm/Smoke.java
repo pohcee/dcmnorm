@@ -50,6 +50,7 @@ public final class Smoke {
         dcmtalkBinary = Path.of(args[1]);
 
         testCore();
+        DatasetTest.run(fixtures);
         testRendering();
         Path tempDir = Files.createTempDirectory("dcmnorm-java-smoke-");
         testMpr(tempDir);
