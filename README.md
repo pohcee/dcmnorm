@@ -60,7 +60,7 @@ Rust (`Cargo.toml`):
 
 ```toml
 [dependencies]
-dcmnorm = { git = "https://github.com/pohcee/dcmnorm", tag = "v0.14.0" }
+dcmnorm = { git = "https://github.com/pohcee/dcmnorm", tag = "v0.15.0" }
 ```
 
 More options (the agent plugin, Docker, building from source): [docs/install.md](docs/install.md).
