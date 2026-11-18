@@ -48,7 +48,7 @@ NATIVES_JAR="$(native_path "$NATIVES_JAR")"
 FIXTURES="$(native_path "$FIXTURES")"
 mkdir -p "$DIR/target/test-classes"
 # shellcheck disable=SC2046 # the test sources have no spaces in their paths
-javac -d "$DIR/target/test-classes" -cp "$DIR/target/classes" $(find "$DIR/src/test/java" -name '*.java')
+javac -encoding UTF-8 -d "$DIR/target/test-classes" -cp "$DIR/target/classes" $(find "$DIR/src/test/java" -name '*.java')
 CP="$API_JAR$SEP$(native_path "$DIR/target/test-classes")"
 java -cp "$CP" com.pohcee.dcmnorm.internal.NativeLoaderTest
 # A fresh cache directory, so the library really is extracted from this jar.
