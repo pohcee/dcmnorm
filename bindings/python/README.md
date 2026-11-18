@@ -36,6 +36,59 @@ python test/smoke.py         # core / render / MPR / texture-export smoke test
 python test/smoke_dimse.py   # DIMSE SCU + SCP smoke test (echo/store/find/move, callbacks)
 ```
 
+## Typed datasets
+
+A typed dataset API (#6) alongside the calls below. A source is a path, bytes-like, or a binary
+file object read front to back with `read(n)` (e.g. an object-storage download).
+
+```python
+import dcmnorm
+from dcmnorm import Tag, VR, TransferSyntax
+
+ds = dcmnorm.read("in.dcm", until_pixel_data=True)          # DicomDataset, plain Python values
+ds.get_string(Tag.StudyInstanceUID)
+ds.get_int(Tag.NumberOfFrames, 1)
+ds.get_sequence(Tag.ReferencedSeriesSequence)                # [DicomDataset]
+ds.get_person_name(Tag.PatientName).family_name
+ds.get_bulk_data_ref(Tag.PixelData)                          # BulkDataRef(tag, vr, offset, length)
+
+json_text = dcmnorm.to_dicom_json("in.dcm", bulk_data_uri_builder=lambda ref: f"{base}/{ref.offset}")
+
+edited = dcmnorm.read("in.dcm").to_builder().set(Tag.PatientName, VR.PN, "Doe^Jane").build()
+dcmnorm.write(edited, "out.dcm", transfer_syntax=TransferSyntax.ExplicitVRLittleEndian)
+
+frame = dcmnorm.render_pixels("in.dcm", 0, window_center=40, window_width=400)
+frame.width, frame.height, frame.channels, frame.shape     # frame.data: bytes, no image encoding
+frame.memoryview()                                         # shaped view; frame.to_numpy() if numpy is installed
+```
+
+- `read(source, until_pixel_data=False, load_bulk_data=False)`: `until_pixel_data` stops at the
+  PixelData header (a file object isn't read past it); bulk values stay in the source as
+  `BulkDataRef`s unless `load_bulk_data`. Accessors: `get_string`, `get_strings`, `get_int`,
+  `get_float`, `get_numbers`, `get_bytes`, `get_sequence`, `get_nested_dataset`,
+  `get_person_name`, `get_bulk_data_ref`, `vr`, `tags`, `file_meta`, `transfer_syntax_uid`,
+  `number_of_frames`, `frame_time_ms`, `pixel_aspect_ratio`; `tag in ds`, `ds[tag]`, iteration.
+- `to_dicom_json(source | dataset, include_tags=, exclude_tags=, bulk_data="uri" | "inline",
+  bulk_data_uri_base=, bulk_data_uri_builder=, include_file_meta=, keyword_and_vm=)`: PS3.18
+  Annex F JSON without reading PixelData.
+- `to_builder()` → `set(tag, vr, *values)` / `set(tag, [values])`, `set_int`, `set_float`,
+  `set_tags`, `set_bytes`, `set_sequence`, `add_sequence_item`, `edit_sequence_item`, `remove`,
+  `remove_private_tags`, `build()`. `write(dataset, path | file | None, transfer_syntax=,
+  bulk_data_source=)` creates the File Meta Information and reads references natively from the
+  source.
+- `render_pixels(source, frame_index, **params)`: `window_center`/`window_width`, `voi_lut`,
+  `modality_lut`, `icc_profile`, `output_width`, `output_height`, `show_overlays`,
+  `overlay_index`, `overlay_color`; pipeline as in [the Java guide](../java/GUIDE.md#3-frame-rendering).
+  `RenderedPixels.data` is the one copy of the pixels; `memoryview()` / `to_numpy()` view it.
+- `transcode_to(source, uid, output=None)`, `transfer_syntax_support()`, `keyword_of` /
+  `vr_of` / `tag_for_keyword`.
+- Generated constants: `Tag` (int constants), `VR`, `TransferSyntax` (`.lossy`,
+  `.encapsulated`, `.explicit_vr`, `.from_uid()`), `SOPClassUID` (`.description`).
+- Errors: `DcmnormError` subclasses `InvalidDicomError`, `UnsupportedTransferSyntaxError`,
+  `DecodeError`, `EncodeError`, `RenderError`, `DimseError`, with `kind`,
+  `source_transfer_syntax_uid`, `target_transfer_syntax_uid`, `frame_index`. numpy is optional;
+  there are no type stubs yet.
+
 ## API
 
 Every function is synchronous and releases the GIL while it runs; every entry point runs through

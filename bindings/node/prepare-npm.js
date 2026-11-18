@@ -8,8 +8,9 @@
 // Layout (the esbuild / napi-rs per-platform scheme): the main package `dcmnorm` holds only JS -
 // dcmnorm.js (the entry point), dicom-constants.js and the napi loader index.js - with their
 // types, and lists one optionalDependency per platform package `@dcmnorm/<platform>`, each of
-// which holds only that platform's .node and declares os/cpu/libc, so npm installs just the one that fits the machine. The platform package dirs are
-// generated under npm/ (not committed) and the repository LICENSE is copied into every package.
+// which holds only that platform's .node and declares os/cpu/libc, so npm installs just the one
+// that fits the machine. The platform package dirs are generated under npm/ (not committed) and
+// the repository LICENSE is copied into every package.
 //
 // napi generates index.js with platform packages named `<package name>-<platform>`
 // (`dcmnorm-linux-x64-gnu`) and has no setting for a scope of their own, so this rewrites those
