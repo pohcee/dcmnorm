@@ -110,7 +110,12 @@ upstream commit):
   10f9b6db). The ratio limit is 64:1, PackBits' actual maximum, rather than
   upstream's 32:1, which refuses valid mostly-blank images; and the RLE header
   itself is validated (64 bytes, at most 15 segments), as is each segment's decoded
-  length, neither of which upstream checks.
+  length, neither of which upstream checks. Not from upstream: each segment's
+  bytes are placed by the PS3.5 Annex G layout (sample by sample, most
+  significant byte first, into little-endian interleaved output) rather than
+  the inherited index expression, which shifted 8-bit single-sample images by
+  one byte and byte-swapped 16-bit colour (#41); the header's segment count
+  must match BitsAllocated x SamplesPerPixel; and 32-bit samples decode.
 - `adapters/jpeg.rs`: color JPEG Baseline output is labeled `YBR_FULL_422`
   (upstream 636ae060), or `YBR_FULL` when `jpeg-encoder` doesn't subsample
   chroma, instead of `RGB`.

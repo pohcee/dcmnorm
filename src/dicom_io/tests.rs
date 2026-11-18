@@ -5924,3 +5924,218 @@ fn flat_and_standard_json_trim_padded_number_strings_alike() {
     assert_eq!(standard["00200011"]["Value"], serde_json::json!(["107"]));
     assert_eq!(standard["00281050"]["Value"], serde_json::json!(["1.5", "2"]));
 }
+
+/// An RLE frame (PS3.5 G.5) built by hand: the 64-byte header, then each segment exactly as
+/// stored (padding included), so the expected samples are known without any RLE encoder.
+fn hand_built_rle_frame(segments: &[&[u8]]) -> Vec<u8> {
+    let mut frame = vec![0u8; 64];
+    frame[..4].copy_from_slice(&(segments.len() as u32).to_le_bytes());
+    let mut offset = 64u32;
+    for (i, segment) in segments.iter().enumerate() {
+        frame[4 + 4 * i..8 + 4 * i].copy_from_slice(&offset.to_le_bytes());
+        offset += segment.len() as u32;
+    }
+    for segment in segments {
+        frame.extend_from_slice(segment);
+    }
+    frame
+}
+
+/// A synthetic Secondary Capture RLE Lossless file (no patient data), one fragment per frame.
+fn synthetic_rle_dicom(
+    rows: u16,
+    cols: u16,
+    bits_allocated: u16,
+    samples_per_pixel: u16,
+    planar_configuration: Option<u16>,
+    frames: Vec<Vec<u8>>,
+) -> Vec<u8> {
+    use dcmnorm_core::value::PixelFragmentSequence;
+    use dcmnorm_object::FileMetaTableBuilder;
+
+    let photometric = if samples_per_pixel == 3 {
+        "RGB"
+    } else {
+        "MONOCHROME2"
+    };
+    let mut elements = vec![
+        DataElement::new(
+            tags::SOP_CLASS_UID,
+            VR::UI,
+            PrimitiveValue::from(uids::SECONDARY_CAPTURE_IMAGE_STORAGE),
+        ),
+        DataElement::new(
+            tags::SOP_INSTANCE_UID,
+            VR::UI,
+            PrimitiveValue::from("2.25.110101"),
+        ),
+        DataElement::new(
+            tags::SAMPLES_PER_PIXEL,
+            VR::US,
+            PrimitiveValue::from(samples_per_pixel),
+        ),
+        DataElement::new(
+            tags::PHOTOMETRIC_INTERPRETATION,
+            VR::CS,
+            PrimitiveValue::from(photometric),
+        ),
+        DataElement::new(tags::ROWS, VR::US, PrimitiveValue::from(rows)),
+        DataElement::new(tags::COLUMNS, VR::US, PrimitiveValue::from(cols)),
+        DataElement::new(
+            tags::BITS_ALLOCATED,
+            VR::US,
+            PrimitiveValue::from(bits_allocated),
+        ),
+        DataElement::new(
+            tags::BITS_STORED,
+            VR::US,
+            PrimitiveValue::from(bits_allocated),
+        ),
+        DataElement::new(
+            tags::HIGH_BIT,
+            VR::US,
+            PrimitiveValue::from(bits_allocated - 1),
+        ),
+        DataElement::new(
+            tags::PIXEL_REPRESENTATION,
+            VR::US,
+            PrimitiveValue::from(0u16),
+        ),
+    ];
+    if frames.len() > 1 {
+        elements.push(DataElement::new(
+            tags::NUMBER_OF_FRAMES,
+            VR::IS,
+            PrimitiveValue::from(frames.len().to_string()),
+        ));
+    }
+    if let Some(planar_configuration) = planar_configuration {
+        elements.push(DataElement::new(
+            tags::PLANAR_CONFIGURATION,
+            VR::US,
+            PrimitiveValue::from(planar_configuration),
+        ));
+    }
+    elements.push(DataElement::new(
+        tags::PIXEL_DATA,
+        VR::OB,
+        PixelFragmentSequence::new(Vec::new(), frames),
+    ));
+    let mut object = InMemDicomObject::from_element_iter(elements)
+        .with_meta(
+            FileMetaTableBuilder::new()
+                .media_storage_sop_class_uid(uids::SECONDARY_CAPTURE_IMAGE_STORAGE)
+                .media_storage_sop_instance_uid("2.25.110101")
+                .transfer_syntax(uids::RLE_LOSSLESS),
+        )
+        .unwrap();
+    write_dicom_bytes(&mut object).unwrap()
+}
+
+/// `transcode_dicom_bytes` RLE Lossless -> Explicit VR Little Endian yields exactly `expected`
+/// as native PixelData; returns the decoded object for further checks.
+fn assert_rle_transcodes_to(input: Vec<u8>, expected: &[u8]) -> dcmnorm_object::DefaultDicomObject {
+    let output = transcode_dicom_bytes(input, uids::EXPLICIT_VR_LITTLE_ENDIAN).unwrap();
+    let object = read_dicom_bytes(&output).unwrap();
+    assert_eq!(
+        object.meta().transfer_syntax().trim_end_matches('\0'),
+        uids::EXPLICIT_VR_LITTLE_ENDIAN
+    );
+    let pixel_data = object
+        .element(tags::PIXEL_DATA)
+        .unwrap()
+        .to_bytes()
+        .unwrap();
+    assert_eq!(pixel_data.as_ref(), expected);
+    object
+}
+
+/// pohcee/dcmnorm#41, the issue's reproduction: a 2x2 8-bit MONOCHROME2 frame of one segment
+/// (`01 11 22 01 33 44`, a 2-byte literal run per row) decoded to `[0, 17, 34, 51]` - a
+/// leading zero, every sample shifted by one, the last dropped - and still succeeded.
+#[test]
+fn rle_8_bit_monochrome_transcodes_to_the_exact_samples() {
+    let frame = hand_built_rle_frame(&[&[0x01, 0x11, 0x22, 0x01, 0x33, 0x44]]);
+    let input = synthetic_rle_dicom(2, 2, 8, 1, None, vec![frame]);
+    assert_rle_transcodes_to(input, &[17, 34, 51, 68]);
+}
+
+/// Odd width, a zero padding byte after an odd-length segment, and a replicate run.
+#[test]
+fn rle_8_bit_monochrome_with_odd_width_padding_and_a_replicate_run_transcodes_exactly() {
+    let segment: &[u8] = &[0x01, 10, 11, 0x00, 12, 0xFE, 5, 0x00];
+    let input = synthetic_rle_dicom(2, 3, 8, 1, None, vec![hand_built_rle_frame(&[segment])]);
+    assert_rle_transcodes_to(input, &[10, 11, 12, 5, 5, 5]);
+}
+
+/// 16-bit: the high-byte segment comes first, the output is little endian.
+#[test]
+fn rle_16_bit_monochrome_transcodes_to_little_endian_samples() {
+    let msb: &[u8] = &[0x01, 0x01, 0x03, 0x01, 0xFF, 0x00];
+    let lsb: &[u8] = &[0x01, 0x02, 0x04, 0x01, 0x00, 0xFF];
+    let input = synthetic_rle_dicom(2, 2, 16, 1, None, vec![hand_built_rle_frame(&[msb, lsb])]);
+    assert_rle_transcodes_to(input, &[0x02, 0x01, 0x04, 0x03, 0x00, 0xFF, 0xFF, 0x00]);
+}
+
+/// 8-bit RGB: three colour-plane segments, decoded to interleaved pixels with Planar
+/// Configuration 0, whichever value the RLE data set carried.
+#[test]
+fn rle_8_bit_rgb_transcodes_to_interleaved_pixels() {
+    let red: &[u8] = &[0x01, 1, 4, 0x00];
+    let green: &[u8] = &[0x01, 2, 5, 0x00];
+    let blue: &[u8] = &[0xFF, 7];
+    for planar_configuration in [None, Some(0), Some(1)] {
+        let frame = hand_built_rle_frame(&[red, green, blue]);
+        let input = synthetic_rle_dicom(1, 2, 8, 3, planar_configuration, vec![frame]);
+        let object = assert_rle_transcodes_to(input, &[1, 2, 7, 4, 5, 7]);
+        assert_eq!(
+            object
+                .element(tags::PLANAR_CONFIGURATION)
+                .unwrap()
+                .uint16()
+                .unwrap(),
+            0
+        );
+    }
+}
+
+/// 16-bit RGB: before #41 every sample came out byte-swapped.
+#[test]
+fn rle_16_bit_rgb_transcodes_to_little_endian_interleaved_pixels() {
+    let frame = hand_built_rle_frame(&[
+        &[0x01, 0x11, 0x77],
+        &[0x01, 0x22, 0x88],
+        &[0x01, 0x33, 0x99],
+        &[0x01, 0x44, 0xAA],
+        &[0x01, 0x55, 0xBB],
+        &[0x01, 0x66, 0xCC],
+    ]);
+    let input = synthetic_rle_dicom(1, 2, 16, 3, Some(1), vec![frame]);
+    assert_rle_transcodes_to(
+        input,
+        &[
+            0x22, 0x11, 0x44, 0x33, 0x66, 0x55, 0x88, 0x77, 0xAA, 0x99, 0xCC, 0xBB,
+        ],
+    );
+}
+
+/// Multi-frame, one fragment per frame (decoded frame-parallel by the transcoder).
+#[test]
+fn rle_multi_frame_8_bit_monochrome_transcodes_every_frame_exactly() {
+    let frames = vec![
+        hand_built_rle_frame(&[&[0x01, 0x11, 0x22, 0x01, 0x33, 0x44]]),
+        hand_built_rle_frame(&[&[0xFF, 9, 0xFF, 10]]),
+        hand_built_rle_frame(&[&[0x01, 0, 255, 0x01, 128, 1]]),
+    ];
+    let input = synthetic_rle_dicom(2, 2, 8, 1, None, frames);
+    assert_rle_transcodes_to(input, &[17, 34, 51, 68, 9, 9, 10, 10, 0, 255, 128, 1]);
+}
+
+/// A header with more segments than BitsAllocated x SamplesPerPixel calls for is an error,
+/// not a success with the wrong samples.
+#[test]
+fn rle_with_a_segment_count_mismatch_fails_to_transcode() {
+    let frame = hand_built_rle_frame(&[&[0x01, 1, 2], &[0x01, 3, 4]]);
+    let input = synthetic_rle_dicom(1, 2, 8, 1, None, vec![frame]);
+    assert!(transcode_dicom_bytes(input, uids::EXPLICIT_VR_LITTLE_ENDIAN).is_err());
+}
