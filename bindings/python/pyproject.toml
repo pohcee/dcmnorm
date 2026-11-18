@@ -17,7 +17,7 @@ build-backend = "maturin"
 name = "dcmnorm"
 # The PEP 440 form of the release version; written by scripts/release-tag.sh
 # (scripts/check-versions.py --set) and checked in CI.
-version = "0.13.0"
+version = "0.13.1"
 description = "DICOM read/edit/transcode/render (dcmnorm) and DICOM network (dcmtalk) command-line tools, with an in-process Python binding"
 readme = "../../packaging/pypi-README.md"
 # The extension module itself needs CPython 3.9+ (its cp39-abi3 tag says so); 3.8 matches the

@@ -16,7 +16,7 @@
 
   <groupId>com.pohcee</groupId>
   <artifactId>dcmnorm-java</artifactId>
-  <version>0.13.0</version>
+  <version>0.13.1</version>
   <packaging>jar</packaging>
 
   <name>dcmnorm-java</name>
