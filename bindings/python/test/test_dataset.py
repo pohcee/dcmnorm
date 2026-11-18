@@ -252,6 +252,24 @@ def test_errors():
     expect_error(TypeError, lambda: dcmnorm.read(12345))
 
 
+def test_readme_sample():
+    """The root README's Python sample, as written, on a copy of a fixture named scan.dcm."""
+    import shutil
+
+    cwd = os.getcwd()
+    with tempfile.TemporaryDirectory() as tmp:
+        shutil.copy(fixture("mr_small.dcm"), os.path.join(tmp, "scan.dcm"))
+        os.chdir(tmp)
+        try:
+            ds = dcmnorm.read("scan.dcm", until_pixel_data=True)
+            print(ds.get_string(Tag.StudyInstanceUID), ds.number_of_frames)
+            frame = dcmnorm.render_pixels("scan.dcm", 0)
+            dcmnorm.transcode_to("scan.dcm", TransferSyntax.ExplicitVRLittleEndian, "out.dcm")
+            assert frame.shape == (64, 64) and os.path.getsize("out.dcm") > 8192
+        finally:
+            os.chdir(cwd)
+
+
 def main():
     for name, test in sorted(globals().items()):
         if name.startswith("test_") and callable(test):

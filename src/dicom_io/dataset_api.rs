@@ -3,6 +3,32 @@
 //! forward-only stream) into a [`DatasetDocument`], writing DICOM JSON from a source or a
 //! document, writing a document back to DICOM, rendering one frame to raw pixels, and
 //! dictionary lookups. Every function reports an [`ApiError`].
+//!
+//! The root README's Rust sample, run here against a fixture:
+//!
+//! ```
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! use dcmnorm::dicom_io::{read_dataset_document, render_source_frame, transcode_source, write_dicom_file};
+//! use dcmnorm::dicom_io::{DatasetReadOptions, DicomSource, RenderPipelineOptions, TreeValue};
+//!
+//! # let fixture = concat!(env!("CARGO_MANIFEST_DIR"), "/test/files/mr_small.dcm");
+//! # let out_dir = std::env::temp_dir().join(format!("dcmnorm-readme-{}", std::process::id()));
+//! # std::fs::create_dir_all(&out_dir)?;
+//! # let out_path = out_dir.join("out.dcm");
+//! let scan = std::path::Path::new(fixture);
+//! let options = DatasetReadOptions { until_pixel_data: true, ..Default::default() };
+//! let ds = read_dataset_document(DicomSource::Path(scan), options)?;
+//! if let Some(TreeValue::Strings(uid)) = ds.dataset.get(0x0020_000D).map(|e| &e.value) {
+//!     println!("StudyInstanceUID {}", uid[0]);
+//! }
+//! let frame = render_source_frame(DicomSource::Path(scan), &RenderPipelineOptions::default())?;
+//! let mut out = transcode_source(DicomSource::Path(scan), "1.2.840.10008.1.2.1")?;
+//! write_dicom_file(&mut out, &out_path)?;
+//! # assert_eq!((frame.width, frame.height), (64, 64));
+//! # std::fs::remove_dir_all(&out_dir)?;
+//! # Ok(())
+//! # }
+//! ```
 
 use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 use std::path::Path;

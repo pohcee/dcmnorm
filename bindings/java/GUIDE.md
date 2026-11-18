@@ -10,7 +10,7 @@ accessors with defaults - but not its API shape: there are no streams to manage,
 configure or handles to close. Each operation is one static call on `Dcmnorm` that runs in
 native code and returns plain Java objects.
 
-Requirements: Java 11 or later; `com.pohcee:dcmnorm-java` plus the natives jar for your platform
+Requirements: Java 11 or later; `com.pohcee:dcmnorm` plus `com.pohcee:dcmnorm-natives` for your platform
 (README, "Install").
 
 - [Concepts](#concepts)

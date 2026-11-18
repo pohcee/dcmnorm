@@ -161,6 +161,24 @@ async function main() {
   );
   await assert.rejects(d.renderPixels(fixture("mr_small.dcm"), 3), (e) => e instanceof d.RenderError && e.frameIndex === 3);
 
+  // the root README's Node.js sample, as written, on a copy of a fixture named scan.dcm
+  const cwd = process.cwd();
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "dcmnorm-readme-"));
+  fs.copyFileSync(fixture("mr_small.dcm"), path.join(tmp, "scan.dcm"));
+  process.chdir(tmp);
+  try {
+    const { read, renderPixels, transcodeTo, Tag, TransferSyntax } = require("../dcmnorm.js");
+    const ds = await read("scan.dcm", { untilPixelData: true });
+    console.log(ds.getString(Tag.StudyInstanceUID), ds.numberOfFrames);
+    const { width, height, channels, pixels } = await renderPixels("scan.dcm", 0);
+    await transcodeTo("scan.dcm", TransferSyntax.ExplicitVRLittleEndian, "out.dcm");
+    assert.deepStrictEqual([width, height, channels, pixels.length], [64, 64, 1, 4096]);
+    assert.ok(fs.statSync("out.dcm").size > 8192);
+  } finally {
+    process.chdir(cwd);
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+
   console.log("dataset tests passed");
 }
 

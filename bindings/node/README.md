@@ -148,7 +148,7 @@ const { width, height, channels, pixels } = await renderPixels("in.dcm", 0, { wi
   — computes a pixel-value histogram per frame, over the same modality-LUT-applied grayscale
   values `renderFrame` decodes from (so e.g. a CT frame's bins are in Hounsfield units). Mirrors
   the CLI's `--histogram`/`--histogram-bins`/`--histogram-frame`/`--histogram-min`/`--histogram-max`
-  — see the main [README](../../README.md#compute-a-pixel-histogram-with---histogram) for the
+  — see the [CLI docs](../../docs/cli.md#compute-a-pixel-histogram-with---histogram) for the
   field-by-field output shape. `binCount` defaults to 256; `frameIndex` (0-based) restricts the
   result to one frame instead of every frame in the instance (and, like `renderFrame`, reads only
   that frame's bytes of a native multi-frame file, and decodes only that frame of a compressed
@@ -191,7 +191,7 @@ Packs a volume, a single frame, or several independent frames as a lossless, GPU
 payload (16-bit samples, row-major, optionally gzip-compressed) instead of an 8-bit windowed
 render — the client does its own window/level and oblique reslicing in a GPU shader instead of
 round-tripping to the server per interaction. Mirrors the CLI's `--output-type texture`/`.gputex`
-(`exportTexture`/`exportFrameTexture`) — see the main [README](../../README.md#export-a-gpu-texture-gputex)
+(`exportTexture`/`exportFrameTexture`) — see the [CLI docs](../../docs/cli.md#export-a-gpu-texture-gputex)
 and `dcmnorm::dicom_io::texture_export`'s own module doc for the full format contract.
 
 - `DicomVolumeHandle.exportTexture(options?: { targetMaxDim?, compression?: 'gzip'|'none', windowCenter?, windowWidth? }): Promise<TextureExportResult>`

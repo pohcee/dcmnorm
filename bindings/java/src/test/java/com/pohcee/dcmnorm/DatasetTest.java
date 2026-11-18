@@ -60,6 +60,7 @@ public final class DatasetTest {
         testRendering();
         testTransferSyntaxesAndTranscode();
         testErrors();
+        testReadmeSample();
     }
 
     private static Path fixture(String name) {
@@ -395,6 +396,20 @@ public final class DatasetTest {
         check(Arrays.equals(native_, out.toByteArray()), "transcode(InputStream, OutputStream)");
         checkEquals(native_.length, Dcmnorm.transcode(new ByteArrayInputStream(input), "1.2.840.10008.1.2.1").length,
             "transcode(InputStream)");
+    }
+
+    /** The root README's Java sample, as written (paths resolved in a temporary directory). */
+    private static void testReadmeSample() throws Exception {
+        Path dir = Files.createTempDirectory("dcmnorm-readme");
+        Files.copy(fixture("mr_small.dcm"), dir.resolve("scan.dcm"));
+        Path scan = dir.resolve("scan.dcm");
+        java.io.File frame = dir.resolve("frame.png").toFile();
+        DicomDataset ds = Dcmnorm.read(scan, ReadOptions.untilPixelData());
+        System.out.println(ds.getString(Tag.StudyInstanceUID) + " " + ds.numberOfFrames());
+        BufferedImage image = Dcmnorm.renderImage(scan, 0, new RenderParams());
+        ImageIO.write(image, "png", frame);
+        Dcmnorm.transcode(scan, dir.resolve("out.dcm"), TransferSyntax.ExplicitVRLittleEndian.uid());
+        check(frame.length() > 0 && Files.size(dir.resolve("out.dcm")) > 8192, "README sample outputs");
     }
 
     private static void testErrors() throws Exception {

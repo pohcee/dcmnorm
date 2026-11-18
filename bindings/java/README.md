@@ -238,7 +238,7 @@ Packs a volume, a single frame, or several independent frames as a lossless, GPU
 payload (16-bit samples, row-major, optionally gzip-compressed) instead of an 8-bit windowed
 render - the client does its own window/level and oblique reslicing in a GPU shader instead of
 round-tripping to the server per interaction. Mirrors the CLI's `--output-type texture`/`.gputex`
-- see the main [README](../../README.md#export-a-gpu-texture-gputex) and
+- see the [CLI docs](../../docs/cli.md#export-a-gpu-texture-gputex) and
 `dcmnorm::dicom_io::texture_export`'s own module doc for the full format contract.
 
 - `DicomVolumeHandle.exportTexture([TextureExportOptions]) -> TextureExportResult` - packs the
