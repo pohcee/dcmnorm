@@ -119,6 +119,57 @@ public final class Dcmnorm {
     }
 
     // -----------------------------------------------------------------------------------------
+    // DICOMDIR: writeDicomdir
+    // -----------------------------------------------------------------------------------------
+
+    /** Writes a DICOMDIR with default options - see {@link #writeDicomdir(List, String,
+     * WriteDicomdirOptions)}. */
+    public static WriteDicomdirResult writeDicomdir(List<DicomdirEntry> entries, String outputPath)
+        throws DcmnormException {
+        return writeDicomdir(entries, outputPath, new WriteDicomdirOptions());
+    }
+
+    /**
+     * Writes a DICOMDIR (Media Storage Directory, Explicit VR Little Endian) for a File-set to
+     * {@code outputPath}: PATIENT &gt; STUDY &gt; SERIES &gt; one record per entry, its type from
+     * the SOP Class (IMAGE, SR DOCUMENT, KEY OBJECT DOC, PRESENTATION, ENCAP DOC, ...; PS3.3 F.5).
+     * Type 1 keys the instances lack are synthesized and reported in {@link
+     * WriteDicomdirResult#getSynthesized()}. Raises {@link DcmnormException} for bad File IDs /
+     * File-set IDs, a Patient ID shared by two patients, a study under two patients, a series in
+     * two studies, duplicate files or SOP Instance UIDs. Mirrors {@code dcmnorm dicomdir ROOT},
+     * which scans a directory instead of taking entries.
+     */
+    public static WriteDicomdirResult writeDicomdir(List<DicomdirEntry> entries, String outputPath,
+        WriteDicomdirOptions options) throws DcmnormException {
+        StringBuilder entriesJson = new StringBuilder("[");
+        for (int i = 0; i < entries.size(); i++) {
+            if (i > 0) {
+                entriesJson.append(',');
+            }
+            entriesJson.append(entries.get(i).toJson());
+        }
+        entriesJson.append(']');
+        String json = nativeWriteDicomdir(entriesJson.toString(), outputPath, options.toJson());
+
+        Map<String, Object> map = Json.asMap(Json.parse(json));
+        List<DicomdirRecordCount> recordTypes = new ArrayList<>();
+        for (Object item : Json.asList(map.get("recordTypes"))) {
+            Map<String, Object> count = Json.asMap(item);
+            recordTypes.add(new DicomdirRecordCount(Json.asString(count.get("recordType")), Json.asInt(count.get("count"))));
+        }
+        List<DicomdirSynthesized> synthesized = new ArrayList<>();
+        for (Object item : Json.asList(map.get("synthesized"))) {
+            Map<String, Object> s = Json.asMap(item);
+            Object source = s.get("source");
+            synthesized.add(new DicomdirSynthesized(Json.asString(s.get("recordType")), Json.asString(s.get("entity")),
+                Json.asString(s.get("attribute")), Json.asString(s.get("value")),
+                source == null ? null : Json.asString(source)));
+        }
+        return new WriteDicomdirResult(Json.asInt(map.get("records")), recordTypes, synthesized,
+            Json.asStringList(map.get("warnings")));
+    }
+
+    // -----------------------------------------------------------------------------------------
     // DIMSE: echoScu / storeScu / findScu / moveScu - every call blocks the calling thread until
     // it completes. Unlike the Python bindings' handle-based start_*_scu variants, there is no
     // early abort()/release() here - see this module's README for the scope decision.
@@ -311,6 +362,9 @@ public final class Dcmnorm {
         throws DcmnormException;
 
     private static native boolean nativeCheckDicom(String filePath);
+
+    private static native String nativeWriteDicomdir(String entriesJson, String outputPath, String optionsJson)
+        throws DcmnormException;
 
     private static native int nativeEchoScu(String destination, String optionsJson, DimseLogger onLog)
         throws DcmnormException;

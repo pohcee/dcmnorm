@@ -16,6 +16,7 @@ OVERLAY_FIXTURE = os.path.join(FIXTURES, "overlay.dcm")
 OVERLAY_MULTI_FIXTURE = os.path.join(FIXTURES, "overlay_multi.dcm")
 OVERLAY_EMBEDDED_FIXTURE = os.path.join(FIXTURES, "overlay_embedded.dcm")
 CT_FIXTURE = os.path.join(FIXTURES, "ct.dcm")
+MR_FIXTURE = os.path.join(FIXTURES, "mr.dcm")
 WSI_FIXTURE = os.path.join(FIXTURES, "wsi.dcm")
 
 # The wheel must run on the oldest glibc among its consumers' runtime images -
@@ -83,6 +84,92 @@ def check(condition, message="assertion failed"):
         raise AssertionError(message)
 
 
+def check_dicomdir(tmp_dir):
+    """write_dicomdir over a small File-set: two CT images in one series, an MR (by path) and a
+    US (by read_json's JSON), then read the DICOMDIR back and walk its records."""
+    root = os.path.join(tmp_dir, "fileset")
+    ct1 = ["DICOM", "ST000001", "SE000001", "IM000001"]
+    ct2 = ["DICOM", "ST000001", "SE000001", "IM000002"]
+    mr = ["DICOM", "ST000002", "SE000001", "IM000001"]
+    us = ["DICOM", "ST000003", "SE000001", "IM000001"]
+
+    def place(file_id):
+        target = os.path.join(root, *file_id)
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        return target
+
+    dcmnorm.edit_tags(CT_FIXTURE, output_path=place(ct1))
+    dcmnorm.edit_tags(CT_FIXTURE, output_path=place(ct2), set={"SOPInstanceUID": "2.25.1234567890"})
+    dcmnorm.edit_tags(MR_FIXTURE, output_path=place(mr))
+    dcmnorm.edit_tags(FIXTURE, output_path=place(us))
+
+    output = os.path.join(root, "DICOMDIR")
+    result = dcmnorm.write_dicomdir(
+        [
+            dcmnorm.DicomdirEntry(ct1, path=os.path.join(root, *ct1)),
+            {"file_id": ct2, "path": os.path.join(root, *ct2)},
+            dcmnorm.DicomdirEntry(mr, path=os.path.join(root, *mr)),
+            dcmnorm.DicomdirEntry(us, json=dcmnorm.read_json(os.path.join(root, *us))),
+        ],
+        output,
+        file_set_id="SMOKE_TEST",
+        sop_instance_uid="2.25.42",
+    )
+    counts = result.record_counts()
+    check(counts["IMAGE"] == 4, f"expected 4 IMAGE records, got {counts}")
+    check(counts["SERIES"] == 3 and counts["STUDY"] == 3, f"expected 3 studies/series, got {counts}")
+    check(result.records == sum(counts.values()), "records should be the sum of record_types")
+    check([c.record_type for c in result.record_types][:4] == ["PATIENT", "STUDY", "SERIES", "IMAGE"])
+    check(isinstance(result.synthesized, list) and isinstance(result.warnings, list))
+    check(
+        all(isinstance(s, dcmnorm.DicomdirSynthesized) and s.attribute for s in result.synthesized),
+        "synthesized entries should carry an attribute keyword",
+    )
+
+    dicomdir = json.loads(dcmnorm.read_json(output))
+    check(dicomdir["MediaStorageSOPClassUID"] == "1.2.840.10008.1.3.10", "Media Storage Directory Storage")
+    check(dicomdir["MediaStorageSOPInstanceUID"] == "2.25.42")
+    check(dicomdir["FileSetID"] == "SMOKE_TEST")
+    records = dicomdir["DirectoryRecordSequence"]
+    check(len(records) == result.records, "DirectoryRecordSequence should hold every record")
+
+    # Records are written depth-first: each IMAGE sits under the last SERIES, STUDY and PATIENT.
+    levels = {"PATIENT": 0, "STUDY": 1, "SERIES": 2, "IMAGE": 3}
+    path = [None, None, None]
+    placed = {}
+    for record in records:
+        level = levels[record["DirectoryRecordType"]]
+        check(all(path[i] is not None for i in range(level)), f"{record['DirectoryRecordType']} record outside its parent")
+        if level < 3:
+            path[level] = record
+            for i in range(level + 1, 3):
+                path[i] = None
+            check(record["OffsetOfReferencedLowerLevelDirectoryEntity"] > 0, "a non-leaf record should point to its children")
+        else:
+            check(record["OffsetOfReferencedLowerLevelDirectoryEntity"] == 0, "an IMAGE record has no children")
+            placed[record["ReferencedFileID"]] = (path[1]["StudyInstanceUID"], path[2]["SeriesInstanceUID"], record)
+    for file_id in (ct1, ct2, mr, us):
+        key = "\\".join(file_id)
+        check(key in placed, f"no IMAGE record for {key}")
+        tags = json.loads(dcmnorm.read_tags(os.path.join(root, *file_id), ["StudyInstanceUID", "SeriesInstanceUID", "SOPInstanceUID"]))
+        study, series, record = placed[key]
+        check(study == tags["0020000D"] and series == tags["0020000E"], f"{key} is under the wrong study/series")
+        check(record["ReferencedSOPInstanceUIDInFile"] == tags["00080018"], f"{key} references the wrong instance")
+    check(placed["\\".join(ct1)][1] == placed["\\".join(ct2)][1], "both CT images should share one series")
+
+    for bad_entries, needle in [
+        ([{"file_id": ["dicom", "im1.dcm"], "path": CT_FIXTURE}], "File ID"),
+        ([{"file_id": ct1, "fileId": ct1, "path": CT_FIXTURE}], "unknown DICOMDIR entry key"),
+        ([dcmnorm.DicomdirEntry(ct1)], "exactly one of json and path"),
+        ([dcmnorm.DicomdirEntry(ct1, path=CT_FIXTURE), dcmnorm.DicomdirEntry(ct2, path=CT_FIXTURE)], "SOP Instance UID"),
+    ]:
+        try:
+            dcmnorm.write_dicomdir(bad_entries, os.path.join(tmp_dir, "BAD_DICOMDIR"))
+            raise AssertionError(f"write_dicomdir should raise for {bad_entries!r}")
+        except dcmnorm.DcmnormError as error:
+            check(needle in str(error), f"unexpected error message: {error}")
+
+
 def main():
     check_glibc_compatibility()
 
@@ -122,6 +209,8 @@ def main():
         dcmnorm.edit_tags(FIXTURE, output_path=edited, set={"PatientName": "SMOKE^TEST"}, remove_private_tags=True)
         edited_tags = json.loads(dcmnorm.read_tags(edited, ["PatientName"]))
         check(edited_tags["00100010"] == "SMOKE^TEST", "edit_tags should have set PatientName")
+
+        check_dicomdir(tmp_dir)
 
         transcoded = os.path.join(tmp_dir, "transcoded.dcm")
         dcmnorm.transcode(FIXTURE, transcoded, "1.2.840.10008.1.2.1")

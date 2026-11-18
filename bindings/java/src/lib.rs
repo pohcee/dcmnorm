@@ -35,7 +35,8 @@ use dcmnorm::dicom_io::{
     read_dcmnorm_object_for_filter, read_dicom_file, read_dicom_json_with_options, reformat_plane as dcm_reformat_plane,
     remove_attribute, remove_private_tags_inplace, render_dicom_frame as dcm_render_dicom_frame, set_attribute,
     store_scu as dcm_store_scu, transcode_dicom_file, write_dicom_file, write_dicom_json_with_options,
-    write_dicom_video as dcm_write_dicom_video, CancelMode as DcmCancelMode, DicomJsonBulkDataMode, DicomJsonFormat,
+    write_dicom_video as dcm_write_dicom_video, write_dicomdir as dcm_write_dicomdir,
+    DicomdirEntry as DcmDicomdirEntry, DicomdirOptions as DcmDicomdirOptions, CancelMode as DcmCancelMode, DicomJsonBulkDataMode, DicomJsonFormat,
     DicomJsonKeyStyle, DicomJsonReadOptions, DicomJsonWriteOptions, DimseLogger, EchoScuOptions as DcmEchoScuOptions,
     FindScuOptions as DcmFindScuOptions, Interpolation as DcmInterpolation, MoveScuOptions as DcmMoveScuOptions, QueryRetrieveLevel as DcmQueryRetrieveLevel,
     PlaneParams as DcmPlaneParams, RenderOutputFormat as DcmRenderOutputFormat,
@@ -581,6 +582,118 @@ pub extern "system" fn Java_com_pohcee_dcmnorm_Dcmnorm_nativeCheckDicom<'local>(
         .and_then(|result| result.ok())
         .unwrap_or(false);
     jboolean::from(is_dicom)
+}
+
+// -------------------------------------------------------------------------------------------
+// DICOMDIR: writeDicomdir
+// -------------------------------------------------------------------------------------------
+
+/// One `DicomdirEntry` as `DicomdirEntry.toJson()` encodes it.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DicomdirEntryIn {
+    file_id: Vec<String>,
+    json: Option<String>,
+    format: Option<String>,
+    path: Option<String>,
+    transfer_syntax_uid: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct WriteDicomdirOptionsIn {
+    file_set_id: Option<String>,
+    sop_instance_uid: Option<String>,
+}
+
+/// Writes a DICOMDIR for a File-set to `output_path`. `entries_json` is a JSON array of
+/// `{"fileId", "json" | "path", "format"?, "transferSyntaxUid"?}`. Returns the report as JSON:
+/// `{"records", "recordTypes": [{"recordType", "count"}], "synthesized": [{"recordType",
+/// "entity", "attribute", "value", "source"?}], "warnings": [...]}`.
+#[no_mangle]
+pub extern "system" fn Java_com_pohcee_dcmnorm_Dcmnorm_nativeWriteDicomdir<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    entries_json: JString<'local>,
+    output_path: JString<'local>,
+    options_json: JString<'local>,
+) -> jstring {
+    let entries_json = match get_string(&mut env, &entries_json) {
+        Ok(value) => value,
+        Err(message) => return throw(&mut env, message),
+    };
+    let output_path = match get_string(&mut env, &output_path) {
+        Ok(value) => value,
+        Err(message) => return throw(&mut env, message),
+    };
+    let options_json = match get_string(&mut env, &options_json) {
+        Ok(value) => value,
+        Err(message) => return throw(&mut env, message),
+    };
+
+    let result = guarded(|| {
+        let entries: Vec<DicomdirEntryIn> =
+            serde_json::from_str(&entries_json).map_err(|error| format!("invalid DICOMDIR entries: {error}"))?;
+        let options: WriteDicomdirOptionsIn = parse_json(&options_json)?;
+        let mut built = Vec::with_capacity(entries.len());
+        for entry in entries {
+            let label = entry.file_id.join("\\");
+            let one = match (entry.json, entry.path) {
+                (Some(json), None) => {
+                    let format = parse_json_format(entry.format.as_deref())?;
+                    DcmDicomdirEntry::from_json(entry.file_id, &json, format, entry.transfer_syntax_uid.as_deref())
+                        .map_err(|error| error.to_string())?
+                }
+                (None, Some(path)) => {
+                    let mut one = DcmDicomdirEntry::from_file(entry.file_id, &path).map_err(|error| error.to_string())?;
+                    if let Some(ts) = entry.transfer_syntax_uid.as_deref().filter(|ts| !ts.is_empty()) {
+                        one.transfer_syntax_uid = ts.to_owned();
+                    }
+                    one
+                }
+                _ => return Err(format!("DICOMDIR entry {label}: give exactly one of json and path")),
+            };
+            built.push(one);
+        }
+        let report = dcm_write_dicomdir(
+            &built,
+            PathBuf::from(&output_path),
+            &DcmDicomdirOptions {
+                file_set_id: options.file_set_id.unwrap_or_default(),
+                sop_instance_uid: options.sop_instance_uid,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        let value = serde_json::json!({
+            "records": report.record_count,
+            "recordTypes": report
+                .record_types
+                .iter()
+                .map(|(record_type, count)| serde_json::json!({"recordType": record_type, "count": count}))
+                .collect::<Vec<_>>(),
+            "synthesized": report
+                .synthesized
+                .iter()
+                .map(|s| serde_json::json!({
+                    "recordType": s.record_type,
+                    "entity": s.entity,
+                    "attribute": s.attribute,
+                    "value": s.value,
+                    "source": s.source,
+                }))
+                .collect::<Vec<_>>(),
+            "warnings": report.warnings,
+        });
+        serde_json::to_string(&value).map_err(|error| error.to_string())
+    });
+
+    match result {
+        Ok(json) => match env.new_string(json) {
+            Ok(value) => value.into_raw(),
+            Err(error) => throw(&mut env, error.to_string()),
+        },
+        Err(message) => throw(&mut env, message),
+    }
 }
 
 // -------------------------------------------------------------------------------------------

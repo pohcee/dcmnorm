@@ -62,6 +62,40 @@ unless it's caught at the FFI boundary.
   - set/remove attributes; writes back in place unless `output_path` is given.
 - `transcode(file_path, output_path, transfer_syntax_uid) -> None`.
 - `check_dicom(file_path) -> bool`.
+- `write_dicomdir(entries: list[DicomdirEntry | dict], output_path, file_set_id=None, sop_instance_uid=None) -> WriteDicomdirResult`
+  - writes a DICOMDIR (Media Storage Directory, Explicit VR Little Endian) for a File-set, the
+  in-process form of `dcmnorm dicomdir ROOT` (same as the Node binding's `writeDicomdir`). Each
+  entry is `DicomdirEntry(file_id, json=None, format=None, path=None, transfer_syntax_uid=None)`,
+  or a dict with those keys (an unknown key raises): the File ID components (1-8 of 1-8
+  characters from `A-Z 0-9 _`, PS3.10 8.2) and the file's header, either as the DICOM JSON
+  `read_json` returns (`json`, `format` `"flat"` by default or `"standard"`; BulkDataURI elements
+  are ignored, so the default `"uri"` output is fine) or a file to read it from (`path`; pixel
+  data isn't loaded). Give exactly one of `json` and `path`. With `json`, the referenced file's
+  transfer syntax is `transfer_syntax_uid`, else the JSON's TransferSyntaxUID, else Explicit VR
+  Little Endian. `sop_instance_uid` is the DICOMDIR's own (generated when not given). The result
+  has `records` (total), `record_types: list[DicomdirRecordCount]` (`record_type`, `count`, in
+  first-seen order; `record_counts()` gives them as a dict),
+  `synthesized: list[DicomdirSynthesized]` (`record_type`, `entity`, `attribute`, `value`,
+  `source`) and `warnings: list[str]`.
+  Records are PATIENT > STUDY > SERIES > one per entry, typed by SOP Class (IMAGE, SR DOCUMENT,
+  KEY OBJECT DOC, PRESENTATION, ENCAP DOC, ...; PS3.3 F.5), written depth-first.
+  `synthesized` lists the Type 1 keys the instances lacked and the values written (IHE PDI Table
+  4.47.4-1: Patient ID, Study ID, Study Date/Time, Modality, Series Number, Instance Number), with
+  `source` naming the attribute a value was copied from, if any. Raises `DcmnormError` for a bad File ID
+  or File-set ID (at most 16 of `A-Z 0-9 _`), a Patient ID shared by two patients, a study under
+  two patients, a series in two studies, and duplicate files or SOP Instance UIDs.
+
+  ```python
+  result = dcmnorm.write_dicomdir(
+      [
+          dcmnorm.DicomdirEntry(["DICOM", "ST000001", "SE000001", "IM000001"], path="/media/disc/DICOM/ST000001/SE000001/IM000001"),
+          {"file_id": ["DICOM", "ST000001", "SE000001", "IM000002"], "json": dcmnorm.read_json(other_path)},
+      ],
+      "/media/disc/DICOMDIR",
+      file_set_id="DISC_0001",
+  )
+  result.record_counts()  # {'PATIENT': 1, 'STUDY': 1, 'SERIES': 1, 'IMAGE': 2}
+  ```
 
 All return values that carry structured data are JSON strings - `json.loads()` them Python-side.
 This matches how the CLI and the Node bindings both already talk JSON everywhere else in this

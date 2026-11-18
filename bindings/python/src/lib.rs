@@ -7,7 +7,7 @@ use std::time::Duration;
 use pyo3::create_exception;
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
-use pyo3::types::PyBytes;
+use pyo3::types::{PyBytes, PyDict};
 
 use ::dcmnorm::dicom_io::{
     dicom_file_to_json,
@@ -20,6 +20,7 @@ use ::dcmnorm::dicom_io::{
     reformat_plane as dcm_reformat_plane, remove_attribute, remove_private_tags_inplace,
     render_dicom_frame as dcm_render_dicom_frame, set_attribute, start_scp as dcm_start_scp,
     store_scu as dcm_store_scu, transcode_dicom_file, write_dicom_file,
+    write_dicomdir as dcm_write_dicomdir, DicomdirEntry as DcmDicomdirEntry, DicomdirOptions as DcmDicomdirOptions,
     write_dicom_json_with_options, write_dicom_video as dcm_write_dicom_video, CancelMode as DcmCancelMode,
     CancelSignal, DicomJsonBulkDataMode, DicomJsonFormat, DicomJsonKeyStyle, DicomJsonReadOptions,
     DicomJsonWriteOptions, DicomScp, DimseLogger, EchoScuOptions as DcmEchoScuOptions,
@@ -338,6 +339,244 @@ fn check_dicom(py: Python<'_>, file_path: String) -> bool {
             .ok()
             .and_then(|result| result.ok())
             .unwrap_or(false)
+    })
+}
+
+// -------------------------------------------------------------------------------------------
+// DICOMDIR: write_dicomdir
+// -------------------------------------------------------------------------------------------
+
+/// One file of the File-set for `write_dicomdir`: its File ID plus its header, either as DICOM
+/// JSON (`json`) or a file to read it from (`path`; pixel data isn't loaded). Give exactly one of
+/// `json` and `path`. `write_dicomdir` also accepts a plain dict with these keys.
+#[pyclass(get_all)]
+#[derive(Clone)]
+struct DicomdirEntry {
+    /// File ID components, e.g. `["DICOM", "ST000001", "SE000001", "IM000001"]`: 1-8 components
+    /// of 1-8 characters from A-Z, 0-9 and _ (PS3.10 8.2).
+    file_id: Vec<String>,
+    /// The referenced file's DICOM JSON (what `read_json` returns; BulkDataURI elements are
+    /// ignored).
+    json: Option<String>,
+    /// 'flat' (default, `read_json`'s default) or 'standard', for `json`.
+    format: Option<String>,
+    /// A DICOM file to read the header from instead of `json`.
+    path: Option<String>,
+    /// The referenced file's transfer syntax. With `json`, defaults to the JSON's
+    /// TransferSyntaxUID (0002,0010), else Explicit VR Little Endian; with `path`, the file's.
+    transfer_syntax_uid: Option<String>,
+}
+
+#[pymethods]
+impl DicomdirEntry {
+    #[new]
+    #[pyo3(signature = (file_id, json=None, format=None, path=None, transfer_syntax_uid=None))]
+    fn new(
+        file_id: Vec<String>,
+        json: Option<String>,
+        format: Option<String>,
+        path: Option<String>,
+        transfer_syntax_uid: Option<String>,
+    ) -> Self {
+        DicomdirEntry { file_id, json, format, path, transfer_syntax_uid }
+    }
+
+    fn __repr__(&self) -> String {
+        let source = match (&self.path, &self.json) {
+            (Some(path), _) => format!("path={path:?}"),
+            (None, Some(_)) => "json=...".to_owned(),
+            (None, None) => "no source".to_owned(),
+        };
+        format!("DicomdirEntry(file_id={:?}, {source})", self.file_id)
+    }
+}
+
+/// Lets `write_dicomdir` take `DicomdirEntry` objects or plain dicts with the same keys.
+struct DicomdirEntryArg(DicomdirEntry);
+
+impl<'py> FromPyObject<'py> for DicomdirEntryArg {
+    fn extract_bound(value: &Bound<'py, PyAny>) -> PyResult<Self> {
+        if let Ok(entry) = value.downcast::<DicomdirEntry>() {
+            return Ok(DicomdirEntryArg(entry.borrow().clone()));
+        }
+        let dict = value.downcast::<PyDict>().map_err(|_| {
+            pyo3::exceptions::PyTypeError::new_err("DICOMDIR entries must be DicomdirEntry objects or dicts")
+        })?;
+        const KEYS: [&str; 5] = ["file_id", "json", "format", "path", "transfer_syntax_uid"];
+        for key in dict.keys() {
+            let key: String = key.extract()?;
+            if !KEYS.contains(&key.as_str()) {
+                return Err(DcmnormError::new_err(format!(
+                    "unknown DICOMDIR entry key '{key}'; expected one of {}",
+                    KEYS.join(", ")
+                )));
+            }
+        }
+        let optional = |key: &str| -> PyResult<Option<String>> {
+            match dict.get_item(key)? {
+                Some(item) if !item.is_none() => Ok(Some(item.extract()?)),
+                _ => Ok(None),
+            }
+        };
+        let file_id: Vec<String> = match dict.get_item("file_id")? {
+            Some(item) => item.extract()?,
+            None => return Err(DcmnormError::new_err("DICOMDIR entry is missing 'file_id'")),
+        };
+        Ok(DicomdirEntryArg(DicomdirEntry {
+            file_id,
+            json: optional("json")?,
+            format: optional("format")?,
+            path: optional("path")?,
+            transfer_syntax_uid: optional("transfer_syntax_uid")?,
+        }))
+    }
+}
+
+#[pyclass(get_all)]
+#[derive(Clone)]
+struct DicomdirRecordCount {
+    /// Directory Record Type, e.g. "IMAGE".
+    record_type: String,
+    count: u32,
+}
+
+#[pymethods]
+impl DicomdirRecordCount {
+    fn __repr__(&self) -> String {
+        format!("DicomdirRecordCount(record_type={:?}, count={})", self.record_type, self.count)
+    }
+}
+
+/// A value `write_dicomdir` made up (or copied from another attribute) for a Type 1 key the
+/// instances lacked (IHE RAD TF-2 Table 4.47.4-1).
+#[pyclass(get_all)]
+#[derive(Clone)]
+struct DicomdirSynthesized {
+    /// e.g. "STUDY".
+    record_type: String,
+    /// The Study/Series/SOP Instance UID; for PATIENT the patient's name, or "patient of study
+    /// <UID>" when the patient has no name either.
+    entity: String,
+    /// Attribute keyword, e.g. "StudyID".
+    attribute: String,
+    value: String,
+    /// Keyword of the instance attribute it was copied from, if any (e.g. "SeriesDate").
+    source: Option<String>,
+}
+
+#[pymethods]
+impl DicomdirSynthesized {
+    fn __repr__(&self) -> String {
+        format!(
+            "DicomdirSynthesized(record_type={:?}, entity={:?}, attribute={:?}, value={:?}, source={:?})",
+            self.record_type, self.entity, self.attribute, self.value, self.source
+        )
+    }
+}
+
+#[pyclass(get_all)]
+struct WriteDicomdirResult {
+    /// Total Directory Records written.
+    records: u32,
+    /// Records per Directory Record Type, in first-seen order.
+    record_types: Vec<DicomdirRecordCount>,
+    synthesized: Vec<DicomdirSynthesized>,
+    warnings: Vec<String>,
+}
+
+#[pymethods]
+impl WriteDicomdirResult {
+    /// `record_types` as a `{record_type: count}` dict (insertion order = first-seen order).
+    fn record_counts<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let dict = PyDict::new(py);
+        for count in &self.record_types {
+            dict.set_item(&count.record_type, count.count)?;
+        }
+        Ok(dict)
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "WriteDicomdirResult(records={}, record_types={:?}, synthesized={}, warnings={})",
+            self.records,
+            self.record_types.iter().map(|c| (c.record_type.as_str(), c.count)).collect::<Vec<_>>(),
+            self.synthesized.len(),
+            self.warnings.len()
+        )
+    }
+}
+
+/// Writes a DICOMDIR (Media Storage Directory, Explicit VR Little Endian) for a File-set to
+/// `output_path`: PATIENT > STUDY > SERIES > one record per entry, its type from the SOP Class
+/// (IMAGE, SR DOCUMENT, KEY OBJECT DOC, PRESENTATION, ENCAP DOC, ...; PS3.3 F.5). `entries` are
+/// `DicomdirEntry` objects or dicts with the same keys. Type 1 keys the instances lack are
+/// synthesized and reported in `synthesized`. Raises `DcmnormError` for bad File IDs / File-set
+/// IDs, a Patient ID shared by two patients, a study under two patients, a series in two
+/// studies, duplicate files or SOP Instance UIDs. Mirrors `dcmnorm dicomdir ROOT`, which scans a
+/// directory instead of taking entries.
+#[pyfunction]
+#[pyo3(signature = (entries, output_path, file_set_id=None, sop_instance_uid=None))]
+fn write_dicomdir(
+    py: Python<'_>,
+    entries: Vec<DicomdirEntryArg>,
+    output_path: String,
+    file_set_id: Option<String>,
+    sop_instance_uid: Option<String>,
+) -> PyResult<WriteDicomdirResult> {
+    let entries: Vec<DicomdirEntry> = entries.into_iter().map(|entry| entry.0).collect();
+    let formats = entries
+        .iter()
+        .map(|entry| parse_json_format(entry.format.as_deref()))
+        .collect::<PyResult<Vec<_>>>()?;
+    let options = DcmDicomdirOptions { file_set_id: file_set_id.unwrap_or_default(), sop_instance_uid };
+    let report = py.allow_threads(|| {
+        guarded(|| {
+            let mut built = Vec::with_capacity(entries.len());
+            for (entry, format) in entries.iter().zip(formats) {
+                let file_id = entry.file_id.clone();
+                let one = match (&entry.json, &entry.path) {
+                    (Some(json), None) => {
+                        DcmDicomdirEntry::from_json(file_id, json, format, entry.transfer_syntax_uid.as_deref())
+                            .map_err(to_py_err)?
+                    }
+                    (None, Some(path)) => {
+                        let mut one = DcmDicomdirEntry::from_file(file_id, path).map_err(to_py_err)?;
+                        if let Some(ts) = entry.transfer_syntax_uid.as_deref().filter(|ts| !ts.is_empty()) {
+                            one.transfer_syntax_uid = ts.to_owned();
+                        }
+                        one
+                    }
+                    _ => {
+                        return Err(DcmnormError::new_err(format!(
+                            "DICOMDIR entry {}: give exactly one of json and path",
+                            entry.file_id.join("\\")
+                        )))
+                    }
+                };
+                built.push(one);
+            }
+            dcm_write_dicomdir(&built, PathBuf::from(&output_path), &options).map_err(to_py_err)
+        })
+    })?;
+    Ok(WriteDicomdirResult {
+        records: report.record_count as u32,
+        record_types: report
+            .record_types
+            .into_iter()
+            .map(|(record_type, count)| DicomdirRecordCount { record_type, count: count as u32 })
+            .collect(),
+        synthesized: report
+            .synthesized
+            .into_iter()
+            .map(|s| DicomdirSynthesized {
+                record_type: s.record_type,
+                entity: s.entity,
+                attribute: s.attribute,
+                value: s.value,
+                source: s.source,
+            })
+            .collect(),
+        warnings: report.warnings,
     })
 }
 
@@ -1533,6 +1772,12 @@ fn dcmnorm(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(edit_tags, module)?)?;
     module.add_function(wrap_pyfunction!(transcode, module)?)?;
     module.add_function(wrap_pyfunction!(check_dicom, module)?)?;
+
+    module.add_function(wrap_pyfunction!(write_dicomdir, module)?)?;
+    module.add_class::<DicomdirEntry>()?;
+    module.add_class::<DicomdirRecordCount>()?;
+    module.add_class::<DicomdirSynthesized>()?;
+    module.add_class::<WriteDicomdirResult>()?;
 
     module.add_function(wrap_pyfunction!(echo_scu, module)?)?;
     module.add_function(wrap_pyfunction!(start_echo_scu, module)?)?;
