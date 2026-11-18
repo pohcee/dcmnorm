@@ -721,6 +721,8 @@ fn python_constants(
 # are plain `dcmnorm.Tag`, `dcmnorm.VR`, `dcmnorm.TransferSyntax` and `dcmnorm.SOPClassUID`.
 import enum as _enum
 
+__all__ = [\"Tag\", \"VR\", \"TransferSyntax\", \"SOPClassUID\"]
+
 
 class Tag:
     \"\"\"DICOM attribute tags as ints, ``(group << 16) | element``, by standard keyword:

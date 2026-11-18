@@ -35,6 +35,8 @@ use ::dcmnorm::dicom_io::{
 
 create_exception!(dcmnorm, DcmnormError, PyException);
 
+mod dataset;
+
 fn to_py_err(err: impl std::fmt::Display) -> PyErr {
     DcmnormError::new_err(err.to_string())
 }
@@ -1809,6 +1811,8 @@ fn dcmnorm(module: &Bound<'_, PyModule>) -> PyResult<()> {
 
     module.add_function(wrap_pyfunction!(start_dicom_server, module)?)?;
     module.add_class::<DicomServerHandle>()?;
+
+    dataset::register(module)?;
 
     Ok(())
 }

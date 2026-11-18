@@ -350,6 +350,12 @@ def main():
         check(stack.content_kind == "framestack")
         check(stack.depth == 1)
 
+    # the typed dataset API (#6)
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import test_dataset
+
+    test_dataset.main()
+
     print("smoke test passed")
 
 
