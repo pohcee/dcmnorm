@@ -158,6 +158,33 @@ export declare function checkDicom(filePath: string): Promise<unknown>
 export declare function computeHistogram(filePath: string, options?: HistogramOptions | undefined | null): Promise<unknown>
 
 /**
+ * Internal (see `dcmnorm.js` `toDicomJson`): DICOM JSON of an encoded data set, bulk data from
+ * its source path/bytes in inline mode.
+ */
+export declare function datasetDocumentToJson(document: Buffer, sourcePath: string | undefined | null, sourceBytes: Buffer | undefined | null, options: NativeJsonOptions): Promise<unknown>
+
+/** Internal (see `dcmnorm.js` `read`): the data set of a path or bytes, in the binary form. */
+export declare function datasetRead(path: string | undefined | null, bytes: Buffer | undefined | null, untilPixelData: boolean, loadBulkData: boolean): Promise<unknown>
+
+/** Internal (see `dcmnorm.js` `renderPixels`): one frame's 8-bit display pixels. */
+export declare function datasetRenderPixels(path: string | undefined | null, bytes: Buffer | undefined | null, frameIndex: number, params: NativeRenderParams): Promise<unknown>
+
+/** Internal (see `dcmnorm.js` `toDicomJson`): DICOM JSON of a source. */
+export declare function datasetSourceToJson(path: string | undefined | null, bytes: Buffer | undefined | null, options: NativeJsonOptions): Promise<unknown>
+
+/**
+ * Internal (see `dcmnorm.js` `transcode`): transcode a source to `outputPath`, or resolve to
+ * the bytes.
+ */
+export declare function datasetTranscode(path: string | undefined | null, bytes: Buffer | undefined | null, outputPath: string | undefined | null, transferSyntaxUid: string): Promise<unknown>
+
+/**
+ * Internal (see `dcmnorm.js` `write`): write an encoded data set to `outputPath`, or (no path)
+ * resolve to the file's bytes.
+ */
+export declare function datasetWrite(document: Buffer, sourcePath?: string | undefined | null, sourceBytes?: Buffer | undefined | null, outputPath?: string | undefined | null, transferSyntaxUid?: string | undefined | null): Promise<unknown>
+
+/**
  * One file of the File-set for `writeDicomdir`: its File ID plus its header, either as DICOM
  * JSON (`json`) or a file to read it from (`path`; pixel data isn't loaded).
  */
@@ -378,6 +405,9 @@ export interface HistogramOptions {
   maxValue?: number
 }
 
+/** The standard keyword of a tag (`0x0020000D` -> `"StudyInstanceUID"`), or null. */
+export declare function keywordOf(tag: number): string | null
+
 /**
  * Performs a C-MOVE (Study Root Query/Retrieve), asking `destination` ("host:port") to push
  * `studyInstanceUid` - or one series of it / a list of its instances, per
@@ -440,6 +470,69 @@ export interface MoveScuResult {
    * produced it (see `MoveScuHandle.release`/`.abort`) - `null` for a real terminal C-MOVE-RSP.
    */
   cancelledVia?: string
+}
+
+export interface NativeError {
+  kind: string
+  message: string
+  sourceTransferSyntaxUid?: string
+  targetTransferSyntaxUid?: string
+  frameIndex?: number
+}
+
+/** Options of `toDicomJson`, as `dcmnorm.js` passes them. */
+export interface NativeJsonOptions {
+  includeTags?: Array<number>
+  excludeTags?: Array<number>
+  bulkData?: string
+  bulkDataUriBase?: string
+  includeFileMeta?: boolean
+  keywordAndVm?: boolean
+  /**
+   * Write each BulkDataURI as the placeholder `dcmnorm-bulk:<TAG>:<VR>:<offset>:<length>`,
+   * for the JS layer to replace with its `bulkDataUriBuilder`'s result (a JS callback can't
+   * run on the thread pool).
+   */
+  placeholderUris?: boolean
+}
+
+export interface NativeOverlay {
+  index: number
+  group: number
+  rows: number
+  columns: number
+  overlayType?: string
+  label?: string
+}
+
+export interface NativeRendered {
+  width: number
+  height: number
+  channels: number
+  pixels: Buffer
+  overlays: Array<NativeOverlay>
+  selectedOverlayIndex?: number
+}
+
+export interface NativeRenderParams {
+  windowCenter?: number
+  windowWidth?: number
+  voiLut?: boolean
+  modalityLut?: boolean
+  iccProfile?: boolean
+  outputWidth?: number
+  outputHeight?: number
+  showOverlays?: boolean
+  overlayIndex?: number
+  overlayColor?: string
+}
+
+/** What a `dataset*` call resolves to: `error`, or one of the payloads. */
+export interface NativeResult {
+  error?: NativeError
+  data?: Buffer
+  text?: string
+  rendered?: NativeRendered
 }
 
 /** Mirrors `dcmnorm::dicom_io::OverlaySummary` for the JS side. */
@@ -664,6 +757,9 @@ export interface StoreScuResult {
   status: number
 }
 
+/** The tag of a standard keyword or tag expression, or null. */
+export declare function tagForKeyword(keyword: string): number | null
+
 export interface TextureExportResult {
   /** 'volume', 'image2d', or 'framestack'. */
   contentKind: string
@@ -735,6 +831,23 @@ export interface TextureExportResult {
  * `dcmnorm --transfer-syntax UID in.dcm out.dcm`.
  */
 export declare function transcode(filePath: string, outputPath: string, transferSyntaxUid: string): Promise<unknown>
+
+/** What this build can read, write, decode and encode, per transfer syntax UID. */
+export declare function transferSyntaxSupport(): Array<TransferSyntaxSupportInfo>
+
+export interface TransferSyntaxSupportInfo {
+  uid: string
+  name: string
+  encapsulated: boolean
+  canReadDataset: boolean
+  canWriteDataset: boolean
+  canDecode: boolean
+  canEncode: boolean
+  canTranscodeTo: boolean
+}
+
+/** The dictionary VR of a tag, or null. */
+export declare function vrOf(tag: number): string | null
 
 /**
  * Writes a DICOMDIR (Media Storage Directory, Explicit VR Little Endian) for a File-set:
