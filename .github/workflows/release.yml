@@ -6,7 +6,8 @@ name: Build and release
 #                                (nothing is published; the bindings are not built)
 #   push of a v*.*.* tag         the same plus the binding builds, then publish: GitHub release,
 #                                PyPI (`dcmnorm` wheels), npm (`dcmnorm` + `@dcmnorm/<platform>`)
-#                                and Maven Central (`com.pohcee:dcmnorm-java` + natives)
+#                                and Maven Central (`com.pohcee:dcmnorm` + `dcmnorm-natives`,
+#                                plus relocation POMs for the old `dcmnorm-java` names)
 #   workflow_dispatch            run on a ref by hand: builds the bindings too; on a tag ref it
 #                                publishes like a tag push
 #
@@ -107,7 +108,7 @@ jobs:
           set -euo pipefail
           mvn -B -q -f bindings/java/pom.xml -Prelease -Dgpg.skip package
           ls -l bindings/java/target/*.jar
-          if unzip -l bindings/java/target/dcmnorm-java-*[0-9].jar | grep -q ' native/'; then
+          if unzip -l bindings/java/target/dcmnorm-*[0-9].jar | grep -q ' native/'; then
             echo "the API jar must not contain native libraries" >&2; exit 1
           fi
           mvn -B -q -f bindings/java/natives/pom.xml package
@@ -116,8 +117,9 @@ jobs:
         # The bundle the maven job uploads, built with this runner's Maven and checked against the
         # Central Portal's rules (bindings/java/check-bundle.py): one component directory per
         # artifact with its .pom, sources and javadoc for the API, checksums for every file, and
-        # nothing else. skipUpload never contacts Central; the server entry only satisfies the
-        # plugin.
+        # nothing else; exactly com.pohcee:dcmnorm, dcmnorm-natives and the dcmnorm-java /
+        # dcmnorm-java-natives relocation POMs. skipUpload never contacts Central; the server
+        # entry only satisfies the plugin.
         run: |
           set -euo pipefail
           for entry in linux-x86_64:libdcmnorm_java.so linux-aarch_64:libdcmnorm_java.so \
@@ -134,7 +136,7 @@ jobs:
           mvn -v | head -1
           mvn -B -q -s "$RUNNER_TEMP/settings.xml" -f bindings/java/natives/pom.xml -Prelease -Dgpg.skip -DskipUpload=true deploy
           python3 bindings/java/check-bundle.py bindings/java/target/central-publishing/central-bundle.zip --unsigned
-          rm -rf bindings/java/natives/target bindings/java/target
+          rm -rf bindings/java/natives/target bindings/java/target bindings/java/relocation/*/target
 
       - name: Python package metadata
         # The metadata maturin would put in the wheel (no compile).
@@ -607,7 +609,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: java-natives-jar-${{ matrix.classifier }}
-          path: bindings/java/natives/target/dcmnorm-java-natives-*-${{ matrix.classifier }}.jar
+          path: bindings/java/natives/target/dcmnorm-natives-*-${{ matrix.classifier }}.jar
           if-no-files-found: error
 
   # --- Publish ----------------------------------------------------------------------------------
@@ -783,7 +785,7 @@ jobs:
     runs-on: ubuntu-24.04
     environment:
       name: maven-central
-      url: https://central.sonatype.com/artifact/com.pohcee/dcmnorm-java
+      url: https://central.sonatype.com/artifact/com.pohcee/dcmnorm
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -817,8 +819,9 @@ jobs:
           find . -type f | sort
 
       - name: Build and check the bundle
-        # One reactor (natives/pom.xml's release profile includes ../pom.xml), so both artifacts go
-        # to Central as a single deployment that is validated and published as a whole.
+        # One reactor (natives/pom.xml's release profile includes ../pom.xml and the relocation
+        # POMs in ../relocation/), so all four artifacts go to Central as a single deployment that
+        # is validated and published as a whole.
         # -Prelease requires all five platforms and signs every file. Checked against the portal's
         # rules before anything is uploaded (bindings/java/check-bundle.py).
         env:
@@ -832,7 +835,7 @@ jobs:
           python3 bindings/java/check-bundle.py bindings/java/target/central-publishing/central-bundle.zip
           rm -rf bindings/java/target/central-* bindings/java/natives/target/central-*
 
-      - name: Publish dcmnorm-java and dcmnorm-java-natives
+      - name: Publish dcmnorm, dcmnorm-natives and the dcmnorm-java relocations
         # The same build again, now uploading; waits until Central reports the deployment
         # published.
         env:

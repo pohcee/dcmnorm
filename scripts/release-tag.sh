@@ -17,7 +17,7 @@ This script:
   1) Computes the next SemVer tag from existing v* tags
   2) Updates the crate versions in the Cargo.toml files, the Claude plugin/skill version pins
      and the binding package versions (npm package.json + loader, pyproject.toml, the Maven
-     poms) via scripts/check-versions.py --set
+     poms and relocation poms) via scripts/check-versions.py --set
     3) Commits the version bump
     4) Creates an annotated tag on that commit
     5) Pushes the commit and tag to origin

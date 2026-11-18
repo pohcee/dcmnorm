@@ -9,7 +9,7 @@ Ships as a CLI, a Rust library, and Node.js/Python/Java bindings.
 [![Latest release](https://img.shields.io/github/v/release/pohcee/dcmnorm)](https://github.com/pohcee/dcmnorm/releases/latest)
 [![PyPI](https://img.shields.io/pypi/v/dcmnorm?label=pypi)](https://pypi.org/project/dcmnorm/)
 [![npm](https://img.shields.io/npm/v/dcmnorm?label=npm)](https://www.npmjs.com/package/dcmnorm)
-[![Maven Central](https://img.shields.io/maven-central/v/com.pohcee/dcmnorm-java?label=maven%20central)](https://central.sonatype.com/artifact/com.pohcee/dcmnorm-java)
+[![Maven Central](https://img.shields.io/maven-central/v/com.pohcee/dcmnorm?label=maven%20central)](https://central.sonatype.com/artifact/com.pohcee/dcmnorm)
 [![Live demo](https://img.shields.io/badge/live%20demo-try%20it-brightgreen)](https://dcmnorm-test-website-spzcbrdjlq-uc.a.run.app)
 
 <!-- TODO: add a hero image, e.g. a rendered WSI tile next to an MPR reformat:
@@ -53,7 +53,7 @@ Cargo, build from source).
 - [`bindings/node`](bindings/node/): Node.js bindings (`npm i dcmnorm`) that call the library in-process via napi-rs — see that package's own README for its API
   - [`bindings/node/examples/test-website`](bindings/node/examples/test-website/): the source for the live demo above — also runnable locally, in Docker, or deployed to your own Cloud Run project
 - [`bindings/python`](bindings/python/): Python bindings (`import dcmnorm`, in the `dcmnorm` PyPI package) that call the library in-process via PyO3 — see that package's own README for its API
-- [`bindings/java`](bindings/java/): Java bindings (`com.pohcee:dcmnorm-java` + `com.pohcee:dcmnorm-java-natives` on Maven Central) that call the library in-process via the [jni](https://docs.rs/jni) crate — see that package's own README for its API
+- [`bindings/java`](bindings/java/): Java bindings (`com.pohcee:dcmnorm` + `com.pohcee:dcmnorm-natives` on Maven Central; `dcmnorm-java` / `dcmnorm-java-natives` up to 0.13.x, now relocated) that call the library in-process via the [jni](https://docs.rs/jni) crate — see that package's own README for its API
 
 ## Contents
 
@@ -1253,7 +1253,7 @@ tool can't "win" by failing fast (e.g. a dcmtk built without libpng rejects
 ├── bindings/
 │   ├── node/          # napi-rs bindings (npm: dcmnorm, @dcmnorm/<platform>)
 │   ├── python/        # PyO3 bindings (PyPI: dcmnorm, with the CLIs)
-│   └── java/          # jni bindings (Maven: com.pohcee:dcmnorm-java + -natives)
+│   └── java/          # jni bindings (Maven: com.pohcee:dcmnorm + -natives)
 ├── scripts/           # install / release helper scripts
 └── test/
     └── files/         # sample DICOM fixtures used by docs and tests
@@ -1419,9 +1419,10 @@ One GitHub Actions workflow, [`.github/workflows/release.yml`](.github/workflows
       with the `import dcmnorm` module and both CLIs, and a `py3-none` wheel with the CLIs only
       (for Pythons the first doesn't fit). Only when the repository variable `PYPI_PUBLISH` is `true`.
     - [`dcmnorm`](https://www.npmjs.com/package/dcmnorm) and its five `@dcmnorm/<platform>` addon
-      packages on npm (`NPM_PUBLISH`), and `com.pohcee:dcmnorm-java` with
-      `com.pohcee:dcmnorm-java-natives` (one jar per platform classifier) on Maven Central
-      (`MAVEN_PUBLISH`). The GitHub release carries the addons, wheels and natives jars too.
+      packages on npm (`NPM_PUBLISH`), and `com.pohcee:dcmnorm` with
+      `com.pohcee:dcmnorm-natives` (one jar per platform classifier) on Maven Central
+      (`MAVEN_PUBLISH`), plus relocation POMs from their pre-0.14 names `dcmnorm-java` and
+      `dcmnorm-java-natives`. The GitHub release carries the addons, wheels and natives jars too.
       Setup for each registry: [packaging/README.md](packaging/README.md).
     - the `claude-plugin` branch, rebuilt from this release's `plugin/` folder
       (`scripts/update-plugin-branch.sh`): the Claude plugin directory tracks that branch, since it

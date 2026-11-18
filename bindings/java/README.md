@@ -1,4 +1,4 @@
-# dcmnorm-java
+# dcmnorm (Java binding)
 
 Native Java bindings for dcmnorm, built with the [jni](https://docs.rs/jni) crate. Calls
 straight into the `dcmnorm` lib crate in-process (no CLI subprocess, no stdio/JSON round trip).
@@ -7,8 +7,8 @@ underlying crate, same feature set, adapted to Java/JNI conventions.
 
 ## Install
 
-Two artifacts on Maven Central: `com.pohcee:dcmnorm-java`, the Java API (no native code), and
-`com.pohcee:dcmnorm-java-natives`, the native library, one jar per platform classifier. Depend on
+Two artifacts on Maven Central: `com.pohcee:dcmnorm`, the Java API (no native code), and
+`com.pohcee:dcmnorm-natives`, the native library, one jar per platform classifier. Depend on
 the API plus the one natives jar for the platform you run on:
 
 | Classifier | Platform |
@@ -24,12 +24,12 @@ Maven:
 ```xml
 <dependency>
   <groupId>com.pohcee</groupId>
-  <artifactId>dcmnorm-java</artifactId>
+  <artifactId>dcmnorm</artifactId>
   <version>${dcmnorm.version}</version>
 </dependency>
 <dependency>
   <groupId>com.pohcee</groupId>
-  <artifactId>dcmnorm-java-natives</artifactId>
+  <artifactId>dcmnorm-natives</artifactId>
   <version>${dcmnorm.version}</version>
   <classifier>linux-x86_64</classifier>
   <scope>runtime</scope>
@@ -40,8 +40,8 @@ Gradle (Kotlin DSL):
 
 ```kotlin
 dependencies {
-    implementation("com.pohcee:dcmnorm-java:$dcmnormVersion")
-    runtimeOnly("com.pohcee:dcmnorm-java-natives:$dcmnormVersion:linux-x86_64")
+    implementation("com.pohcee:dcmnorm:$dcmnormVersion")
+    runtimeOnly("com.pohcee:dcmnorm-natives:$dcmnormVersion:linux-x86_64")
 }
 ```
 
@@ -61,7 +61,7 @@ convention, so a Maven build can pick the one for the machine it builds on:
 <!-- ... -->
 <dependency>
   <groupId>com.pohcee</groupId>
-  <artifactId>dcmnorm-java-natives</artifactId>
+  <artifactId>dcmnorm-natives</artifactId>
   <version>${dcmnorm.version}</version>
   <classifier>${os.detected.classifier}</classifier>
   <scope>runtime</scope>
@@ -69,15 +69,24 @@ convention, so a Maven build can pick the one for the machine it builds on:
 ```
 
 (Gradle: the `com.google.osdetector` plugin gives the same value as `osdetector.classifier`.)
-For an application that ships to several platforms, add one `dcmnorm-java-natives` dependency per
+For an application that ships to several platforms, add one `dcmnorm-natives` dependency per
 classifier: each jar holds only its own platform's library, under a different path, and
 `NativeLoader` picks the one for the running JVM. The version is the dcmnorm release version
 (`0.11.2` for `v0.11.2`). Java 11+.
 
+**Renamed in 0.14.0.** Versions 0.12.0 to 0.13.x were published as `com.pohcee:dcmnorm-java` and
+`com.pohcee:dcmnorm-java-natives`; they stay on Maven Central. From 0.14.0 on, the artifacts are
+`com.pohcee:dcmnorm` and `com.pohcee:dcmnorm-natives` (same group, classifiers and Java package
+`com.pohcee.dcmnorm`), and every release also publishes a relocation POM under each old name, so
+Maven resolves `com.pohcee:dcmnorm-java:<v>` to `com.pohcee:dcmnorm:<v>` (and
+`dcmnorm-java-natives:<v>:<classifier>` to `dcmnorm-natives:<v>:<classifier>`) with a warning.
+Switch to the new coordinates anyway: a build tool that does not follow Maven relocations would
+resolve the old name to a POM with no jar.
+
 ## Build
 
 ```sh
-./build.sh              # debug build -> target/debug/libdcmnorm_java.so + target/dcmnorm-java-<v>.jar
+./build.sh              # debug build -> target/debug/libdcmnorm_java.so + target/dcmnorm-<v>.jar
 ./build.sh --release     # release build, slower to compile but faster to run
 ./build.sh test           # also builds exec/dcmtalk and runs the smoke test against it
 ./build.sh --release test # release build + smoke test
@@ -335,8 +344,14 @@ Published to Maven Central (through the Sonatype Central Portal) by the
 
 | Artifact | Contents |
 | --- | --- |
-| `com.pohcee:dcmnorm-java:<v>` (`pom.xml`) | the API classes; `-sources` and `-javadoc` jars; no native code |
-| `com.pohcee:dcmnorm-java-natives:<v>` (`natives/pom.xml`, packaging `pom`) | one attached jar per classifier, `native/<classifier>/<library>` + `<library>.sha256` |
+| `com.pohcee:dcmnorm:<v>` (`pom.xml`) | the API classes; `-sources` and `-javadoc` jars; no native code |
+| `com.pohcee:dcmnorm-natives:<v>` (`natives/pom.xml`, packaging `pom`) | one attached jar per classifier, `native/<classifier>/<library>` + `<library>.sha256` |
+| `com.pohcee:dcmnorm-java:<v>` (`relocation/dcmnorm-java/pom.xml`, packaging `pom`) | only a POM, relocating to `com.pohcee:dcmnorm:<v>` (the API's name up to 0.13.x) |
+| `com.pohcee:dcmnorm-java-natives:<v>` (`relocation/dcmnorm-java-natives/pom.xml`, packaging `pom`) | only a POM, relocating to `com.pohcee:dcmnorm-natives:<v>` |
+
+All four go to Central as one deployment (`natives/pom.xml -Prelease` builds the others in the
+same reactor). The Cargo crate (`dcmnorm-java`, this directory) and the library name
+(`dcmnorm_java`) did not change with the Maven names.
 
 `<library>` is `libdcmnorm_java.so` (Linux), `libdcmnorm_java.dylib` (macOS) or
 `dcmnorm_java.dll` (Windows). Every file is GPG-signed. `NativeLoader`

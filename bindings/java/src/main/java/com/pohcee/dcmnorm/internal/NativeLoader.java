@@ -27,7 +27,7 @@ import java.util.regex.Pattern;
  *       {@code <platform>} is {@code linux-x86_64}, {@code linux-aarch_64}, {@code osx-aarch_64},
  *       {@code osx-x86_64} or {@code windows-x86_64} and {@code <library>} is
  *       {@code libdcmnorm_java.so}, {@code libdcmnorm_java.dylib} or {@code dcmnorm_java.dll}.
- *       That is what the {@code com.pohcee:dcmnorm-java-natives} jar with the platform's
+ *       That is what the {@code com.pohcee:dcmnorm-natives} jar with the platform's
  *       classifier contains (one platform per jar; see this module's README). It is extracted
  *       once per library build to a per-user cache, {@code <cache>/dcmnorm/<sha256>/<library>},
  *       and loaded from there by every later JVM - copying the ~28 MB library on every start was
@@ -85,7 +85,7 @@ public final class NativeLoader {
                 "Could not load the native dcmnorm_java library: no bundled resource for this platform ("
                     + resourceFailure.getMessage() + "), and System.loadLibrary(\"" + LIBRARY_NAME
                     + "\") failed (" + linkError.getMessage() + "). Add the dependency "
-                    + "com.pohcee:dcmnorm-java-natives with the classifier " + platformDirectoryName()
+                    + "com.pohcee:dcmnorm-natives with the classifier " + platformDirectoryName()
                     + " (the platforms published are linux-x86_64, linux-aarch_64, osx-aarch_64, osx-x86_64 "
                     + "and windows-x86_64), put " + LIBRARY_FILE + " on java.library.path, or set -D"
                     + LIBRARY_PATH_PROPERTY + "=/path/to/" + LIBRARY_FILE + ".");

@@ -1,0 +1,114 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Relocation POM: com.pohcee:dcmnorm-java-natives is the pre-0.14 name of
+  com.pohcee:dcmnorm-natives, the native libraries (one jar per platform classifier; Maven keeps
+  a dependency's classifier when it follows a relocation, and the classifiers are unchanged).
+  Versions 0.12.0 to 0.13.x were published under the old name and stay on Maven Central forever;
+  from 0.14.0 on, every release also publishes this POM at the release version, so a build that
+  bumps the version of the old coordinates resolves the new artifact (Maven follows the
+  <relocation> and prints a warning naming the new coordinates).
+
+  Published with every release, with no end date. Dropping it later would only save one small
+  POM per release, while a consumer still on the old name would then get "artifact not found"
+  instead of the relocation warning; keeping it needs no further step and no decision on when.
+  To stop, remove its <module> from ../../natives/pom.xml's release profile and its entry in
+  scripts/check-versions.py and ../../check-bundle.py.
+
+  Packaging pom: Central requires no jar, sources or javadoc for it, only the POM itself with
+  the metadata below, its checksums and its signature. It is built only in the release reactor
+  (../../natives/pom.xml -Prelease), which signs it and adds it to the one Central deployment.
+  Both <version>s equal ../../pom.xml's (scripts/check-versions.py writes them with its set option).
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>com.pohcee</groupId>
+  <artifactId>dcmnorm-java-natives</artifactId>
+  <version>0.13.1</version>
+  <packaging>pom</packaging>
+
+  <name>dcmnorm-java-natives (relocated to com.pohcee:dcmnorm-natives)</name>
+  <description>Relocation: com.pohcee:dcmnorm-java-natives is now com.pohcee:dcmnorm-natives, with the same classifiers. Depend on com.pohcee:dcmnorm-natives directly.</description>
+  <url>https://github.com/pohcee/dcmnorm</url>
+
+  <licenses>
+    <license>
+      <name>Apache-2.0</name>
+      <url>https://www.apache.org/licenses/LICENSE-2.0.txt</url>
+      <distribution>repo</distribution>
+    </license>
+  </licenses>
+  <developers>
+    <developer>
+      <name>Jason Klotzer</name>
+      <url>https://github.com/pohcee</url>
+    </developer>
+  </developers>
+  <scm>
+    <connection>scm:git:https://github.com/pohcee/dcmnorm.git</connection>
+    <developerConnection>scm:git:git@github.com:pohcee/dcmnorm.git</developerConnection>
+    <url>https://github.com/pohcee/dcmnorm</url>
+  </scm>
+
+  <distributionManagement>
+    <relocation>
+      <groupId>com.pohcee</groupId>
+      <artifactId>dcmnorm-natives</artifactId>
+      <version>0.13.1</version>
+      <message>com.pohcee:dcmnorm-java-natives was renamed to com.pohcee:dcmnorm-natives in dcmnorm 0.14.0; the classifiers are unchanged.</message>
+    </relocation>
+  </distributionManagement>
+
+  <profiles>
+    <profile>
+      <id>release</id>
+      <build>
+        <plugins>
+          <plugin>
+            <!-- Signs with the key actions/setup-java imported (MAVEN_GPG_PRIVATE_KEY); the
+                 passphrase comes from the MAVEN_GPG_PASSPHRASE environment variable. -->
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-gpg-plugin</artifactId>
+            <version>3.2.7</version>
+            <executions>
+              <execution>
+                <id>sign-artifacts</id>
+                <phase>verify</phase>
+                <goals>
+                  <goal>sign</goal>
+                </goals>
+                <configuration>
+                  <gpgArguments>
+                    <arg>--pinentry-mode</arg>
+                    <arg>loopback</arg>
+                  </gpgArguments>
+                </configuration>
+              </execution>
+            </executions>
+          </plugin>
+          <plugin>
+            <groupId>org.sonatype.central</groupId>
+            <artifactId>central-publishing-maven-plugin</artifactId>
+            <version>0.12.0</version>
+            <extensions>true</extensions>
+            <configuration>
+              <publishingServerId>central</publishingServerId>
+              <autoPublish>true</autoPublish>
+              <waitUntil>published</waitUntil>
+              <deploymentName>dcmnorm ${project.version}</deploymentName>
+              <!-- The plugin's deferred and staging directories and the bundle default to the
+                   first reactor project's target/, and the reactor order of these unrelated
+                   modules is not their declaration order: every module names the same place,
+                   bindings/java/target/. -->
+              <forcedDeferredDirectory>${project.basedir}/../../target/central-deferred</forcedDeferredDirectory>
+              <forcedStagingDirectory>${project.basedir}/../../target/central-staging</forcedStagingDirectory>
+              <forcedOutputDirectory>${project.basedir}/../../target/central-publishing</forcedOutputDirectory>
+            </configuration>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+  </profiles>
+</project>

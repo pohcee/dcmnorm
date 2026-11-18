@@ -32,6 +32,10 @@ const { execFileSync } = require("child_process");
 const ROOT = __dirname;
 const NPM_DIR = path.join(ROOT, "npm");
 const SCOPE = "@dcmnorm";
+// The icon at the top of every package's README, as in README.md and packaging/pypi-README.md. An
+// absolute URL: npm does not resolve image paths relative to the package.
+const ICON =
+  '<img src="https://raw.githubusercontent.com/pohcee/dcmnorm/main/docs/images/dcmnorm-icon.png" alt="dcmnorm" width="96">';
 const pkg = require("./package.json");
 
 // napi target triple -> platform name (as in the .node file name) and the package's os/cpu/libc.
@@ -104,7 +108,7 @@ function main() {
     fs.writeFileSync(path.join(dir, "package.json"), JSON.stringify(sub, null, 2) + "\n");
     fs.writeFileSync(
       path.join(dir, "README.md"),
-      `# \`${sub.name}\`\n\nThe ${p.name} native addon of [\`${pkg.name}\`](https://www.npmjs.com/package/${pkg.name}). ` +
+      `${ICON}\n\n# \`${sub.name}\`\n\nThe ${p.name} native addon of [\`${pkg.name}\`](https://www.npmjs.com/package/${pkg.name}). ` +
         `Install \`${pkg.name}\`, which depends on this package on matching platforms.\n`,
     );
     fs.copyFileSync(license, path.join(dir, "LICENSE"));
@@ -123,6 +127,7 @@ function main() {
   const required = new Set([...loader.matchAll(/require\('(@[^/']+\/[a-z0-9-]+)'\)/g)].map((m) => m[1]));
   for (const name of Object.keys(expectedDeps)) assert.ok(required.has(name), `index.js does not require ${name}`);
 
+  assert.ok(fs.readFileSync(path.join(ROOT, "README.md"), "utf8").startsWith(ICON + "\n"), "README.md must start with the icon line");
   const main = packFiles(ROOT);
   assert.deepStrictEqual(main.files, ["LICENSE", "README.md", "index.d.ts", "index.js", "package.json"], `${pkg.name} contents`);
   console.error(`${pkg.name}@${pkg.version}: ${main.files.join(", ")} (${main.size} bytes packed)`);

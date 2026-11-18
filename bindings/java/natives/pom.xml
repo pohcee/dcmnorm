@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  com.pohcee:dcmnorm-java-natives: the native library of the Java binding, one jar per platform,
-  told apart by Maven classifier. A consumer depends on com.pohcee:dcmnorm-java plus exactly one of
+  com.pohcee:dcmnorm-natives: the native library of the Java binding, one jar per platform,
+  told apart by Maven classifier. A consumer depends on com.pohcee:dcmnorm plus exactly one of
   these (see ../README.md, "Install"):
 
     classifier       jar contents (NativeLoader looks there)
@@ -23,12 +23,12 @@
   <modelVersion>4.0.0</modelVersion>
 
   <groupId>com.pohcee</groupId>
-  <artifactId>dcmnorm-java-natives</artifactId>
+  <artifactId>dcmnorm-natives</artifactId>
   <version>0.13.1</version>
   <packaging>pom</packaging>
 
-  <name>dcmnorm-java-natives</name>
-  <description>Native libraries for dcmnorm-java, one jar per platform classifier: linux-x86_64, linux-aarch_64, osx-aarch_64, osx-x86_64, windows-x86_64.</description>
+  <name>dcmnorm-natives</name>
+  <description>Native libraries for com.pohcee:dcmnorm, one jar per platform classifier: linux-x86_64, linux-aarch_64, osx-aarch_64, osx-x86_64, windows-x86_64.</description>
   <url>https://github.com/pohcee/dcmnorm</url>
 
   <licenses>
@@ -128,10 +128,15 @@
   <profiles>
     <profile>
       <id>release</id>
-      <!-- A release builds the API (../pom.xml) in the same reactor, so the Central Portal gets both
-           artifacts as one bundle: one deployment that is validated and published as a whole,
-           never the natives without the API or the other way round. -->
+      <!-- A release builds the API (../pom.xml) and the relocation POMs for the pre-0.14 names
+           (../relocation/) in the same reactor, so the Central Portal gets all four artifacts as
+           one bundle: one deployment that is validated and published as a whole, never the
+           natives without the API, or a relocation without its target. Every module writes the
+           bundle to ../target/central-publishing/central-bundle.zip (forcedOutputDirectory
+           below), where the release workflow checks it. -->
       <modules>
+        <module>../relocation/dcmnorm-java</module>
+        <module>../relocation/dcmnorm-java-natives</module>
         <module>..</module>
       </modules>
       <build>
@@ -200,7 +205,14 @@
               <publishingServerId>central</publishingServerId>
               <autoPublish>true</autoPublish>
               <waitUntil>published</waitUntil>
-              <deploymentName>dcmnorm-java ${project.version}</deploymentName>
+              <deploymentName>dcmnorm ${project.version}</deploymentName>
+              <!-- The plugin's deferred and staging directories and the bundle default to the
+                   first reactor project's target/, and the reactor order of these unrelated
+                   modules is not their declaration order: every module names the same place,
+                   bindings/java/target/. -->
+              <forcedDeferredDirectory>${project.basedir}/../target/central-deferred</forcedDeferredDirectory>
+              <forcedStagingDirectory>${project.basedir}/../target/central-staging</forcedStagingDirectory>
+              <forcedOutputDirectory>${project.basedir}/../target/central-publishing</forcedOutputDirectory>
             </configuration>
           </plugin>
         </plugins>
