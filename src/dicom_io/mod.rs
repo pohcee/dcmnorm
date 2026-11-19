@@ -17,6 +17,9 @@ mod json;
 mod kakadu;
 mod mpeg;
 mod render;
+mod registration;
+#[cfg(test)]
+mod registration_tests;
 mod scp;
 mod standard_json;
 #[cfg(test)]
@@ -87,6 +90,11 @@ pub use types::{
 pub use volume::{
     build_volume, canonical_view_basis, reformat_plane, reformat_plane_values, resample_volume,
     rotate_basis, Interpolation, PlaneParams, SlabProjection, Volume, VolumeError,
+};
+pub use registration::{
+    estimate_translation, euler_deg, mat_inverse, mat_mul, register_rigid, rigid_about, rotation_angle_deg, rotation_matrix,
+    transform_point, translation_matrix, Initialization, LevelResult, MaskMode, Mat4, MetricChoice, MetricKind,
+    RegistrationError, RegistrationOptions, RegistrationResult, StopReason, TranslationEstimate, TranslationOptions,
 };
 pub use volume_export::{generate_uid, write_nifti, write_nrrd, VolumeExportError, VolumeGeometry};
 pub use texture_export::{
