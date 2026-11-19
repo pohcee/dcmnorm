@@ -21,6 +21,10 @@ mod scp;
 mod standard_json;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod test_support;
+#[cfg(test)]
+mod volume_geometry_tests;
 mod secondary_capture;
 mod texture_export;
 mod types;

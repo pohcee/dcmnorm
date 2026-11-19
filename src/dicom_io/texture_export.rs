@@ -94,7 +94,7 @@ pub enum SampleFormat {
 }
 
 impl SampleFormat {
-    fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Uint16 => "uint16",
             Self::Int16 => "int16",
@@ -426,6 +426,13 @@ pub fn pack_volume_texture(
             let resampled = resample_volume(volume, target_cols, target_rows, target_slices, Interpolation::Trilinear);
             (Cow::Owned(resampled), (target_cols, target_rows, target_slices), true)
         }
+        // An irregularly spaced stack has no uniform slice spacing to report, so it's resampled
+        // by position onto a uniform lattice with the same slice count (the texture's
+        // `slice_spacing_mm` is then exact instead of an average that stretches part of it).
+        _ if volume.has_irregular_spacing() => {
+            let resampled = resample_volume(volume, native_dims.0, native_dims.1, native_dims.2, Interpolation::Trilinear);
+            (Cow::Owned(resampled), native_dims, false)
+        }
         _ => (Cow::Borrowed(volume.samples.as_slice()), native_dims, false),
     };
 
@@ -442,14 +449,21 @@ pub fn pack_volume_texture(
 
     // Downsampling shrinks voxel COUNT while covering the same physical extent, so per-axis
     // spacing grows by the inverse of that axis's shrink ratio.
-    let col_scale = native_dims.0 as f64 / dims.0 as f64;
-    let row_scale = native_dims.1 as f64 / dims.1 as f64;
-    let slice_nominal_spacing = if volume.slice_zs.len() > 1 {
-        ((volume.slice_zs[volume.slice_zs.len() - 1] - volume.slice_zs[0]) / (volume.slice_zs.len() - 1) as f64).abs()
-    } else {
-        0.0
+    // `resample_volume` places the first and last target voxel exactly on the first and last
+    // native voxel, so an axis of n native voxels exported as d covers the same centre-to-centre
+    // extent: its spacing grows by (n - 1) / (d - 1), not n / d (which left the far end of a
+    // 512 -> 256 axis half a voxel short).
+    let axis_scale = |native: u32, exported: u32| -> f64 {
+        if exported > 1 && native > 1 {
+            (native - 1) as f64 / (exported - 1) as f64
+        } else {
+            native as f64 / exported as f64
+        }
     };
-    let slice_scale = native_dims.2 as f64 / dims.2 as f64;
+    let col_scale = axis_scale(native_dims.0, dims.0);
+    let row_scale = axis_scale(native_dims.1, dims.1);
+    let slice_nominal_spacing = volume.nominal_slice_spacing_mm();
+    let slice_scale = axis_scale(native_dims.2, dims.2);
 
     let meta = TextureMeta {
         content_kind: ContentKind::Volume,
@@ -1046,6 +1060,12 @@ mod tests {
             col_spacing_mm: 0.5,
             row_spacing_mm: 0.6,
             slice_zs: (0..num_slices).map(|index| index as f64 * 2.0).collect(),
+            modality: None,
+            frame_of_reference_uid: None,
+            series_instance_uid: None,
+            study_instance_uid: None,
+            gantry_tilt_deg: 0.0,
+            desheared: false,
         }
     }
 
