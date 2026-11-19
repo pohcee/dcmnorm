@@ -63,7 +63,7 @@ fn spec() -> Json {
 
 #[test]
 fn format_ds_fits_sixteen_characters_and_round_trips_closely() {
-    for v in [0.0, 1.0, -1.0, 0.999_999_999_999_9, 1e-12, -123_456.789_012_345, 3.141_592_653_589_793, 1.5e20, -0.000_123_456_789_123] {
+    for v in [0.0, 1.0, -1.0, 0.999_999_999_999_9, 1e-12, -123_456.789_012_345, std::f64::consts::PI, 1.5e20, -0.000_123_456_789_123] {
         let text = format_ds(v);
         assert!(text.len() <= 16, "{v} -> {text:?}");
         let back: f64 = text.parse().unwrap();
@@ -162,7 +162,8 @@ fn patient_and_study_are_copied_from_a_fixed_instance_and_overrides_win() {
 
 #[test]
 fn invalid_specs_are_rejected() {
-    let cases: Vec<(&str, Box<dyn Fn(&mut Json)>)> = vec![
+    type Mutation = Box<dyn Fn(&mut Json)>;
+    let cases: Vec<(&str, Mutation)> = vec![
         ("same frame", Box::new(|s: &mut Json| s["moving"]["frameOfReferenceUid"] = json!(FIXED_FOR))),
         ("15 values", Box::new(|s: &mut Json| s["matrix"].as_array_mut().unwrap().pop().map(|_| ()).unwrap())),
         ("not rigid", Box::new(|s: &mut Json| s["matrix"][0] = json!(1.2))),

@@ -1179,7 +1179,7 @@ pub extern "system" fn Java_com_pohcee_dcmnorm_Dcmnorm_nativeRenderMovie<'local>
 /// one CT/MR/PT series) sharing consistent `ImageOrientationPatient`. Slices are spatially
 /// re-sorted internally by `ImagePositionPatient`, regardless of input order. Raises (rather than
 /// silently mis-rendering) for fewer than 2 files, mismatched Rows/Columns, or a
-/// non-parallel/gantry-tilt-inconsistent stack.
+/// non-parallel stack. Enhanced multi-frame files and gantry-tilted (desheared) stacks are handled.
 #[no_mangle]
 pub extern "system" fn Java_com_pohcee_dcmnorm_Dcmnorm_nativeBuildVolume<'local>(
     mut env: JNIEnv<'local>,

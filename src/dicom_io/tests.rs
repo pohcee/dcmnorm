@@ -4062,7 +4062,7 @@ fn build_volume_rejects_a_non_parallel_orientation_in_the_stack() {
     let paths = write_synthetic_ct_series(4, 1.0);
 
     // Corrupt one slice's ImageOrientationPatient so it no longer shares the stack's plane -
-    // e.g. simulating a gantry-tilt-inconsistent or accidentally-mixed-series file set.
+    // e.g. simulating a multi-orientation or accidentally-mixed-series file set.
     let mut tilted = read_dicom_file(&paths[1]).unwrap();
     tilted.put(DataElement::new(
         tags::IMAGE_ORIENTATION_PATIENT,

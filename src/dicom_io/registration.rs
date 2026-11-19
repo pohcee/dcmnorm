@@ -868,7 +868,7 @@ fn select_samples(fixed: &Prepared, max_samples: usize) -> Samples {
     let mut points = Vec::new();
     let mut values = Vec::new();
     for (index, &m) in fixed.sampling.iter().enumerate() {
-        if m == 0 || (keep_one_in > 1 && hash64(index as u64) % keep_one_in != 0) {
+        if m == 0 || (keep_one_in > 1 && !hash64(index as u64).is_multiple_of(keep_one_in)) {
             continue;
         }
         let (i, j, k) = (index % nx, (index / nx) % ny, index / (nx * ny));
@@ -1715,7 +1715,7 @@ pub fn estimate_translation(fixed: &Volume, moving: &Volume, options: &Translati
         .map(|(_, s)| s.1)
         .fold(f64::NEG_INFINITY, f64::max);
     let second = if second.is_finite() { second } else { 0.0 };
-    let confidence = peak.max(0.0).min(1.0) * ((peak - second.max(0.0)) / 0.3).clamp(0.0, 1.0);
+    let confidence = peak.clamp(0.0, 1.0) * ((peak - second.max(0.0)) / 0.3).clamp(0.0, 1.0);
 
     // In-plane: body centroids over the overlapping bins.
     let (mut fx, mut fy, mut fw, mut mx, mut my, mut mw) = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0);

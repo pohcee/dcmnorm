@@ -680,6 +680,9 @@ fn now_date_time() -> (String, String) {
     )
 }
 
+/// One explicit `spec.patient` / `spec.study` field: JSON key, tag, VR.
+type OverrideField = (&'static str, Tag, VR);
+
 /// Patient / General Study / Patient Study attributes copied from the fixed study.
 const COPIED_ATTRIBUTES: &[(Tag, VR)] = &[
     (tags::PATIENT_NAME, VR::PN),
@@ -793,7 +796,7 @@ pub fn build_spatial_registration(spec: &Json, copy_from: Option<&DefaultDicomOb
             }
         }
     }
-    let overrides: [(&str, &[(&str, Tag, VR)]); 2] = [
+    let overrides: [(&str, &[OverrideField]); 2] = [
         (
             "patient",
             &[

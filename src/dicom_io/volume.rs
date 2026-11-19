@@ -498,8 +498,8 @@ fn permute_planes_in_place(samples: &mut [f32], plane_len: usize, order: &[usize
 /// Transformation functional groups are honoured. A sheared (gantry-tilted) stack is desheared
 /// onto an orthogonal grid (`Volume::desheared`).
 /// Rejects (rather than silently mis-rendering) a series whose slices don't share a consistent
-/// `ImageOrientationPatient`/dimensions - true oblique/gantry-tilt-inconsistent stacks aren't a
-/// resamplable orthogonal volume without more advanced reconstruction, which is out of scope.
+/// `ImageOrientationPatient`/dimensions - slices in different planes (a multi-orientation or
+/// non-parallel series) aren't one resamplable lattice.
 ///
 /// Memory: every slice is decoded straight into its plane of one preallocated `f32` buffer (in
 /// file order), then the planes are sorted in place, so the peak is the volume itself plus one
@@ -571,7 +571,7 @@ fn build_volume_from_single_frame_files<P: AsRef<Path> + Sync>(file_paths: &[P])
             || !vectors_close(slice.col_vector, col_vector, ORIENTATION_EPSILON)
         {
             return Err(VolumeError::InconsistentGeometry(
-                "ImageOrientationPatient differs between slices (non-parallel or gantry-tilt-inconsistent stack)"
+                "ImageOrientationPatient differs between slices (non-parallel or multi-orientation stack)"
                     .to_owned(),
             ));
         }

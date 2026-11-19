@@ -56,6 +56,10 @@ DICOMDIR (a command of its own, see [Write a DICOMDIR](#write-a-dicomdir)):
 
 - `dcmnorm dicomdir <ROOT> [--file-set-id <ID>] [-o <PATH>] [--json]`
 
+Registration (a command of its own, see [Register two volumes](#register-two-volumes)):
+
+- `dcmnorm register <FIXED> <MOVING> [--metric auto|ncc|mattes-mi] [--translation-only] [--time-limit-ms <MS>] [--levels <MM,...>] [--reg <PATH>]`
+
 DICOM editing:
 
 - `--set <KEY=VALUE>`
@@ -529,8 +533,9 @@ a clear error rather than a silently-ignored flag); `--mpr-projection` additiona
 positive `--mpr-thickness`. MPR mode is incompatible with `--filter`/`--transfer-syntax`/`--set`/
 `--remove`/`--render-all-frames`/`--render-fps`/`--scale-max-size`, and fails with a clear error
 (rather than a silently wrong reformat) if the given files don't share a consistent
-`ImageOrientationPatient` - e.g. a genuinely gantry-tilt-inconsistent stack or an accidentally
-mixed set of series.
+`ImageOrientationPatient` - e.g. an accidentally mixed set of series. A gantry-tilted stack
+(parallel slices whose origins drift within the slice plane) is fine: it is desheared onto an
+orthogonal grid. One Enhanced CT/MR/PET multi-frame file is a whole volume on its own.
 
 #### Reformatting a STACK of slices - `--mpr-depth` ranges
 
@@ -829,3 +834,44 @@ as DICOM JSON or a path to read it from: Node's `writeDicomdir(entries, outputPa
 (`DicomdirEntry(file_id, json=...)` / `path=...`, or dicts; see `bindings/python/README.md`) and
 Java's `Dcmnorm.writeDicomdir(entries, outputPath, options)` (`DicomdirEntry.fromJson` /
 `fromFile`, see `bindings/java/README.md`).
+
+### Register two volumes
+
+`dcmnorm register FIXED MOVING` aligns the MOVING series to the FIXED one with a rigid (6 degrees
+of freedom) registration and prints the result as JSON. Each of FIXED and MOVING is a directory
+holding one series' files, a single Enhanced CT/MR/PET file, or a comma-separated list of files.
+
+```bash
+dcmnorm register current/ prior/                                   # the result as JSON
+dcmnorm register ct/ pet/ --reg pet-to-ct.dcm                      # also write a DICOM REG
+dcmnorm register current/ prior/ --translation-only                # the fast estimate only
+```
+
+- `matrix` is a row-major 4x4 that maps a point in the MOVING patient coordinates (LPS mm) to the
+  FIXED ones. This is the direction a DICOM Spatial Registration item stores, with the item's
+  Frame of Reference the moving one and the REG's own the fixed one.
+- Any pairing of CT, MR and PT works. The metric is NCC when both series have the same modality
+  and Mattes mutual information otherwise (`--metric` overrides it). An MR-MR pair that NCC can't
+  align (a T1 against a T2) is retried with mutual information.
+- Both volumes are resampled onto an 8, 4 and 2 mm pyramid, so anisotropic voxels, different
+  voxel sizes and different fields of view are fine. Body masks depend on the modality: a CT mask
+  drops the table, and MR and PT masks need no HU or SUV values. Intensities are normalized by
+  percentile, so MR scaling and PET counts versus SUV don't matter.
+- The result carries `metric`, `metricValue`, `normalizedMetric` (the NCC correlation, or MI's
+  entropy correlation coefficient), `overlapFraction`, `quality` and `qualityLabel`
+  (`good`/`fair`/`poor`), the per-level iterations, `initialization`, `stopReason` and `timingMs`.
+- The result is deterministic: the same inputs give the same matrix bit for bit, whatever the
+  thread count. `--time-limit-ms` (default 30000) returns the best result so far when it runs out.
+- `--translation-only` runs just the fast estimate, which also seeds the rigid registration.
+  The S-I shift comes from cross-correlating per-height profiles (body area, plus lung and bone
+  area for CT and integrated intensity for MR/PT), and the in-plane shift from the body
+  centroids. Its `confidence` drops when another alignment fits almost as well.
+- `--reg PATH` writes the result as a Spatial Registration object
+  (`1.2.840.10008.5.1.4.1.1.66.1`) in the fixed study. The fixed and moving series and instances
+  are referenced, and the patient and study modules are copied from the first fixed file.
+  `dcmnorm PATH` prints any REG object as JSON.
+
+The bindings expose the same functions: Node's `registerVolumes`, `estimateTranslation`,
+`readSpatialRegistration` and `writeSpatialRegistration` (see `bindings/node/README.md`), and
+`dcmnorm::dicom_io::{register_rigid, estimate_translation, read_spatial_registration,
+build_spatial_registration, validate_spatial_registration}` in Rust.

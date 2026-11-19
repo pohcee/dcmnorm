@@ -210,7 +210,8 @@ options, not results" below for why only the options side of this binding leans 
 - `Dcmnorm.buildVolume(List<String> filePaths) -> DicomVolumeHandle` - reads and decodes every
   slice of a parallel stack (e.g. one CT/MR/PT series), spatially re-sorted by
   `ImagePositionPatient` regardless of input order. Raises for fewer than 2 files, mismatched
-  Rows/Columns, or a non-parallel/gantry-tilt-inconsistent stack. This is the expensive step -
+  Rows/Columns, or a non-parallel stack (one Enhanced multi-frame file is a whole volume; a
+  gantry-tilted stack is desheared onto an orthogonal grid). This is the expensive step -
   build once per series and keep the returned handle resident (e.g. in a volume cache) so every
   subsequent `reformat()` call is cheap.
 - `DicomVolumeHandle` - an opaque, read-only handle around the built volume. **Must be closed**

@@ -476,10 +476,7 @@ fn an_initial_matrix_is_used_and_invalid_options_are_rejected() {
     ] {
         assert!(matches!(register_rigid(&f, &m, &bad), Err(RegistrationError::InvalidOption(_))));
     }
-    assert!(matches!(
-        register_rigid(&f, &m, &RegistrationOptions { metric: MetricChoice::Ncc, mask: super::registration::MaskMode::None, ..Default::default() }),
-        Ok(_)
-    ));
+    assert!(register_rigid(&f, &m, &RegistrationOptions { metric: MetricChoice::Ncc, mask: super::registration::MaskMode::None, ..Default::default() }).is_ok());
 }
 
 /// The render-server-sized benchmark: a 512 x 512 x 300 CT (0.78 mm pixels, 1.25 mm slices)
