@@ -20,9 +20,12 @@ export declare class DicomServerHandle {
 }
 
 export declare class DicomVolumeHandle {
-  /** Rows in the source slices (image height). */
+  /**
+   * Rows of the volume's slice grid (image height). The source images' Rows, except for a
+   * desheared (gantry-tilted) stack, whose grid covers every slice's footprint.
+   */
   get rows(): number
-  /** Columns in the source slices (image width). */
+  /** Columns of the volume's slice grid (image width); see `rows`. */
   get cols(): number
   /** Number of slices in the built volume. */
   get numSlices(): number
@@ -48,6 +51,31 @@ export declare class DicomVolumeHandle {
   get center(): Array<number>
   /** The volume's own smallest voxel dimension, in mm - a reasonable default output spacing. */
   get minSpacingMm(): number
+  /** `Modality` of the source images (`CT`, `MR`, `PT`, ...), or `null`. */
+  get modality(): string | null
+  /** `FrameOfReferenceUID` of the source images, or `null`. */
+  get frameOfReferenceUid(): string | null
+  /** `SeriesInstanceUID` of the source images, or `null`. */
+  get seriesInstanceUid(): string | null
+  /** `StudyInstanceUID` of the source images, or `null`. */
+  get studyInstanceUid(): string | null
+  /**
+   * Gantry tilt of the acquisition, degrees: the angle between the slice-to-slice position
+   * step and the slice normal. `0` for an ordinary stack.
+   */
+  get gantryTiltDeg(): number
+  /** Whether the stack was sheared (gantry tilt) and resampled onto an orthogonal grid. */
+  get desheared(): boolean
+  /**
+   * Whether the slice gaps are irregular (a missing slice, variable pitch). Reformats
+   * interpolate by real position either way; `exportTexture` resamples to a uniform lattice.
+   */
+  get irregularSpacing(): boolean
+  /**
+   * Row-major 4x4 matrix from voxel index `(col, row, slice, 1)` to patient LPS mm (slice
+   * axis at the nominal uniform spacing).
+   */
+  get voxelToPatient(): Array<number>
   /**
    * Resamples one plane through this volume and encodes it exactly like a normal 2D render
    * (same `RenderedFrame` shape `renderFrame` returns), so callers can reuse their existing
@@ -117,6 +145,16 @@ export declare class MoveScuHandle {
   abort(): Promise<MoveScuResult>
 }
 
+/**
+ * Cancels a running `registerVolumes`: pass it as the 4th argument and call `cancel()`; the
+ * registration rejects with "registration cancelled" at its next metric evaluation.
+ */
+export declare class RegistrationCancelToken {
+  constructor()
+  cancel(): void
+  get cancelled(): boolean
+}
+
 export declare class StoreScuHandle {
   /**
    * The eventual per-file `{sopInstanceUid, status}` results, without requesting
@@ -137,11 +175,13 @@ export declare class StoreScuHandle {
 
 /**
  * Builds a 3D volume from a parallel stack of DICOM slice files (e.g. every image instance in
- * one CT/MR/PT series) sharing consistent `ImageOrientationPatient`. Slices are spatially
- * re-sorted internally by `ImagePositionPatient`, regardless of `filePaths`' own order. Returns a
- * `DicomVolumeHandle` for repeated `reformat()` calls. Rejects (rather than silently
- * mis-rendering) fewer than 2 files, mismatched Rows/Columns, or a non-parallel/gantry-tilt-
- * inconsistent stack.
+ * one CT/MR/PT series) sharing consistent `ImageOrientationPatient`, or from Enhanced
+ * multi-frame objects (one Enhanced CT/MR/PET file is enough; per-frame positions and rescale
+ * are honoured). Slices are spatially re-sorted internally by `ImagePositionPatient`,
+ * regardless of `filePaths`' own order; a gantry-tilted stack is desheared onto an orthogonal
+ * grid. Returns a `DicomVolumeHandle` for repeated `reformat()` calls. Rejects (rather than
+ * silently mis-rendering) fewer than 2 slices, mismatched Rows/Columns, or a non-parallel
+ * stack.
  */
 export declare function buildVolume(filePaths: Array<string>): Promise<unknown>
 
@@ -261,6 +301,25 @@ export interface EditTagsOptions {
   set?: Record<string, string>
   remove?: Array<string>
   removePrivateTags?: boolean
+}
+
+/**
+ * A fast moving -> fixed translation: the S-I shift from cross-correlating per-height profiles
+ * (body area; plus lung and bone area for CT-CT, integrated intensity for MR-MR / PT-PT), the
+ * in-plane shift from body-mask centroids over the matched overlap. Works for any acquisition
+ * orientation. Tens of milliseconds for a typical CT.
+ */
+export declare function estimateTranslation(fixed: DicomVolumeHandle, moving: DicomVolumeHandle, options?: EstimateTranslationOptions | undefined | null): Promise<unknown>
+
+export interface EstimateTranslationOptions {
+  /** Overrides the fixed volume's Modality ('CT', 'MR', 'PT', ...). */
+  fixedModality?: string
+  /** Overrides the moving volume's Modality. */
+  movingModality?: string
+  /** Smallest S-I overlap of the two scans a z shift may imply, mm (default 60). */
+  minOverlapMm?: number
+  /** Largest |z shift| considered, mm (default: anything with enough overlap). */
+  maxShiftMm?: number
 }
 
 /**
@@ -568,6 +627,16 @@ export interface ReadJsonOptions {
   omitKeywordVm?: boolean
 }
 
+/**
+ * Reads a DICOM Spatial Registration object (1.2.840.10008.5.1.4.1.1.66.1; for a Deformable
+ * one, .66.3, only its pre/post-deformation matrices) and resolves with its JSON form as a
+ * string: the REG's own (registered) Frame of Reference, one entry per Registration Sequence
+ * item with its Frame of Reference, the composed item -> REG matrix (row-major), its type and
+ * referenced images, the Common Instance Reference series, and `warnings` (IOD problems).
+ * Rejects anything that is not a registration object.
+ */
+export declare function readSpatialRegistration(filePath: string): Promise<unknown>
+
 export declare function readTags(filePath: string, tags: Array<string>): Promise<unknown>
 
 export interface ReformatPlaneOptions {
@@ -601,6 +670,96 @@ export interface ReformatPlaneOptions {
    * intensity projection), 'minip' (minimum intensity projection), or 'average'.
    */
   slabProjection?: string
+}
+
+/**
+ * Rigid (6-DOF) registration of `moving` onto `fixed`, any CT / MR / PT pairing: a multi-
+ * resolution pyramid, modality-aware body masks (CT table removed), NCC for the same modality
+ * and Mattes mutual information across modalities, Powell's optimizer. Deterministic, bounded
+ * by `maxMemoryBytes` and `timeLimitMs`, cancellable through `cancel`. Resolves with the
+ * moving -> fixed patient matrix, the metric, a quality score and timing; rejects when the
+ * volumes have no body or do not overlap, on invalid options, or when cancelled.
+ */
+export declare function registerVolumes(fixed: DicomVolumeHandle, moving: DicomVolumeHandle, options?: RegisterVolumesOptions | undefined | null, cancel?: RegistrationCancelToken | undefined | null): Promise<unknown>
+
+export interface RegisterVolumesOptions {
+  /**
+   * 'auto' (default: 'ncc' for the same modality, 'mattes-mi' across modalities), 'ncc' or
+   * 'mattes-mi'.
+   */
+  metric?: string
+  fixedModality?: string
+  movingModality?: string
+  /** Starting moving -> fixed transform (16 numbers, row-major), e.g. the viewer's translation. */
+  initialMatrix?: Array<number>
+  /**
+   * Without `initialMatrix`: 'translation' (default; estimateTranslation, then the mask
+   * centroids when it is not confident), 'centroid' or 'none'.
+   */
+  initialize?: string
+  /** Working-grid spacing per pyramid level, coarse to fine, mm (default [8, 4, 2]). */
+  levelsMm?: Array<number>
+  /** Optimizer iterations per level (default 40). */
+  maxIterations?: number
+  /**
+   * Wall-clock limit, ms (default 30000). On expiry the best result so far is returned with
+   * `stopReason: 'time-limit'`.
+   */
+  timeLimitMs?: number
+  /** 'auto' (default: modality-aware body mask, CT table removed) or 'none'. */
+  mask?: string
+  /** Optional box in FIXED patient coordinates the fixed mask is limited to (min corner). */
+  roiMinMm?: Array<number>
+  /** Max corner of `roiMinMm`'s box. */
+  roiMaxMm?: Array<number>
+  /** Mutual-information histogram bins (default 32). */
+  histogramBins?: number
+  /** Metric sample points per level (default 100000). */
+  maxSamples?: number
+  /** Working-memory cap in bytes (default 268435456); a level that would exceed it is coarsened. */
+  maxMemoryBytes?: number
+}
+
+export interface RegistrationLevel {
+  spacingMm: number
+  iterations: number
+  metricEvaluations: number
+  metricValue: number
+}
+
+export interface RegistrationResult {
+  /** Moving -> fixed patient, row-major 4x4. */
+  matrix: Array<number>
+  /** Euler angles of the matrix's rotation, degrees (`R = Rz * Ry * Rx`). */
+  rotationDeg: Array<number>
+  /** The matrix's translation column, mm. */
+  translationMm: Array<number>
+  /** Centre of rotation the optimizer used (fixed body centroid), fixed patient mm. */
+  centerMm: Array<number>
+  /** 'ncc' or 'mattes-mi'. */
+  metric: string
+  /** NCC correlation (-1..1), or mutual information (nats). */
+  metricValue: number
+  initialMetricValue: number
+  /** NCC correlation, or MI's entropy correlation coefficient (0..1). */
+  normalizedMetric: number
+  /** Fraction of the fixed body samples that land inside the moving volume. */
+  overlapFraction: number
+  /** 0..1 heuristic; show it, and never apply a 'poor' result silently. */
+  quality: number
+  /** 'good' (>= 0.7), 'fair' (>= 0.4) or 'poor'. */
+  qualityLabel: string
+  iterations: number
+  metricEvaluations: number
+  levels: Array<RegistrationLevel>
+  /** 'matrix', 'translation', 'centroid' or 'none'. */
+  initialization: string
+  converged: boolean
+  /** 'converged', 'max-iterations' or 'time-limit'. */
+  stopReason: string
+  timingMs: number
+  /** Peak bytes of working images and samples held. */
+  workingBytes: number
 }
 
 export interface RenderedFrame {
@@ -846,6 +1005,23 @@ export interface TransferSyntaxSupportInfo {
   canTranscodeTo: boolean
 }
 
+export interface TranslationEstimate {
+  /** Moving -> fixed patient (a pure translation), row-major 4x4. */
+  matrix: Array<number>
+  translationMm: Array<number>
+  /**
+   * 0..1: the correlation peak's height and its margin over the next peak 20+ mm away.
+   * Below ~0.3, fall back to capture-on-link.
+   */
+  confidence: number
+  peakCorrelation: number
+  secondPeakCorrelation: number
+  overlapMm: number
+  /** The profiles correlated: 'body', 'lung', 'bone' (CT-CT), 'intensity' (MR-MR, PT-PT). */
+  profiles: Array<string>
+  timingMs: number
+}
+
 /** The dictionary VR of a tag, or null. */
 export declare function vrOf(tag: number): string | null
 
@@ -895,4 +1071,37 @@ export interface WriteJsonOptions {
    * self-contained and resolved independently of this option.
    */
   bulkDataSourcePath?: string
+}
+
+/**
+ * Builds a DICOM Spatial Registration instance from `specJson` (a JSON string) and writes it to
+ * `outputPath`, or returns its bytes as `data` when `outputPath` is omitted. The REG goes in the
+ * FIXED study and Frame of Reference: item 1 maps the fixed frame with the identity, item 2 the
+ * moving frame with `matrix` (moving -> fixed, row-major, what registerVolumes returns).
+ *
+ * spec: `{ matrix: number[16], matrixType?: 'RIGID' (default) | 'RIGID_SCALE' | 'AFFINE',
+ * registrationType?: 'auto' | 'manual' | 'identity', fixed: { frameOfReferenceUid,
+ * studyInstanceUid, seriesInstanceUid, instances?: [{ sopClassUid, sopInstanceUid }] }, moving:
+ * { ...same }, copyPatientStudyFrom?: path to one fixed-study DICOM file, patient?: {
+ * patientName, patientId, patientBirthDate, patientSex }, study?: { studyDate, studyTime,
+ * accessionNumber, referringPhysicianName, studyId, studyDescription }, sopInstanceUid?,
+ * seriesInstanceUid?, seriesNumber?, seriesDescription?, instanceNumber?, contentLabel?,
+ * contentDescription?, contentCreatorName?, manufacturer?, comment? }`. Rejects a spec that would
+ * not produce a conformant object (missing UIDs, a non-rigid RIGID matrix, fixed and moving in
+ * one Frame of Reference, ...).
+ */
+export declare function writeSpatialRegistration(specJson: string, outputPath?: string | undefined | null): Promise<unknown>
+
+export interface WrittenSpatialRegistration {
+  /** The written object in readSpatialRegistration's JSON form (a string). */
+  json: string
+  /**
+   * The written object as standard PS3.18 DICOM JSON (hex tag keys, `{vr, Value}`), a
+   * string, ready for `writeJson`.
+   */
+  dataset: string
+  sopInstanceUid: string
+  seriesInstanceUid: string
+  /** The Part 10 file's bytes, when no `outputPath` was given. */
+  data?: Buffer
 }

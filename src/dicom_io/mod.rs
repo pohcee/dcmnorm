@@ -29,6 +29,9 @@ mod test_support;
 #[cfg(test)]
 mod volume_geometry_tests;
 mod secondary_capture;
+mod spatial_registration;
+#[cfg(test)]
+mod spatial_registration_tests;
 mod texture_export;
 mod types;
 mod volume;
@@ -103,6 +106,11 @@ pub use texture_export::{
     pack_rgb_frame_texture, pack_volume_texture, quantize_samples, resample_frame_2d, resample_rgb_frame_2d,
     ContentKind, DecodedFrame, DecodedRgbFrame, PackedTexture, SampleFormat, TextureCompression,
     TextureExportError, TextureMeta,
+};
+pub use spatial_registration::{
+    build_spatial_registration, format_ds, is_spatial_registration_sop_class, read_spatial_registration,
+    validate_spatial_registration, SpatialRegistrationError, DEFORMABLE_SPATIAL_REGISTRATION_SOP_CLASS_UID,
+    SPATIAL_REGISTRATION_SOP_CLASS_UID,
 };
 pub use secondary_capture::{write_reformatted_dicom_slice, SecondaryCaptureError, SliceGeometry};
 pub mod dicom_edit;

@@ -38,6 +38,11 @@ use dcmnorm::dicom_io::{
     StoreScuOptions as DcmStoreScuOptions, TextureCompression as DcmTextureCompression,
     TextureMeta as DcmTextureMeta, Volume as DcmVolume,
     write_dicomdir as dcm_write_dicomdir, DicomdirEntry as DcmDicomdirEntry,
+    build_spatial_registration as dcm_build_spatial_registration, estimate_translation as dcm_estimate_translation,
+    read_spatial_registration as dcm_read_spatial_registration, register_rigid as dcm_register_rigid,
+    write_dicom_bytes as dcm_write_dicom_bytes, Initialization as DcmInitialization, MaskMode as DcmMaskMode,
+    MetricChoice as DcmMetricChoice, RegistrationOptions as DcmRegistrationOptions,
+    TranslationOptions as DcmTranslationOptions,
     DicomdirOptions as DcmDicomdirOptions, DicomdirReport as DcmDicomdirReport,
 };
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
@@ -1667,11 +1672,13 @@ impl Task for BuildVolumeTask {
 }
 
 /// Builds a 3D volume from a parallel stack of DICOM slice files (e.g. every image instance in
-/// one CT/MR/PT series) sharing consistent `ImageOrientationPatient`. Slices are spatially
-/// re-sorted internally by `ImagePositionPatient`, regardless of `filePaths`' own order. Returns a
-/// `DicomVolumeHandle` for repeated `reformat()` calls. Rejects (rather than silently
-/// mis-rendering) fewer than 2 files, mismatched Rows/Columns, or a non-parallel/gantry-tilt-
-/// inconsistent stack.
+/// one CT/MR/PT series) sharing consistent `ImageOrientationPatient`, or from Enhanced
+/// multi-frame objects (one Enhanced CT/MR/PET file is enough; per-frame positions and rescale
+/// are honoured). Slices are spatially re-sorted internally by `ImagePositionPatient`,
+/// regardless of `filePaths`' own order; a gantry-tilted stack is desheared onto an orthogonal
+/// grid. Returns a `DicomVolumeHandle` for repeated `reformat()` calls. Rejects (rather than
+/// silently mis-rendering) fewer than 2 slices, mismatched Rows/Columns, or a non-parallel
+/// stack.
 #[napi]
 pub fn build_volume(file_paths: Vec<String>) -> AsyncTask<BuildVolumeTask> {
     AsyncTask::new(BuildVolumeTask {
@@ -1792,6 +1799,14 @@ pub struct DicomVolumeHandle {
     center: Vec<f64>,
     min_spacing_mm: f64,
     byte_length: f64,
+    modality: Option<String>,
+    frame_of_reference_uid: Option<String>,
+    series_instance_uid: Option<String>,
+    study_instance_uid: Option<String>,
+    gantry_tilt_deg: f64,
+    desheared: bool,
+    irregular_spacing: bool,
+    voxel_to_patient: Vec<f64>,
 }
 
 impl DicomVolumeHandle {
@@ -1807,6 +1822,14 @@ impl DicomVolumeHandle {
             center: volume.center().to_vec(),
             min_spacing_mm: volume.min_spacing_mm(),
             byte_length: (volume.samples.len() * std::mem::size_of::<f32>()) as f64,
+            modality: volume.modality.clone(),
+            frame_of_reference_uid: volume.frame_of_reference_uid.clone(),
+            series_instance_uid: volume.series_instance_uid.clone(),
+            study_instance_uid: volume.study_instance_uid.clone(),
+            gantry_tilt_deg: volume.gantry_tilt_deg,
+            desheared: volume.desheared,
+            irregular_spacing: volume.has_irregular_spacing(),
+            voxel_to_patient: volume.voxel_to_patient().to_vec(),
             volume: std::sync::Mutex::new(Some(Arc::new(volume))),
         }
     }
@@ -1822,12 +1845,13 @@ impl DicomVolumeHandle {
 
 #[napi]
 impl DicomVolumeHandle {
-    /// Rows in the source slices (image height).
+    /// Rows of the volume's slice grid (image height). The source images' Rows, except for a
+    /// desheared (gantry-tilted) stack, whose grid covers every slice's footprint.
     #[napi(getter, js_name = "rows")]
     pub fn rows(&self) -> u32 {
         self.rows
     }
-    /// Columns in the source slices (image width).
+    /// Columns of the volume's slice grid (image width); see `rows`.
     #[napi(getter, js_name = "cols")]
     pub fn cols(&self) -> u32 {
         self.cols
@@ -1880,6 +1904,57 @@ impl DicomVolumeHandle {
         self.min_spacing_mm
     }
 
+    /// `Modality` of the source images (`CT`, `MR`, `PT`, ...), or `null`.
+    #[napi(getter, js_name = "modality")]
+    pub fn modality(&self) -> Option<String> {
+        self.modality.clone()
+    }
+
+    /// `FrameOfReferenceUID` of the source images, or `null`.
+    #[napi(getter, js_name = "frameOfReferenceUid")]
+    pub fn frame_of_reference_uid(&self) -> Option<String> {
+        self.frame_of_reference_uid.clone()
+    }
+
+    /// `SeriesInstanceUID` of the source images, or `null`.
+    #[napi(getter, js_name = "seriesInstanceUid")]
+    pub fn series_instance_uid(&self) -> Option<String> {
+        self.series_instance_uid.clone()
+    }
+
+    /// `StudyInstanceUID` of the source images, or `null`.
+    #[napi(getter, js_name = "studyInstanceUid")]
+    pub fn study_instance_uid(&self) -> Option<String> {
+        self.study_instance_uid.clone()
+    }
+
+    /// Gantry tilt of the acquisition, degrees: the angle between the slice-to-slice position
+    /// step and the slice normal. `0` for an ordinary stack.
+    #[napi(getter, js_name = "gantryTiltDeg")]
+    pub fn gantry_tilt_deg(&self) -> f64 {
+        self.gantry_tilt_deg
+    }
+
+    /// Whether the stack was sheared (gantry tilt) and resampled onto an orthogonal grid.
+    #[napi(getter, js_name = "desheared")]
+    pub fn desheared(&self) -> bool {
+        self.desheared
+    }
+
+    /// Whether the slice gaps are irregular (a missing slice, variable pitch). Reformats
+    /// interpolate by real position either way; `exportTexture` resamples to a uniform lattice.
+    #[napi(getter, js_name = "irregularSpacing")]
+    pub fn irregular_spacing(&self) -> bool {
+        self.irregular_spacing
+    }
+
+    /// Row-major 4x4 matrix from voxel index `(col, row, slice, 1)` to patient LPS mm (slice
+    /// axis at the nominal uniform spacing).
+    #[napi(getter, js_name = "voxelToPatient")]
+    pub fn voxel_to_patient(&self) -> Vec<f64> {
+        self.voxel_to_patient.clone()
+    }
+
     /// Resamples one plane through this volume and encodes it exactly like a normal 2D render
     /// (same `RenderedFrame` shape `renderFrame` returns), so callers can reuse their existing
     /// image-display code path unchanged.
@@ -1901,6 +1976,457 @@ impl DicomVolumeHandle {
             options: options.unwrap_or_default(),
         }))
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Registration: estimateTranslation / registerVolumes / RegistrationCancelToken
+// ---------------------------------------------------------------------------------------------
+//
+// Every matrix is 16 numbers, row-major, mapping MOVING patient LPS mm to FIXED patient LPS mm -
+// the same direction a DICOM Spatial Registration item stores (item frame = moving, the REG's
+// own frame = fixed), so a result goes into writeSpatialRegistration unchanged.
+
+fn parse_matrix(values: &[f64], field_name: &str) -> Result<[f64; 16]> {
+    if values.len() != 16 || values.iter().any(|v| !v.is_finite()) {
+        return Err(Error::from_reason(format!("{field_name} must be 16 finite numbers (row-major 4x4)")));
+    }
+    let mut m = [0.0; 16];
+    m.copy_from_slice(values);
+    Ok(m)
+}
+
+fn volume_pair(fixed: &DicomVolumeHandle, moving: &DicomVolumeHandle) -> Result<(Arc<DcmVolume>, Arc<DcmVolume>)> {
+    Ok((fixed.volume()?, moving.volume()?))
+}
+
+#[napi(object)]
+#[derive(Default)]
+pub struct EstimateTranslationOptions {
+    /// Overrides the fixed volume's Modality ('CT', 'MR', 'PT', ...).
+    pub fixed_modality: Option<String>,
+    /// Overrides the moving volume's Modality.
+    pub moving_modality: Option<String>,
+    /// Smallest S-I overlap of the two scans a z shift may imply, mm (default 60).
+    pub min_overlap_mm: Option<f64>,
+    /// Largest |z shift| considered, mm (default: anything with enough overlap).
+    pub max_shift_mm: Option<f64>,
+}
+
+#[napi(object)]
+pub struct TranslationEstimate {
+    /// Moving -> fixed patient (a pure translation), row-major 4x4.
+    pub matrix: Vec<f64>,
+    pub translation_mm: Vec<f64>,
+    /// 0..1: the correlation peak's height and its margin over the next peak 20+ mm away.
+    /// Below ~0.3, fall back to capture-on-link.
+    pub confidence: f64,
+    pub peak_correlation: f64,
+    pub second_peak_correlation: f64,
+    pub overlap_mm: f64,
+    /// The profiles correlated: 'body', 'lung', 'bone' (CT-CT), 'intensity' (MR-MR, PT-PT).
+    pub profiles: Vec<String>,
+    pub timing_ms: f64,
+}
+
+pub struct EstimateTranslationTask {
+    fixed: Arc<DcmVolume>,
+    moving: Arc<DcmVolume>,
+    options: EstimateTranslationOptions,
+}
+
+impl Task for EstimateTranslationTask {
+    type Output = TranslationEstimate;
+    type JsValue = TranslationEstimate;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        guarded(|| {
+            let defaults = DcmTranslationOptions::default();
+            let options = DcmTranslationOptions {
+                fixed_modality: self.options.fixed_modality.clone(),
+                moving_modality: self.options.moving_modality.clone(),
+                min_overlap_mm: self.options.min_overlap_mm.unwrap_or(defaults.min_overlap_mm),
+                max_shift_mm: self.options.max_shift_mm,
+            };
+            let estimate = dcm_estimate_translation(&self.fixed, &self.moving, &options).map_err(to_napi_err)?;
+            Ok(TranslationEstimate {
+                matrix: estimate.matrix.to_vec(),
+                translation_mm: estimate.translation_mm.to_vec(),
+                confidence: estimate.confidence,
+                peak_correlation: estimate.peak_correlation,
+                second_peak_correlation: estimate.second_peak_correlation,
+                overlap_mm: estimate.overlap_mm,
+                profiles: estimate.profiles.iter().map(|p| (*p).to_owned()).collect(),
+                timing_ms: estimate.timing_ms,
+            })
+        })
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(output)
+    }
+}
+
+/// A fast moving -> fixed translation: the S-I shift from cross-correlating per-height profiles
+/// (body area; plus lung and bone area for CT-CT, integrated intensity for MR-MR / PT-PT), the
+/// in-plane shift from body-mask centroids over the matched overlap. Works for any acquisition
+/// orientation. Tens of milliseconds for a typical CT.
+#[napi]
+pub fn estimate_translation(
+    fixed: &DicomVolumeHandle,
+    moving: &DicomVolumeHandle,
+    options: Option<EstimateTranslationOptions>,
+) -> Result<AsyncTask<EstimateTranslationTask>> {
+    let (fixed, moving) = volume_pair(fixed, moving)?;
+    Ok(AsyncTask::new(EstimateTranslationTask { fixed, moving, options: options.unwrap_or_default() }))
+}
+
+#[napi(object)]
+#[derive(Default)]
+pub struct RegisterVolumesOptions {
+    /// 'auto' (default: 'ncc' for the same modality, 'mattes-mi' across modalities), 'ncc' or
+    /// 'mattes-mi'.
+    pub metric: Option<String>,
+    pub fixed_modality: Option<String>,
+    pub moving_modality: Option<String>,
+    /// Starting moving -> fixed transform (16 numbers, row-major), e.g. the viewer's translation.
+    pub initial_matrix: Option<Vec<f64>>,
+    /// Without `initialMatrix`: 'translation' (default; estimateTranslation, then the mask
+    /// centroids when it is not confident), 'centroid' or 'none'.
+    pub initialize: Option<String>,
+    /// Working-grid spacing per pyramid level, coarse to fine, mm (default [8, 4, 2]).
+    pub levels_mm: Option<Vec<f64>>,
+    /// Optimizer iterations per level (default 40).
+    pub max_iterations: Option<u32>,
+    /// Wall-clock limit, ms (default 30000). On expiry the best result so far is returned with
+    /// `stopReason: 'time-limit'`.
+    pub time_limit_ms: Option<f64>,
+    /// 'auto' (default: modality-aware body mask, CT table removed) or 'none'.
+    pub mask: Option<String>,
+    /// Optional box in FIXED patient coordinates the fixed mask is limited to (min corner).
+    pub roi_min_mm: Option<Vec<f64>>,
+    /// Max corner of `roiMinMm`'s box.
+    pub roi_max_mm: Option<Vec<f64>>,
+    /// Mutual-information histogram bins (default 32).
+    pub histogram_bins: Option<u32>,
+    /// Metric sample points per level (default 100000).
+    pub max_samples: Option<u32>,
+    /// Working-memory cap in bytes (default 268435456); a level that would exceed it is coarsened.
+    pub max_memory_bytes: Option<f64>,
+}
+
+#[napi(object)]
+pub struct RegistrationLevel {
+    pub spacing_mm: f64,
+    pub iterations: u32,
+    pub metric_evaluations: u32,
+    pub metric_value: f64,
+}
+
+#[napi(object)]
+pub struct RegistrationResult {
+    /// Moving -> fixed patient, row-major 4x4.
+    pub matrix: Vec<f64>,
+    /// Euler angles of the matrix's rotation, degrees (`R = Rz * Ry * Rx`).
+    pub rotation_deg: Vec<f64>,
+    /// The matrix's translation column, mm.
+    pub translation_mm: Vec<f64>,
+    /// Centre of rotation the optimizer used (fixed body centroid), fixed patient mm.
+    pub center_mm: Vec<f64>,
+    /// 'ncc' or 'mattes-mi'.
+    pub metric: String,
+    /// NCC correlation (-1..1), or mutual information (nats).
+    pub metric_value: f64,
+    pub initial_metric_value: f64,
+    /// NCC correlation, or MI's entropy correlation coefficient (0..1).
+    pub normalized_metric: f64,
+    /// Fraction of the fixed body samples that land inside the moving volume.
+    pub overlap_fraction: f64,
+    /// 0..1 heuristic; show it, and never apply a 'poor' result silently.
+    pub quality: f64,
+    /// 'good' (>= 0.7), 'fair' (>= 0.4) or 'poor'.
+    pub quality_label: String,
+    pub iterations: u32,
+    pub metric_evaluations: u32,
+    pub levels: Vec<RegistrationLevel>,
+    /// 'matrix', 'translation', 'centroid' or 'none'.
+    pub initialization: String,
+    pub converged: bool,
+    /// 'converged', 'max-iterations' or 'time-limit'.
+    pub stop_reason: String,
+    pub timing_ms: f64,
+    /// Peak bytes of working images and samples held.
+    pub working_bytes: f64,
+}
+
+/// Cancels a running `registerVolumes`: pass it as the 4th argument and call `cancel()`; the
+/// registration rejects with "registration cancelled" at its next metric evaluation.
+#[napi]
+pub struct RegistrationCancelToken {
+    flag: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[napi]
+impl RegistrationCancelToken {
+    #[napi(constructor)]
+    #[allow(clippy::new_without_default)]
+    pub fn new() -> Self {
+        Self { flag: Arc::new(std::sync::atomic::AtomicBool::new(false)) }
+    }
+
+    #[napi]
+    pub fn cancel(&self) {
+        self.flag.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    #[napi(getter, js_name = "cancelled")]
+    pub fn cancelled(&self) -> bool {
+        self.flag.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+pub struct RegisterVolumesTask {
+    fixed: Arc<DcmVolume>,
+    moving: Arc<DcmVolume>,
+    options: DcmRegistrationOptions,
+}
+
+impl Task for RegisterVolumesTask {
+    type Output = RegistrationResult;
+    type JsValue = RegistrationResult;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        guarded(|| {
+            let result = dcm_register_rigid(&self.fixed, &self.moving, &self.options).map_err(to_napi_err)?;
+            Ok(RegistrationResult {
+                matrix: result.matrix.to_vec(),
+                rotation_deg: result.rotation_deg.to_vec(),
+                translation_mm: result.translation_mm.to_vec(),
+                center_mm: result.center_mm.to_vec(),
+                metric: result.metric.as_str().to_owned(),
+                metric_value: result.metric_value,
+                initial_metric_value: result.initial_metric_value,
+                normalized_metric: result.normalized_metric,
+                overlap_fraction: result.overlap_fraction,
+                quality: result.quality,
+                quality_label: result.quality_label.to_owned(),
+                iterations: result.iterations,
+                metric_evaluations: result.metric_evaluations,
+                levels: result
+                    .levels
+                    .iter()
+                    .map(|level| RegistrationLevel {
+                        spacing_mm: level.spacing_mm,
+                        iterations: level.iterations,
+                        metric_evaluations: level.metric_evaluations,
+                        metric_value: level.metric_value,
+                    })
+                    .collect(),
+                initialization: result.initialization.to_owned(),
+                converged: result.converged,
+                stop_reason: result.stop_reason.as_str().to_owned(),
+                timing_ms: result.timing_ms,
+                working_bytes: result.working_bytes as f64,
+            })
+        })
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(output)
+    }
+}
+
+fn registration_options(options: RegisterVolumesOptions, cancel: Option<&RegistrationCancelToken>) -> Result<DcmRegistrationOptions> {
+    let defaults = DcmRegistrationOptions::default();
+    let metric = match options.metric.as_deref() {
+        None | Some("auto") => DcmMetricChoice::Auto,
+        Some("ncc") => DcmMetricChoice::Ncc,
+        Some("mattes-mi") | Some("mi") => DcmMetricChoice::MattesMi,
+        Some(other) => return Err(Error::from_reason(format!("invalid metric '{other}'; expected 'auto', 'ncc' or 'mattes-mi'"))),
+    };
+    let initialization = match options.initialize.as_deref() {
+        None | Some("translation") => DcmInitialization::Translation,
+        Some("centroid") => DcmInitialization::Centroid,
+        Some("none") => DcmInitialization::None,
+        Some(other) => return Err(Error::from_reason(format!("invalid initialize '{other}'; expected 'translation', 'centroid' or 'none'"))),
+    };
+    let mask = match options.mask.as_deref() {
+        None | Some("auto") => DcmMaskMode::Auto,
+        Some("none") => DcmMaskMode::None,
+        Some(other) => return Err(Error::from_reason(format!("invalid mask '{other}'; expected 'auto' or 'none'"))),
+    };
+    let roi = match (&options.roi_min_mm, &options.roi_max_mm) {
+        (None, None) => None,
+        (Some(lo), Some(hi)) => Some((parse_vec3(lo, "roiMinMm")?, parse_vec3(hi, "roiMaxMm")?)),
+        _ => return Err(Error::from_reason("roiMinMm and roiMaxMm go together")),
+    };
+    let time_limit = match options.time_limit_ms {
+        None => defaults.time_limit,
+        Some(ms) if ms.is_finite() && ms > 0.0 => Some(std::time::Duration::from_secs_f64(ms / 1000.0)),
+        Some(_) => return Err(Error::from_reason("timeLimitMs must be a positive number")),
+    };
+    Ok(DcmRegistrationOptions {
+        metric,
+        fixed_modality: options.fixed_modality,
+        moving_modality: options.moving_modality,
+        initial_matrix: options.initial_matrix.as_deref().map(|m| parse_matrix(m, "initialMatrix")).transpose()?,
+        initialization,
+        levels_mm: options.levels_mm.unwrap_or(defaults.levels_mm),
+        max_iterations: options.max_iterations.unwrap_or(defaults.max_iterations),
+        time_limit,
+        cancel: cancel.map(|token| token.flag.clone()),
+        mask,
+        roi,
+        histogram_bins: options.histogram_bins.map(|b| b as usize).unwrap_or(defaults.histogram_bins),
+        max_samples: options.max_samples.map(|s| s as usize).unwrap_or(defaults.max_samples),
+        max_memory_bytes: options.max_memory_bytes.map(|b| b.max(0.0) as u64).unwrap_or(defaults.max_memory_bytes),
+    })
+}
+
+/// Rigid (6-DOF) registration of `moving` onto `fixed`, any CT / MR / PT pairing: a multi-
+/// resolution pyramid, modality-aware body masks (CT table removed), NCC for the same modality
+/// and Mattes mutual information across modalities, Powell's optimizer. Deterministic, bounded
+/// by `maxMemoryBytes` and `timeLimitMs`, cancellable through `cancel`. Resolves with the
+/// moving -> fixed patient matrix, the metric, a quality score and timing; rejects when the
+/// volumes have no body or do not overlap, on invalid options, or when cancelled.
+#[napi]
+pub fn register_volumes(
+    fixed: &DicomVolumeHandle,
+    moving: &DicomVolumeHandle,
+    options: Option<RegisterVolumesOptions>,
+    cancel: Option<&RegistrationCancelToken>,
+) -> Result<AsyncTask<RegisterVolumesTask>> {
+    let (fixed, moving) = volume_pair(fixed, moving)?;
+    let options = registration_options(options.unwrap_or_default(), cancel)?;
+    Ok(AsyncTask::new(RegisterVolumesTask { fixed, moving, options }))
+}
+
+// ---------------------------------------------------------------------------------------------
+// DICOM Spatial Registration: readSpatialRegistration / writeSpatialRegistration
+// ---------------------------------------------------------------------------------------------
+
+pub struct ReadSpatialRegistrationTask {
+    file_path: PathBuf,
+}
+
+impl Task for ReadSpatialRegistrationTask {
+    type Output = String;
+    type JsValue = String;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        guarded(|| {
+            let object = read_dicom_file(&self.file_path).map_err(to_napi_err)?;
+            let json = dcm_read_spatial_registration(&object).map_err(to_napi_err)?;
+            serde_json::to_string(&json).map_err(to_napi_err)
+        })
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(output)
+    }
+}
+
+/// Reads a DICOM Spatial Registration object (1.2.840.10008.5.1.4.1.1.66.1; for a Deformable
+/// one, .66.3, only its pre/post-deformation matrices) and resolves with its JSON form as a
+/// string: the REG's own (registered) Frame of Reference, one entry per Registration Sequence
+/// item with its Frame of Reference, the composed item -> REG matrix (row-major), its type and
+/// referenced images, the Common Instance Reference series, and `warnings` (IOD problems).
+/// Rejects anything that is not a registration object.
+#[napi]
+pub fn read_spatial_registration(file_path: String) -> AsyncTask<ReadSpatialRegistrationTask> {
+    AsyncTask::new(ReadSpatialRegistrationTask { file_path: PathBuf::from(file_path) })
+}
+
+#[napi(object)]
+pub struct WrittenSpatialRegistration {
+    /// The written object in readSpatialRegistration's JSON form (a string).
+    pub json: String,
+    /// The written object as standard PS3.18 DICOM JSON (hex tag keys, `{vr, Value}`), a
+    /// string, ready for `writeJson`.
+    pub dataset: String,
+    pub sop_instance_uid: String,
+    pub series_instance_uid: String,
+    /// The Part 10 file's bytes, when no `outputPath` was given.
+    pub data: Option<Buffer>,
+}
+
+pub struct WriteSpatialRegistrationTask {
+    spec_json: String,
+    output_path: Option<PathBuf>,
+}
+
+pub struct WrittenSpatialRegistrationOutput {
+    json: String,
+    dataset: String,
+    sop_instance_uid: String,
+    series_instance_uid: String,
+    data: Option<Vec<u8>>,
+}
+
+impl Task for WriteSpatialRegistrationTask {
+    type Output = WrittenSpatialRegistrationOutput;
+    type JsValue = WrittenSpatialRegistration;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        guarded(|| {
+            let spec: serde_json::Value = serde_json::from_str(&self.spec_json).map_err(|e| Error::from_reason(format!("spec is not valid JSON: {e}")))?;
+            let copy_from = match spec.get("copyPatientStudyFrom").and_then(|v| v.as_str()) {
+                Some(path) => Some(read_dicom_file(path).map_err(to_napi_err)?),
+                None => None,
+            };
+            let mut object = dcm_build_spatial_registration(&spec, copy_from.as_ref()).map_err(to_napi_err)?;
+            let json = dcm_read_spatial_registration(&object).map_err(to_napi_err)?;
+            let dataset = write_dicom_json_with_options(
+                &object,
+                DicomJsonWriteOptions { format: DicomJsonFormat::Standard, key_style: DicomJsonKeyStyle::Hex, ..Default::default() },
+            )
+            .map_err(to_napi_err)?;
+            let data = match &self.output_path {
+                Some(path) => {
+                    write_dicom_file(&mut object, path).map_err(to_napi_err)?;
+                    None
+                }
+                None => Some(dcm_write_dicom_bytes(&mut object).map_err(to_napi_err)?),
+            };
+            let text = |key: &str| json.get(key).and_then(|v| v.as_str()).unwrap_or_default().to_owned();
+            Ok(WrittenSpatialRegistrationOutput {
+                sop_instance_uid: text("sopInstanceUid"),
+                series_instance_uid: text("seriesInstanceUid"),
+                json: serde_json::to_string(&json).map_err(to_napi_err)?,
+                dataset,
+                data,
+            })
+        })
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(WrittenSpatialRegistration {
+            json: output.json,
+            dataset: output.dataset,
+            sop_instance_uid: output.sop_instance_uid,
+            series_instance_uid: output.series_instance_uid,
+            data: output.data.map(Buffer::from),
+        })
+    }
+}
+
+/// Builds a DICOM Spatial Registration instance from `specJson` (a JSON string) and writes it to
+/// `outputPath`, or returns its bytes as `data` when `outputPath` is omitted. The REG goes in the
+/// FIXED study and Frame of Reference: item 1 maps the fixed frame with the identity, item 2 the
+/// moving frame with `matrix` (moving -> fixed, row-major, what registerVolumes returns).
+///
+/// spec: `{ matrix: number[16], matrixType?: 'RIGID' (default) | 'RIGID_SCALE' | 'AFFINE',
+/// registrationType?: 'auto' | 'manual' | 'identity', fixed: { frameOfReferenceUid,
+/// studyInstanceUid, seriesInstanceUid, instances?: [{ sopClassUid, sopInstanceUid }] }, moving:
+/// { ...same }, copyPatientStudyFrom?: path to one fixed-study DICOM file, patient?: {
+/// patientName, patientId, patientBirthDate, patientSex }, study?: { studyDate, studyTime,
+/// accessionNumber, referringPhysicianName, studyId, studyDescription }, sopInstanceUid?,
+/// seriesInstanceUid?, seriesNumber?, seriesDescription?, instanceNumber?, contentLabel?,
+/// contentDescription?, contentCreatorName?, manufacturer?, comment? }`. Rejects a spec that would
+/// not produce a conformant object (missing UIDs, a non-rigid RIGID matrix, fixed and moving in
+/// one Frame of Reference, ...).
+#[napi]
+pub fn write_spatial_registration(spec_json: String, output_path: Option<String>) -> AsyncTask<WriteSpatialRegistrationTask> {
+    AsyncTask::new(WriteSpatialRegistrationTask { spec_json, output_path: output_path.map(PathBuf::from) })
 }
 
 // ---------------------------------------------------------------------------------------------
