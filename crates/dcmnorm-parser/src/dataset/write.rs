@@ -398,6 +398,26 @@ where
         self.printer.write_bytes(data).context(WriteValueSnafu)
     }
 
+    /// Write an element header directly without buffering its value - for callers streaming a
+    /// large defined-length value (such as native PixelData) via [`Self::write_raw_bytes`].
+    pub fn write_element_header(&mut self, header: DataElementHeader) -> Result<()> {
+        self.printer
+            .encode_element_header(header)
+            .context(WriteHeaderSnafu { tag: header.tag })?;
+        self.last_de = None;
+        Ok(())
+    }
+
+    /// Write raw, already-encoded bytes directly to the underlying writer without padding.
+    pub fn write_raw_bytes(&mut self, data: &[u8]) -> Result<()> {
+        self.printer.write_raw_bytes(data).context(WriteValueSnafu)
+    }
+
+    /// Number of bytes written to the data set stream so far.
+    pub fn bytes_written(&self) -> u64 {
+        self.printer.bytes_written()
+    }
+
     fn write_impl(&mut self, token: &DataToken) -> Result<()> {
         match token {
             DataToken::ElementHeader(header) => {

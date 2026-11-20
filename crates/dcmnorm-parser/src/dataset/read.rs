@@ -688,6 +688,22 @@ pub struct SkippedValue {
     pub length: u64,
 }
 
+/// Where one skipped encapsulated pixel data fragment's payload sat in the data set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SkippedFragment {
+    pub position: u64,
+    pub length: u32,
+}
+
+/// The Basic Offset Table and per-fragment locations of an encapsulated pixel data sequence
+/// skipped by [`DataSetReader::skip_pixel_sequence_indexed`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkippedPixelSequence {
+    pub offset_table: Vec<u32>,
+    pub fragments: Vec<SkippedFragment>,
+    pub end_position: u64,
+}
+
 impl<S> DataSetReader<S>
 where
     S: StatefulDecode,
@@ -789,6 +805,107 @@ where
         // as after a pixel sequence's SequenceEnd: enclosing items can end here
         self.delimiter_check_pending = true;
         Ok(SkippedValue { position, length })
+    }
+
+    /// Skip an encapsulated pixel data value right after `PixelSequenceStart`, reading only its
+    /// Basic Offset Table (the first item) and recording each subsequent fragment's offset and
+    /// length while seeking past fragment bytes.
+    pub fn skip_pixel_sequence_indexed(&mut self) -> Result<SkippedPixelSequence> {
+        match (self.peek.as_ref(), self.last_header) {
+            (None, Some(header)) if header.is_encapsulated_pixeldata() => {}
+            _ => {
+                return SkipNotApplicableSnafu {
+                    context: "no encapsulated pixel data is next",
+                }
+                .fail();
+            }
+        }
+        self.last_header = None;
+
+        // First item is always the Basic Offset Table.
+        let bot_item = match self.parser.decode_item_header() {
+            Ok(item) => item,
+            Err(source) => {
+                self.hard_break = true;
+                return Err(source).context(ReadItemHeaderSnafu);
+            }
+        };
+        let mut offset_table = Vec::new();
+        match bot_item {
+            SequenceItemHeader::Item { len } => {
+                let Some(len) = self.sanitize_length(len) else {
+                    self.hard_break = true;
+                    return InvalidItemLengthSnafu {
+                        bytes_read: self.parser.position(),
+                        len: len.0,
+                    }
+                    .fail();
+                };
+                let Some(len) = len.get() else {
+                    self.hard_break = true;
+                    return UndefinedItemLengthSnafu.fail();
+                };
+                if len > 0 {
+                    if let Err(source) = self.parser.read_u32_to_vec(len, &mut offset_table) {
+                        self.hard_break = true;
+                        return Err(source).context(ReadItemValueSnafu { len });
+                    }
+                }
+            }
+            other => {
+                self.hard_break = true;
+                return UnexpectedItemTagSnafu { tag: other.tag() }.fail();
+            }
+        }
+
+        let mut fragments = Vec::new();
+        loop {
+            let item = match self.parser.decode_item_header() {
+                Ok(item) => item,
+                Err(source) => {
+                    self.hard_break = true;
+                    return Err(source).context(ReadItemHeaderSnafu);
+                }
+            };
+            match item {
+                SequenceItemHeader::Item { len } => {
+                    let Some(len) = self.sanitize_length(len) else {
+                        self.hard_break = true;
+                        return InvalidItemLengthSnafu {
+                            bytes_read: self.parser.position(),
+                            len: len.0,
+                        }
+                        .fail();
+                    };
+                    let Some(len) = len.get() else {
+                        self.hard_break = true;
+                        return UndefinedItemLengthSnafu.fail();
+                    };
+                    let position = self.parser.position();
+                    if let Err(source) = self.parser.skip_bytes_seek(u64::from(len)) {
+                        self.hard_break = true;
+                        return Err(source).context(ReadItemValueSnafu { len });
+                    }
+                    fragments.push(SkippedFragment {
+                        position,
+                        length: len,
+                    });
+                }
+                SequenceItemHeader::SequenceDelimiter => break,
+                other => {
+                    self.hard_break = true;
+                    return UnexpectedItemTagSnafu { tag: other.tag() }.fail();
+                }
+            }
+        }
+
+        let end_position = self.parser.position();
+        self.delimiter_check_pending = true;
+        Ok(SkippedPixelSequence {
+            offset_table,
+            fragments,
+            end_position,
+        })
     }
 }
 

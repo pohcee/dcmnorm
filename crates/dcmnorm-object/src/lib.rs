@@ -7,14 +7,15 @@ mod mem;
 mod meta;
 mod pixel;
 
+pub use dcmnorm_parser::dataset::{DataSetWriter, DataToken};
 pub use error::{ReadError, WithMetaError, WriteError};
 pub use file::{
     read_dataset_trial_parse, with_meta_from_bare_dataset, DefaultDicomObject, FileDicomObject,
     OpenFileOptions, PixelDataValueLocation, ReadPreamble,
 };
 pub use mem::{
-    ApplyOpError, DeferredValueLocation, DeferredValues, InMemDicomObject, InMemElement,
-    InMemFragment, MissingElementError,
+    ApplyOpError, DeferredPixelData, DeferredValueLocation, DeferredValues, FragmentLocation,
+    InMemDicomObject, InMemElement, InMemFragment, MissingElementError,
 };
 pub use meta::{FileMetaTable, FileMetaTableBuilder};
 

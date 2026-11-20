@@ -644,6 +644,47 @@ pub fn transcode_source(
     })
 }
 
+/// Transcode `source` to `output_path` in `target_transfer_syntax_uid`. When `source` is a file
+/// path, uses [`super::io::transcode_dicom_file`] so multi-frame files stream frame-by-frame
+/// without loading all of PixelData into memory.
+pub fn transcode_source_to_path(
+    source: DicomSource<'_>,
+    output_path: &Path,
+    target_transfer_syntax_uid: &str,
+) -> Result<(), ApiError> {
+    match source {
+        DicomSource::Path(input_path) => {
+            super::io::transcode_dicom_file(input_path, output_path, target_transfer_syntax_uid)
+                .map_err(|error| {
+                    let source_uid = std::fs::metadata(input_path)
+                        .is_ok_and(|meta| meta.file_type().is_file())
+                        .then(|| {
+                            std::fs::File::open(input_path).ok().and_then(|file| {
+                                FileMetaTable::read_from(std::io::BufReader::new(file))
+                                    .ok()
+                                    .flatten()
+                            })
+                        })
+                        .flatten()
+                        .map(|meta| {
+                            meta.transfer_syntax()
+                                .trim_end_matches(['\0', ' '])
+                                .to_owned()
+                        });
+                    ApiError::from(error)
+                        .with_source_ts(source_uid.as_deref())
+                        .with_target_ts(Some(target_transfer_syntax_uid))
+                })
+        }
+        other => {
+            let mut object = transcode_source(other, target_transfer_syntax_uid)?;
+            super::io::write_dicom_file(&mut object, output_path).map_err(|error| {
+                ApiError::from(error).with_target_ts(Some(target_transfer_syntax_uid))
+            })
+        }
+    }
+}
+
 fn read_full(source: DicomSource<'_>) -> Result<DefaultDicomObject, ApiError> {
     Ok(match source {
         DicomSource::Path(path) => super::io::read_dicom_file(path)?,

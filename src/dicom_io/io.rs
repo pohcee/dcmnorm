@@ -41,7 +41,7 @@ pub enum Jpeg2000Backend {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Jpeg2000CodecPreference {
+pub(super) enum Jpeg2000CodecPreference {
     Auto,
     Kakadu,
     OpenJpeg,
@@ -71,7 +71,7 @@ pub fn jpeg2000_backend() -> Jpeg2000Backend {
     }
 }
 
-fn jpeg2000_codec_preference() -> Jpeg2000CodecPreference {
+pub(super) fn jpeg2000_codec_preference() -> Jpeg2000CodecPreference {
     let Some(value) = std::env::var_os(JPEG2000_CODEC_ENV_FLAG) else {
         return Jpeg2000CodecPreference::Auto;
     };
@@ -179,7 +179,7 @@ fn jpeg2000_debug_enabled() -> bool {
     })
 }
 
-fn jpeg2000_debug_log(message: impl AsRef<str>) {
+pub(super) fn jpeg2000_debug_log(message: impl AsRef<str>) {
     if jpeg2000_debug_enabled() {
         eprintln!("[dcmnorm:jpeg2000] {}", message.as_ref());
     }
@@ -220,7 +220,7 @@ pub(super) fn is_htj2k_transfer_syntax(uid: &str) -> bool {
 /// HTJ2K transfer syntaxes this build can *encode* (losslessly, via OpenHTJ2K - see
 /// `encode_htj2k_pixel_data`). `.202` (RPCL Options) is decode-only: its DICOM profile also
 /// requires PLT/TLM marker segments, which OpenHTJ2K's encoder doesn't write.
-fn is_htj2k_encode_transfer_syntax(uid: &str) -> bool {
+pub(super) fn is_htj2k_encode_transfer_syntax(uid: &str) -> bool {
     matches!(
         normalize_transfer_syntax_uid(uid),
         "1.2.840.10008.1.2.4.201" | "1.2.840.10008.1.2.4.203"
@@ -231,7 +231,7 @@ fn is_htj2k_encode_transfer_syntax(uid: &str) -> bool {
 /// this build can *encode* - see `encode_jpeg2000_pixel_data`'s doc comment for why Part 2
 /// multi-component (`.92`/`.93`) isn't included even though it's grouped together for *decode*
 /// by [`is_jpeg2000_transfer_syntax`]. HTJ2K encode is [`is_htj2k_encode_transfer_syntax`].
-fn is_classic_jpeg2000_encode_transfer_syntax(uid: &str) -> bool {
+pub(super) fn is_classic_jpeg2000_encode_transfer_syntax(uid: &str) -> bool {
     matches!(
         normalize_transfer_syntax_uid(uid),
         "1.2.840.10008.1.2.4.90" | "1.2.840.10008.1.2.4.91"
@@ -338,6 +338,23 @@ pub(super) fn jpeg2000_frame_uses_mct(
     frame_index: usize,
 ) -> Option<bool> {
     dcmnorm_jpeg2000::codestream::uses_mct(jpeg2000_frame_codestream(object, frame_index)?)
+}
+
+pub(super) fn codestream_uses_mct(fragment: &[u8]) -> Option<bool> {
+    let codestream = dcmnorm_jpeg2000::codestream::locate(fragment)?.codestream;
+    dcmnorm_jpeg2000::codestream::uses_mct(codestream)
+}
+
+pub(super) fn codestream_component_count(fragment: &[u8]) -> Option<u16> {
+    let codestream = dcmnorm_jpeg2000::codestream::locate(fragment)?.codestream;
+    Some(dcmnorm_jpeg2000::codestream::read_siz(codestream)?.components())
+}
+
+pub(super) fn codestream_precision(fragment: &[u8]) -> Option<u16> {
+    let codestream = dcmnorm_jpeg2000::codestream::locate(fragment)?.codestream;
+    Some(u16::from(
+        dcmnorm_jpeg2000::codestream::read_siz(codestream)?.max_precision(),
+    ))
 }
 
 /// Determines the true number of components a JPEG 2000 codestream carries
@@ -503,7 +520,7 @@ pub(super) fn apply_jpeg2000_component_correction(
     }
 }
 
-fn is_mpeg_transfer_syntax(uid: &str) -> bool {
+pub(super) fn is_mpeg_transfer_syntax(uid: &str) -> bool {
     let normalized = normalize_transfer_syntax_uid(uid);
     matches!(
         normalized,
@@ -526,7 +543,7 @@ pub(super) fn is_jpeg_ls_transfer_syntax(uid: &str) -> bool {
     )
 }
 
-fn is_jpeg_xl_transfer_syntax(uid: &str) -> bool {
+pub(super) fn is_jpeg_xl_transfer_syntax(uid: &str) -> bool {
     matches!(
         normalize_transfer_syntax_uid(uid),
         "1.2.840.10008.1.2.4.110" | "1.2.840.10008.1.2.4.111" | "1.2.840.10008.1.2.4.112"
@@ -1172,6 +1189,16 @@ pub fn transcode_dcmnorm_object_owned(
         .get(target_uid)
         .ok_or_else(|| TranscodeError::UnknownTransferSyntax(target_uid.to_owned()))?;
 
+    // Encapsulated nested PixelData (e.g. compressed IconImageSequence) shares the dataset's
+    // transfer syntax per PS3.5 Annex A.4 and cannot stay compressed under a different syntax.
+    if super::streaming_transcode::has_nested_encapsulated_pixel_data(&object) {
+        return Err(TranscodeError::EncodePixelData {
+            uid: target_uid.to_owned(),
+            name: target_ts.name().to_owned(),
+            message: "cannot transcode dataset containing encapsulated nested PixelData (e.g. IconImageSequence) to a different transfer syntax".to_owned(),
+        });
+    }
+
     let pixel_representation = pixel_data_representation(&object);
     let mut transcoded = object;
 
@@ -1213,6 +1240,15 @@ where
     P: AsRef<Path>,
     Q: AsRef<Path>,
 {
+    let input_path = input_path.as_ref();
+    let output_path = output_path.as_ref();
+    if super::streaming_transcode::try_transcode_dicom_file_streaming(
+        input_path,
+        output_path,
+        target_transfer_syntax_uid,
+    )? {
+        return Ok(());
+    }
     let object = read_dicom_file(input_path)?;
     let mut transcoded = transcode_dcmnorm_object_owned(object, target_transfer_syntax_uid)?;
     write_dicom_file(&mut transcoded, output_path)?;
@@ -1272,7 +1308,7 @@ fn can_encode_pixel_data<D, R, W>(
 
 /// JPEG XL Lossless, the JPEG XL syntax dcmnorm encodes (`.111` JPEG Recompression needs a source
 /// JPEG and `.112` is the lossy-capable one).
-fn is_jpeg_xl_lossless_transfer_syntax(uid: &str) -> bool {
+pub(super) fn is_jpeg_xl_lossless_transfer_syntax(uid: &str) -> bool {
     normalize_transfer_syntax_uid(uid) == "1.2.840.10008.1.2.4.110"
 }
 
@@ -1299,8 +1335,7 @@ fn encode_jpeg2000_pixel_data(
         .element(tags::PIXEL_DATA)
         .map_err(|e| format!("missing PixelData: {e}"))?
         .to_bytes()
-        .map_err(|e| format!("failed to access pixel data: {e}"))?
-        .to_vec();
+        .map_err(|e| format!("failed to access pixel data: {e}"))?;
 
     let rows = object
         .get(tags::ROWS)
@@ -1353,34 +1388,21 @@ fn encode_jpeg2000_pixel_data(
 
     let lossless = normalize_transfer_syntax_uid(target_uid) == "1.2.840.10008.1.2.4.90";
     let planar = is_planar(object, samples_per_pixel);
-    let pixels = usize::from(rows) * usize::from(cols);
 
     let mut fragments = Vec::with_capacity(number_of_frames);
     for frame_index in 0..number_of_frames {
         let start = frame_index * frame_len;
         let frame_bytes = &pixel_data[start..start + frame_len];
-        // the encoder takes interleaved samples (pohcee/dcmnorm#30)
-        let interleaved;
-        let frame_bytes = if planar {
-            interleaved = interleave_planar_frame(
-                frame_bytes,
-                pixels,
-                usize::from(samples_per_pixel),
-                bytes_per_sample,
-            );
-            interleaved.as_slice()
-        } else {
-            frame_bytes
-        };
-        let encoded = jpeg2000_openjpeg::encode_jpeg2000_with_openjpeg(
+        let encoded = encode_jpeg2000_frame(
             frame_bytes,
-            u32::from(rows),
-            u32::from(cols),
-            u32::from(samples_per_pixel),
-            u32::from(bits_stored),
+            rows,
+            cols,
+            samples_per_pixel,
+            bits_allocated,
+            bits_stored,
             is_signed,
+            planar,
             lossless,
-            JPEG2000_LOSSY_COMPRESSION_RATIO,
         )
         .map_err(|e| format!("JPEG2000 encode failed for frame {frame_index}: {e}"))?;
         fragments.push(encoded);
@@ -1389,8 +1411,47 @@ fn encode_jpeg2000_pixel_data(
     Ok(fragments)
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(super) fn encode_jpeg2000_frame(
+    frame_bytes: &[u8],
+    rows: u16,
+    cols: u16,
+    samples_per_pixel: u16,
+    bits_allocated: u16,
+    bits_stored: u16,
+    is_signed: bool,
+    planar: bool,
+    lossless: bool,
+) -> Result<Vec<u8>, String> {
+    let bytes_per_sample = if bits_allocated <= 8 { 1usize } else { 2usize };
+    let pixels = usize::from(rows) * usize::from(cols);
+    // the encoder takes interleaved samples (pohcee/dcmnorm#30)
+    let interleaved;
+    let frame_bytes = if planar {
+        interleaved = interleave_planar_frame(
+            frame_bytes,
+            pixels,
+            usize::from(samples_per_pixel),
+            bytes_per_sample,
+        );
+        interleaved.as_slice()
+    } else {
+        frame_bytes
+    };
+    jpeg2000_openjpeg::encode_jpeg2000_with_openjpeg(
+        frame_bytes,
+        u32::from(rows),
+        u32::from(cols),
+        u32::from(samples_per_pixel),
+        u32::from(bits_stored),
+        is_signed,
+        lossless,
+        JPEG2000_LOSSY_COMPRESSION_RATIO,
+    )
+}
+
 /// Whether native multi-sample pixel data is stored colour-by-plane (PlanarConfiguration 1).
-fn is_planar(object: &DefaultDicomObject, samples_per_pixel: u16) -> bool {
+pub(super) fn is_planar(object: &DefaultDicomObject, samples_per_pixel: u16) -> bool {
     samples_per_pixel > 1
         && object
             .get(tags::PLANAR_CONFIGURATION)
@@ -1418,7 +1479,7 @@ fn interleave_planar_frame(
 
 /// After encoding to a JPEG 2000 family syntax, a colour image's pixel attributes describe
 /// interleaved samples: PlanarConfiguration is 0 (PS3.5 8.2.4 / 8.2.14).
-fn set_planar_configuration_interleaved(object: &mut DefaultDicomObject) {
+pub(super) fn set_planar_configuration_interleaved(object: &mut DefaultDicomObject) {
     let samples = object
         .get(tags::SAMPLES_PER_PIXEL)
         .and_then(|e| e.uint16().ok())
@@ -1499,6 +1560,48 @@ fn encode_htj2k_pixel_data(object: &DefaultDicomObject) -> Result<Vec<Vec<u8>>, 
         ));
     }
 
+    // PlanarConfiguration 1 stores each colour plane in turn (R..R G..G B..B) rather than
+    // interleaved pixels (RGB RGB ..): read the samples where they are (pohcee/dcmnorm#30)
+    let planar = is_planar(object, samples_per_pixel);
+
+    let mut planes = vec![vec![0i32; pixels]; spp];
+    let mut fragments = Vec::with_capacity(number_of_frames);
+    for frame_index in 0..number_of_frames {
+        let frame = &pixel_data[frame_index * frame_len..(frame_index + 1) * frame_len];
+        let encoded = encode_htj2k_frame(
+            frame,
+            rows,
+            cols,
+            samples_per_pixel,
+            bits_allocated,
+            bits_stored,
+            is_signed,
+            planar,
+            &mut planes,
+        )
+        .map_err(|e| format!("HTJ2K encode failed for frame {frame_index}: {e}"))?;
+        fragments.push(encoded);
+    }
+
+    Ok(fragments)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn encode_htj2k_frame(
+    frame: &[u8],
+    rows: u16,
+    cols: u16,
+    samples_per_pixel: u16,
+    bits_allocated: u16,
+    bits_stored: u16,
+    is_signed: bool,
+    planar: bool,
+    planes: &mut [Vec<i32>],
+) -> Result<Vec<u8>, String> {
+    let bytes_per_sample = usize::from(bits_allocated / 8);
+    let spp = usize::from(samples_per_pixel);
+    let pixels = usize::from(rows) * usize::from(cols);
+
     // Masks off any bits above BitsStored (overlay bits in the high bits are allowed by the
     // standard) and sign-extends from BitsStored for signed data.
     let shift = 32 - u32::from(bits_stored);
@@ -1517,41 +1620,30 @@ fn encode_htj2k_pixel_data(object: &DefaultDicomObject) -> Result<Vec<Vec<u8>>, 
             u32::from(value[0])
         }
     };
-    // PlanarConfiguration 1 stores each colour plane in turn (R..R G..G B..B) rather than
-    // interleaved pixels (RGB RGB ..): read the samples where they are (pohcee/dcmnorm#30)
-    let planar = is_planar(object, samples_per_pixel);
 
-    let mut planes = vec![vec![0i32; pixels]; spp];
-    let mut fragments = Vec::with_capacity(number_of_frames);
-    for frame_index in 0..number_of_frames {
-        let frame = &pixel_data[frame_index * frame_len..(frame_index + 1) * frame_len];
-        if planar {
-            for (c, plane) in frame.chunks_exact(pixels * bytes_per_sample).enumerate() {
-                for (i, value) in plane.chunks_exact(bytes_per_sample).enumerate() {
-                    planes[c][i] = sample(read_raw(value));
-                }
-            }
-        } else {
-            for (i, pixel) in frame.chunks_exact(spp * bytes_per_sample).enumerate() {
-                for (c, value) in pixel.chunks_exact(bytes_per_sample).enumerate() {
-                    planes[c][i] = sample(read_raw(value));
-                }
+    if planar {
+        for (c, plane) in frame.chunks_exact(pixels * bytes_per_sample).enumerate() {
+            for (i, value) in plane.chunks_exact(bytes_per_sample).enumerate() {
+                planes[c][i] = sample(read_raw(value));
             }
         }
-        let plane_refs: Vec<&[i32]> = planes.iter().map(Vec::as_slice).collect();
-        let encoded = dcmnorm_jpeg2000::htj2k::encode_lossless(
-            &plane_refs,
-            u32::from(cols),
-            u32::from(rows),
-            bits_stored as u8,
-            is_signed,
-            dcmnorm_jpeg2000::htj2k::Progression::Lrcp,
-        )
-        .map_err(|e| format!("HTJ2K encode failed for frame {frame_index}: {e}"))?;
-        fragments.push(encoded);
+    } else {
+        for (i, pixel) in frame.chunks_exact(spp * bytes_per_sample).enumerate() {
+            for (c, value) in pixel.chunks_exact(bytes_per_sample).enumerate() {
+                planes[c][i] = sample(read_raw(value));
+            }
+        }
     }
-
-    Ok(fragments)
+    let plane_refs: Vec<&[i32]> = planes.iter().map(Vec::as_slice).collect();
+    dcmnorm_jpeg2000::htj2k::encode_lossless(
+        &plane_refs,
+        u32::from(cols),
+        u32::from(rows),
+        bits_stored as u8,
+        is_signed,
+        dcmnorm_jpeg2000::htj2k::Progression::Lrcp,
+    )
+    .map_err(|e| e.to_string())
 }
 
 fn decode_jpeg2000_with_kakadu(object: &DefaultDicomObject) -> Result<Vec<u8>, String> {
@@ -1616,7 +1708,7 @@ fn decode_jpeg2000_with_kakadu(object: &DefaultDicomObject) -> Result<Vec<u8>, S
     )
 }
 
-fn is_encapsulated_transfer_syntax<D, R, W>(
+pub(super) fn is_encapsulated_transfer_syntax<D, R, W>(
     ts: &dcmnorm_encoding::TransferSyntax<D, R, W>,
 ) -> bool {
     matches!(ts.codec(), Codec::EncapsulatedPixelData(_, _))
@@ -1901,11 +1993,12 @@ fn decode_pixel_data_parallel_frames(
                 .map_err(|error| format!("frame {} decode failed: {}", frame_index, error))?;
             Ok(frame_bytes)
         })
-        .collect::<Vec<Result<Vec<u8>, String>>>();
+        .collect::<Result<Vec<Vec<u8>>, String>>()?;
 
-    let mut decoded = Vec::new();
+    let total_len: usize = frames.iter().map(Vec::len).sum();
+    let mut decoded = Vec::with_capacity(total_len);
     for frame in frames {
-        decoded.extend(frame?);
+        decoded.extend_from_slice(&frame);
     }
 
     Ok(decoded)
@@ -1938,7 +2031,7 @@ fn should_parallel_frame_decode(
     fragment_count == number_of_frames || offset_count >= number_of_frames.saturating_sub(1)
 }
 
-fn is_parallel_decode_transfer_syntax(uid: &str) -> bool {
+pub(super) fn is_parallel_decode_transfer_syntax(uid: &str) -> bool {
     matches!(
         normalize_transfer_syntax_uid(uid),
         // JPEG Baseline and Extended
@@ -2103,6 +2196,22 @@ fn replace_with_native_pixel_data(
         .get(tags::BITS_ALLOCATED)
         .and_then(|element| element.uint16().ok())
         .ok_or(TranscodeError::MissingImageAttribute("BitsAllocated"))?;
+    let word_bytes = match bits_allocated {
+        1..=8 => 1usize,
+        9..=16 => 2,
+        17..=32 => 4,
+        33..=64 => 8,
+        _ => return Err(TranscodeError::UnsupportedBitsAllocated(bits_allocated)),
+    };
+    if !decoded.len().is_multiple_of(word_bytes) {
+        return Err(TranscodeError::InvalidDecodedPixelDataLength {
+            bits_allocated,
+            length: decoded.len(),
+        });
+    }
+    // Drop the old encapsulated fragments before allocating the converted native word buffer
+    // so both do not coexist in memory at peak.
+    object.remove_element(tags::PIXEL_DATA);
     let value = native_pixel_value_from_little_endian_bytes(decoded, bits_allocated)?;
     let vr = native_pixel_vr(bits_allocated);
 
@@ -2127,7 +2236,7 @@ fn replace_with_encapsulated_frames(object: &mut DefaultDicomObject, mut fragmen
     replace_with_encapsulated_pixel_data(object, offset_table, fragments);
 }
 
-fn number_of_frames(object: &DefaultDicomObject) -> usize {
+pub(super) fn number_of_frames(object: &DefaultDicomObject) -> usize {
     object
         .get(tags::NUMBER_OF_FRAMES)
         .and_then(|e| e.to_str().ok())
@@ -2169,7 +2278,7 @@ fn replace_with_encapsulated_pixel_data(
     ));
 }
 
-fn remove_encapsulation_sidecar_attributes(object: &mut DefaultDicomObject) {
+pub(super) fn remove_encapsulation_sidecar_attributes(object: &mut DefaultDicomObject) {
     object.remove_element(Tag(0x7FE0, 0x0001));
     object.remove_element(Tag(0x7FE0, 0x0002));
     object.remove_element(Tag(0x7FE0, 0x0003));
@@ -2184,15 +2293,15 @@ fn native_pixel_value_from_little_endian_bytes(
         1..=8 => Ok(PrimitiveValue::from(bytes)),
         9..=16 => {
             let words = bytes_to_words::<2, u16>(bytes, u16::from_le_bytes, bits_allocated)?;
-            Ok(PrimitiveValue::U16(words.into_iter().collect()))
+            Ok(PrimitiveValue::U16(words.into()))
         }
         17..=32 => {
             let words = bytes_to_words::<4, u32>(bytes, u32::from_le_bytes, bits_allocated)?;
-            Ok(PrimitiveValue::U32(words.into_iter().collect()))
+            Ok(PrimitiveValue::U32(words.into()))
         }
         33..=64 => {
             let words = bytes_to_words::<8, u64>(bytes, u64::from_le_bytes, bits_allocated)?;
-            Ok(PrimitiveValue::U64(words.into_iter().collect()))
+            Ok(PrimitiveValue::U64(words.into()))
         }
         _ => Err(TranscodeError::UnsupportedBitsAllocated(bits_allocated)),
     }
@@ -2219,7 +2328,7 @@ fn bytes_to_words<const N: usize, T>(
     Ok(values)
 }
 
-fn native_pixel_vr(bits_allocated: u16) -> VR {
+pub(super) fn native_pixel_vr(bits_allocated: u16) -> VR {
     if bits_allocated <= 8 {
         VR::OB
     } else {
@@ -2227,7 +2336,7 @@ fn native_pixel_vr(bits_allocated: u16) -> VR {
     }
 }
 
-fn normalize_decoded_pixel_data_attributes(
+pub(super) fn normalize_decoded_pixel_data_attributes(
     object: &mut DefaultDicomObject,
     source_ts_uid: &str,
     jpeg2000_uses_mct: Option<bool>,
