@@ -58,7 +58,7 @@ DICOMDIR (a command of its own, see [Write a DICOMDIR](#write-a-dicomdir)):
 
 Registration (a command of its own, see [Register two volumes](#register-two-volumes)):
 
-- `dcmnorm register <FIXED> <MOVING> [--metric auto|ncc|mattes-mi] [--translation-only] [--time-limit-ms <MS>] [--levels <MM,...>] [--reg <PATH>]`
+- `dcmnorm register <FIXED> <MOVING> [--metric auto|ncc|mattes-mi] [--translation-only] [--multi] [--time-limit-ms <MS>] [--levels <MM,...>] [--reg <PATH>]`
 
 DICOM editing:
 
@@ -845,6 +845,7 @@ holding one series' files, a single Enhanced CT/MR/PET file, or a comma-separate
 dcmnorm register current/ prior/                                   # the result as JSON
 dcmnorm register ct/ pet/ --reg pet-to-ct.dcm                      # also write a DICOM REG
 dcmnorm register current/ prior/ --translation-only                # the fast estimate only
+dcmnorm register current/ prior/ --multi                           # several starts, the best kept
 ```
 
 - `matrix` is a row-major 4x4 that maps a point in the MOVING patient coordinates (LPS mm) to the
@@ -860,12 +861,33 @@ dcmnorm register current/ prior/ --translation-only                # the fast es
 - The result carries `metric`, `metricValue`, `normalizedMetric` (the NCC correlation, or MI's
   entropy correlation coefficient), `overlapFraction`, `quality` and `qualityLabel`
   (`good`/`fair`/`poor`), the per-level iterations, `initialization`, `stopReason` and `timingMs`.
+- `quality` comes from `bodyMetric`: the metric over only the fixed samples that land inside the
+  moving body, so anatomy one scan never saw (a smaller reconstruction field of view, a cropped
+  end) does not count against a correct result, while a misalignment still compares anatomy that
+  doesn't match. It is scaled down when the moving body covers under 30% of the fixed one
+  (`bodyOverlapFraction`) or a transform 2 voxels away scores better (not converged). The scale
+  is calibrated per modality on public CT, PT and MR pairs (`benchmarks/registration`): correct
+  results score `good`, divergent ones `poor`. A rotation above 30 degrees (`rotationAngleDeg`)
+  is always `poor` with `plausible: false`; a current and a prior on a table are not rotated that
+  much.
+- `--multi` tries several starts, the translation estimate, the body-mask centroids and the
+  scanner coordinates (plus the initial matrix and extra `starts` in the bindings), each through
+  the coarse levels, refines the best plausible one, and reports `consistent` (another start
+  converged to within 3 mm of it) and every start under `starts`. The working images are built
+  once for all of them, so it costs about 1.5 times one start. It recovers from seeds 120-180 mm
+  off in S-I, 60 mm off in-plane or upside down, where a single start ends in a wrong minimum.
 - The result is deterministic: the same inputs give the same matrix bit for bit, whatever the
   thread count. `--time-limit-ms` (default 30000) returns the best result so far when it runs out.
 - `--translation-only` runs just the fast estimate, which also seeds the rigid registration.
   The S-I shift comes from cross-correlating per-height profiles (body area, plus lung and bone
-  area for CT and integrated intensity for MR/PT), and the in-plane shift from the body
-  centroids. Its `confidence` drops when another alignment fits almost as well.
+  area for CT and integrated intensity for MR/PT) over the in-plane region both scans cover, so a
+  smaller reconstruction field of view doesn't skew them. A shift with a short overlap is
+  down-weighted, so a chance fit at the ends can't beat a long overlap, and the smallest overlap
+  allowed is 40% of the shorter scan (20 to 60 mm), so short MR slabs still match. The in-plane
+  shift comes from a masked correlation of the two scans' axial projections over the matched
+  overlap, which truncation doesn't bias the way body centroids are biased. `confidence` combines
+  the peak, its margin over the next one, whether each profile on its own agrees, and the
+  in-plane fit. It is calibrated so that no wrong answer on the benchmark scores 0.3 or more.
 - `--reg PATH` writes the result as a Spatial Registration object
   (`1.2.840.10008.5.1.4.1.1.66.1`) in the fixed study. The fixed and moving series and instances
   are referenced, and the patient and study modules are copied from the first fixed file.

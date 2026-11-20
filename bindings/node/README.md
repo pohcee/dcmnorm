@@ -207,7 +207,11 @@ in [the CLI docs](../../docs/cli.md#register-two-volumes).
     - `metric` (`'auto'` | `'ncc'` | `'mattes-mi'`)
     - `fixedModality` / `movingModality`: override the files' Modality
     - `initialMatrix` (number[16]): a starting moving -> fixed transform
-    - `initialize` (`'translation'` default | `'centroid'` | `'none'`): used without `initialMatrix`
+    - `initialize` (`'translation'` default | `'centroid'` | `'none'` | `'multi'`): used without
+      `initialMatrix`, except `'multi'`: several starts (the `initialMatrix` and `starts` given,
+      the translation estimate, the body centroids, identity), the best plausible one refined
+    - `starts` (number[16][]): extra starting matrices; implies `'multi'`
+    - `maxRotationDeg` (default 30; 0 for no limit): a larger rotation is `'poor'`, `plausible: false`
     - `levelsMm` (default `[8, 4, 2]`)
     - `maxIterations` (per level, default 40)
     - `timeLimitMs` (default 30000)
@@ -218,7 +222,14 @@ in [the CLI docs](../../docs/cli.md#register-two-volumes).
   - Result fields:
     - `matrix`, `rotationDeg` and `translationMm` (of the matrix), `centerMm`
     - `metric`, `metricValue`, `initialMetricValue`, `normalizedMetric`, `overlapFraction`
-    - `quality` (0..1) and `qualityLabel` (`'good'` | `'fair'` | `'poor'`)
+    - `quality` (0..1) and `qualityLabel` (`'good'` | `'fair'` | `'poor'`), from `bodyMetric` (the
+      metric where both bodies are, so FOV truncation and cropping don't count against it) and
+      `bodyOverlapFraction`, lowered when the result isn't a local optimum
+    - `rotationAngleDeg`, `plausible`
+    - multi-start: `consistent` (another start converged within 3 mm; absent for one start) and
+      `starts[]`: `start` (`'matrix'` | `'translation'` | `'centroid'` | `'none'` | `'start-<n>'`),
+      `matrix`, `normalizedMetric`, `quality`, `qualityLabel`, `rotationAngleDeg`, `plausible`,
+      `agrees`, `refined`
     - `iterations`, `metricEvaluations`, `levels[]`, `initialization`
     - `converged`, `stopReason` (`'converged'` | `'max-iterations'` | `'time-limit'`)
     - `timingMs`, `workingBytes`
@@ -228,10 +239,12 @@ in [the CLI docs](../../docs/cli.md#register-two-volumes).
 - `new RegistrationCancelToken()`: `.cancel()`, `.cancelled`.
 - `estimateTranslation(fixed, moving, options?): Promise<TranslationEstimate>`
   - What it does: the fast translation-only estimate, which also seeds `registerVolumes`.
-  - `options`: `fixedModality`, `movingModality`, `minOverlapMm` (60), `maxShiftMm`.
-  - Result: `matrix`, `translationMm`, `confidence` (0..1; below about 0.3, fall back to
-    capture-on-link), `peakCorrelation`, `secondPeakCorrelation`, `overlapMm`, `profiles`,
-    `timingMs`.
+  - `options`: `fixedModality`, `movingModality`, `minOverlapMm` (60), `maxShiftMm`,
+    `minOverlapFraction` (0.4: the smallest overlap is 40% of the shorter scan, 20 to
+    `minOverlapMm`; when only `minOverlapMm` is given it is used exactly; 0 turns it off).
+  - Result: `matrix`, `translationMm`, `confidence` (0..1, calibrated so wrong answers stay below
+    0.3; below that, fall back to capture-on-link), `peakCorrelation`, `secondPeakCorrelation`,
+    `overlapMm`, `profiles`, `channelAgreement`, `xyCorrelation`, `minOverlapMm`, `timingMs`.
 - `readSpatialRegistration(filePath): Promise<string>`
   - What it does: a Spatial Registration object (`.66.1`, or the pre/post matrices of a
     Deformable `.66.3`) as a JSON string.

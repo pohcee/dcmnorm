@@ -1,0 +1,24 @@
+{
+  "description": "Registration benchmark cases over public TCIA series (README.md). fixed/moving: series directories under the data root; truth: the true moving -> fixed matrix, relative to this file or the data root (null: none known). The real repeat pairs' truths are rigid registrations that every start agreed on, not independent ground truth; the derived series' truths are exact relative to them.",
+  "cases": [
+    { "name": "ct-repeat", "fixed": "A", "moving": "B", "truth": "ref-BtoA.json" },
+    { "name": "ct-fov250", "fixed": "A", "moving": "B-fov", "truth": "B-fov.truth.json" },
+    { "name": "ct-crop-top60", "fixed": "A", "moving": "B-crop", "truth": "B-crop.truth.json" },
+    { "name": "ct-shift", "fixed": "A", "moving": "B-tr", "truth": "B-tr.truth.json" },
+    { "name": "ct-rot-shift", "fixed": "A", "moving": "B-rot", "truth": "B-rot.truth.json" },
+    { "name": "ct-crop-rot-shift-fov", "fixed": "A", "moving": "B-s1", "truth": "B-s1.truth.json" },
+    { "name": "ct-both-cropped", "fixed": "A-cropbot40", "moving": "B-s1", "truth": "B-s1.truth.json" },
+    { "name": "ct-self-crop-rot", "fixed": "A", "moving": "A-self-s1", "truth": "A-self-s1.truth.json" },
+    { "name": "ct-self-both-cropped", "fixed": "A-cropbot40", "moving": "A-self-s1", "truth": "A-self-s1.truth.json" },
+    { "name": "pt-repeat-6mo", "fixed": "P1", "moving": "P2", "truth": "ref-PT.json" },
+    { "name": "pt-self-crop150-rot", "fixed": "P1", "moving": "P1-self", "truth": "P1-self.truth.json" },
+    { "name": "pt-6mo-crop150-rot", "fixed": "P1", "moving": "P2-s1", "truth": "P2-s1.truth.json" },
+    { "name": "pt-both-cropped", "fixed": "P1-cropbot", "moving": "P2-s1", "truth": "P2-s1.truth.json" },
+    { "name": "mr-repeat", "fixed": "M1", "moving": "M2", "truth": "ref-MR.json" },
+    { "name": "mr-self-rot", "fixed": "M1", "moving": "M1-self", "truth": "M1-self.truth.json" },
+    { "name": "mr-repeat-rot", "fixed": "M1", "moving": "M2-s1", "truth": "M2-s1.truth.json" },
+    { "name": "x-unrelated-ct-pt", "fixed": "A", "moving": "P2", "truth": null },
+    { "name": "x-unrelated-pt-ct", "fixed": "P1", "moving": "B-crop", "truth": null },
+    { "name": "x-unrelated-mr-ct", "fixed": "M1", "moving": "A-cropbot40", "truth": null }
+  ]
+}

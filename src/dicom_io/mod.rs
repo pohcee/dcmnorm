@@ -97,7 +97,7 @@ pub use volume::{
 pub use registration::{
     estimate_translation, euler_deg, mat_inverse, mat_mul, register_rigid, rigid_about, rotation_angle_deg, rotation_matrix,
     transform_point, translation_matrix, Initialization, LevelResult, MaskMode, Mat4, MetricChoice, MetricKind,
-    RegistrationError, RegistrationOptions, RegistrationResult, StopReason, TranslationEstimate, TranslationOptions,
+    RegistrationError, RegistrationOptions, RegistrationResult, StartResult, StopReason, TranslationEstimate, TranslationOptions,
 };
 pub use volume_export::{generate_uid, write_nifti, write_nrrd, VolumeExportError, VolumeGeometry};
 pub use texture_export::{
