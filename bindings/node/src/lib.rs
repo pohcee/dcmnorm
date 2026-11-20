@@ -2006,10 +2006,15 @@ pub struct EstimateTranslationOptions {
     pub fixed_modality: Option<String>,
     /// Overrides the moving volume's Modality.
     pub moving_modality: Option<String>,
-    /// Smallest S-I overlap of the two scans a z shift may imply, mm (default 60).
+    /// Smallest S-I overlap of the two scans a z shift may imply, mm (default 60, an upper
+    /// bound under `minOverlapFraction`). Given alone, it is used exactly.
     pub min_overlap_mm: Option<f64>,
     /// Largest |z shift| considered, mm (default: anything with enough overlap).
     pub max_shift_mm: Option<f64>,
+    /// The smallest overlap is `min(minOverlapMm, max(fraction x the shorter scan's S-I extent,
+    /// 20 mm))`, so short slabs (an 80 mm prostate or head MR) can be matched. Default 0.4 when
+    /// `minOverlapMm` is not given either; 0 turns it off.
+    pub min_overlap_fraction: Option<f64>,
 }
 
 #[napi(object)]
@@ -2017,8 +2022,9 @@ pub struct TranslationEstimate {
     /// Moving -> fixed patient (a pure translation), row-major 4x4.
     pub matrix: Vec<f64>,
     pub translation_mm: Vec<f64>,
-    /// 0..1: the correlation peak's height and its margin over the next peak 20+ mm away.
-    /// Below ~0.3, fall back to capture-on-link.
+    /// 0..1, calibrated on public CT, PT and MR pairs so a wrong answer stays below 0.3: the z
+    /// peak (overlap-weighted), its margin over the next peak 20+ mm away, the profile channels'
+    /// agreement and the in-plane correlation. Below 0.3, fall back to capture-on-link.
     pub confidence: f64,
     pub peak_correlation: f64,
     pub second_peak_correlation: f64,
@@ -2026,6 +2032,12 @@ pub struct TranslationEstimate {
     /// The profiles correlated: 'body', 'lung', 'bone' (CT-CT), 'intensity' (MR-MR, PT-PT).
     pub profiles: Vec<String>,
     pub timing_ms: f64,
+    /// Share (0..1, weighted) of the profile channels whose own best z is within 10 mm of the answer.
+    pub channel_agreement: f64,
+    /// Correlation of the two scans' axial projections at the x/y answer.
+    pub xy_correlation: f64,
+    /// The smallest overlap that was allowed, mm.
+    pub min_overlap_mm: f64,
 }
 
 pub struct EstimateTranslationTask {
@@ -2046,6 +2058,13 @@ impl Task for EstimateTranslationTask {
                 moving_modality: self.options.moving_modality.clone(),
                 min_overlap_mm: self.options.min_overlap_mm.unwrap_or(defaults.min_overlap_mm),
                 max_shift_mm: self.options.max_shift_mm,
+                // An explicit minOverlapMm alone means exactly that; 0 turns the fraction off.
+                min_overlap_fraction: match (self.options.min_overlap_fraction, self.options.min_overlap_mm) {
+                    (Some(f), _) if f <= 0.0 => None,
+                    (Some(f), _) => Some(f),
+                    (None, Some(_)) => None,
+                    (None, None) => defaults.min_overlap_fraction,
+                },
             };
             let estimate = dcm_estimate_translation(&self.fixed, &self.moving, &options).map_err(to_napi_err)?;
             Ok(TranslationEstimate {
@@ -2057,6 +2076,9 @@ impl Task for EstimateTranslationTask {
                 overlap_mm: estimate.overlap_mm,
                 profiles: estimate.profiles.iter().map(|p| (*p).to_owned()).collect(),
                 timing_ms: estimate.timing_ms,
+                channel_agreement: estimate.channel_agreement,
+                xy_correlation: estimate.xy_correlation,
+                min_overlap_mm: estimate.min_overlap_mm,
             })
         })
     }
@@ -2067,9 +2089,10 @@ impl Task for EstimateTranslationTask {
 }
 
 /// A fast moving -> fixed translation: the S-I shift from cross-correlating per-height profiles
-/// (body area; plus lung and bone area for CT-CT, integrated intensity for MR-MR / PT-PT), the
-/// in-plane shift from body-mask centroids over the matched overlap. Works for any acquisition
-/// orientation. Tens of milliseconds for a typical CT.
+/// (body area; plus lung and bone area for CT-CT, integrated intensity for MR-MR / PT-PT) over
+/// the two scans' common in-plane support (so a smaller reconstruction FOV does not skew them),
+/// short end overlaps down-weighted; the in-plane shift from a masked correlation of their axial
+/// projections over the matched overlap. Works for any acquisition orientation. About 100-300 ms.
 #[napi]
 pub fn estimate_translation(
     fixed: &DicomVolumeHandle,
@@ -2091,8 +2114,15 @@ pub struct RegisterVolumesOptions {
     /// Starting moving -> fixed transform (16 numbers, row-major), e.g. the viewer's translation.
     pub initial_matrix: Option<Vec<f64>>,
     /// Without `initialMatrix`: 'translation' (default; estimateTranslation, then the mask
-    /// centroids when it is not confident), 'centroid' or 'none'.
+    /// centroids when it is not confident), 'centroid' or 'none'. 'multi': several starts (the
+    /// `initialMatrix` and `starts` given, the translation estimate, the mask centroids, identity),
+    /// the best plausible one refined; see `consistent` and `starts` in the result.
     pub initialize: Option<String>,
+    /// Extra starting moving -> fixed matrices (16 numbers each); implies `initialize: 'multi'`.
+    pub starts: Option<Vec<Vec<f64>>>,
+    /// A result rotated more than this many degrees is labelled 'poor' with `plausible: false`
+    /// (and loses to any plausible start). Default 30; 0 or a negative number: no limit.
+    pub max_rotation_deg: Option<f64>,
     /// Working-grid spacing per pyramid level, coarse to fine, mm (default [8, 4, 2]).
     pub levels_mm: Option<Vec<f64>>,
     /// Optimizer iterations per level (default 40).
@@ -2141,7 +2171,9 @@ pub struct RegistrationResult {
     pub normalized_metric: f64,
     /// Fraction of the fixed body samples that land inside the moving volume.
     pub overlap_fraction: f64,
-    /// 0..1 heuristic; show it, and never apply a 'poor' result silently.
+    /// 0..1 from the metric over where both bodies are (so FOV truncation and cropping do not
+    /// count against it) and whether the result is a local optimum; calibrated on public CT, PT
+    /// and MR pairs. Show it, and never apply a 'poor' result silently.
     pub quality: f64,
     /// 'good' (>= 0.7), 'fair' (>= 0.4) or 'poor'.
     pub quality_label: String,
@@ -2156,6 +2188,36 @@ pub struct RegistrationResult {
     pub timing_ms: f64,
     /// Peak bytes of working images and samples held.
     pub working_bytes: f64,
+    /// The normalized metric over the fixed samples inside the moving body (what `quality` uses).
+    pub body_metric: f64,
+    /// Share of the fixed body samples inside the moving body.
+    pub body_overlap_fraction: f64,
+    /// Rotation angle of `matrix`, degrees.
+    pub rotation_angle_deg: f64,
+    /// False when the rotation is above `maxRotationDeg` (the label is then 'poor').
+    pub plausible: bool,
+    /// Multi-start only: whether another start converged to the same result (within 3 mm,
+    /// mean over the fixed body's central box). Absent (undefined) for a single start.
+    pub consistent: Option<bool>,
+    /// Multi-start only: every start, the returned one first.
+    pub starts: Vec<RegistrationStart>,
+}
+
+#[napi(object)]
+pub struct RegistrationStart {
+    /// 'matrix', 'translation', 'centroid', 'none' or 'start-<n>' (`starts[n-1]`).
+    pub start: String,
+    /// Where this start converged (moving -> fixed, row-major).
+    pub matrix: Vec<f64>,
+    pub normalized_metric: f64,
+    pub quality: f64,
+    pub quality_label: String,
+    pub rotation_angle_deg: f64,
+    pub plausible: bool,
+    /// Within 3 mm of the returned result.
+    pub agrees: bool,
+    /// Whether it ran the finest pyramid level (the others stop one level coarser).
+    pub refined: bool,
 }
 
 /// Cancels a running `registerVolumes`: pass it as the 4th argument and call `cancel()`; the
@@ -2226,6 +2288,26 @@ impl Task for RegisterVolumesTask {
                 stop_reason: result.stop_reason.as_str().to_owned(),
                 timing_ms: result.timing_ms,
                 working_bytes: result.working_bytes as f64,
+                body_metric: result.body_metric,
+                body_overlap_fraction: result.body_overlap_fraction,
+                rotation_angle_deg: result.rotation_angle_deg,
+                plausible: result.plausible,
+                consistent: result.consistent,
+                starts: result
+                    .starts
+                    .iter()
+                    .map(|s| RegistrationStart {
+                        start: s.start.clone(),
+                        matrix: s.matrix.to_vec(),
+                        normalized_metric: s.normalized_metric,
+                        quality: s.quality,
+                        quality_label: s.quality_label.to_owned(),
+                        rotation_angle_deg: s.rotation_angle_deg,
+                        plausible: s.plausible,
+                        agrees: s.agrees,
+                        refined: s.refined,
+                    })
+                    .collect(),
             })
         })
     }
@@ -2247,7 +2329,8 @@ fn registration_options(options: RegisterVolumesOptions, cancel: Option<&Registr
         None | Some("translation") => DcmInitialization::Translation,
         Some("centroid") => DcmInitialization::Centroid,
         Some("none") => DcmInitialization::None,
-        Some(other) => return Err(Error::from_reason(format!("invalid initialize '{other}'; expected 'translation', 'centroid' or 'none'"))),
+        Some("multi") => DcmInitialization::Multi,
+        Some(other) => return Err(Error::from_reason(format!("invalid initialize '{other}'; expected 'translation', 'centroid', 'none' or 'multi'"))),
     };
     let mask = match options.mask.as_deref() {
         None | Some("auto") => DcmMaskMode::Auto,
@@ -2279,6 +2362,18 @@ fn registration_options(options: RegisterVolumesOptions, cancel: Option<&Registr
         histogram_bins: options.histogram_bins.map(|b| b as usize).unwrap_or(defaults.histogram_bins),
         max_samples: options.max_samples.map(|s| s as usize).unwrap_or(defaults.max_samples),
         max_memory_bytes: options.max_memory_bytes.map(|b| b.max(0.0) as u64).unwrap_or(defaults.max_memory_bytes),
+        starts: options
+            .starts
+            .unwrap_or_default()
+            .iter()
+            .enumerate()
+            .map(|(i, m)| parse_matrix(m, &format!("starts[{i}]")))
+            .collect::<Result<Vec<_>>>()?,
+        max_rotation_deg: match options.max_rotation_deg {
+            None => defaults.max_rotation_deg,
+            Some(d) if d.is_finite() && d > 0.0 => Some(d),
+            Some(_) => None,
+        },
     })
 }
 

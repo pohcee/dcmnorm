@@ -701,6 +701,9 @@ struct RegisterCli {
     #[arg(long, value_name = "MS", default_value_t = 30000.0, help = "Time limit, milliseconds")]
     time_limit_ms: f64,
 
+    #[arg(long, help = "Try several starts (translation estimate, body centroids, scanner coordinates) and keep the best; reports whether they agree")]
+    multi: bool,
+
     #[arg(long, value_name = "MM,MM,...", help = "Pyramid level spacings, coarse to fine (default 8,4,2)")]
     levels: Option<String>,
 
@@ -745,6 +748,7 @@ fn run_register_command(args: impl IntoIterator<Item = std::ffi::OsString>) -> R
             "confidence": estimate.confidence, "peakCorrelation": estimate.peak_correlation,
             "secondPeakCorrelation": estimate.second_peak_correlation, "overlapMm": estimate.overlap_mm,
             "profiles": estimate.profiles, "timingMs": estimate.timing_ms,
+            "channelAgreement": estimate.channel_agreement, "xyCorrelation": estimate.xy_correlation, "minOverlapMm": estimate.min_overlap_mm,
         });
         (estimate.matrix, report)
     } else {
@@ -757,6 +761,7 @@ fn run_register_command(args: impl IntoIterator<Item = std::ffi::OsString>) -> R
         let mut options = RegistrationOptions {
             metric,
             time_limit: Some(std::time::Duration::from_secs_f64(cli.time_limit_ms.max(1.0) / 1000.0)),
+            initialization: if cli.multi { dcmnorm::dicom_io::Initialization::Multi } else { dcmnorm::dicom_io::Initialization::Translation },
             ..Default::default()
         };
         if let Some(levels) = &cli.levels {
@@ -777,6 +782,9 @@ fn run_register_command(args: impl IntoIterator<Item = std::ffi::OsString>) -> R
             "levels": result.levels.iter().map(|l| serde_json::json!({ "spacingMm": l.spacing_mm, "iterations": l.iterations, "metricEvaluations": l.metric_evaluations, "metricValue": l.metric_value })).collect::<Vec<_>>(),
             "initialization": result.initialization, "converged": result.converged,
             "stopReason": result.stop_reason.as_str(), "timingMs": result.timing_ms, "workingBytes": result.working_bytes,
+            "bodyMetric": result.body_metric, "bodyOverlapFraction": result.body_overlap_fraction,
+            "rotationAngleDeg": result.rotation_angle_deg, "plausible": result.plausible, "consistent": result.consistent,
+            "starts": result.starts.iter().map(|s| serde_json::json!({ "start": s.start, "matrix": s.matrix.to_vec(), "normalizedMetric": s.normalized_metric, "quality": s.quality, "qualityLabel": s.quality_label, "rotationAngleDeg": s.rotation_angle_deg, "plausible": s.plausible, "agrees": s.agrees, "refined": s.refined })).collect::<Vec<_>>(),
         });
         (result.matrix, report)
     };

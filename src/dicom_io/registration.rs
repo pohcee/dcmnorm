@@ -17,9 +17,12 @@
 //! 2. **Body masks, modality aware.** CT: HU above -400, eroded one voxel, largest connected
 //!    component, dilated back - which removes the table (it is separated from the patient by a
 //!    low-density mattress). MR (and unknown modalities): half the Otsu threshold of the
-//!    intensities. PT: 5% of the 99.5th percentile, which works on raw counts, Bq/ml or SUV alike
-//!    (no HU or SUV assumption). Every mask is the largest component with its holes filled
-//!    (lungs, bowel gas) and a one-voxel margin for the skin edge.
+//!    intensities. PT: 30% of the median uptake above 5% of the 99.5th percentile, opened like CT
+//!    to drop the speckle outside the body; it works on raw counts, Bq/ml or SUV alike (no HU or
+//!    SUV assumption). Every mask is the largest component with its holes filled (lungs, bowel
+//!    gas) and a one-voxel margin for the skin edge; a CT's also includes everything between two
+//!    body voxels of a slice row or column, so lungs a smaller reconstruction field of view cut
+//!    open still count.
 //! 3. **Intensity normalization.** Inside the mask, intensities are clamped to their 0.5-99.5
 //!    percentile range and mapped to [0, 1]; outside it they are 0. That absorbs MR's arbitrary
 //!    scaling and PET's counts-vs-SUV, and stops bright outliers (metal, the bladder) dominating.
@@ -30,7 +33,14 @@
 //!    (about the fixed mask's centroid) and 3 translations, rotations scaled by the mask radius
 //!    so one unit is about one millimetre of motion everywhere. Each level starts from the
 //!    previous one; the first from `initial_matrix`, the translation estimate or the mask
-//!    centroids.
+//!    centroids - or, with `Initialization::Multi`, from each of several starts (`register_rigid`).
+//! 6. **Quality.** The metric again, over only the fixed samples that land inside the moving
+//!    BODY (`body_metric`): what one scan never saw (a smaller FOV, a cropped end) does not count
+//!    against the alignment, while a misalignment still puts anatomy on anatomy that does not
+//!    match. Mapped to 0..1 by a modality-aware scale calibrated on public data
+//!    (`quality_score`), scaled down when the moving body covers little of the fixed one or a
+//!    neighbouring transform 2 voxels away scores better (not a local optimum), and a rotation
+//!    above `max_rotation_deg` (30 by default) is always "poor".
 //!
 //! Deterministic: sample selection is a fixed hash, every parallel reduction is summed in a fixed
 //! chunk order, and nothing depends on the thread count. Bounded: the working images are capped
@@ -96,6 +106,9 @@ pub enum Initialization {
     Centroid,
     /// Identity: the two frames are assumed roughly aligned already.
     None,
+    /// Several starts (the initial matrix and `starts` when given, the translation estimate, the
+    /// mask centroids and identity), the best kept; see `register_rigid`.
+    Multi,
 }
 
 #[derive(Clone, Debug)]
@@ -122,6 +135,11 @@ pub struct RegistrationOptions {
     pub max_samples: usize,
     /// Cap on the working images' memory; a level that would exceed it is coarsened.
     pub max_memory_bytes: u64,
+    /// Extra starting moving -> fixed transforms. Non-empty means a multi-start registration.
+    pub starts: Vec<Mat4>,
+    /// A result rotated more than this (degrees, the rotation angle of the matrix) is labelled
+    /// poor and `plausible: false`, and loses to any plausible start. `None`: no limit.
+    pub max_rotation_deg: Option<f64>,
 }
 
 impl Default for RegistrationOptions {
@@ -141,6 +159,8 @@ impl Default for RegistrationOptions {
             histogram_bins: 32,
             max_samples: 100_000,
             max_memory_bytes: 256 * 1024 * 1024,
+            starts: Vec::new(),
+            max_rotation_deg: Some(30.0),
         }
     }
 }
@@ -201,21 +221,59 @@ pub struct RegistrationResult {
     pub timing_ms: f64,
     /// Peak bytes of working images and samples the registration held.
     pub working_bytes: u64,
+    /// The normalized metric over the fixed samples that land inside the moving BODY (not just
+    /// the moving volume): what `quality` is computed from.
+    pub body_metric: f64,
+    /// Share of the fixed body samples that land inside the moving body.
+    pub body_overlap_fraction: f64,
+    /// The rotation angle of `matrix`, degrees.
+    pub rotation_angle_deg: f64,
+    /// False when `rotation_angle_deg` is above `max_rotation_deg`.
+    pub plausible: bool,
+    /// Multi-start only: whether another start converged to the same transform (within
+    /// `AGREE_MM` over the fixed body). `None` for a single start.
+    pub consistent: Option<bool>,
+    /// Multi-start only: every start's result, in the order they were tried.
+    pub starts: Vec<StartResult>,
+}
+
+/// One start of a multi-start registration.
+#[derive(Clone, Debug)]
+pub struct StartResult {
+    /// "matrix", "translation", "centroid", "none" or "start-<n>" (`RegistrationOptions::starts`).
+    pub start: String,
+    /// Where this start converged (moving -> fixed).
+    pub matrix: Mat4,
+    pub normalized_metric: f64,
+    pub quality: f64,
+    pub quality_label: &'static str,
+    pub rotation_angle_deg: f64,
+    pub plausible: bool,
+    /// Within `AGREE_MM` of the returned result.
+    pub agrees: bool,
+    /// Whether this start ran the finest level (only the best start does).
+    pub refined: bool,
 }
 
 #[derive(Clone, Debug)]
 pub struct TranslationOptions {
     pub fixed_modality: Option<String>,
     pub moving_modality: Option<String>,
-    /// Smallest S-I overlap of the two scans a z shift may imply, mm.
+    /// Smallest S-I overlap of the two scans a z shift may imply, mm (an upper bound when
+    /// `min_overlap_fraction` is set).
     pub min_overlap_mm: f64,
     /// Largest |z shift| considered, mm (`None`: anything with enough overlap).
     pub max_shift_mm: Option<f64>,
+    /// When set, the smallest overlap is `min(min_overlap_mm, max(fraction * shorter, 20 mm))`
+    /// (the shorter scan's covered S-I extent; a 20 mm floor, itself at most 3/4 of it), so a
+    /// short slab (an 80 mm prostate or head MR) can still be matched. `None`: exactly
+    /// `min_overlap_mm`.
+    pub min_overlap_fraction: Option<f64>,
 }
 
 impl Default for TranslationOptions {
     fn default() -> Self {
-        Self { fixed_modality: None, moving_modality: None, min_overlap_mm: 60.0, max_shift_mm: None }
+        Self { fixed_modality: None, moving_modality: None, min_overlap_mm: 60.0, max_shift_mm: None, min_overlap_fraction: Some(0.4) }
     }
 }
 
@@ -224,7 +282,9 @@ pub struct TranslationEstimate {
     /// Moving patient -> fixed patient (a pure translation), row-major.
     pub matrix: Mat4,
     pub translation_mm: Vec3,
-    /// 0..1: the correlation peak's height and its margin over the best peak at least 20 mm away.
+    /// 0..1, calibrated so a wrong answer stays below 0.3: the z peak's height (overlap factor
+    /// included), its margin over the best other peak at least 20 mm away, the profile channels'
+    /// agreement and the in-plane correlation.
     pub confidence: f64,
     pub peak_correlation: f64,
     pub second_peak_correlation: f64,
@@ -232,6 +292,13 @@ pub struct TranslationEstimate {
     /// The profiles that were correlated ("body", "lung", "bone", "intensity").
     pub profiles: Vec<&'static str>,
     pub timing_ms: f64,
+    /// Weighted share (0..1) of the profile channels whose own best z shift is within 10 mm of
+    /// the answer (1 with a single channel).
+    pub channel_agreement: f64,
+    /// The in-plane projections' correlation at the x/y answer.
+    pub xy_correlation: f64,
+    /// The smallest overlap that was allowed, mm (after `min_overlap_fraction`).
+    pub min_overlap_mm: f64,
 }
 
 #[derive(Debug)]
@@ -759,7 +826,12 @@ fn body_mask(image: &WorkImage, class: ModalityClass) -> Vec<u8> {
     let data = &image.data;
     let threshold = match class {
         ModalityClass::Ct => -400.0,
-        ModalityClass::Pt => quantile(data, |_| true, 0.995).unwrap_or(0.0) * 0.05,
+        ModalityClass::Pt => {
+            // 30 % of the median uptake of what is above 5 % of the 99.5th percentile: the
+            // 5 % level alone lets the speckle outside the body of a noisy scan through.
+            let floor = quantile(data, |_| true, 0.995).unwrap_or(0.0) * 0.05;
+            quantile(data, |i| data[i] > floor, 0.5).map_or(floor, |median| (0.3 * median).max(floor))
+        }
         ModalityClass::Mr | ModalityClass::Other => {
             let lo = quantile(data, |_| true, 0.0).unwrap_or(0.0);
             let hi = quantile(data, |_| true, 0.995).unwrap_or(1.0);
@@ -767,14 +839,49 @@ fn body_mask(image: &WorkImage, class: ModalityClass) -> Vec<u8> {
         }
     };
     let foreground: Vec<u8> = data.iter().map(|&v| u8::from(v > threshold)).collect();
-    let body = if class == ModalityClass::Ct {
-        // Opening by one voxel detaches the table (and blankets, cables) before picking the
-        // patient as the largest component.
+    let body = if matches!(class, ModalityClass::Ct | ModalityClass::Pt) {
+        // Opening by one voxel detaches the table (and blankets, cables; PET speckle) before
+        // picking the patient as the largest component.
         dilate(&largest_component(&erode(&foreground, dims), dims), dims)
     } else {
         largest_component(&foreground, dims)
     };
-    fill_holes(&body, dims, &image.axes)
+    let filled = fill_holes(&body, dims, &image.axes);
+    // A CT reconstructed with a smaller field of view than the patient has its lungs cut open
+    // at the FOV edge; they are still inside the patient.
+    if class == ModalityClass::Ct { fill_in_plane(&filled, dims) } else { filled }
+}
+
+/// Also counts as body every voxel between two body voxels of its slice's row or column: a lung
+/// or bowel loop that a reconstruction field of view cut open (so `fill_holes` sees it reach the
+/// outside) is still inside the patient.
+fn fill_in_plane(mask: &[u8], dims: [usize; 3]) -> Vec<u8> {
+    let [nx, ny, nz] = dims;
+    let mut out = mask.to_vec();
+    for k in 0..nz {
+        let slice = &mask[k * nx * ny..(k + 1) * nx * ny];
+        let target = &mut out[k * nx * ny..(k + 1) * nx * ny];
+        let mut rows = vec![(usize::MAX, 0usize); ny];
+        let mut cols = vec![(usize::MAX, 0usize); nx];
+        for j in 0..ny {
+            for i in 0..nx {
+                if slice[j * nx + i] != 0 {
+                    rows[j] = (rows[j].0.min(i), rows[j].1.max(i));
+                    cols[i] = (cols[i].0.min(j), cols[i].1.max(j));
+                }
+            }
+        }
+        for j in 0..ny {
+            for i in 0..nx {
+                let (r0, r1) = rows[j];
+                let (c0, c1) = cols[i];
+                if (r0 <= i && i <= r1) || (c0 <= j && j <= c1) {
+                    target[j * nx + i] = 1;
+                }
+            }
+        }
+    }
+    out
 }
 
 fn apply_roi(mask: &mut [u8], image: &WorkImage, roi: Option<(Vec3, Vec3)>) {
@@ -1309,15 +1416,57 @@ fn fit_spacing(fixed: &Volume, moving: &Volume, spacing: f64, budget: u64) -> f6
     s
 }
 
-/// Quality heuristic in 0..1: how far the final metric is above what a misregistration gives
-/// (NCC 0.4 -> 0, 0.9 -> 1; ECC 0.05 -> 0, 0.30 -> 1), scaled down when under half the fixed
-/// body lands in the moving volume.
-fn quality_score(kind: MetricKind, normalized: f64, overlap: f64) -> f64 {
-    let base = match kind {
-        MetricKind::Ncc => (normalized - 0.4) / 0.5,
-        MetricKind::MattesMi => (normalized - 0.05) / 0.25,
+/// Two multi-start results agree when they move the corners of the fixed body's central box
+/// (the middle 60 % of its bounding box) by less than this many mm from each other, on average.
+pub const AGREE_MM: f64 = 3.0;
+/// A start closer than this (mm, same measure) to an earlier one is not run again.
+const DUPLICATE_START_MM: f64 = 2.0;
+
+/// The metric's correlation restricted to where BOTH bodies are: fixed samples whose mapped point
+/// falls inside the moving body mask. `(normalized, share of the fixed samples in the moving
+/// body)`. Unlike the optimizer's metric, this does not count the fixed anatomy the moving scan
+/// never saw (a smaller reconstruction field of view, a cropped end) against the alignment.
+fn masked_metric(kind: MetricKind, bins: usize, samples: &Samples, moving: &Prepared, fixed_to_moving_index: &Mat4) -> (f64, f64) {
+    let image = &moving.image;
+    let [nx, ny, nz] = image.dims;
+    let in_body = |index: Vec3| -> bool {
+        let (i, j, k) = (index[0].round(), index[1].round(), index[2].round());
+        if i < 0.0 || j < 0.0 || k < 0.0 || i >= nx as f64 || j >= ny as f64 || k >= nz as f64 {
+            return false;
+        }
+        moving.body[k as usize * nx * ny + j as usize * nx + i as usize] != 0
     };
-    base.clamp(0.0, 1.0) * (overlap / 0.5).clamp(0.0, 1.0)
+    let mut points = Vec::new();
+    let mut values = Vec::new();
+    for (p, &v) in samples.points.iter().zip(&samples.values) {
+        let index = transform_point(fixed_to_moving_index, [f64::from(p[0]), f64::from(p[1]), f64::from(p[2])]);
+        if in_body(index) {
+            points.push(*p);
+            values.push(v);
+        }
+    }
+    let share = points.len() as f64 / samples.points.len().max(1) as f64;
+    if points.len() < 64 {
+        return (0.0, share);
+    }
+    let subset = Samples { points, values };
+    (evaluate_metric(kind, bins, &subset, image, fixed_to_moving_index).normalized, share)
+}
+
+/// Quality in 0..1 from the masked metric (`masked_metric`) and the share of the fixed body the
+/// moving body covers (scaled down below 30 %). Calibrated on public CT, PT and MR pairs
+/// (benchmarks/registration), started both near and far (100-180 mm, 60 mm in-plane, 25 and 180
+/// degrees) from the truth: correct results, FOV-truncated and cropped ones included, had a
+/// masked NCC of 0.92+ for CT, 0.73+ for MR and 0.52+ for PET months apart; divergent ones 0.44
+/// or less for CT/MR and 0.35 or less for PET. So NCC 0.45 -> 0, 0.75 -> 1 (PET: 0.30 -> 0,
+/// 0.55 -> 1); the entropy correlation coefficient of MI 0.05 -> 0, 0.30 -> 1.
+fn quality_score(kind: MetricKind, pet: bool, masked: f64, share: f64) -> f64 {
+    let base = match (kind, pet) {
+        (MetricKind::Ncc, false) => (masked - 0.45) / 0.3,
+        (MetricKind::Ncc, true) => (masked - 0.30) / 0.25,
+        (MetricKind::MattesMi, _) => (masked - 0.05) / 0.25,
+    };
+    base.clamp(0.0, 1.0) * (share / 0.3).clamp(0.0, 1.0)
 }
 
 fn quality_label(quality: f64) -> &'static str {
@@ -1331,6 +1480,14 @@ fn quality_label(quality: f64) -> &'static str {
 }
 
 /// Registers `moving` to `fixed` (module docs). Returns the moving -> fixed patient transform.
+///
+/// With `Initialization::Multi` (or a non-empty `starts`), several starts are tried: the
+/// `initial_matrix` and `starts` given, the translation estimate (whatever its confidence), the
+/// body-mask centroids and identity, less any within 2 mm of an earlier one. Each runs the
+/// coarse levels; the plausible one (rotation within `max_rotation_deg`) with the best metric is
+/// refined at the finest level and returned, `consistent` saying whether another start converged
+/// to within `AGREE_MM` of it and `starts` listing them all. The working images are built once
+/// and shared, so extra starts cost only optimizer time.
 pub fn register_rigid(fixed: &Volume, moving: &Volume, options: &RegistrationOptions) -> Result<RegistrationResult, RegistrationError> {
     validate_options(options)?;
     let fixed_class = parse_modality(&options.fixed_modality, fixed);
@@ -1343,16 +1500,19 @@ pub fn register_rigid(fixed: &Volume, moving: &Volume, options: &RegistrationOpt
     };
     let started = Instant::now();
     let budget = Budget { deadline: options.time_limit.map(|limit| started + limit), cancel: options.cancel.clone() };
-    let first = run_rigid(fixed, moving, options, kind, fixed_class, moving_class, &budget, started)?;
+    let spacings: Vec<f64> = options.levels_mm.iter().map(|&s| fit_spacing(fixed, moving, s, options.max_memory_bytes)).collect();
+    let mut levels: Vec<Option<Level>> = (0..spacings.len()).map(|_| None).collect();
+    let mut context = RigidContext { fixed, moving, options, fixed_class, moving_class, spacings, levels: &mut levels, budget: &budget, started };
+    let first = context.run(kind)?;
     // MR-MR is often two different weightings (T1 vs T2), which NCC cannot align: if NCC stays
-    // poor, try mutual information from the same start and keep the better result.
+    // poor, try mutual information from the same starts and keep the better result.
     if options.metric == MetricChoice::Auto
         && kind == MetricKind::Ncc
         && fixed_class == ModalityClass::Mr
         && first.normalized_metric < 0.5
         && first.stop_reason != StopReason::TimeLimit
     {
-        if let Ok(second) = run_rigid(fixed, moving, options, MetricKind::MattesMi, fixed_class, moving_class, &budget, started) {
+        if let Ok(second) = context.run(MetricKind::MattesMi) {
             if second.quality > first.quality {
                 return Ok(second);
             }
@@ -1361,267 +1521,697 @@ pub fn register_rigid(fixed: &Volume, moving: &Volume, options: &RegistrationOpt
     Ok(first)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn run_rigid(
-    fixed: &Volume,
-    moving: &Volume,
-    options: &RegistrationOptions,
-    kind: MetricKind,
+fn validate_rotation(options: &RegistrationOptions) -> Result<(), RegistrationError> {
+    if options.max_rotation_deg.is_some_and(|d| !(d.is_finite() && d > 0.0)) {
+        return Err(RegistrationError::InvalidOption("maxRotationDeg must be a positive number".into()));
+    }
+    if options.starts.iter().any(|m| m.iter().any(|v| !v.is_finite()) || mat_inverse(m).is_none()) {
+        return Err(RegistrationError::InvalidOption("starts must be matrices of 16 finite numbers, invertible".into()));
+    }
+    Ok(())
+}
+
+/// One pyramid level's working images and samples, built once and shared by every start.
+struct Level {
+    spacing: f64,
+    moving: Prepared,
+    samples: Samples,
+    center: Vec3,
+    radius: f64,
+    bytes: u64,
+}
+
+/// The outcome of optimizing one start through a range of levels.
+struct LevelRun {
+    /// Fixed -> moving.
+    fixed_to_moving: Mat4,
+    levels: Vec<LevelResult>,
+    iterations: u32,
+    evaluations: u32,
+    stop_reason: StopReason,
+    converged: bool,
+    metric: MetricValue,
+    /// The metric at the start transform, on the last level run.
+    initial_metric: f64,
+    center: Vec3,
+}
+
+struct RigidContext<'a> {
+    fixed: &'a Volume,
+    moving: &'a Volume,
+    options: &'a RegistrationOptions,
     fixed_class: ModalityClass,
     moving_class: ModalityClass,
-    budget: &Budget,
+    spacings: Vec<f64>,
+    levels: &'a mut Vec<Option<Level>>,
+    budget: &'a Budget,
     started: Instant,
-) -> Result<RegistrationResult, RegistrationError> {
-    let spacings: Vec<f64> = options.levels_mm.iter().map(|&s| fit_spacing(fixed, moving, s, options.max_memory_bytes)).collect();
-    let finest = *spacings.last().expect("validated non-empty");
+}
 
-    // Initial moving -> fixed transform.
-    let (initial, initialization): (Mat4, &'static str) = if let Some(m) = options.initial_matrix {
-        (m, "matrix")
-    } else {
-        match options.initialization {
-            Initialization::None => (IDENTITY, "none"),
-            Initialization::Translation | Initialization::Centroid => {
-                let estimate = if options.initialization == Initialization::Translation {
-                    estimate_translation(
-                        fixed,
-                        moving,
-                        &TranslationOptions {
-                            fixed_modality: options.fixed_modality.clone(),
-                            moving_modality: options.moving_modality.clone(),
-                            ..Default::default()
-                        },
-                    )
-                    .ok()
-                } else {
-                    None
-                };
-                match estimate {
-                    Some(estimate) if estimate.confidence >= 0.3 => (estimate.matrix, "translation"),
-                    _ => {
-                        let spacing = finest.max(4.0);
-                        let f = prepare(fixed, spacing, fixed_class, options.mask, options.roi);
-                        let m = prepare(moving, spacing, moving_class, options.mask, None);
-                        match (mask_centroid(&f), mask_centroid(&m)) {
-                            (Some(cf), Some(cm)) => (translation_matrix(sub(cf, cm)), "centroid"),
-                            _ => (IDENTITY, "none"),
-                        }
-                    }
+impl RigidContext<'_> {
+    fn level(&mut self, index: usize) -> Result<&Level, RegistrationError> {
+        if self.levels[index].is_none() {
+            let spacing = self.spacings[index];
+            let fixed = prepare(self.fixed, spacing, self.fixed_class, self.options.mask, self.options.roi);
+            if fixed.body.iter().all(|&m| m == 0) {
+                return Err(RegistrationError::EmptyMask("fixed"));
+            }
+            let moving = prepare(self.moving, spacing, self.moving_class, self.options.mask, None);
+            if moving.body.iter().all(|&m| m == 0) {
+                return Err(RegistrationError::EmptyMask("moving"));
+            }
+            let samples = select_samples(&fixed, self.options.max_samples);
+            let center = mask_centroid(&fixed).unwrap_or([0.0; 3]);
+            // Rotations are scaled by the body's radius of gyration, so one parameter unit moves
+            // the anatomy about one millimetre whichever parameter it is.
+            let radius = {
+                let mut sum = 0.0;
+                for p in &samples.points {
+                    let p = [f64::from(p[0]), f64::from(p[1]), f64::from(p[2])];
+                    sum += dot(sub(p, center), sub(p, center));
+                }
+                (sum / samples.points.len().max(1) as f64).sqrt().max(20.0)
+            };
+            let bytes = work_image_bytes(self.fixed, spacing) + work_image_bytes(self.moving, spacing) + samples.points.len() as u64 * 16;
+            self.levels[index] = Some(Level { spacing, moving, samples, center, radius, bytes });
+        }
+        Ok(self.levels[index].as_ref().expect("just built"))
+    }
+
+    fn working_bytes(&self) -> u64 {
+        self.levels.iter().flatten().map(|l| l.bytes).sum()
+    }
+
+    /// Optimizes from `start` (moving -> fixed) through levels `range`.
+    fn optimize(&mut self, kind: MetricKind, start: &Mat4, range: std::ops::Range<usize>) -> Result<LevelRun, RegistrationError> {
+        let mut fixed_to_moving = mat_inverse(start).ok_or_else(|| RegistrationError::InvalidOption("initial transform is singular".into()))?;
+        let mut run = LevelRun {
+            fixed_to_moving,
+            levels: Vec::new(),
+            iterations: 0,
+            evaluations: 0,
+            stop_reason: StopReason::Converged,
+            converged: true,
+            metric: MetricValue { cost: 1.0, value: 0.0, normalized: 0.0, overlap: 0.0 },
+            initial_metric: 0.0,
+            center: [0.0; 3],
+        };
+        let bins = self.options.histogram_bins;
+        let max_iterations = self.options.max_iterations;
+        let budget = self.budget;
+        for index in range {
+            let level = self.level(index)?;
+            let mut objective = LevelObjective {
+                kind,
+                bins,
+                samples: &level.samples,
+                moving: &level.moving.image,
+                moving_world_to_index: level.moving.image.world_to_index(),
+                start: fixed_to_moving,
+                center: level.center,
+                radius: level.radius,
+                budget,
+                evaluations: 0,
+                best: ([0.0; 6], f64::INFINITY),
+            };
+            let start_metric = objective.metric(&[0.0; 6]);
+            if start_metric.overlap <= 0.0 {
+                return Err(RegistrationError::NoOverlap);
+            }
+            run.initial_metric = start_metric.value;
+            let step = level.spacing;
+            let tolerance = (level.spacing * 0.05).max(0.02);
+            let outcome = powell(&mut objective, step, tolerance, max_iterations);
+            let (q, iterations, converged) = match outcome {
+                Ok((q, _, iterations, converged)) => (q, iterations, converged),
+                Err(Stop::Cancelled) => return Err(RegistrationError::Cancelled),
+                Err(Stop::TimeLimit) => {
+                    run.stop_reason = StopReason::TimeLimit;
+                    (objective.best.0, 0, false)
+                }
+            };
+            // The best point evaluated (Powell's result, or the best before a time limit hit).
+            let q = if objective.best.1.is_finite() { objective.best.0 } else { q };
+            fixed_to_moving = objective.transform(&q);
+            let metric = objective.metric(&q);
+            run.iterations += iterations;
+            run.evaluations += objective.evaluations;
+            if !converged {
+                run.converged = false;
+                if run.stop_reason != StopReason::TimeLimit {
+                    run.stop_reason = StopReason::MaxIterations;
+                }
+            }
+            run.levels.push(LevelResult { spacing_mm: level.spacing, iterations, metric_evaluations: objective.evaluations, metric_value: metric.value });
+            run.metric = metric;
+            run.center = level.center;
+            run.fixed_to_moving = fixed_to_moving;
+            if run.stop_reason == StopReason::TimeLimit {
+                break;
+            }
+        }
+        Ok(run)
+    }
+
+    /// The masked metric and quality of a fixed -> moving transform on the finest level built.
+    /// `check_optimum`: also look 2 working voxels away along each axis; a result that is not a
+    /// local maximum there (the time limit stopped it, or it is on a slope) has its quality
+    /// scaled down by how much better a neighbour is.
+    fn assess(&mut self, kind: MetricKind, fixed_to_moving: &Mat4, check_optimum: bool) -> Result<(f64, f64, f64), RegistrationError> {
+        let finest = self.levels.iter().rposition(Option::is_some).unwrap_or(self.spacings.len() - 1);
+        let bins = self.options.histogram_bins;
+        let pet = self.fixed_class == ModalityClass::Pt || self.moving_class == ModalityClass::Pt;
+        let level = self.level(finest)?;
+        let world_to_index = level.moving.image.world_to_index();
+        let at = |m: &Mat4| masked_metric(kind, bins, &level.samples, &level.moving, &mat_mul(&world_to_index, m));
+        let (masked, share) = at(fixed_to_moving);
+        let mut quality = quality_score(kind, pet, masked, share);
+        if check_optimum {
+            let step = 2.0 * level.spacing;
+            let mut gain = 0.0f64;
+            for axis in 0..3 {
+                for sign in [-1.0, 1.0] {
+                    let mut d = [0.0; 3];
+                    d[axis] = sign * step;
+                    let (neighbour, _) = at(&mat_mul(fixed_to_moving, &translation_matrix(d)));
+                    gain = gain.max(neighbour - masked);
+                }
+            }
+            quality *= (1.0 - gain / 0.03).clamp(0.0, 1.0);
+        }
+        Ok((masked, share, quality))
+    }
+
+    /// The fixed body's central box (8 corners of the middle 60 % of its bounding box, in fixed
+    /// patient mm), for comparing transforms.
+    fn central_box(&mut self) -> Result<Vec<Vec3>, RegistrationError> {
+        let level = self.level(0)?;
+        let (mut lo, mut hi) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
+        for p in &level.samples.points {
+            for a in 0..3 {
+                lo[a] = lo[a].min(f64::from(p[a]));
+                hi[a] = hi[a].max(f64::from(p[a]));
+            }
+        }
+        let mut corners = Vec::new();
+        for a in [0.2, 0.8] {
+            for b in [0.2, 0.8] {
+                for c in [0.2, 0.8] {
+                    corners.push([lo[0] + a * (hi[0] - lo[0]), lo[1] + b * (hi[1] - lo[1]), lo[2] + c * (hi[2] - lo[2])]);
                 }
             }
         }
-    };
-    // A cancel before the first level is an error; a time limit just leaves the initial transform.
-    if let Err(Stop::Cancelled) = budget.check() {
-        return Err(RegistrationError::Cancelled);
+        Ok(corners)
     }
 
-    let mut fixed_to_moving = mat_inverse(&initial).ok_or_else(|| RegistrationError::InvalidOption("initial transform is singular".into()))?;
-    let mut levels = Vec::new();
-    let mut total_iterations = 0;
-    let mut total_evaluations = 0;
-    let mut stop_reason = StopReason::Converged;
-    let mut converged_all = true;
-    let mut working_bytes = 0u64;
-    let mut final_metric = None;
-    let mut initial_metric_value = 0.0;
-    let mut center = [0.0; 3];
-
-    for (level, &spacing) in spacings.iter().enumerate() {
-        let fixed_prepared = prepare(fixed, spacing, fixed_class, options.mask, options.roi);
-        if fixed_prepared.body.iter().all(|&m| m == 0) {
-            return Err(RegistrationError::EmptyMask("fixed"));
-        }
-        let moving_prepared = prepare(moving, spacing, moving_class, options.mask, None);
-        if moving_prepared.body.iter().all(|&m| m == 0) {
-            return Err(RegistrationError::EmptyMask("moving"));
-        }
-        let samples = select_samples(&fixed_prepared, options.max_samples);
-        working_bytes = working_bytes.max(
-            work_image_bytes(fixed, spacing) + work_image_bytes(moving, spacing) + samples.points.len() as u64 * 16,
-        );
-        center = mask_centroid(&fixed_prepared).unwrap_or([0.0; 3]);
-        // Rotations are scaled by the body's radius of gyration, so one parameter unit moves the
-        // anatomy about one millimetre whichever parameter it is.
-        let radius = {
-            let mut sum = 0.0;
-            for p in &samples.points {
-                let p = [f64::from(p[0]), f64::from(p[1]), f64::from(p[2])];
-                sum += dot(sub(p, center), sub(p, center));
-            }
-            (sum / samples.points.len().max(1) as f64).sqrt().max(20.0)
-        };
-        let mut objective = LevelObjective {
-            kind,
-            bins: options.histogram_bins,
-            samples: &samples,
-            moving: &moving_prepared.image,
-            moving_world_to_index: moving_prepared.image.world_to_index(),
-            start: fixed_to_moving,
-            center,
-            radius,
-            budget,
-            evaluations: 0,
-            best: ([0.0; 6], f64::INFINITY),
-        };
-        let start_metric = objective.metric(&[0.0; 6]);
-        if start_metric.overlap <= 0.0 {
-            return Err(RegistrationError::NoOverlap);
-        }
-        if level + 1 == spacings.len() {
-            initial_metric_value = start_metric.value;
-        }
-        let step = spacing;
-        let tolerance = (spacing * 0.05).max(0.02);
-        let outcome = powell(&mut objective, step, tolerance, options.max_iterations);
-        let (q, iterations, converged) = match outcome {
-            Ok((q, _, iterations, converged)) => (q, iterations, converged),
-            Err(Stop::Cancelled) => return Err(RegistrationError::Cancelled),
-            Err(Stop::TimeLimit) => {
-                stop_reason = StopReason::TimeLimit;
-                (objective.best.0, 0, false)
-            }
-        };
-        // The best point evaluated (Powell's result, or the best before a time limit hit).
-        let q = if objective.best.1.is_finite() { objective.best.0 } else { q };
-        fixed_to_moving = objective.transform(&q);
-        let metric = objective.metric(&q);
-        total_iterations += iterations;
-        total_evaluations += objective.evaluations;
-        if !converged {
-            converged_all = false;
-            if stop_reason != StopReason::TimeLimit {
-                stop_reason = StopReason::MaxIterations;
+    /// Initial transforms: (name, moving -> fixed). One for a single-start run.
+    fn starts(&mut self, multi: bool) -> Result<Vec<(String, Mat4)>, RegistrationError> {
+        let options = self.options;
+        let mut starts: Vec<(String, Mat4)> = Vec::new();
+        if let Some(m) = options.initial_matrix {
+            starts.push(("matrix".into(), m));
+            if !multi {
+                return Ok(starts);
             }
         }
-        levels.push(LevelResult { spacing_mm: spacing, iterations, metric_evaluations: objective.evaluations, metric_value: metric.value });
-        final_metric = Some(metric);
-        if stop_reason == StopReason::TimeLimit {
-            break;
+        for (index, m) in options.starts.iter().enumerate() {
+            starts.push((format!("start-{}", index + 1), *m));
         }
+        let estimate = if multi || matches!(options.initialization, Initialization::Translation | Initialization::Multi) {
+            estimate_translation(
+                self.fixed,
+                self.moving,
+                &TranslationOptions { fixed_modality: options.fixed_modality.clone(), moving_modality: options.moving_modality.clone(), ..Default::default() },
+            )
+            .ok()
+        } else {
+            None
+        };
+        let centroid = |context: &mut Self| -> Option<Mat4> {
+            let spacing = context.spacings.last().copied().unwrap_or(4.0).max(4.0);
+            let f = prepare(context.fixed, spacing, context.fixed_class, options.mask, options.roi);
+            let m = prepare(context.moving, spacing, context.moving_class, options.mask, None);
+            match (mask_centroid(&f), mask_centroid(&m)) {
+                (Some(cf), Some(cm)) => Some(translation_matrix(sub(cf, cm))),
+                _ => None,
+            }
+        };
+        if multi {
+            if let Some(e) = &estimate {
+                starts.push(("translation".into(), e.matrix));
+            }
+            if let Some(c) = centroid(self) {
+                starts.push(("centroid".into(), c));
+            }
+            starts.push(("none".into(), IDENTITY));
+            return Ok(starts);
+        }
+        match options.initialization {
+            Initialization::None => starts.push(("none".into(), IDENTITY)),
+            Initialization::Translation | Initialization::Centroid | Initialization::Multi => match estimate {
+                Some(e) if e.confidence >= 0.3 => starts.push(("translation".into(), e.matrix)),
+                _ => match centroid(self) {
+                    Some(c) => starts.push(("centroid".into(), c)),
+                    None => starts.push(("none".into(), IDENTITY)),
+                },
+            },
+        }
+        Ok(starts)
     }
 
-    let metric = final_metric.expect("at least one level ran");
-    let matrix = mat_inverse(&fixed_to_moving).expect("a rigid transform is invertible");
-    let quality = quality_score(kind, metric.normalized, metric.overlap);
-    Ok(RegistrationResult {
-        matrix,
-        rotation_deg: euler_deg(&matrix),
-        translation_mm: [matrix[3], matrix[7], matrix[11]],
-        center_mm: center,
-        metric: kind,
-        metric_value: metric.value,
-        initial_metric_value,
-        normalized_metric: metric.normalized,
-        overlap_fraction: metric.overlap,
-        quality,
-        quality_label: quality_label(quality),
-        iterations: total_iterations,
-        metric_evaluations: total_evaluations,
-        levels,
-        initialization,
-        converged: converged_all && stop_reason == StopReason::Converged,
-        stop_reason,
-        timing_ms: started.elapsed().as_secs_f64() * 1000.0,
-        working_bytes,
-    })
+    fn run(&mut self, kind: MetricKind) -> Result<RegistrationResult, RegistrationError> {
+        let options = self.options;
+        validate_rotation(options)?;
+        let multi = options.initialization == Initialization::Multi || !options.starts.is_empty();
+        let max_rotation = options.max_rotation_deg.unwrap_or(f64::INFINITY);
+        let starts = self.starts(multi)?;
+        // A cancel before the first level is an error; a time limit just leaves the start.
+        if let Err(Stop::Cancelled) = self.budget.check() {
+            return Err(RegistrationError::Cancelled);
+        }
+        let last = self.spacings.len() - 1;
+        let finest = last;
+
+        if !multi || starts.len() == 1 {
+            let (name, start) = starts.into_iter().next().expect("one start");
+            let run = self.optimize(kind, &start, 0..last + 1)?;
+            return self.finish(kind, run, name_to_initialization(&name), None, Vec::new());
+        }
+
+        // Multi-start: every distinct start through the coarse levels.
+        let coarse_end = if last == 0 { 1 } else { last };
+        let box_points = self.central_box()?;
+        let distance = |a: &Mat4, b: &Mat4| -> f64 {
+            box_points
+                .iter()
+                .map(|p| {
+                    let (x, y) = (transform_point(a, *p), transform_point(b, *p));
+                    ((x[0] - y[0]).powi(2) + (x[1] - y[1]).powi(2) + (x[2] - y[2]).powi(2)).sqrt()
+                })
+                .sum::<f64>()
+                / box_points.len() as f64
+        };
+        let mut runs: Vec<(String, LevelRun)> = Vec::new();
+        let mut tried: Vec<Mat4> = Vec::new();
+        let mut last_error = None;
+        for (name, start) in starts {
+            let Some(start_inverse) = mat_inverse(&start) else { continue };
+            if tried.iter().any(|t| distance(t, &start_inverse) < DUPLICATE_START_MM) {
+                continue;
+            }
+            tried.push(start_inverse);
+            if !runs.is_empty() && self.budget.check().is_err() {
+                break;
+            }
+            match self.optimize(kind, &start, 0..coarse_end) {
+                Ok(run) => {
+                    let time_limited = run.stop_reason == StopReason::TimeLimit;
+                    runs.push((name, run));
+                    if time_limited {
+                        break;
+                    }
+                }
+                Err(RegistrationError::Cancelled) => return Err(RegistrationError::Cancelled),
+                Err(error) => last_error = Some(error),
+            }
+        }
+        if runs.is_empty() {
+            return Err(last_error.unwrap_or(RegistrationError::NoOverlap));
+        }
+        let rotation_of = |run: &LevelRun| rotation_angle_deg(&run.fixed_to_moving);
+        // The best: plausible first, then the metric (normalized, the same level for all).
+        let best = (0..runs.len())
+            .max_by(|&a, &b| {
+                let (ra, rb) = (&runs[a].1, &runs[b].1);
+                (rotation_of(ra) <= max_rotation)
+                    .cmp(&(rotation_of(rb) <= max_rotation))
+                    .then(ra.metric.normalized.total_cmp(&rb.metric.normalized))
+                    .then(b.cmp(&a))
+            })
+            .expect("non-empty");
+        let best_coarse = runs[best].1.fixed_to_moving;
+        // Coarse results scatter by up to about their level's spacing.
+        let agree_mm = AGREE_MM.max(self.spacings[coarse_end - 1]);
+        let agrees: Vec<bool> = runs.iter().map(|(_, r)| distance(&r.fixed_to_moving, &best_coarse) <= agree_mm).collect();
+        let consistent = agrees.iter().filter(|&&a| a).count() > 1;
+        // Refine the best at the finest level (from where its coarse run ended).
+        let (best_name, best_run) = runs.swap_remove(best);
+        let mut agrees = agrees;
+        agrees.swap_remove(best);
+        let final_run = if coarse_end <= finest && best_run.stop_reason != StopReason::TimeLimit {
+            let start = mat_inverse(&best_run.fixed_to_moving).expect("rigid");
+            let mut refined = self.optimize(kind, &start, coarse_end..finest + 1)?;
+            let mut levels = best_run.levels.clone();
+            levels.append(&mut refined.levels);
+            refined.levels = levels;
+            refined.iterations += best_run.iterations;
+            refined.evaluations += best_run.evaluations;
+            refined.converged &= best_run.converged;
+            refined
+        } else {
+            best_run
+        };
+        // No other start agreed at the coarse levels: refine the best of those that came close
+        // (within three times the tolerance), in case they meet at the finest level.
+        let mut consistent = consistent;
+        let mut refined_other = None;
+        if !consistent && coarse_end <= finest && final_run.stop_reason != StopReason::TimeLimit {
+            let candidate = (0..runs.len())
+                .filter(|&i| distance(&runs[i].1.fixed_to_moving, &best_coarse) <= 3.0 * agree_mm)
+                .max_by(|&a, &b| runs[a].1.metric.normalized.total_cmp(&runs[b].1.metric.normalized).then(b.cmp(&a)));
+            if let Some(i) = candidate {
+                let start = mat_inverse(&runs[i].1.fixed_to_moving).expect("rigid");
+                if let Ok(run) = self.optimize(kind, &start, coarse_end..finest + 1) {
+                    if distance(&run.fixed_to_moving, &final_run.fixed_to_moving) <= AGREE_MM {
+                        consistent = true;
+                        agrees[i] = true;
+                    }
+                    refined_other = Some((i, run));
+                }
+            }
+        }
+        let refined_index = refined_other.as_ref().map(|(i, _)| *i);
+        if let Some((i, run)) = refined_other {
+            runs[i].1.fixed_to_moving = run.fixed_to_moving;
+            runs[i].1.metric = run.metric;
+        }
+        let mut start_results = Vec::new();
+        for (index, ((name, run), agree)) in runs.iter().zip(&agrees).enumerate() {
+            let matrix = mat_inverse(&run.fixed_to_moving).expect("rigid");
+            let (_, _, quality) = self.assess(kind, &run.fixed_to_moving, false)?;
+            let rotation = rotation_angle_deg(&matrix);
+            start_results.push(StartResult {
+                start: name.clone(),
+                matrix,
+                normalized_metric: run.metric.normalized,
+                quality,
+                quality_label: if rotation <= max_rotation { quality_label(quality) } else { "poor" },
+                rotation_angle_deg: rotation,
+                plausible: rotation <= max_rotation,
+                agrees: *agree,
+                refined: refined_index == Some(index),
+            });
+        }
+        self.finish(kind, final_run, name_to_initialization(&best_name), Some((best_name, consistent)), start_results)
+    }
+
+    fn finish(
+        &mut self,
+        kind: MetricKind,
+        run: LevelRun,
+        initialization: &'static str,
+        multi: Option<(String, bool)>,
+        mut start_results: Vec<StartResult>,
+    ) -> Result<RegistrationResult, RegistrationError> {
+        let max_rotation = self.options.max_rotation_deg.unwrap_or(f64::INFINITY);
+        let matrix = mat_inverse(&run.fixed_to_moving).expect("a rigid transform is invertible");
+        let (masked, share, mut quality) = self.assess(kind, &run.fixed_to_moving, true)?;
+        let rotation = rotation_angle_deg(&matrix);
+        let plausible = rotation <= max_rotation;
+        let mut label = quality_label(quality);
+        if !plausible {
+            label = "poor";
+            quality = quality.min(0.39);
+        }
+        let consistent = multi.as_ref().map(|(_, c)| *c);
+        if let Some((name, _)) = &multi {
+            start_results.insert(
+                0,
+                StartResult {
+                    start: name.clone(),
+                    matrix,
+                    normalized_metric: run.metric.normalized,
+                    quality,
+                    quality_label: label,
+                    rotation_angle_deg: rotation,
+                    plausible,
+                    agrees: true,
+                    refined: true,
+                },
+            );
+        }
+        Ok(RegistrationResult {
+            matrix,
+            rotation_deg: euler_deg(&matrix),
+            translation_mm: [matrix[3], matrix[7], matrix[11]],
+            center_mm: run.center,
+            metric: kind,
+            metric_value: run.metric.value,
+            initial_metric_value: run.initial_metric,
+            normalized_metric: run.metric.normalized,
+            overlap_fraction: run.metric.overlap,
+            quality,
+            quality_label: label,
+            iterations: run.iterations,
+            metric_evaluations: run.evaluations,
+            levels: run.levels,
+            initialization,
+            converged: run.converged && run.stop_reason == StopReason::Converged,
+            stop_reason: run.stop_reason,
+            timing_ms: self.started.elapsed().as_secs_f64() * 1000.0,
+            working_bytes: self.working_bytes(),
+            body_metric: masked,
+            body_overlap_fraction: share,
+            rotation_angle_deg: rotation,
+            plausible,
+            consistent,
+            starts: start_results,
+        })
+    }
+}
+
+fn name_to_initialization(name: &str) -> &'static str {
+    match name {
+        "matrix" => "matrix",
+        "translation" => "translation",
+        "centroid" => "centroid",
+        "none" => "none",
+        _ => "start",
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
 // Translation estimate
 // ---------------------------------------------------------------------------------------------
+//
+// z (S-I) comes from cross-correlating per-height profiles, x/y from a masked 2-D correlation of
+// axial projections. Both only compare what BOTH scans could see:
+//
+// - Each scan's in-plane "support" is where its body mask ever is, over all its slices (dilated
+//   by a cell). A scan truncated by a smaller reconstruction field of view never shows anatomy
+//   beyond its FOV disc, so its support stops there. Profiles and projections are built from the
+//   voxels inside the intersection of the two supports (after the current x/y estimate), so the
+//   arms and flanks one scan cut off do not change the other's body area.
+// - A z shift is scored by the profiles' correlation over the overlap times an overlap factor
+//   (`overlap_factor`): a short end overlap needs a much better fit to beat a long one, which is
+//   what stops a 100 mm end overlap with a chance correlation from winning.
+// - x/y: the per-cell projections (body, lung and bone counts for CT-CT, mean normalized
+//   intensity for the same modality, the body otherwise) over the matched z overlap, correlated
+//   over a grid of shifts within the intersection of the supports. Unlike the body-mask centroids
+//   this is not pulled by truncation: a cut-off flank is simply outside the comparison.
+// - Confidence combines the peak (after the overlap factor), its margin over the best other
+//   peak, and whether each profile channel on its own agrees with the combined answer; it was
+//   calibrated on public CT, PT and MR pairs with cropped, shifted, rotated and FOV-truncated
+//   versions (benchmarks/registration): no wrong answer scores 0.3 or more.
 
-/// Working-grid spacing of the translation estimate's profiles, mm.
+/// Working-grid spacing of the translation estimate, mm.
 const PROFILE_GRID_MM: f64 = 3.0;
 /// Profile bin width along patient S-I, mm.
 const PROFILE_BIN_MM: f64 = 1.0;
+/// In-plane cell of the supports and projections (patient x/y), mm.
+const XY_CELL_MM: f64 = 3.0;
+/// Largest in-plane offset the projection correlation searches, mm.
+const XY_SEARCH_MM: f64 = 150.0;
+/// The refining x/y searches look this far around the previous answer, mm.
+const XY_LOCAL_MM: f64 = 30.0;
 
-struct Profiles {
-    /// S-I (patient z) of bin 0, mm.
-    z0: f64,
-    /// Channels, each one value per bin: cross-sectional area (mm^2) or integrated intensity.
-    channels: Vec<(&'static str, Vec<f64>)>,
-    /// Whether the scan fully covers each bin's height.
-    valid: Vec<bool>,
-    /// Body voxels' (x, y) sums and counts per bin, for the in-plane centroid.
-    xy: Vec<(f64, f64, f64)>,
+/// One body voxel of an estimate volume.
+#[derive(Clone, Copy)]
+struct EstimateVoxel {
+    /// Absolute patient-xy cell (`floor(x / XY_CELL_MM)`, `floor(y / XY_CELL_MM)`).
+    cell: [i32; 2],
+    z: f32,
+    /// bit 0 lung, bit 1 bone (CT).
+    flags: u8,
+    /// Normalized intensity (0..1), when the intensity channel is on.
+    intensity: f32,
 }
 
-/// Per-bin profiles of one volume along patient z (S-I), whatever its acquisition orientation:
-/// every working voxel spreads over the bins its own z extent covers.
-fn profiles(volume: &Volume, class: ModalityClass, intensity_channel: bool, ct_channels: bool) -> Profiles {
+/// A 2-D boolean map over absolute patient-xy cells.
+struct CellMap {
+    x0: i32,
+    y0: i32,
+    nx: usize,
+    ny: usize,
+    on: Vec<bool>,
+}
+
+impl CellMap {
+    fn get(&self, x: i32, y: i32) -> bool {
+        let (i, j) = (x - self.x0, y - self.y0);
+        i >= 0 && j >= 0 && (i as usize) < self.nx && (j as usize) < self.ny && self.on[j as usize * self.nx + i as usize]
+    }
+}
+
+struct EstimateVolume {
+    /// S-I (patient z) of bin 0, mm.
+    z0: f64,
+    bins: usize,
+    /// Whether the scan fully covers each bin's height.
+    valid: Vec<bool>,
+    /// Patient-z footprint of one working voxel, mm.
+    extent: f64,
+    voxel_volume: f64,
+    voxels: Vec<EstimateVoxel>,
+    support: CellMap,
+}
+
+fn cell_of(v: f64) -> i32 {
+    (v / XY_CELL_MM).floor() as i32
+}
+
+/// The working image, body mask and support of one volume for the estimate.
+fn estimate_volume(volume: &Volume, class: ModalityClass, intensity_channel: bool, ct_channels: bool) -> EstimateVolume {
     let image = build_work_image(volume, PROFILE_GRID_MM);
     let body = body_mask(&image, class);
     let normalized = if intensity_channel { Some(normalize(&image, &body)) } else { None };
     let [nx, ny, nz] = image.dims;
     let extent: f64 = (0..3).map(|a| image.axes[a][2].abs() * image.spacing[a]).sum::<f64>().max(PROFILE_BIN_MM);
     let voxel_volume = image.spacing[0] * image.spacing[1] * image.spacing[2];
-    // Range of z over the grid's corners.
-    let mut z_lo = f64::INFINITY;
-    let mut z_hi = f64::NEG_INFINITY;
+    let (mut lo, mut hi) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
     for &k in &[0, nz - 1] {
         for &j in &[0, ny - 1] {
             for &i in &[0, nx - 1] {
-                let z = image.world(i, j, k)[2];
-                z_lo = z_lo.min(z);
-                z_hi = z_hi.max(z);
+                let p = image.world(i, j, k);
+                for a in 0..3 {
+                    lo[a] = lo[a].min(p[a]);
+                    hi[a] = hi[a].max(p[a]);
+                }
             }
         }
     }
-    let z0 = (z_lo - extent).floor();
-    let bins = ((z_hi + extent - z0) / PROFILE_BIN_MM).ceil() as usize + 1;
-    let mut names: Vec<&'static str> = vec!["body"];
-    if ct_channels {
-        names.extend(["lung", "bone"]);
-    }
-    if intensity_channel {
-        names.push("intensity");
-    }
-    let mut channels: Vec<Vec<f64>> = vec![vec![0.0; bins]; names.len()];
-    let mut coverage = vec![0.0; bins];
-    let mut xy = vec![(0.0, 0.0, 0.0); bins];
+    let z0 = (lo[2] - extent).floor();
+    let bins = ((hi[2] + extent - z0) / PROFILE_BIN_MM).ceil() as usize + 1;
+    // Coverage of each bin by the grid, for `valid`.
+    let mut coverage = vec![0.0f64; bins];
+    let mut voxels = Vec::new();
+    let (cx0, cy0) = (cell_of(lo[0]) - 1, cell_of(lo[1]) - 1);
+    let (cnx, cny) = ((cell_of(hi[0]) - cx0 + 2) as usize, (cell_of(hi[1]) - cy0 + 2) as usize);
+    let mut union = vec![false; cnx * cny];
     for k in 0..nz {
         for j in 0..ny {
             for i in 0..nx {
                 let index = k * nx * ny + j * nx + i;
                 let p = image.world(i, j, k);
-                let (lo, hi) = (p[2] - extent / 2.0, p[2] + extent / 2.0);
-                let first = (((lo - z0) / PROFILE_BIN_MM).floor().max(0.0)) as usize;
-                let last = ((((hi - z0) / PROFILE_BIN_MM).floor()) as usize).min(bins - 1);
-                let in_body = body[index] != 0;
+                spread(p[2], extent, z0, bins, |bin, share| coverage[bin] += share);
+                if body[index] == 0 {
+                    continue;
+                }
                 let v = image.data[index];
-                let mut weights = [0.0f64; 4];
-                weights[0] = f64::from(u8::from(in_body));
+                let mut flags = 0u8;
                 if ct_channels {
-                    weights[1] = f64::from(u8::from(in_body && v > -950.0 && v < -500.0));
-                    weights[2] = f64::from(u8::from(in_body && v > 200.0));
-                }
-                if let Some(n) = &normalized {
-                    weights[names.len() - 1] = f64::from(n[index]);
-                }
-                for bin in first..=last {
-                    let b_lo = z0 + bin as f64 * PROFILE_BIN_MM;
-                    let overlap = (hi.min(b_lo + PROFILE_BIN_MM) - lo.max(b_lo)).max(0.0) / extent;
-                    if overlap <= 0.0 {
-                        continue;
+                    if v > -950.0 && v < -500.0 {
+                        flags |= 1;
                     }
-                    let share = voxel_volume * overlap / PROFILE_BIN_MM;
-                    coverage[bin] += share;
-                    for (channel, &w) in channels.iter_mut().zip(&weights) {
-                        channel[bin] += w * share;
-                    }
-                    if in_body {
-                        xy[bin].0 += p[0] * overlap;
-                        xy[bin].1 += p[1] * overlap;
-                        xy[bin].2 += overlap;
+                    if v > 200.0 {
+                        flags |= 2;
                     }
                 }
+                let cell = [cell_of(p[0]), cell_of(p[1])];
+                union[(cell[1] - cy0) as usize * cnx + (cell[0] - cx0) as usize] = true;
+                voxels.push(EstimateVoxel { cell, z: p[2] as f32, flags, intensity: normalized.as_ref().map_or(0.0, |n| n[index]) });
             }
         }
     }
     let full = coverage.iter().cloned().fold(0.0, f64::max);
     let valid = coverage.iter().map(|&c| c >= 0.9 * full && full > 0.0).collect();
-    Profiles { z0, channels: names.into_iter().zip(channels).collect(), valid, xy }
+    // The support: the union of the body over all slices, dilated by one cell.
+    let mut on = union.clone();
+    for y in 0..cny {
+        for x in 0..cnx {
+            if union[y * cnx + x] {
+                continue;
+            }
+            let near = (y > 0 && union[(y - 1) * cnx + x])
+                || (y + 1 < cny && union[(y + 1) * cnx + x])
+                || (x > 0 && union[y * cnx + x - 1])
+                || (x + 1 < cnx && union[y * cnx + x + 1]);
+            on[y * cnx + x] = near;
+        }
+    }
+    EstimateVolume { z0, bins, valid, extent, voxel_volume, voxels, support: CellMap { x0: cx0, y0: cy0, nx: cnx, ny: cny, on } }
+}
+
+/// Spreads a voxel centred at `z` with footprint `extent` over the 1 mm bins: `f(bin, share)`,
+/// the shares summing to 1.
+#[inline]
+fn spread(z: f64, extent: f64, z0: f64, bins: usize, mut f: impl FnMut(usize, f64)) {
+    let (lo, hi) = (z - extent / 2.0, z + extent / 2.0);
+    let first = (((lo - z0) / PROFILE_BIN_MM).floor().max(0.0)) as usize;
+    let last = ((((hi - z0) / PROFILE_BIN_MM).floor()) as usize).min(bins - 1);
+    for bin in first..=last {
+        let b_lo = z0 + bin as f64 * PROFILE_BIN_MM;
+        let overlap = (hi.min(b_lo + PROFILE_BIN_MM) - lo.max(b_lo)).max(0.0) / extent;
+        if overlap > 0.0 {
+            f(bin, overlap);
+        }
+    }
+}
+
+/// Channel layout of the estimate for a modality pair.
+#[derive(Clone, Copy)]
+struct Channels {
+    ct: bool,
+    intensity: bool,
+}
+
+impl Channels {
+    fn names(self) -> Vec<&'static str> {
+        let mut names = vec!["body"];
+        if self.ct {
+            names.extend(["lung", "bone"]);
+        }
+        if self.intensity {
+            names.push("intensity");
+        }
+        names
+    }
+
+    /// The voxel's weight in each channel.
+    fn weights(self, v: &EstimateVoxel) -> [f64; 4] {
+        let mut w = [1.0, 0.0, 0.0, 0.0];
+        let mut n = 1;
+        if self.ct {
+            w[1] = f64::from(v.flags & 1);
+            w[2] = f64::from((v.flags >> 1) & 1);
+            n = 3;
+        }
+        if self.intensity {
+            w[n] = f64::from(v.intensity);
+        }
+        w
+    }
+}
+
+/// Per-bin profiles (one vector per channel; cross-sectional area in mm^2 or integrated
+/// intensity) of the voxels whose cell is in `own` support and, shifted by `shift` cells, in
+/// the `other` support.
+fn channel_profiles(volume: &EstimateVolume, channels: Channels, other: &CellMap, shift: [i32; 2]) -> Vec<Vec<f64>> {
+    let count = channels.names().len();
+    let mut out = vec![vec![0.0; volume.bins]; count];
+    let scale = volume.voxel_volume / PROFILE_BIN_MM;
+    for v in &volume.voxels {
+        if !other.get(v.cell[0] + shift[0], v.cell[1] + shift[1]) {
+            continue;
+        }
+        let w = channels.weights(v);
+        spread(f64::from(v.z), volume.extent, volume.z0, volume.bins, |bin, share| {
+            for c in 0..count {
+                out[c][bin] += w[c] * share * scale;
+            }
+        });
+    }
+    out
 }
 
 fn pearson(a: &[f64], b: &[f64]) -> f64 {
@@ -1636,112 +2226,388 @@ fn pearson(a: &[f64], b: &[f64]) -> f64 {
         va += (x - ma) * (x - ma);
         vb += (y - mb) * (y - mb);
     }
-    if va <= 1e-12 || vb <= 1e-12 {
+    // A channel flat over the overlap (std under 2 % of its mean) says nothing.
+    let flat = |var: f64, mean: f64| var <= (0.02 * mean.abs()).powi(2) * n || var <= 1e-12;
+    if flat(va, ma) || flat(vb, mb) {
         0.0
     } else {
         cov / (va * vb).sqrt()
     }
 }
 
-/// A fast moving -> fixed translation: z from cross-correlating per-height profiles (body area;
-/// plus lung and bone area for CT-CT, and integrated normalized intensity for MR-MR / PT-PT),
-/// x/y from the body-mask centroids over the matched overlap.
+/// Down-weights short overlaps: 1 when the overlap covers the shorter scan, 0.83 at half of it,
+/// 0.63 at a quarter (`n / (n + L / 4) * 1.25`).
+fn overlap_factor(overlap_mm: f64, shorter_mm: f64) -> f64 {
+    let quarter = 0.25 * shorter_mm.max(1.0);
+    (1.25 * overlap_mm / (overlap_mm + quarter)).min(1.0)
+}
+
+/// One z shift's score.
+#[derive(Clone)]
+struct ZScore {
+    /// Fixed bin i <-> moving bin i + offset.
+    offset: i64,
+    /// Mean channel correlation times the overlap factor.
+    score: f64,
+    /// Mean channel correlation, without the overlap factor (for locating the peak precisely:
+    /// the factor's slope would pull it towards more overlap).
+    raw: f64,
+    /// Per-channel correlation times the overlap factor.
+    per_channel: Vec<f64>,
+    overlap_bins: usize,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn search_z(
+    f: &EstimateVolume,
+    m: &EstimateVolume,
+    fp: &[Vec<f64>],
+    mp: &[Vec<f64>],
+    weights: &[f64],
+    min_overlap_bins: usize,
+    max_shift_mm: Option<f64>,
+    shorter_mm: f64,
+) -> Vec<ZScore> {
+    let (f_bins, m_bins) = (f.bins as i64, m.bins as i64);
+    let base = (f.z0 - m.z0) / PROFILE_BIN_MM;
+    let weight_sum: f64 = weights.iter().sum();
+    let offsets: Vec<i64> = (-f_bins..=m_bins).collect();
+    offsets
+        .par_iter()
+        .filter_map(|&offset| {
+            let dz = (base - offset as f64) * PROFILE_BIN_MM;
+            if max_shift_mm.is_some_and(|max| dz.abs() > max) {
+                return None;
+            }
+            let pairs: Vec<(usize, usize)> = (0..f_bins)
+                .filter_map(|i| {
+                    let j = i + offset;
+                    (j >= 0 && j < m_bins && f.valid[i as usize] && m.valid[j as usize]).then_some((i as usize, j as usize))
+                })
+                .collect();
+            if pairs.len() < min_overlap_bins.max(3) {
+                return None;
+            }
+            let factor = overlap_factor(pairs.len() as f64 * PROFILE_BIN_MM, shorter_mm);
+            let per_channel: Vec<f64> = fp
+                .iter()
+                .zip(mp)
+                .map(|(fc, mc)| {
+                    let a: Vec<f64> = pairs.iter().map(|&(i, _)| fc[i]).collect();
+                    let b: Vec<f64> = pairs.iter().map(|&(_, j)| mc[j]).collect();
+                    pearson(&a, &b) * factor
+                })
+                .collect();
+            let score = per_channel.iter().zip(weights).map(|(r, w)| r * w).sum::<f64>() / weight_sum;
+            Some(ZScore { offset, score, raw: score / factor.max(1e-9), per_channel, overlap_bins: pairs.len() })
+        })
+        .collect()
+}
+
+/// Index of the best score (ties: the smaller offset, i.e. deterministic).
+fn best_index(scores: &[ZScore], key: impl Fn(&ZScore) -> f64) -> Option<usize> {
+    (0..scores.len()).max_by(|&a, &b| key(&scores[a]).total_cmp(&key(&scores[b])).then(scores[b].offset.cmp(&scores[a].offset)))
+}
+
+/// The lobe of `scores[best]`: downhill both ways until the score rises again (contiguous offsets).
+fn lobe(scores: &[ZScore], best: usize, key: impl Fn(&ZScore) -> f64) -> (usize, usize) {
+    let (mut left, mut right) = (best, best);
+    while left > 0 && scores[left - 1].offset == scores[left].offset - 1 && key(&scores[left - 1]) <= key(&scores[left]) {
+        left -= 1;
+    }
+    while right + 1 < scores.len() && scores[right + 1].offset == scores[right].offset + 1 && key(&scores[right + 1]) <= key(&scores[right]) {
+        right += 1;
+    }
+    (left, right)
+}
+
+/// Per-cell projections (one map per channel, over the cell grid of `support`) of the voxels
+/// with `z` in `[z_lo, z_hi]`.
+fn projections(volume: &EstimateVolume, channels: Channels, z_lo: f64, z_hi: f64) -> Vec<Vec<f64>> {
+    let count = channels.names().len();
+    let s = &volume.support;
+    let mut maps = vec![vec![0.0; s.nx * s.ny]; count];
+    for v in &volume.voxels {
+        let z = f64::from(v.z);
+        if z < z_lo || z > z_hi {
+            continue;
+        }
+        let index = (v.cell[1] - s.y0) as usize * s.nx + (v.cell[0] - s.x0) as usize;
+        let w = channels.weights(v);
+        for c in 0..count {
+            maps[c][index] += w[c];
+        }
+    }
+    // The intensity channel as a mean over the body (so it is not just the body count again).
+    if channels.intensity {
+        let body = maps[0].clone();
+        for (value, &n) in maps[count - 1].iter_mut().zip(&body) {
+            *value = if n > 0.0 { *value / n } else { 0.0 };
+        }
+    }
+    maps
+}
+
+/// Masked correlation of the projections for the in-plane shift `s` (cells, moving -> fixed),
+/// over the fixed support cells `f_cells` (absolute x, y, map index) inside the moving support
+/// too. Returns (score, cells compared).
+fn xy_score(m: &EstimateVolume, f_cells: &[(i32, i32, usize)], fmaps: &[Vec<f64>], mmaps: &[Vec<f64>], weights: &[f64], s: [i32; 2]) -> (f64, usize) {
+    let ms = &m.support;
+    let count = fmaps.len();
+    // Sums per channel: a, b, aa, bb, ab.
+    let mut acc = [[0.0f64; 5]; 4];
+    let mut n = 0usize;
+    for &(x, y, fi) in f_cells {
+        let (mx, my) = (x - s[0], y - s[1]);
+        if !ms.get(mx, my) {
+            continue;
+        }
+        let mi = (my - ms.y0) as usize * ms.nx + (mx - ms.x0) as usize;
+        n += 1;
+        for c in 0..count {
+            let (a, b) = (fmaps[c][fi], mmaps[c][mi]);
+            let t = &mut acc[c];
+            t[0] += a;
+            t[1] += b;
+            t[2] += a * a;
+            t[3] += b * b;
+            t[4] += a * b;
+        }
+    }
+    if n < 16 {
+        return (f64::NEG_INFINITY, n);
+    }
+    let k = n as f64;
+    let mut score = 0.0;
+    for (t, w) in acc.iter().take(count).zip(weights) {
+        let cov = t[4] - t[0] * t[1] / k;
+        let va = t[2] - t[0] * t[0] / k;
+        let vb = t[3] - t[1] * t[1] / k;
+        if va > 1e-9 && vb > 1e-9 {
+            score += w * cov / (va * vb).sqrt();
+        }
+    }
+    (score / weights.iter().sum::<f64>(), n)
+}
+
+/// The in-plane shift (mm, moving -> fixed) that best aligns the projections over the given z
+/// ranges, and its score. `around`: search only within `XY_LOCAL_MM` of this shift (mm) instead
+/// of the whole `XY_SEARCH_MM` range.
+#[allow(clippy::too_many_arguments)]
+fn search_xy(
+    f: &EstimateVolume,
+    m: &EstimateVolume,
+    channels: Channels,
+    weights: &[f64],
+    f_range: (f64, f64),
+    m_range: (f64, f64),
+    around: Option<[f64; 2]>,
+) -> ([f64; 2], f64) {
+    let fmaps = projections(f, channels, f_range.0, f_range.1);
+    let mmaps = projections(m, channels, m_range.0, m_range.1);
+    let fs = &f.support;
+    let f_cells: Vec<(i32, i32, usize)> = (0..fs.nx * fs.ny).filter(|&i| fs.on[i]).map(|i| (fs.x0 + (i % fs.nx) as i32, fs.y0 + (i / fs.nx) as i32, i)).collect();
+    let m_cells = m.support.on.iter().filter(|&&o| o).count();
+    let smaller = f_cells.len().min(m_cells).max(1) as f64;
+    // A shift that leaves little of either support in the comparison is not a match.
+    let scored = |s: [i32; 2]| -> f64 {
+        let (score, n) = xy_score(m, &f_cells, &fmaps, &mmaps, weights, s);
+        let cover = n as f64 / smaller;
+        if cover < 0.3 {
+            f64::NEG_INFINITY
+        } else {
+            score * overlap_factor(cover, 1.0)
+        }
+    };
+    // Coarse: a 3-cell (9 mm) lattice over the range, in parallel.
+    let (center, reach) = match around {
+        Some(c) => ([(c[0] / XY_CELL_MM).round() as i32, (c[1] / XY_CELL_MM).round() as i32], (XY_LOCAL_MM / XY_CELL_MM).ceil() as i32),
+        None => ([0, 0], (XY_SEARCH_MM / XY_CELL_MM).ceil() as i32),
+    };
+    let step = if around.is_some() { 2 } else { 3 };
+    let coarse: Vec<[i32; 2]> = (-reach..=reach)
+        .step_by(step)
+        .flat_map(|y| (-reach..=reach).step_by(step).map(move |x| [center[0] + x, center[1] + y]))
+        .collect();
+    let coarse_scores: Vec<f64> = coarse.par_iter().map(|&s| scored(s)).collect();
+    let mut best = (0..coarse.len()).max_by(|&a, &b| coarse_scores[a].total_cmp(&coarse_scores[b]).then(b.cmp(&a))).map(|i| coarse[i]).unwrap_or(center);
+    let mut best_score = scored(best);
+    // Fine: hill-climb on single cells.
+    for _ in 0..32 {
+        let neighbours: Vec<[i32; 2]> =
+            [[-1, 0], [1, 0], [0, -1], [0, 1], [-1, -1], [1, 1], [-1, 1], [1, -1]].iter().map(|d| [best[0] + d[0], best[1] + d[1]]).collect();
+        let values: Vec<f64> = neighbours.par_iter().map(|&s| scored(s)).collect();
+        let Some(i) = (0..8).max_by(|&a, &b| values[a].total_cmp(&values[b]).then(b.cmp(&a))) else { break };
+        if values[i] <= best_score {
+            break;
+        }
+        best = neighbours[i];
+        best_score = values[i];
+    }
+    // Sub-cell refinement per axis by a parabola.
+    let mut refined = [best[0] as f64, best[1] as f64];
+    for axis in 0..2 {
+        let mut lo = best;
+        let mut hi = best;
+        lo[axis] -= 1;
+        hi[axis] += 1;
+        let (l, r) = (scored(lo), scored(hi));
+        let denominator = l - 2.0 * best_score + r;
+        if l.is_finite() && r.is_finite() && denominator < -1e-12 {
+            refined[axis] += (0.5 * (l - r) / denominator).clamp(-0.5, 0.5);
+        }
+    }
+    ([refined[0] * XY_CELL_MM, refined[1] * XY_CELL_MM], best_score)
+}
+
+/// Valid z extent of an estimate volume, mm.
+fn valid_extent_mm(volume: &EstimateVolume) -> f64 {
+    volume.valid.iter().filter(|&&v| v).count() as f64 * PROFILE_BIN_MM
+}
+
+/// A fast moving -> fixed translation (module section "Translation estimate"): z from per-height
+/// profiles over the two scans' common in-plane support, x/y from a masked correlation of their
+/// projections over the matched overlap.
 pub fn estimate_translation(fixed: &Volume, moving: &Volume, options: &TranslationOptions) -> Result<TranslationEstimate, RegistrationError> {
     if !(options.min_overlap_mm.is_finite() && options.min_overlap_mm > 0.0) {
         return Err(RegistrationError::InvalidOption("minOverlapMm must be a positive number".into()));
+    }
+    if options.min_overlap_fraction.is_some_and(|f| !(f.is_finite() && f > 0.0 && f <= 1.0)) {
+        return Err(RegistrationError::InvalidOption("minOverlapFraction must be in (0, 1]".into()));
     }
     let started = Instant::now();
     let fixed_class = parse_modality(&options.fixed_modality, fixed);
     let moving_class = parse_modality(&options.moving_modality, moving);
     let same = fixed_class == moving_class;
-    let ct = same && fixed_class == ModalityClass::Ct;
-    let intensity = same && !ct;
-    let (f, m) = rayon::join(|| profiles(fixed, fixed_class, intensity, ct), || profiles(moving, moving_class, intensity, ct));
+    let channels = Channels { ct: same && fixed_class == ModalityClass::Ct, intensity: same && fixed_class != ModalityClass::Ct };
+    let (f, m) = rayon::join(
+        || estimate_volume(fixed, fixed_class, channels.intensity, channels.ct),
+        || estimate_volume(moving, moving_class, channels.intensity, channels.ct),
+    );
+    if f.voxels.is_empty() || m.voxels.is_empty() {
+        return Err(RegistrationError::EmptyMask(if f.voxels.is_empty() { "fixed" } else { "moving" }));
+    }
+    let names = channels.names();
+    // Profile channel weights. CT: the body area is the one most changed by truncation, the lung
+    // and bone areas the most specific. MR: the body is mostly the (small) field of view, the
+    // intensity carries the anatomy. PT: the body outline is stable between scans months apart,
+    // the uptake is not (disease, bladder, brown fat).
+    let z_weights: Vec<f64> = names
+        .iter()
+        .map(|n| match (*n, fixed_class) {
+            ("body", ModalityClass::Pt) => 1.0,
+            ("intensity", ModalityClass::Pt) => 0.3,
+            ("body", _) => 0.5,
+            _ => 1.0,
+        })
+        .collect();
+    let xy_weights: Vec<f64> = names.iter().map(|_| 1.0).collect();
 
-    let f_bins = f.valid.len() as i64;
-    let m_bins = m.valid.len() as i64;
-    let min_overlap = (options.min_overlap_mm / PROFILE_BIN_MM).ceil() as usize;
-    // dz (mm) maps moving z to fixed z. Fixed bin i <-> moving bin j = i + offset, where
-    // offset = (f.z0 - m.z0 - dz) / bin.
-    let base = (f.z0 - m.z0) / PROFILE_BIN_MM;
-    let mut scores: Vec<(i64, f64, usize)> = Vec::new();
-    for offset in -(f_bins)..=m_bins {
-        let dz = (base - offset as f64) * PROFILE_BIN_MM;
-        if options.max_shift_mm.is_some_and(|max| dz.abs() > max) {
-            continue;
-        }
-        let pairs: Vec<(usize, usize)> = (0..f_bins)
-            .filter_map(|i| {
-                let j = i + offset;
-                (j >= 0 && j < m_bins && f.valid[i as usize] && m.valid[j as usize]).then_some((i as usize, j as usize))
+    let shorter = valid_extent_mm(&f).min(valid_extent_mm(&m));
+    let min_overlap_mm = match options.min_overlap_fraction {
+        Some(fraction) => options.min_overlap_mm.min((fraction * shorter).max(20.0_f64.min(0.75 * shorter))),
+        None => options.min_overlap_mm,
+    };
+    let min_overlap_bins = (min_overlap_mm / PROFILE_BIN_MM).ceil() as usize;
+
+    // 1. A first in-plane offset over the whole scans, for the support intersection.
+    let all = (f64::NEG_INFINITY, f64::INFINITY);
+    let (xy0, _) = search_xy(&f, &m, channels, &xy_weights, all, all, None);
+    // 2. z over the common support; 3. x/y over the matched overlap; 4. z again.
+    let mut xy = xy0;
+    let mut result = None;
+    for _ in 0..2 {
+        let shift = [(xy[0] / XY_CELL_MM).round() as i32, (xy[1] / XY_CELL_MM).round() as i32];
+        // Fixed cell c sees moving cell c - shift.
+        let fp = channel_profiles(&f, channels, &m.support, [-shift[0], -shift[1]]);
+        let mp = channel_profiles(&m, channels, &f.support, shift);
+        let mut scores = search_z(&f, &m, &fp, &mp, &z_weights, min_overlap_bins, options.max_shift_mm, shorter);
+        scores.sort_by_key(|s| s.offset);
+        let Some(chosen) = best_index(&scores, |s| s.score) else {
+            return Err(RegistrationError::NoOverlap);
+        };
+        // The overlap factor picks the peak; its exact position is the raw correlation's local
+        // maximum near it.
+        let window = (10.0 / PROFILE_BIN_MM) as i64;
+        let best = (0..scores.len())
+            .filter(|&i| (scores[i].offset - scores[chosen].offset).abs() <= window)
+            .max_by(|&a, &b| scores[a].raw.total_cmp(&scores[b].raw).then(b.cmp(&a)))
+            .unwrap_or(chosen);
+        let base = (f.z0 - m.z0) / PROFILE_BIN_MM;
+        let peak = scores[best].raw;
+        let refine = if best > 0 && best + 1 < scores.len() && scores[best - 1].offset + 1 == scores[best].offset && scores[best + 1].offset == scores[best].offset + 1 {
+            let (l, r) = (scores[best - 1].raw, scores[best + 1].raw);
+            let denominator = l - 2.0 * peak + r;
+            if denominator < -1e-12 { (0.5 * (l - r) / denominator).clamp(-0.5, 0.5) } else { 0.0 }
+        } else {
+            0.0
+        };
+        let dz = (base - (scores[best].offset as f64 + refine)) * PROFILE_BIN_MM;
+        // The matched z range, in each scan's own coordinates.
+        let pairs: Vec<usize> = (0..f.bins)
+            .filter(|&i| {
+                let j = i as i64 + scores[best].offset;
+                j >= 0 && (j as usize) < m.bins && f.valid[i] && m.valid[j as usize]
             })
             .collect();
-        if pairs.len() < min_overlap {
-            continue;
+        let (lo, hi) = match (pairs.first(), pairs.last()) {
+            (Some(&a), Some(&b)) => (f.z0 + a as f64 * PROFILE_BIN_MM, f.z0 + (b + 1) as f64 * PROFILE_BIN_MM),
+            _ => return Err(RegistrationError::NoOverlap),
+        };
+        let (xy_new, xy_score) = search_xy(&f, &m, channels, &xy_weights, (lo, hi), (lo - dz, hi - dz), Some(xy));
+        let converged = (xy_new[0] - xy[0]).abs() < XY_CELL_MM && (xy_new[1] - xy[1]).abs() < XY_CELL_MM;
+        xy = xy_new;
+        result = Some((scores, chosen, dz, xy_score));
+        if converged {
+            break;
         }
-        let mut score = 0.0;
-        for ((_, fc), (_, mc)) in f.channels.iter().zip(&m.channels) {
-            let a: Vec<f64> = pairs.iter().map(|&(i, _)| fc[i]).collect();
-            let b: Vec<f64> = pairs.iter().map(|&(_, j)| mc[j]).collect();
-            score += pearson(&a, &b);
-        }
-        scores.push((offset, score / f.channels.len() as f64, pairs.len()));
     }
-    let profiles_used: Vec<&'static str> = f.channels.iter().map(|(name, _)| *name).collect();
-    let Some(&(best_offset, peak, overlap_bins)) = scores.iter().max_by(|a, b| a.1.total_cmp(&b.1).then(b.0.cmp(&a.0))) else {
-        return Err(RegistrationError::NoOverlap);
-    };
-    // Sub-bin refinement by a parabola through the peak and its neighbours.
-    let score_at = |offset: i64| scores.iter().find(|s| s.0 == offset).map(|s| s.1);
-    let refine = match (score_at(best_offset - 1), score_at(best_offset + 1)) {
-        (Some(left), Some(right)) => {
-            let denominator = left - 2.0 * peak + right;
-            if denominator < -1e-12 { (0.5 * (left - right) / denominator).clamp(-0.5, 0.5) } else { 0.0 }
-        }
-        _ => 0.0,
-    };
-    let offset_f = best_offset as f64 + refine;
-    let dz = (base - offset_f) * PROFILE_BIN_MM;
-    // The runner-up is the best OTHER local maximum at least 20 mm away (the main peak's own
-    // shoulders are not an alternative answer).
+    let (scores, best, dz, xy_score) = result.expect("at least one pass");
+    let peak = scores[best].score;
+    // The runner-up: the best score outside the peak's lobe and at least 20 mm away.
+    let (left, right) = lobe(&scores, best, |s| s.score);
     let second = scores
         .iter()
         .enumerate()
-        .filter(|(index, s)| {
-            let left = index.checked_sub(1).and_then(|i| scores.get(i)).filter(|l| l.0 == s.0 - 1).map_or(f64::NEG_INFINITY, |l| l.1);
-            let right = scores.get(index + 1).filter(|r| r.0 == s.0 + 1).map_or(f64::NEG_INFINITY, |r| r.1);
-            s.1 >= left && s.1 >= right && (s.0 - best_offset).abs() as f64 * PROFILE_BIN_MM > 20.0
-        })
-        .map(|(_, s)| s.1)
-        .fold(f64::NEG_INFINITY, f64::max);
-    let second = if second.is_finite() { second } else { 0.0 };
-    let confidence = peak.clamp(0.0, 1.0) * ((peak - second.max(0.0)) / 0.3).clamp(0.0, 1.0);
-
-    // In-plane: body centroids over the overlapping bins.
-    let (mut fx, mut fy, mut fw, mut mx, mut my, mut mw) = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
-    for i in 0..f_bins {
-        let j = i + best_offset;
-        if j < 0 || j >= m_bins || !f.valid[i as usize] || !m.valid[j as usize] {
-            continue;
+        .filter(|(i, s)| (*i < left || *i > right) && ((s.offset - scores[best].offset).abs() as f64 * PROFILE_BIN_MM) > 20.0)
+        .map(|(_, s)| s.score)
+        .fold(0.0, f64::max);
+    // Each channel on its own: does its best shift agree with the combined one (within 10 mm)?
+    let agreement = if names.len() > 1 {
+        let mut agree = 0.0;
+        for (c, w) in z_weights.iter().enumerate() {
+            if let Some(own) = best_index(&scores, |s| s.per_channel[c]) {
+                if (scores[own].offset - scores[best].offset).abs() as f64 * PROFILE_BIN_MM <= 10.0 {
+                    agree += w;
+                }
+            }
         }
-        let (a, b) = (f.xy[i as usize], m.xy[j as usize]);
-        fx += a.0;
-        fy += a.1;
-        fw += a.2;
-        mx += b.0;
-        my += b.1;
-        mw += b.2;
-    }
-    let (dx, dy) = if fw > 0.0 && mw > 0.0 { (fx / fw - mx / mw, fy / fw - my / mw) } else { (0.0, 0.0) };
-    let translation = [dx, dy, dz];
+        agree / z_weights.iter().sum::<f64>()
+    } else {
+        1.0
+    };
+    let confidence = calibrated_confidence(peak, second, agreement, xy_score);
+    let translation = [xy[0], xy[1], dz];
     Ok(TranslationEstimate {
         matrix: translation_matrix(translation),
         translation_mm: translation,
         confidence,
         peak_correlation: peak,
         second_peak_correlation: second,
-        overlap_mm: overlap_bins as f64 * PROFILE_BIN_MM,
-        profiles: profiles_used,
+        overlap_mm: scores[best].overlap_bins as f64 * PROFILE_BIN_MM,
+        profiles: names,
         timing_ms: started.elapsed().as_secs_f64() * 1000.0,
+        channel_agreement: agreement,
+        xy_correlation: xy_score,
+        min_overlap_mm,
     })
+}
+
+/// Confidence in 0..1 from the z peak (overlap factor included), its margin over the runner-up,
+/// the channels' agreement and the in-plane correlation (calibration: module section).
+fn calibrated_confidence(peak: f64, second: f64, agreement: f64, xy_score: f64) -> f64 {
+    let height = ((peak - 0.5) / 0.4).clamp(0.0, 1.0);
+    let margin = ((peak - second.max(0.0)) / 0.15).clamp(0.0, 1.0);
+    let xy = ((xy_score - 0.3) / 0.4).clamp(0.0, 1.0);
+    height * margin * (0.5 + 0.5 * agreement) * (0.5 + 0.5 * xy)
 }

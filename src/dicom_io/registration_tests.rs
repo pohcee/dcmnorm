@@ -556,3 +556,138 @@ fn enhanced_multi_frame_volumes_register() {
     }
     std::fs::remove_dir_all(fixed_path.parent().unwrap()).ok();
 }
+
+// ---------------------------------------------------------------------------------------------
+// Robustness: truncation by a smaller reconstruction field of view, cropped ends, wrong seeds
+// (the failure modes measured on public TCIA pairs; benchmarks/registration).
+// ---------------------------------------------------------------------------------------------
+
+/// Sets every voxel outside an in-plane disc of `radius` mm around the grid's centre to `value`:
+/// what a scan reconstructed with a smaller field of view than the patient looks like.
+fn truncate_to_fov(volume: &mut Volume, radius: f64, value: f32) {
+    let (cols, rows) = (volume.cols as usize, volume.rows as usize);
+    let (cx, cy) = ((cols - 1) as f64 / 2.0, (rows - 1) as f64 / 2.0);
+    for (index, v) in volume.samples.iter_mut().enumerate() {
+        let (c, r) = ((index % (cols * rows)) % cols, (index % (cols * rows)) / cols);
+        let (dx, dy) = ((c as f64 - cx) * volume.col_spacing_mm, (r as f64 - cy) * volume.row_spacing_mm);
+        if dx * dx + dy * dy > radius * radius {
+            *v = value;
+        }
+    }
+}
+
+/// The CT moving grid with its top `crop` mm of slices removed.
+fn cropped_ct_grid(crop: f64) -> Grid {
+    let full = moving_grid(Modality::Ct);
+    let dropped = (crop / full.slice_spacing).round() as u32;
+    Grid { slices: full.slices - dropped, ..full }
+}
+
+#[test]
+fn translation_estimate_survives_fov_truncation_and_a_cropped_end() {
+    let truth = translation_matrix([6.0, -14.0, 41.0]);
+    let fixed = synthetic_volume(Modality::Ct, &fixed_grid(Modality::Ct), &translation_matrix([0.0; 3]), 21);
+    let mut moving = synthetic_volume(Modality::Ct, &cropped_ct_grid(60.0), &truth, 22);
+    // The phantom is 320 mm wide: a 230 mm FOV cuts off both flanks and opens the lungs.
+    truncate_to_fov(&mut moving, 115.0, -1000.0);
+    let estimate = estimate_translation(&fixed, &moving, &TranslationOptions::default()).unwrap();
+    let t = estimate.translation_mm;
+    eprintln!("truncated + cropped CT: {:?} (truth [6, -14, 41]) confidence {:.2} agreement {:.2} xy {:.2}", t, estimate.confidence, estimate.channel_agreement, estimate.xy_correlation);
+    assert!((t[2] - 41.0).abs() < 3.0 && (t[0] - 6.0).abs() < 4.0 && (t[1] + 14.0).abs() < 4.0, "estimate {t:?}");
+    assert!(estimate.confidence >= 0.3, "confidence {}", estimate.confidence);
+
+    // The rigid registration from it is correct, and its quality says so: the anatomy the moving
+    // scan never saw does not count against it.
+    let result = register_rigid(&fixed, &moving, &RegistrationOptions::default()).unwrap();
+    let e = errors(&result.matrix, &truth);
+    eprintln!("truncated + cropped CT rigid: TRE max {:.2} mm, quality {:.2} {} (body metric {:.3}, NCC {:.3})", e.tre_max, result.quality, result.quality_label, result.body_metric, result.normalized_metric);
+    assert!(e.tre_max < 3.0, "TRE {}", e.tre_max);
+    assert_eq!(result.quality_label, "good", "quality {}", result.quality);
+    assert!(result.plausible && result.consistent.is_none() && result.starts.is_empty());
+}
+
+#[test]
+fn translation_estimate_matches_short_mr_slabs() {
+    // Two 65 mm axial MR slabs 20 mm apart: 45 mm of overlap, under the old fixed 60 mm minimum.
+    let slab = |center: Vec3| axial(224, 192, 14, 1.8, 5.0, center);
+    let truth = translation_matrix([4.0, -6.0, 20.0]);
+    let fixed = synthetic_volume(Modality::Mr, &slab([0.0, 0.0, -150.0]), &translation_matrix([0.0; 3]), 23);
+    let moving = synthetic_volume(Modality::Mr, &slab([0.0, 0.0, -150.0]), &truth, 24);
+    let estimate = estimate_translation(&fixed, &moving, &TranslationOptions::default()).unwrap();
+    eprintln!("MR slabs: {:?} confidence {:.2} min overlap {:.0} mm", estimate.translation_mm, estimate.confidence, estimate.min_overlap_mm);
+    assert!(estimate.min_overlap_mm < 45.0);
+    assert!((estimate.translation_mm[2] - 20.0).abs() < 3.0, "dz {}", estimate.translation_mm[2]);
+    // An explicit minimum without the fraction is still honoured.
+    let strict = TranslationOptions { min_overlap_mm: 60.0, min_overlap_fraction: None, ..Default::default() };
+    assert!(estimate_translation(&fixed, &moving, &strict).map_or(true, |e| (e.translation_mm[2] - 20.0).abs() > 3.0 || e.overlap_mm >= 60.0));
+}
+
+#[test]
+fn translation_confidence_is_low_without_matching_anatomy() {
+    // A featureless water cylinder against the torso: nothing to match, whatever the shift.
+    let fixed = synthetic_volume(Modality::Ct, &fixed_grid(Modality::Ct), &translation_matrix([0.0; 3]), 25);
+    let mut moving = synthetic_volume(Modality::Ct, &moving_grid(Modality::Ct), &translation_matrix([0.0; 3]), 26);
+    let (cols, rows) = (moving.cols as usize, moving.rows as usize);
+    for (index, v) in moving.samples.iter_mut().enumerate() {
+        let (c, r) = ((index % (cols * rows)) % cols, (index % (cols * rows)) / cols);
+        let (dx, dy) = ((c as f64 - cols as f64 / 2.0) * 1.7, (r as f64 - rows as f64 / 2.0) * 1.7);
+        *v = if dx * dx + dy * dy < 120.0 * 120.0 { 10.0 } else { -1000.0 };
+    }
+    let estimate = estimate_translation(&fixed, &moving, &TranslationOptions::default()).unwrap();
+    eprintln!("featureless: confidence {:.2}", estimate.confidence);
+    assert!(estimate.confidence < 0.3, "confidence {}", estimate.confidence);
+}
+
+#[test]
+fn multi_start_recovers_from_a_wrong_seed_and_reports_consistency() {
+    let truth = known_transform();
+    let fixed = synthetic_volume(Modality::Ct, &fixed_grid(Modality::Ct), &translation_matrix([0.0; 3]), 27);
+    let moving = synthetic_volume(Modality::Ct, &moving_grid(Modality::Ct), &truth, 28);
+    // A seed 150 mm off in S-I (a capture-on-link of the wrong slices).
+    let seed = mat_mul(&translation_matrix([0.0, 0.0, 150.0]), &truth);
+    let single = register_rigid(&fixed, &moving, &RegistrationOptions { initial_matrix: Some(seed), ..Default::default() });
+    if let Ok(single) = &single {
+        let e = errors(&single.matrix, &truth);
+        eprintln!("wrong seed, single start: TRE max {:.1} mm, quality {:.2} {}", e.tre_max, single.quality, single.quality_label);
+        if e.tre_max > 10.0 {
+            assert_eq!(single.quality_label, "poor", "a divergent result must be poor (quality {})", single.quality);
+        }
+    }
+    let multi = register_rigid(&fixed, &moving, &RegistrationOptions { initial_matrix: Some(seed), initialization: Initialization::Multi, ..Default::default() }).unwrap();
+    let e = errors(&multi.matrix, &truth);
+    eprintln!(
+        "wrong seed, multi-start: TRE max {:.2} mm, {} {:.2}, consistent {:?}, starts {:?}, {:.0} ms",
+        e.tre_max,
+        multi.quality_label,
+        multi.quality,
+        multi.consistent,
+        multi.starts.iter().map(|s| (s.start.as_str(), s.quality_label, s.agrees, s.refined)).collect::<Vec<_>>(),
+        multi.timing_ms
+    );
+    assert!(e.tre_max < 1.5 && e.rotation_deg < 0.5, "TRE {} rotation {}", e.tre_max, e.rotation_deg);
+    assert_eq!(multi.consistent, Some(true));
+    assert_eq!(multi.quality_label, "good");
+    assert!(multi.starts.len() >= 3 && multi.starts[0].refined && multi.starts[0].agrees);
+    assert!(multi.starts.iter().any(|s| s.start == "matrix"));
+    // Extra starts are accepted and named.
+    let with_starts = register_rigid(&fixed, &moving, &RegistrationOptions { starts: vec![seed], ..Default::default() }).unwrap();
+    assert!(with_starts.starts.iter().any(|s| s.start == "start-1"));
+    assert!(errors(&with_starts.matrix, &truth).tre_max < 1.5);
+}
+
+#[test]
+fn implausible_rotations_are_flagged_poor() {
+    let fixed = synthetic_volume(Modality::Ct, &fixed_grid(Modality::Ct), &translation_matrix([0.0; 3]), 29);
+    let moving = synthetic_volume(Modality::Ct, &moving_grid(Modality::Ct), &known_transform(), 30);
+    // Upside down: the optimizer stays near 180 degrees.
+    let flipped = mat_mul(&rigid_about(std::f64::consts::PI, 0.0, 0.0, [0.0; 3], [0.0, 10.0, 0.0]), &known_transform());
+    let result = register_rigid(&fixed, &moving, &RegistrationOptions { initial_matrix: Some(flipped), max_iterations: 10, ..Default::default() }).unwrap();
+    eprintln!("flipped: rotation {:.1} deg, plausible {}, {} {:.2}", result.rotation_angle_deg, result.plausible, result.quality_label, result.quality);
+    assert!(result.rotation_angle_deg > 30.0);
+    assert!(!result.plausible);
+    assert_eq!(result.quality_label, "poor");
+    // Asked not to limit it, the same result is labelled by its metric alone (still poor here).
+    let unlimited = register_rigid(&fixed, &moving, &RegistrationOptions { initial_matrix: Some(flipped), max_iterations: 10, max_rotation_deg: None, ..Default::default() }).unwrap();
+    assert!(unlimited.plausible);
+    assert!(register_rigid(&fixed, &moving, &RegistrationOptions { max_rotation_deg: Some(-1.0), ..Default::default() }).is_err());
+}

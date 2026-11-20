@@ -305,9 +305,10 @@ export interface EditTagsOptions {
 
 /**
  * A fast moving -> fixed translation: the S-I shift from cross-correlating per-height profiles
- * (body area; plus lung and bone area for CT-CT, integrated intensity for MR-MR / PT-PT), the
- * in-plane shift from body-mask centroids over the matched overlap. Works for any acquisition
- * orientation. Tens of milliseconds for a typical CT.
+ * (body area; plus lung and bone area for CT-CT, integrated intensity for MR-MR / PT-PT) over
+ * the two scans' common in-plane support (so a smaller reconstruction FOV does not skew them),
+ * short end overlaps down-weighted; the in-plane shift from a masked correlation of their axial
+ * projections over the matched overlap. Works for any acquisition orientation. About 100-300 ms.
  */
 export declare function estimateTranslation(fixed: DicomVolumeHandle, moving: DicomVolumeHandle, options?: EstimateTranslationOptions | undefined | null): Promise<unknown>
 
@@ -316,10 +317,19 @@ export interface EstimateTranslationOptions {
   fixedModality?: string
   /** Overrides the moving volume's Modality. */
   movingModality?: string
-  /** Smallest S-I overlap of the two scans a z shift may imply, mm (default 60). */
+  /**
+   * Smallest S-I overlap of the two scans a z shift may imply, mm (default 60, an upper
+   * bound under `minOverlapFraction`). Given alone, it is used exactly.
+   */
   minOverlapMm?: number
   /** Largest |z shift| considered, mm (default: anything with enough overlap). */
   maxShiftMm?: number
+  /**
+   * The smallest overlap is `min(minOverlapMm, max(fraction x the shorter scan's S-I extent,
+   * 20 mm))`, so short slabs (an 80 mm prostate or head MR) can be matched. Default 0.4 when
+   * `minOverlapMm` is not given either; 0 turns it off.
+   */
+  minOverlapFraction?: number
 }
 
 /**
@@ -694,9 +704,18 @@ export interface RegisterVolumesOptions {
   initialMatrix?: Array<number>
   /**
    * Without `initialMatrix`: 'translation' (default; estimateTranslation, then the mask
-   * centroids when it is not confident), 'centroid' or 'none'.
+   * centroids when it is not confident), 'centroid' or 'none'. 'multi': several starts (the
+   * `initialMatrix` and `starts` given, the translation estimate, the mask centroids, identity),
+   * the best plausible one refined; see `consistent` and `starts` in the result.
    */
   initialize?: string
+  /** Extra starting moving -> fixed matrices (16 numbers each); implies `initialize: 'multi'`. */
+  starts?: Array<Array<number>>
+  /**
+   * A result rotated more than this many degrees is labelled 'poor' with `plausible: false`
+   * (and loses to any plausible start). Default 30; 0 or a negative number: no limit.
+   */
+  maxRotationDeg?: number
   /** Working-grid spacing per pyramid level, coarse to fine, mm (default [8, 4, 2]). */
   levelsMm?: Array<number>
   /** Optimizer iterations per level (default 40). */
@@ -745,7 +764,11 @@ export interface RegistrationResult {
   normalizedMetric: number
   /** Fraction of the fixed body samples that land inside the moving volume. */
   overlapFraction: number
-  /** 0..1 heuristic; show it, and never apply a 'poor' result silently. */
+  /**
+   * 0..1 from the metric over where both bodies are (so FOV truncation and cropping do not
+   * count against it) and whether the result is a local optimum; calibrated on public CT, PT
+   * and MR pairs. Show it, and never apply a 'poor' result silently.
+   */
   quality: number
   /** 'good' (>= 0.7), 'fair' (>= 0.4) or 'poor'. */
   qualityLabel: string
@@ -760,6 +783,37 @@ export interface RegistrationResult {
   timingMs: number
   /** Peak bytes of working images and samples held. */
   workingBytes: number
+  /** The normalized metric over the fixed samples inside the moving body (what `quality` uses). */
+  bodyMetric: number
+  /** Share of the fixed body samples inside the moving body. */
+  bodyOverlapFraction: number
+  /** Rotation angle of `matrix`, degrees. */
+  rotationAngleDeg: number
+  /** False when the rotation is above `maxRotationDeg` (the label is then 'poor'). */
+  plausible: boolean
+  /**
+   * Multi-start only: whether another start converged to the same result (within 3 mm,
+   * mean over the fixed body's central box). Absent (undefined) for a single start.
+   */
+  consistent?: boolean
+  /** Multi-start only: every start, the returned one first. */
+  starts: Array<RegistrationStart>
+}
+
+export interface RegistrationStart {
+  /** 'matrix', 'translation', 'centroid', 'none' or 'start-<n>' (`starts[n-1]`). */
+  start: string
+  /** Where this start converged (moving -> fixed, row-major). */
+  matrix: Array<number>
+  normalizedMetric: number
+  quality: number
+  qualityLabel: string
+  rotationAngleDeg: number
+  plausible: boolean
+  /** Within 3 mm of the returned result. */
+  agrees: boolean
+  /** Whether it ran the finest pyramid level (the others stop one level coarser). */
+  refined: boolean
 }
 
 export interface RenderedFrame {
@@ -1010,8 +1064,9 @@ export interface TranslationEstimate {
   matrix: Array<number>
   translationMm: Array<number>
   /**
-   * 0..1: the correlation peak's height and its margin over the next peak 20+ mm away.
-   * Below ~0.3, fall back to capture-on-link.
+   * 0..1, calibrated on public CT, PT and MR pairs so a wrong answer stays below 0.3: the z
+   * peak (overlap-weighted), its margin over the next peak 20+ mm away, the profile channels'
+   * agreement and the in-plane correlation. Below 0.3, fall back to capture-on-link.
    */
   confidence: number
   peakCorrelation: number
@@ -1020,6 +1075,12 @@ export interface TranslationEstimate {
   /** The profiles correlated: 'body', 'lung', 'bone' (CT-CT), 'intensity' (MR-MR, PT-PT). */
   profiles: Array<string>
   timingMs: number
+  /** Share (0..1, weighted) of the profile channels whose own best z is within 10 mm of the answer. */
+  channelAgreement: number
+  /** Correlation of the two scans' axial projections at the x/y answer. */
+  xyCorrelation: number
+  /** The smallest overlap that was allowed, mm. */
+  minOverlapMm: number
 }
 
 /** The dictionary VR of a tag, or null. */

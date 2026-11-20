@@ -144,6 +144,11 @@ async function main() {
     assert.ok(Math.abs(estimate.translationMm[2] - truth[11]) < 8, `estimate dz ${estimate.translationMm[2]} vs ${truth[11]}`);
     assert.ok(estimate.confidence >= 0 && estimate.confidence <= 1);
     assert.deepStrictEqual(estimate.profiles, ["body", "lung", "bone"]);
+    assert.ok(estimate.channelAgreement >= 0 && estimate.channelAgreement <= 1);
+    assert.ok(Number.isFinite(estimate.xyCorrelation) && estimate.minOverlapMm > 0 && estimate.minOverlapMm <= 60);
+    // An explicit minimum alone is used as is; the fraction can be given too.
+    assert.strictEqual((await d.estimateTranslation(fixed, moving, { minOverlapMm: 30 })).minOverlapMm, 30);
+    assert.ok((await d.estimateTranslation(fixed, moving, { minOverlapFraction: 0.2 })).minOverlapMm <= 60);
 
     const result = await d.registerVolumes(fixed, moving, { timeLimitMs: 60000 });
     const error = tre(result.matrix, truth);
@@ -153,6 +158,22 @@ async function main() {
     assert.strictEqual(result.stopReason, "converged");
     assert.ok(["good", "fair"].includes(result.qualityLabel));
     assert.strictEqual(result.levels.length, 3);
+    assert.strictEqual(result.consistent, undefined);
+    assert.deepStrictEqual(result.starts, []);
+    assert.ok(result.plausible && result.rotationAngleDeg < 30 && result.bodyMetric > 0.5 && result.bodyOverlapFraction > 0.3);
+
+    // Multi-start from a seed 150 mm off: the other starts find the answer, and agree on it.
+    const wrongSeed = truth.slice();
+    wrongSeed[11] += 150;
+    const multi = await d.registerVolumes(fixed, moving, { initialize: "multi", initialMatrix: wrongSeed, timeLimitMs: 60000 });
+    console.log(`registerVolumes multi: TRE max ${tre(multi.matrix, truth).toFixed(2)} mm, ${multi.qualityLabel}, consistent ${multi.consistent}, starts ${multi.starts.map((s) => `${s.start}:${s.qualityLabel}${s.agrees ? "*" : ""}`).join(" ")}, ${multi.timingMs.toFixed(0)} ms`);
+    assert.ok(tre(multi.matrix, truth) < 2.5);
+    assert.strictEqual(multi.consistent, true);
+    assert.ok(multi.starts.length >= 3 && multi.starts[0].refined && multi.starts.some((s) => s.start === "matrix"));
+    const extra = await d.registerVolumes(fixed, moving, { starts: [wrongSeed], levelsMm: [8, 4] });
+    assert.ok(extra.starts.some((s) => s.start === "start-1"));
+    assert.throws(() => d.registerVolumes(fixed, moving, { starts: [[1, 2, 3]] }), /starts\[0\]/);
+    assert.throws(() => d.registerVolumes(fixed, moving, { initialize: "sideways" }), /'multi'/);
 
     // Initial matrix and option validation.
     const seeded = await d.registerVolumes(fixed, moving, { initialMatrix: estimate.matrix, levelsMm: [8, 4] });
