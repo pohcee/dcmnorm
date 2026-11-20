@@ -165,15 +165,23 @@ const { width, height, channels, pixels } = await renderPixels("in.dcm", 0, { wi
 
 - `buildVolume(filePaths: string[]): Promise<DicomVolumeHandle>` — reads and decodes every slice
   of a parallel stack (e.g. one CT/MR/PT series), spatially re-sorted by `ImagePositionPatient`
-  regardless of input order. Rejects fewer than 2 files, mismatched Rows/Columns, or a
-  non-parallel/gantry-tilt-inconsistent stack. This is the expensive step — build once per series
-  and keep the returned handle resident (e.g. in a volume cache) so every subsequent `reformat()`
-  call is cheap.
+  regardless of input order.
+  - Enhanced multi-frame objects work too: a single Enhanced CT/MR/PET file is a whole volume.
+    Each frame's Plane Position, Plane Orientation and Pixel Measures functional groups and its
+    own rescale are used. Frames that repeat a position are skipped (later temporal positions or
+    echoes): the first in file and frame order is kept.
+  - A gantry-tilted stack, whose slice origins drift within the slice plane, is desheared onto an
+    orthogonal grid that covers every slice. `rows`/`cols` can then exceed the source images.
+  - Rejects fewer than 2 slices, mismatched Rows/Columns, or a non-parallel stack.
+  - This is the expensive step. Build once per series and keep the returned handle resident (e.g.
+    in a volume cache), so every later `reformat()` call is cheap.
 - `DicomVolumeHandle` — an opaque, read-only handle around the built volume:
   - getters: `rows`, `cols`, `numSlices`, `nativeBasis` (`[rowDir(3), colDir(3)]`, the volume's own
     acquisition-native orientation — a reasonable seed for an "axial" reformat), `center`
     (`[x,y,z]` LPS mm, the volume's physical center), `minSpacingMm` (its smallest voxel
-    dimension, a reasonable default output spacing)
+    dimension, a reasonable default output spacing), `modality`, `frameOfReferenceUid`,
+    `seriesInstanceUid`, `studyInstanceUid` (from the files, or `null`), `gantryTiltDeg`,
+    `desheared`, `irregularSpacing`, `voxelToPatient` (row-major 4x4, `(col, row, slice, 1)` to LPS mm)
   - `reformat(options): Promise<RenderedFrame>` — resamples one plane through the volume and
     encodes it exactly like `renderFrame`'s output shape, so callers reuse their existing
     image-display code path. `options`: `{ origin: number[3], rowDir: number[3], colDir: number[3],
@@ -184,6 +192,74 @@ const { width, height, channels, pixels } = await renderPixels("in.dcm", 0, { wi
     a thick-slab reformat centered on `origin`, combined per `slabProjection` (default `'mip'`).
   - `exportTexture(options?): Promise<TextureExportResult>` — see
     [Texture export](#texture-export) below.
+
+### Registration
+
+Every matrix is 16 numbers, row-major, mapping MOVING patient LPS mm to FIXED patient LPS mm
+(`p_fixed = M * [x, y, z, 1]`). That is the DICOM Spatial Registration convention, with the item's
+Frame of Reference the moving one and the REG's own the fixed one, so a result goes into
+`writeSpatialRegistration` unchanged. Volumes are `buildVolume` handles. The algorithm is described
+in [the CLI docs](../../docs/cli.md#register-two-volumes).
+
+- `registerVolumes(fixed, moving, options?, cancel?: RegistrationCancelToken): Promise<RegistrationResult>`
+  - What it does: rigid 6-DOF registration of any CT/MR/PT pairing.
+  - `options`:
+    - `metric` (`'auto'` | `'ncc'` | `'mattes-mi'`)
+    - `fixedModality` / `movingModality`: override the files' Modality
+    - `initialMatrix` (number[16]): a starting moving -> fixed transform
+    - `initialize` (`'translation'` default | `'centroid'` | `'none'`): used without `initialMatrix`
+    - `levelsMm` (default `[8, 4, 2]`)
+    - `maxIterations` (per level, default 40)
+    - `timeLimitMs` (default 30000)
+    - `mask` (`'auto'` | `'none'`)
+    - `roiMinMm` / `roiMaxMm`: a box in fixed patient coordinates
+    - `histogramBins` (32), `maxSamples` (100000), `maxMemoryBytes` (256 MiB; a level that would
+      exceed it is coarsened)
+  - Result fields:
+    - `matrix`, `rotationDeg` and `translationMm` (of the matrix), `centerMm`
+    - `metric`, `metricValue`, `initialMetricValue`, `normalizedMetric`, `overlapFraction`
+    - `quality` (0..1) and `qualityLabel` (`'good'` | `'fair'` | `'poor'`)
+    - `iterations`, `metricEvaluations`, `levels[]`, `initialization`
+    - `converged`, `stopReason` (`'converged'` | `'max-iterations'` | `'time-limit'`)
+    - `timingMs`, `workingBytes`
+  - Rejects when a volume was released, when there are no body voxels or no overlap, on invalid
+    options, and when cancelled (the message starts "registration cancelled"). Results are
+    deterministic across runs and thread counts.
+- `new RegistrationCancelToken()`: `.cancel()`, `.cancelled`.
+- `estimateTranslation(fixed, moving, options?): Promise<TranslationEstimate>`
+  - What it does: the fast translation-only estimate, which also seeds `registerVolumes`.
+  - `options`: `fixedModality`, `movingModality`, `minOverlapMm` (60), `maxShiftMm`.
+  - Result: `matrix`, `translationMm`, `confidence` (0..1; below about 0.3, fall back to
+    capture-on-link), `peakCorrelation`, `secondPeakCorrelation`, `overlapMm`, `profiles`,
+    `timingMs`.
+- `readSpatialRegistration(filePath): Promise<string>`
+  - What it does: a Spatial Registration object (`.66.1`, or the pre/post matrices of a
+    Deformable `.66.3`) as a JSON string.
+  - Top-level fields: `frameOfReferenceUid` (the REG's own registered frame), the SOP, series,
+    study and patient identifiers, `contentLabel`, `contentDate`, `deformable`.
+  - `registrations[]`: `frameOfReferenceUid`, `matrix` (the item frame -> REG frame, composed over
+    its Matrix Sequence in order), `matrixType`, `matrices[]`, `registrationType`, `comment`,
+    `referencedImages[]`, `isIdentity`.
+  - Also `referencedSeries[]` (the Common Instance Reference) and `warnings[]` (IOD problems).
+  - Rejects any other SOP Class.
+- `writeSpatialRegistration(specJson: string, outputPath?): Promise<{ json, dataset, sopInstanceUid, seriesInstanceUid, data? }>`
+  - What it does: builds a conformant REG in the fixed study. Item 1 holds the fixed Frame of
+    Reference with the identity, item 2 the moving one with `matrix`.
+  - Spec fields:
+    - `matrix`, `matrixType` (`'RIGID'` default, validated orthonormal; `'RIGID_SCALE'`; `'AFFINE'`)
+    - `registrationType` (`'auto'` → DCM 125024 | `'manual'` → 125025 | `'identity'` → 125021)
+    - `fixed` / `moving`: `{ frameOfReferenceUid, studyInstanceUid, seriesInstanceUid, instances?: [{ sopClassUid, sopInstanceUid }] }`
+    - `copyPatientStudyFrom`: a path to one fixed-study file
+    - `patient` / `study` overrides
+    - `sopInstanceUid`, `seriesInstanceUid` (generated when omitted), `seriesNumber` (9902),
+      `seriesDescription`, `instanceNumber`, `contentLabel`, `contentDescription`,
+      `contentCreatorName`, `manufacturer`, `comment`
+  - Returns:
+    - `json`: the object in `readSpatialRegistration`'s form
+    - `dataset`: standard PS3.18 DICOM JSON, ready for `writeJson`
+    - `data`: the Part 10 bytes, when `outputPath` is omitted
+  - Rejects specs that would not make a conformant object, for example fixed and moving in one
+    Frame of Reference, or a non-rigid `'RIGID'` matrix.
 
 ### Texture export
 

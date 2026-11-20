@@ -85,6 +85,7 @@ docker run --rm -v "$SCRIPT_DIR/../..":/repo -w /repo/bindings/node \
     # the host. FFmpeg is statically linked, so the only runtime requirement is glibc/libstdc++;
     # load-check.js also round-trips a file through MPEG-2, which fails without FFmpeg linked in.
     node test/smoke.js
+    node test/registration.js
     node load-check.js
 
     # Hard glibc floor check: fail if the addon references any GLIBC_ symbol version above 2.31

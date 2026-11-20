@@ -680,6 +680,145 @@ struct DicomdirCli {
     json: bool,
 }
 
+#[derive(Parser, Debug)]
+#[command(name = "dcmnorm register")]
+#[command(
+    long_about = "Registers the MOVING volume onto the FIXED one (rigid, 6 degrees of freedom) and prints the result as JSON: the moving -> fixed patient matrix (row-major 4x4, the DICOM Spatial Registration convention), the metric, a quality score and timing. FIXED and MOVING are each a directory of one series' DICOM files, one Enhanced multi-frame file, or a list of files separated by commas. CT, MR and PT in any combination: NCC for the same modality, Mattes mutual information across modalities. With --reg, the result is also written as a DICOM Spatial Registration object in the fixed study."
+)]
+struct RegisterCli {
+    #[arg(value_name = "FIXED", help = "Fixed series: a directory, one (Enhanced) file, or comma-separated files")]
+    fixed: String,
+
+    #[arg(value_name = "MOVING", help = "Moving series, same forms as FIXED")]
+    moving: String,
+
+    #[arg(long, value_name = "auto|ncc|mattes-mi", default_value = "auto", help = "Similarity metric")]
+    metric: String,
+
+    #[arg(long, help = "Only the fast translation estimate (S-I profiles + body centroid), no rigid optimization")]
+    translation_only: bool,
+
+    #[arg(long, value_name = "MS", default_value_t = 30000.0, help = "Time limit, milliseconds")]
+    time_limit_ms: f64,
+
+    #[arg(long, value_name = "MM,MM,...", help = "Pyramid level spacings, coarse to fine (default 8,4,2)")]
+    levels: Option<String>,
+
+    #[arg(long, value_name = "PATH", help = "Also write the result as a DICOM Spatial Registration object")]
+    reg: Option<PathBuf>,
+}
+
+fn register_input_files(spec: &str) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
+    let path = Path::new(spec);
+    if path.is_dir() {
+        let mut files: Vec<PathBuf> = fs::read_dir(path)?
+            .filter_map(|entry| entry.ok().map(|e| e.path()))
+            .filter(|p| p.is_file())
+            .collect();
+        files.sort();
+        return Ok(files);
+    }
+    Ok(spec.split(',').filter(|s| !s.is_empty()).map(PathBuf::from).collect())
+}
+
+fn run_register_command(args: impl IntoIterator<Item = std::ffi::OsString>) -> Result<(), Box<dyn std::error::Error>> {
+    use dcmnorm::dicom_io::{
+        build_spatial_registration, estimate_translation, read_spatial_registration, register_rigid, MetricChoice,
+        RegistrationOptions, TranslationOptions,
+    };
+    let cli = RegisterCli::parse_from(args);
+    let fixed_files = register_input_files(&cli.fixed)?;
+    let moving_files = register_input_files(&cli.moving)?;
+    let fixed = build_volume(&fixed_files)?;
+    let moving = build_volume(&moving_files)?;
+    let geometry = |volume: &Volume| {
+        serde_json::json!({
+            "modality": volume.modality, "frameOfReferenceUid": volume.frame_of_reference_uid,
+            "dims": [volume.cols, volume.rows, volume.num_slices], "gantryTiltDeg": volume.gantry_tilt_deg,
+            "irregularSpacing": volume.has_irregular_spacing(),
+        })
+    };
+    let (matrix, mut report) = if cli.translation_only {
+        let estimate = estimate_translation(&fixed, &moving, &TranslationOptions::default())?;
+        let report = serde_json::json!({
+            "matrix": estimate.matrix.to_vec(), "translationMm": estimate.translation_mm.to_vec(),
+            "confidence": estimate.confidence, "peakCorrelation": estimate.peak_correlation,
+            "secondPeakCorrelation": estimate.second_peak_correlation, "overlapMm": estimate.overlap_mm,
+            "profiles": estimate.profiles, "timingMs": estimate.timing_ms,
+        });
+        (estimate.matrix, report)
+    } else {
+        let metric = match cli.metric.as_str() {
+            "auto" => MetricChoice::Auto,
+            "ncc" => MetricChoice::Ncc,
+            "mattes-mi" | "mi" => MetricChoice::MattesMi,
+            other => return Err(io::Error::new(ErrorKind::InvalidInput, format!("--metric {other}: expected auto, ncc or mattes-mi")).into()),
+        };
+        let mut options = RegistrationOptions {
+            metric,
+            time_limit: Some(std::time::Duration::from_secs_f64(cli.time_limit_ms.max(1.0) / 1000.0)),
+            ..Default::default()
+        };
+        if let Some(levels) = &cli.levels {
+            options.levels_mm = levels
+                .split(',')
+                .map(|v| v.trim().parse::<f64>())
+                .collect::<Result<_, _>>()
+                .map_err(|_| io::Error::new(ErrorKind::InvalidInput, "--levels: expected comma-separated millimetres"))?;
+        }
+        let result = register_rigid(&fixed, &moving, &options)?;
+        let report = serde_json::json!({
+            "matrix": result.matrix.to_vec(), "rotationDeg": result.rotation_deg.to_vec(),
+            "translationMm": result.translation_mm.to_vec(), "centerMm": result.center_mm.to_vec(),
+            "metric": result.metric.as_str(), "metricValue": result.metric_value,
+            "initialMetricValue": result.initial_metric_value, "normalizedMetric": result.normalized_metric,
+            "overlapFraction": result.overlap_fraction, "quality": result.quality, "qualityLabel": result.quality_label,
+            "iterations": result.iterations, "metricEvaluations": result.metric_evaluations,
+            "levels": result.levels.iter().map(|l| serde_json::json!({ "spacingMm": l.spacing_mm, "iterations": l.iterations, "metricEvaluations": l.metric_evaluations, "metricValue": l.metric_value })).collect::<Vec<_>>(),
+            "initialization": result.initialization, "converged": result.converged,
+            "stopReason": result.stop_reason.as_str(), "timingMs": result.timing_ms, "workingBytes": result.working_bytes,
+        });
+        (result.matrix, report)
+    };
+    report["fixed"] = geometry(&fixed);
+    report["moving"] = geometry(&moving);
+
+    if let Some(reg_path) = &cli.reg {
+        let side = |volume: &Volume, files: &[PathBuf], name: &str| -> Result<JsonValue, Box<dyn std::error::Error>> {
+            let missing = |what: &str| io::Error::new(ErrorKind::InvalidInput, format!("the {name} series has no {what}; a Spatial Registration needs it"));
+            let mut instances = Vec::new();
+            for file in files {
+                let object = read_dicom_file_deferring_bulk_data(file)?.map(|(object, _)| object);
+                if let Some(object) = object {
+                    let text = |tag| object.get(tag).and_then(|e| e.to_str().ok()).map(|v| v.trim_end_matches('\0').trim().to_owned());
+                    if let (Some(class), Some(instance)) = (text(tags::SOP_CLASS_UID), text(tags::SOP_INSTANCE_UID)) {
+                        instances.push(serde_json::json!({ "sopClassUid": class, "sopInstanceUid": instance }));
+                    }
+                }
+            }
+            Ok(serde_json::json!({
+                "frameOfReferenceUid": volume.frame_of_reference_uid.clone().ok_or_else(|| missing("FrameOfReferenceUID"))?,
+                "studyInstanceUid": volume.study_instance_uid.clone().ok_or_else(|| missing("StudyInstanceUID"))?,
+                "seriesInstanceUid": volume.series_instance_uid.clone().ok_or_else(|| missing("SeriesInstanceUID"))?,
+                "instances": instances,
+            }))
+        };
+        let spec = serde_json::json!({
+            "matrix": matrix.to_vec(),
+            "fixed": side(&fixed, &fixed_files, "fixed")?,
+            "moving": side(&moving, &moving_files, "moving")?,
+            "contentDescription": format!("dcmnorm register ({})", report["metric"].as_str().unwrap_or("translation")),
+        });
+        let copy_from = read_dicom_file(&fixed_files[0])?;
+        let mut object = build_spatial_registration(&spec, Some(&copy_from))?;
+        write_dicom_file(&mut object, reg_path)?;
+        report["spatialRegistration"] = read_spatial_registration(&object)?;
+        report["spatialRegistrationPath"] = JsonValue::from(reg_path.display().to_string());
+    }
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(())
+}
+
 fn run_dicomdir_command(args: impl IntoIterator<Item = std::ffi::OsString>) -> Result<(), Box<dyn std::error::Error>> {
     let cli = DicomdirCli::parse_from(args);
     let (entries, skipped) = collect_dicomdir_entries(&cli.root)?;
@@ -750,6 +889,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let _scope = perf::scope("cli.run");
     if std::env::args_os().nth(1).is_some_and(|arg| arg == "dicomdir") {
         return run_dicomdir_command(std::env::args_os().skip(1));
+    }
+    if std::env::args_os().nth(1).is_some_and(|arg| arg == "register") {
+        return run_register_command(std::env::args_os().skip(1));
     }
     // Hashing the running binary means reading all of it (~34MB with FFmpeg statically linked),
     // which used to cost ~30ms on every invocation - only pay that when the version is actually

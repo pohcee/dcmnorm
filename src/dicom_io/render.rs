@@ -3370,7 +3370,7 @@ pub fn try_extract_passthrough_jpeg_frame(
     }))
 }
 
-fn ensure_native_render_object<'a>(
+pub(crate) fn ensure_native_render_object<'a>(
     object: &'a DefaultDicomObject,
 ) -> Result<Cow<'a, DefaultDicomObject>, RenderError> {
     let has_native_pixel_data = object

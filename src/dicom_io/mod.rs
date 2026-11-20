@@ -17,11 +17,21 @@ mod json;
 mod kakadu;
 mod mpeg;
 mod render;
+mod registration;
+#[cfg(test)]
+mod registration_tests;
 mod scp;
 mod standard_json;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod test_support;
+#[cfg(test)]
+mod volume_geometry_tests;
 mod secondary_capture;
+mod spatial_registration;
+#[cfg(test)]
+mod spatial_registration_tests;
 mod texture_export;
 mod types;
 mod volume;
@@ -84,6 +94,11 @@ pub use volume::{
     build_volume, canonical_view_basis, reformat_plane, reformat_plane_values, resample_volume,
     rotate_basis, Interpolation, PlaneParams, SlabProjection, Volume, VolumeError,
 };
+pub use registration::{
+    estimate_translation, euler_deg, mat_inverse, mat_mul, register_rigid, rigid_about, rotation_angle_deg, rotation_matrix,
+    transform_point, translation_matrix, Initialization, LevelResult, MaskMode, Mat4, MetricChoice, MetricKind,
+    RegistrationError, RegistrationOptions, RegistrationResult, StopReason, TranslationEstimate, TranslationOptions,
+};
 pub use volume_export::{generate_uid, write_nifti, write_nrrd, VolumeExportError, VolumeGeometry};
 pub use texture_export::{
     pack_dicom_frame_stack_texture, pack_dicom_frame_texture, pack_dicom_rgb_frame_stack_texture,
@@ -91,6 +106,11 @@ pub use texture_export::{
     pack_rgb_frame_texture, pack_volume_texture, quantize_samples, resample_frame_2d, resample_rgb_frame_2d,
     ContentKind, DecodedFrame, DecodedRgbFrame, PackedTexture, SampleFormat, TextureCompression,
     TextureExportError, TextureMeta,
+};
+pub use spatial_registration::{
+    build_spatial_registration, format_ds, is_spatial_registration_sop_class, read_spatial_registration,
+    validate_spatial_registration, SpatialRegistrationError, DEFORMABLE_SPATIAL_REGISTRATION_SOP_CLASS_UID,
+    SPATIAL_REGISTRATION_SOP_CLASS_UID,
 };
 pub use secondary_capture::{write_reformatted_dicom_slice, SecondaryCaptureError, SliceGeometry};
 pub mod dicom_edit;

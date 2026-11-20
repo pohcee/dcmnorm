@@ -542,7 +542,8 @@ public final class Dcmnorm {
      * filePaths}' own order. Returns a {@link DicomVolumeHandle} for repeated {@code reformat()}
      * calls - <strong>must be closed</strong> (ideally via try-with-resources) once you are done
      * with it, see that class's own doc. Raises (rather than silently mis-rendering) for fewer
-     * than 2 files, mismatched Rows/Columns, or a non-parallel/gantry-tilt-inconsistent stack.
+     * than 2 slices, mismatched Rows/Columns, or a non-parallel stack (Enhanced multi-frame files
+     * and gantry-tilted, desheared stacks are handled).
      */
     public static DicomVolumeHandle buildVolume(List<String> filePaths) throws DcmnormException {
         long handle = nativeBuildVolume(Json.encodeStringArray(filePaths));

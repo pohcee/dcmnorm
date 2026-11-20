@@ -1284,7 +1284,7 @@ fn render_movie(
 /// re-sorted internally by `ImagePositionPatient`, regardless of `file_paths`' own order. Returns
 /// a `DicomVolumeHandle` for repeated `reformat()` calls. Raises (rather than silently
 /// mis-rendering) for fewer than 2 files, mismatched Rows/Columns, or a
-/// non-parallel/gantry-tilt-inconsistent stack.
+/// non-parallel stack. Enhanced multi-frame files and gantry-tilted (desheared) stacks are handled.
 #[pyfunction]
 fn build_volume(py: Python<'_>, file_paths: Vec<String>) -> PyResult<DicomVolumeHandle> {
     let paths: Vec<PathBuf> = file_paths.into_iter().map(PathBuf::from).collect();

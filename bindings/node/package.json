@@ -50,7 +50,7 @@
     "build": "napi build --platform --release && node prepare-npm.js --fix-loader",
     "build:debug": "napi build --platform && node prepare-npm.js --fix-loader",
     "build:docker": "./build-in-docker.sh",
-    "test": "node test/smoke.js && node test/dataset.js"
+    "test": "node test/smoke.js && node test/dataset.js && node test/registration.js"
   },
   "optionalDependencies": {
     "@dcmnorm/linux-x64-gnu": "0.15.1",

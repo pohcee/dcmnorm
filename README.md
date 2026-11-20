@@ -75,6 +75,7 @@ dcmnorm scan.dcm frame.png                                         # render a fr
 dcmnorm scan.dcm out.dcm --transfer-syntax 1.2.840.10008.1.2.1     # transcode to Explicit VR LE
 dcmnorm cine.dcm cine.mp4                                          # multi-frame → MP4
 dcmnorm --mpr coronal series/*.dcm coronal.png                     # multiplanar reformat
+dcmnorm register current/ prior/ --reg prior-to-current.dcm         # rigid registration → DICOM REG
 dcmtalk echoscu somepacs.example.com:11112                         # verify a PACS connection
 ```
 
@@ -134,7 +135,7 @@ common workflow to its dcm4che idiom.
 ## Why dcmnorm
 
 - **Fast:** faster than dcmtk and dcm4che in every parse, render, and transcode benchmark; DICOM → JSON takes ~3 ms whether the file is 90 KB or 29 MB ([benchmarks](docs/benchmarks.md#benchmarks))
-- **Broad:** renders most DICOM imaging SOP classes, including WSI, with modality/VOI LUTs, windowing, and overlays; cine → MP4; MPR reformats; NIfTI/NRRD volume export
+- **Broad:** renders most DICOM imaging SOP classes, including WSI, with modality/VOI LUTs, windowing, and overlays; cine → MP4; MPR reformats (gantry tilt, Enhanced multi-frame); NIfTI/NRRD volume export; rigid CT/MR/PT registration and DICOM Spatial Registration objects
 - **Networked:** `dcmtalk` covers C-ECHO/C-STORE/C-FIND/C-MOVE plus a storage SCP, with no dcmtk dependency
 - **Embeddable:** in-process Node.js, Python, and Java bindings, plus a Rust library crate
 - **Agent-ready:** ships with a skill for popular AI coding assistants
@@ -156,7 +157,7 @@ common workflow to its dcm4che idiom.
   binaries and `.deb` packages, Docker
 - [dcmnorm CLI](docs/cli.md): every option - JSON conversion, filtering, bulk data, validation,
   histograms, editing, rendering, texture export, MPR and volume export, overlays, batch mode,
-  transcoding, video, JPEG 2000 codec selection, DICOMDIR
+  transcoding, video, JPEG 2000 codec selection, DICOMDIR, registration
 - [dcmtalk CLI](docs/dcmtalk.md): C-ECHO, C-STORE, C-FIND, C-MOVE and a storage SCP
 - Bindings: [Node.js](bindings/node/README.md), [Python](bindings/python/README.md),
   [Java](bindings/java/README.md) and the [Java guide for dcm4che users](bindings/java/GUIDE.md)
