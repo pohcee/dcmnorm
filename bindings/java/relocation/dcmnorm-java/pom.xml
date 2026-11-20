@@ -24,7 +24,7 @@
 
   <groupId>com.pohcee</groupId>
   <artifactId>dcmnorm-java</artifactId>
-  <version>0.16.0</version>
+  <version>0.17.0</version>
   <packaging>pom</packaging>
 
   <name>dcmnorm-java (relocated to com.pohcee:dcmnorm)</name>
@@ -54,7 +54,7 @@
     <relocation>
       <groupId>com.pohcee</groupId>
       <artifactId>dcmnorm</artifactId>
-      <version>0.16.0</version>
+      <version>0.17.0</version>
       <message>com.pohcee:dcmnorm-java was renamed to com.pohcee:dcmnorm in dcmnorm 0.14.0.</message>
     </relocation>
   </distributionManagement>

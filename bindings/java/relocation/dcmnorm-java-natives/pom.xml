@@ -26,7 +26,7 @@
 
   <groupId>com.pohcee</groupId>
   <artifactId>dcmnorm-java-natives</artifactId>
-  <version>0.16.0</version>
+  <version>0.17.0</version>
   <packaging>pom</packaging>
 
   <name>dcmnorm-java-natives (relocated to com.pohcee:dcmnorm-natives)</name>
@@ -56,7 +56,7 @@
     <relocation>
       <groupId>com.pohcee</groupId>
       <artifactId>dcmnorm-natives</artifactId>
-      <version>0.16.0</version>
+      <version>0.17.0</version>
       <message>com.pohcee:dcmnorm-java-natives was renamed to com.pohcee:dcmnorm-natives in dcmnorm 0.14.0; the classifiers are unchanged.</message>
     </relocation>
   </distributionManagement>

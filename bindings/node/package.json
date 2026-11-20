@@ -1,6 +1,6 @@
 {
   "name": "dcmnorm",
-  "version": "0.16.0",
+  "version": "0.17.0",
   "description": "Native Node.js bindings for dcmnorm: DICOM read/edit/transcode/render and DIMSE networking in-process (no CLI subprocess)",
   "license": "Apache-2.0",
   "author": "Jason Klotzer",
@@ -53,11 +53,11 @@
     "test": "node test/smoke.js && node test/dataset.js && node test/registration.js"
   },
   "optionalDependencies": {
-    "@dcmnorm/linux-x64-gnu": "0.16.0",
-    "@dcmnorm/linux-arm64-gnu": "0.16.0",
-    "@dcmnorm/win32-x64-msvc": "0.16.0",
-    "@dcmnorm/darwin-arm64": "0.16.0",
-    "@dcmnorm/darwin-x64": "0.16.0"
+    "@dcmnorm/linux-x64-gnu": "0.17.0",
+    "@dcmnorm/linux-arm64-gnu": "0.17.0",
+    "@dcmnorm/win32-x64-msvc": "0.17.0",
+    "@dcmnorm/darwin-arm64": "0.17.0",
+    "@dcmnorm/darwin-x64": "0.17.0"
   },
   "devDependencies": {
     "@napi-rs/cli": "^3.7.3"
