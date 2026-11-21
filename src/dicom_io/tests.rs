@@ -5777,6 +5777,91 @@ fn issue_29_jpeg2000_decode_corrects_bits_stored_to_codestream_precision() {
     assert_eq!(words, [0, 1, 256, 644]);
 }
 
+/// pohcee/dcmnorm#58 (fixture: test/files/issues/make_fixtures.py, "58"): 8-bit YBR_RCT JPEG 2000
+/// Lossless stored as a JP2 file whose ICC profile holds an `FF51` (and `FF52`) byte pair. It
+/// renders and decodes to its RGB samples; before, rendering failed with exactly "failed to
+/// decode encapsulated pixel data from 1.2.840.10008.1.2.4.90 (JPEG 2000): the JPEG 2000
+/// codestream has 24-bit samples, more than BitsAllocated 8", and the decoy COD's MCT 0 would
+/// have left the decoded YBR_RCT samples unconverted.
+#[test]
+fn jp2_wrapped_ybr_rct_fixture_with_marker_like_icc_bytes_renders_and_decodes() {
+    let expected: [u8; 12] = [255, 0, 0, 0, 255, 0, 0, 0, 255, 17, 128, 250];
+    let bytes = issue_fixture("jp2_ybr_rct_icc_marker_bytes.dcm");
+    let object = read_dicom_bytes(&bytes).unwrap();
+    let rendered = render_dicom_frame(&object, RenderOutputFormat::Png, &RenderPipelineOptions::default()).unwrap();
+    assert_eq!(image::load_from_memory(&rendered.bytes).unwrap().to_rgb8().as_raw().as_slice(), expected);
+
+    let native = read_dicom_bytes(&transcode_dicom_bytes(bytes, uids::EXPLICIT_VR_LITTLE_ENDIAN).unwrap()).unwrap();
+    assert_eq!(native.element(tags::PHOTOMETRIC_INTERPRETATION).unwrap().to_str().unwrap().trim(), "RGB");
+    assert_eq!(native.element(tags::BITS_STORED).unwrap().to_int::<u16>().unwrap(), 8);
+    assert_eq!(native.element(tags::PIXEL_DATA).unwrap().to_bytes().unwrap().as_ref(), expected);
+}
+
+/// A JP2 box: LBox, TBox, payload.
+fn issue_jp2_box(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+    let mut out = ((8 + payload.len()) as u32).to_be_bytes().to_vec();
+    out.extend_from_slice(kind);
+    out.extend_from_slice(payload);
+    out
+}
+
+/// `codestream` wrapped in a JP2 file (as some encoders store it in a DICOM fragment) whose colr
+/// box carries an ICC-profile-like payload with an `FF51` byte pair and, 40 bytes on, `0x97`: a
+/// search for the first `FF51` reads that as a SIZ with 24-bit samples (and a nonsense Csiz).
+/// Real ICC profiles' 16-bit tone curves contain such pairs (e.g. colord's Bluish.icc).
+fn issue_jp2_with_marker_like_icc(codestream: &[u8], components: u16) -> Vec<u8> {
+    let mut icc = vec![0x11u8; 128];
+    icc.extend_from_slice(&[0xFF, 0x51]);
+    icc.extend(std::iter::repeat(0x22).take(38));
+    icc.push(0x97);
+    // and a COD-like pair whose "MCT" byte is 0
+    icc.extend_from_slice(&[0xFF, 0x52, 0x00, 0x0C, 0x00, 0x00, 0x00, 0x01, 0x00]);
+    icc.extend(std::iter::repeat(0x33).take(64));
+    let mut file = dcmnorm_jpeg2000::codestream::JP2_SIGNATURE.to_vec();
+    file.extend(issue_jp2_box(b"ftyp", b"jp2 \0\0\0\0jp2 "));
+    let mut ihdr = vec![0, 0, 0, 2, 0, 0, 0, 2];
+    ihdr.extend_from_slice(&components.to_be_bytes());
+    ihdr.extend_from_slice(&[7, 7, 0, 0]);
+    let mut header = issue_jp2_box(b"ihdr", &ihdr);
+    let mut colr = vec![2, 0, 0];
+    colr.extend_from_slice(&icc);
+    header.extend(issue_jp2_box(b"colr", &colr));
+    file.extend(issue_jp2_box(b"jp2h", &header));
+    file.extend(issue_jp2_box(b"jp2c", codestream));
+    file
+}
+
+/// pohcee/dcmnorm#58: JPEG 2000 / HTJ2K fragments that are JP2 files, not raw codestreams,
+/// decode and render: the main header is read from the jp2c box's codestream (SIZ right after
+/// SOC), not from the first `FF51` in the fragment. Before, an `FF51` inside the colr box's ICC profile was read as SIZ:
+/// "the JPEG 2000 codestream has 24-bit samples, more than BitsAllocated 8" on 8-bit RGB.
+#[test]
+fn jp2_wrapped_jpeg2000_fragment_with_icc_profile_decodes_and_renders() {
+    use dcmnorm_core::value::PixelFragmentSequence;
+    let expected: [u8; 12] = [255, 0, 0, 0, 255, 0, 0, 0, 255, 17, 128, 250];
+    for target in ["1.2.840.10008.1.2.4.90", "1.2.840.10008.1.2.4.201"] {
+        let encoded = transcode_dicom_bytes(issue_fixture("rgb_planar_2x2.dcm"), target).unwrap();
+        let (_, fragments) = issue_fragments(&encoded);
+        let wrapped = issue_jp2_with_marker_like_icc(&fragments[0], 3);
+        let mut object = read_dicom_bytes(&encoded).unwrap();
+        object.put(DataElement::new(tags::PIXEL_DATA, VR::OB, PixelFragmentSequence::new(Vec::new(), vec![wrapped])));
+        let bytes = write_dicom_bytes(&mut object).unwrap();
+
+        let native = transcode_dicom_bytes(bytes.clone(), uids::EXPLICIT_VR_LITTLE_ENDIAN)
+            .unwrap_or_else(|error| panic!("{target}: {error}"));
+        let native = read_dicom_bytes(&native).unwrap();
+        assert_eq!(native.element(tags::BITS_STORED).unwrap().to_int::<u16>().unwrap(), 8, "{target}");
+        assert_eq!(native.element(tags::SAMPLES_PER_PIXEL).unwrap().to_int::<u16>().unwrap(), 3, "{target}");
+        assert_eq!(native.element(tags::PIXEL_DATA).unwrap().to_bytes().unwrap().as_ref(), expected, "{target}");
+
+        let object = read_dicom_bytes(&bytes).unwrap();
+        let rendered = render_dicom_frame(&object, RenderOutputFormat::Png, &RenderPipelineOptions::default())
+            .unwrap_or_else(|error| panic!("{target}: {error}"));
+        let image = image::load_from_memory(&rendered.bytes).unwrap().to_rgb8();
+        assert_eq!(image.as_raw().as_slice(), expected, "{target}");
+    }
+}
+
 /// The fragments of an encapsulated Pixel Data, after reading `bytes`.
 fn issue_fragments(bytes: &[u8]) -> (Vec<u32>, Vec<Vec<u8>>) {
     let object = read_dicom_bytes(bytes).unwrap();

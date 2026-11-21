@@ -4,10 +4,13 @@
 //!   encode via the vendored OpenHTJ2K library.
 //! - [`openjpeg`]: classic JPEG 2000 (Part 1) decode via OpenJPEG, with an explicit thread count.
 //! - [`threads`]: the shared threading policy.
+//! - [`codestream`]: locating the codestream in a fragment (raw or JP2-wrapped) and reading its
+//!   SIZ/COD main-header parameters without decoding.
 //!
 //! See `docs/jpeg2000-codec-evaluation.md` at the repository root for why these two libraries
 //! (and not Kakadu, the `j2k` crate, Grok or OpenJPH) were chosen.
 
+pub mod codestream;
 pub mod htj2k;
 pub mod openjpeg;
 pub mod threads;
