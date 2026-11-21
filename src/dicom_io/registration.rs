@@ -61,7 +61,9 @@ use super::volume::Volume;
 pub type Mat4 = [f64; 16];
 type Vec3 = [f64; 3];
 
-const IDENTITY: Mat4 = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0];
+const IDENTITY: Mat4 = [
+    1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+];
 
 /// Fixed chunk size of every parallel reduction: results are summed chunk by chunk in order, so
 /// a metric value is bit-identical whatever the thread count.
@@ -273,7 +275,13 @@ pub struct TranslationOptions {
 
 impl Default for TranslationOptions {
     fn default() -> Self {
-        Self { fixed_modality: None, moving_modality: None, min_overlap_mm: 60.0, max_shift_mm: None, min_overlap_fraction: Some(0.4) }
+        Self {
+            fixed_modality: None,
+            moving_modality: None,
+            min_overlap_mm: 60.0,
+            max_shift_mm: None,
+            min_overlap_fraction: Some(0.4),
+        }
     }
 }
 
@@ -312,8 +320,14 @@ pub enum RegistrationError {
 impl fmt::Display for RegistrationError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::EmptyMask(which) => write!(formatter, "registration: the {which} volume has no body voxels to register"),
-            Self::NoOverlap => write!(formatter, "registration: fixed and moving volumes do not overlap"),
+            Self::EmptyMask(which) => write!(
+                formatter,
+                "registration: the {which} volume has no body voxels to register"
+            ),
+            Self::NoOverlap => write!(
+                formatter,
+                "registration: fixed and moving volumes do not overlap"
+            ),
             Self::InvalidOption(message) => write!(formatter, "registration: {message}"),
             Self::Cancelled => write!(formatter, "registration cancelled"),
         }
@@ -365,7 +379,8 @@ pub fn mat_inverse(m: &Mat4) -> Option<Mat4> {
     let mut a = *m;
     let mut inv = IDENTITY;
     for col in 0..4 {
-        let pivot = (col..4).max_by(|&x, &y| a[x * 4 + col].abs().total_cmp(&a[y * 4 + col].abs()))?;
+        let pivot =
+            (col..4).max_by(|&x, &y| a[x * 4 + col].abs().total_cmp(&a[y * 4 + col].abs()))?;
         if a[pivot * 4 + col].abs() < 1e-12 {
             return None;
         }
@@ -394,7 +409,9 @@ pub fn mat_inverse(m: &Mat4) -> Option<Mat4> {
 }
 
 pub fn translation_matrix(t: Vec3) -> Mat4 {
-    [1.0, 0.0, 0.0, t[0], 0.0, 1.0, 0.0, t[1], 0.0, 0.0, 1.0, t[2], 0.0, 0.0, 0.0, 1.0]
+    [
+        1.0, 0.0, 0.0, t[0], 0.0, 1.0, 0.0, t[1], 0.0, 0.0, 1.0, t[2], 0.0, 0.0, 0.0, 1.0,
+    ]
 }
 
 /// `Rz(rz) * Ry(ry) * Rx(rx)`, radians, as the 3x3 part of a 4x4.
@@ -403,10 +420,22 @@ pub fn rotation_matrix(rx: f64, ry: f64, rz: f64) -> Mat4 {
     let (sy, cy) = ry.sin_cos();
     let (sz, cz) = rz.sin_cos();
     [
-        cz * cy, cz * sy * sx - sz * cx, cz * sy * cx + sz * sx, 0.0,
-        sz * cy, sz * sy * sx + cz * cx, sz * sy * cx - cz * sx, 0.0,
-        -sy, cy * sx, cy * cx, 0.0,
-        0.0, 0.0, 0.0, 1.0,
+        cz * cy,
+        cz * sy * sx - sz * cx,
+        cz * sy * cx + sz * sx,
+        0.0,
+        sz * cy,
+        sz * sy * sx + cz * cx,
+        sz * sy * cx - cz * sx,
+        0.0,
+        -sy,
+        cy * sx,
+        cy * cx,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
     ]
 }
 
@@ -460,7 +489,10 @@ impl WorkImage {
 
     fn world(&self, i: usize, j: usize, k: usize) -> Vec3 {
         add(
-            add(add(self.origin, scale(self.axes[0], i as f64 * self.spacing[0])), scale(self.axes[1], j as f64 * self.spacing[1])),
+            add(
+                add(self.origin, scale(self.axes[0], i as f64 * self.spacing[0])),
+                scale(self.axes[1], j as f64 * self.spacing[1]),
+            ),
             scale(self.axes[2], k as f64 * self.spacing[2]),
         )
     }
@@ -526,7 +558,11 @@ fn work_grid(volume: &Volume, spacing: f64) -> ([usize; 2], [usize; 3], f64) {
     let span = volume.slice_zs[volume.slice_zs.len() - 1] - volume.slice_zs[0];
     let nominal = volume.nominal_slice_spacing_mm().max(1e-3);
     let sz = spacing.max(nominal);
-    let nz = if volume.num_slices > 1 { (span / sz + 1e-6).floor() as usize + 1 } else { 1 };
+    let nz = if volume.num_slices > 1 {
+        (span / sz + 1e-6).floor() as usize + 1
+    } else {
+        1
+    };
     ([kx, ky], [nx, ny, nz], sz)
 }
 
@@ -546,59 +582,84 @@ fn build_work_image(volume: &Volume, spacing: f64) -> WorkImage {
 
     // In-plane block averages of every slice.
     let mut binned = vec![0f32; out_plane * slices];
-    binned.par_chunks_mut(out_plane).enumerate().for_each(|(s, out)| {
-        let src = &volume.samples[s * plane..(s + 1) * plane];
-        for by in 0..ny {
-            let r0 = by * ky;
-            let r1 = (r0 + ky).min(rows);
-            for bx in 0..nx {
-                let c0 = bx * kx;
-                let c1 = (c0 + kx).min(cols);
-                let mut sum = 0f64;
-                for r in r0..r1 {
-                    sum += src[r * cols + c0..r * cols + c1].iter().map(|&v| f64::from(v)).sum::<f64>();
+    binned
+        .par_chunks_mut(out_plane)
+        .enumerate()
+        .for_each(|(s, out)| {
+            let src = &volume.samples[s * plane..(s + 1) * plane];
+            for by in 0..ny {
+                let r0 = by * ky;
+                let r1 = (r0 + ky).min(rows);
+                for bx in 0..nx {
+                    let c0 = bx * kx;
+                    let c1 = (c0 + kx).min(cols);
+                    let mut sum = 0f64;
+                    for r in r0..r1 {
+                        sum += src[r * cols + c0..r * cols + c1]
+                            .iter()
+                            .map(|&v| f64::from(v))
+                            .sum::<f64>();
+                    }
+                    out[by * nx + bx] = (sum / ((r1 - r0) * (c1 - c0)) as f64) as f32;
                 }
-                out[by * nx + bx] = (sum / ((r1 - r0) * (c1 - c0)) as f64) as f32;
             }
-        }
-    });
+        });
 
     // Along the normal: the mean of the slices within half a working step of each target
     // position, or linear interpolation between the two bracketing slices when none is.
     let zs = &volume.slice_zs;
     let mut data = vec![0f32; out_plane * nz];
-    data.par_chunks_mut(out_plane).enumerate().for_each(|(k, out)| {
-        let z = zs[0] + k as f64 * sz;
-        let lo = zs.partition_point(|&v| v < z - sz / 2.0);
-        let hi = zs.partition_point(|&v| v < z + sz / 2.0);
-        if hi > lo {
-            let count = (hi - lo) as f32;
-            for s in lo..hi {
-                for (o, &v) in out.iter_mut().zip(&binned[s * out_plane..(s + 1) * out_plane]) {
-                    *o += v;
+    data.par_chunks_mut(out_plane)
+        .enumerate()
+        .for_each(|(k, out)| {
+            let z = zs[0] + k as f64 * sz;
+            let lo = zs.partition_point(|&v| v < z - sz / 2.0);
+            let hi = zs.partition_point(|&v| v < z + sz / 2.0);
+            if hi > lo {
+                let count = (hi - lo) as f32;
+                for s in lo..hi {
+                    for (o, &v) in out
+                        .iter_mut()
+                        .zip(&binned[s * out_plane..(s + 1) * out_plane])
+                    {
+                        *o += v;
+                    }
+                }
+                out.iter_mut().for_each(|o| *o /= count);
+            } else {
+                let upper = zs.partition_point(|&v| v < z).clamp(1, slices - 1);
+                let lower = upper - 1;
+                let t =
+                    ((z - zs[lower]) / (zs[upper] - zs[lower]).max(1e-9)).clamp(0.0, 1.0) as f32;
+                let a = &binned[lower * out_plane..(lower + 1) * out_plane];
+                let b = &binned[upper * out_plane..(upper + 1) * out_plane];
+                for ((o, &va), &vb) in out.iter_mut().zip(a).zip(b) {
+                    *o = va + (vb - va) * t;
                 }
             }
-            out.iter_mut().for_each(|o| *o /= count);
-        } else {
-            let upper = zs.partition_point(|&v| v < z).clamp(1, slices - 1);
-            let lower = upper - 1;
-            let t = ((z - zs[lower]) / (zs[upper] - zs[lower]).max(1e-9)).clamp(0.0, 1.0) as f32;
-            let a = &binned[lower * out_plane..(lower + 1) * out_plane];
-            let b = &binned[upper * out_plane..(upper + 1) * out_plane];
-            for ((o, &va), &vb) in out.iter_mut().zip(a).zip(b) {
-                *o = va + (vb - va) * t;
-            }
-        }
-    });
+        });
 
     let origin = add(
-        add(volume.origin, scale(volume.row_vector, (kx - 1) as f64 / 2.0 * volume.col_spacing_mm)),
-        scale(volume.col_vector, (ky - 1) as f64 / 2.0 * volume.row_spacing_mm),
+        add(
+            volume.origin,
+            scale(
+                volume.row_vector,
+                (kx - 1) as f64 / 2.0 * volume.col_spacing_mm,
+            ),
+        ),
+        scale(
+            volume.col_vector,
+            (ky - 1) as f64 / 2.0 * volume.row_spacing_mm,
+        ),
     );
     WorkImage {
         data,
         dims: [nx, ny, nz],
-        spacing: [kx as f64 * volume.col_spacing_mm, ky as f64 * volume.row_spacing_mm, if nz > 1 { sz } else { 1.0 }],
+        spacing: [
+            kx as f64 * volume.col_spacing_mm,
+            ky as f64 * volume.row_spacing_mm,
+            if nz > 1 { sz } else { 1.0 },
+        ],
         origin,
         axes: [volume.row_vector, volume.col_vector, volume.slice_normal],
     }
@@ -674,7 +735,11 @@ fn otsu(values: &[f32], lo: f32, hi: f32) -> f32 {
         }
     }
     let total: f64 = histogram.iter().sum();
-    let sum_all: f64 = histogram.iter().enumerate().map(|(i, &n)| i as f64 * n).sum();
+    let sum_all: f64 = histogram
+        .iter()
+        .enumerate()
+        .map(|(i, &n)| i as f64 * n)
+        .sum();
     let (mut weight_b, mut sum_b, mut best, mut best_bin) = (0.0, 0.0, -1.0, 0);
     for (bin, &n) in histogram.iter().enumerate() {
         weight_b += n;
@@ -783,14 +848,19 @@ fn largest_component(mask: &[u8], dims: [usize; 3]) -> Vec<u8> {
             best = (next, size);
         }
     }
-    label.iter().map(|&l| u8::from(l != 0 && l == best.0)).collect()
+    label
+        .iter()
+        .map(|&l| u8::from(l != 0 && l == best.0))
+        .collect()
 }
 
 /// Fills enclosed holes: everything not reachable from the grid's side faces through
 /// background. The two faces of the axis closest to patient S-I are not seeds, so a lung or
 /// airway cut by the top or bottom of the scan still counts as enclosed.
 fn fill_holes(mask: &[u8], dims: [usize; 3], axes: &[Vec3; 3]) -> Vec<u8> {
-    let si_axis = (0..3).max_by(|&a, &b| axes[a][2].abs().total_cmp(&axes[b][2].abs())).unwrap_or(2);
+    let si_axis = (0..3)
+        .max_by(|&a, &b| axes[a][2].abs().total_cmp(&axes[b][2].abs()))
+        .unwrap_or(2);
     let [nx, ny, nz] = dims;
     let mut outside = vec![false; mask.len()];
     let mut stack = Vec::new();
@@ -830,7 +900,8 @@ fn body_mask(image: &WorkImage, class: ModalityClass) -> Vec<u8> {
             // 30 % of the median uptake of what is above 5 % of the 99.5th percentile: the
             // 5 % level alone lets the speckle outside the body of a noisy scan through.
             let floor = quantile(data, |_| true, 0.995).unwrap_or(0.0) * 0.05;
-            quantile(data, |i| data[i] > floor, 0.5).map_or(floor, |median| (0.3 * median).max(floor))
+            quantile(data, |i| data[i] > floor, 0.5)
+                .map_or(floor, |median| (0.3 * median).max(floor))
         }
         ModalityClass::Mr | ModalityClass::Other => {
             let lo = quantile(data, |_| true, 0.0).unwrap_or(0.0);
@@ -849,7 +920,11 @@ fn body_mask(image: &WorkImage, class: ModalityClass) -> Vec<u8> {
     let filled = fill_holes(&body, dims, &image.axes);
     // A CT reconstructed with a smaller field of view than the patient has its lungs cut open
     // at the FOV edge; they are still inside the patient.
-    if class == ModalityClass::Ct { fill_in_plane(&filled, dims) } else { filled }
+    if class == ModalityClass::Ct {
+        fill_in_plane(&filled, dims)
+    } else {
+        filled
+    }
 }
 
 /// Also counts as body every voxel between two body voxels of its slice's row or column: a lung
@@ -909,7 +984,13 @@ fn normalize(image: &WorkImage, mask: &[u8]) -> Vec<f32> {
         .data
         .iter()
         .zip(mask)
-        .map(|(&v, &m)| if m == 0 { 0.0 } else { ((v - lo) / range).clamp(0.0, 1.0) })
+        .map(|(&v, &m)| {
+            if m == 0 {
+                0.0
+            } else {
+                ((v - lo) / range).clamp(0.0, 1.0)
+            }
+        })
         .collect()
 }
 
@@ -922,16 +1003,30 @@ struct Prepared {
     sampling: Vec<u8>,
 }
 
-fn prepare(volume: &Volume, spacing: f64, class: ModalityClass, mask_mode: MaskMode, roi: Option<(Vec3, Vec3)>) -> Prepared {
+fn prepare(
+    volume: &Volume,
+    spacing: f64,
+    class: ModalityClass,
+    mask_mode: MaskMode,
+    roi: Option<(Vec3, Vec3)>,
+) -> Prepared {
     let mut image = build_work_image(volume, spacing);
     let mut body = match mask_mode {
         MaskMode::Auto => body_mask(&image, class),
         MaskMode::None => vec![1u8; image.len()],
     };
     apply_roi(&mut body, &image, roi);
-    let sampling = if mask_mode == MaskMode::Auto { dilate(&body, image.dims) } else { body.clone() };
+    let sampling = if mask_mode == MaskMode::Auto {
+        dilate(&body, image.dims)
+    } else {
+        body.clone()
+    };
     image.data = normalize(&image, &sampling);
-    Prepared { image, body, sampling }
+    Prepared {
+        image,
+        body,
+        sampling,
+    }
 }
 
 fn mask_centroid(prepared: &Prepared) -> Option<Vec3> {
@@ -1011,7 +1106,13 @@ fn bspline3(x: f64) -> f64 {
     }
 }
 
-fn evaluate_metric(kind: MetricKind, bins: usize, samples: &Samples, moving: &WorkImage, fixed_to_moving_index: &Mat4) -> MetricValue {
+fn evaluate_metric(
+    kind: MetricKind,
+    bins: usize,
+    samples: &Samples,
+    moving: &WorkImage,
+    fixed_to_moving_index: &Mat4,
+) -> MetricValue {
     let m = fixed_to_moving_index;
     let total = samples.points.len();
     let map = |p: &[f32; 3]| -> Vec3 {
@@ -1049,15 +1150,33 @@ fn evaluate_metric(kind: MetricKind, bins: usize, samples: &Samples, moving: &Wo
             let n = acc[0];
             let overlap = n / total.max(1) as f64;
             if n < 16.0 {
-                return MetricValue { cost: 1.0, value: 0.0, normalized: 0.0, overlap };
+                return MetricValue {
+                    cost: 1.0,
+                    value: 0.0,
+                    normalized: 0.0,
+                    overlap,
+                };
             }
             let cov = acc[5] - acc[1] * acc[2] / n;
             let var_f = acc[3] - acc[1] * acc[1] / n;
             let var_m = acc[4] - acc[2] * acc[2] / n;
-            let corr = if var_f > 1e-12 && var_m > 1e-12 { cov / (var_f * var_m).sqrt() } else { 0.0 };
+            let corr = if var_f > 1e-12 && var_m > 1e-12 {
+                cov / (var_f * var_m).sqrt()
+            } else {
+                0.0
+            };
             // Too little overlap is never a good alignment, however well the remnant correlates.
-            let penalty = if overlap < 0.1 { 1.0 - overlap / 0.1 } else { 0.0 };
-            MetricValue { cost: -corr + penalty, value: corr, normalized: corr, overlap }
+            let penalty = if overlap < 0.1 {
+                1.0 - overlap / 0.1
+            } else {
+                0.0
+            };
+            MetricValue {
+                cost: -corr + penalty,
+                value: corr,
+                normalized: corr,
+                overlap,
+            }
         }
         MetricKind::MattesMi => {
             let b = bins.max(8);
@@ -1096,7 +1215,12 @@ fn evaluate_metric(kind: MetricKind, bins: usize, samples: &Samples, moving: &Wo
             }
             let overlap = n / total.max(1) as f64;
             if n < 16.0 {
-                return MetricValue { cost: 1.0, value: 0.0, normalized: 0.0, overlap };
+                return MetricValue {
+                    cost: 1.0,
+                    value: 0.0,
+                    normalized: 0.0,
+                    overlap,
+                };
             }
             let sum: f64 = joint.iter().sum();
             let mut pf = vec![0.0; b];
@@ -1109,7 +1233,8 @@ fn evaluate_metric(kind: MetricKind, bins: usize, samples: &Samples, moving: &Wo
                     pm[j] += p;
                 }
             }
-            let entropy = |p: &[f64]| -> f64 { p.iter().filter(|&&x| x > 0.0).map(|&x| -x * x.ln()).sum() };
+            let entropy =
+                |p: &[f64]| -> f64 { p.iter().filter(|&&x| x > 0.0).map(|&x| -x * x.ln()).sum() };
             let (hf, hm) = (entropy(&pf), entropy(&pm));
             let mut mi = 0.0;
             for i in 0..b {
@@ -1120,9 +1245,22 @@ fn evaluate_metric(kind: MetricKind, bins: usize, samples: &Samples, moving: &Wo
                     }
                 }
             }
-            let ecc = if hf + hm > 0.0 { 2.0 * mi / (hf + hm) } else { 0.0 };
-            let penalty = if overlap < 0.1 { 1.0 - overlap / 0.1 } else { 0.0 };
-            MetricValue { cost: -mi + penalty * mi.abs().max(0.1), value: mi, normalized: ecc, overlap }
+            let ecc = if hf + hm > 0.0 {
+                2.0 * mi / (hf + hm)
+            } else {
+                0.0
+            };
+            let penalty = if overlap < 0.1 {
+                1.0 - overlap / 0.1
+            } else {
+                0.0
+            };
+            MetricValue {
+                cost: -mi + penalty * mi.abs().max(0.1),
+                value: mi,
+                normalized: ecc,
+                overlap,
+            }
         }
     }
 }
@@ -1144,10 +1282,17 @@ struct Budget {
 
 impl Budget {
     fn check(&self) -> Result<(), Stop> {
-        if self.cancel.as_ref().is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+        if self
+            .cancel
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::Relaxed))
+        {
             return Err(Stop::Cancelled);
         }
-        if self.deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+        if self
+            .deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
             return Err(Stop::TimeLimit);
         }
         Ok(())
@@ -1174,7 +1319,13 @@ impl LevelObjective<'_> {
     /// fixed -> moving world transform for parameters `q`: `start * D(q)`, where `D` rotates
     /// about the centre by `q[0..3] / radius` radians and translates by `q[3..6]` mm.
     fn transform(&self, q: &[f64; 6]) -> Mat4 {
-        let delta = rigid_about(q[0] / self.radius, q[1] / self.radius, q[2] / self.radius, [q[3], q[4], q[5]], self.center);
+        let delta = rigid_about(
+            q[0] / self.radius,
+            q[1] / self.radius,
+            q[2] / self.radius,
+            [q[3], q[4], q[5]],
+            self.center,
+        );
         mat_mul(&self.start, &delta)
     }
 
@@ -1204,7 +1355,14 @@ fn along(p: &[f64; 6], d: &[f64; 6], t: f64) -> [f64; 6] {
 
 /// Minimizes `cost(p + t d)` over `t`: bracketing from `[0, step]`, then Brent's method to
 /// `tolerance` (in parameter units). Returns `(t, cost)`.
-fn line_minimize(objective: &mut LevelObjective, p: &[f64; 6], d: &[f64; 6], f0: f64, step: f64, tolerance: f64) -> Result<(f64, f64), Stop> {
+fn line_minimize(
+    objective: &mut LevelObjective,
+    p: &[f64; 6],
+    d: &[f64; 6],
+    f0: f64,
+    step: f64,
+    tolerance: f64,
+) -> Result<(f64, f64), Stop> {
     const GOLD: f64 = 1.618_033_988_749_895;
     const MAX_EXPANSIONS: usize = 12;
     // Bracket a < b < c (in t) with f(b) below both ends.
@@ -1214,7 +1372,15 @@ fn line_minimize(objective: &mut LevelObjective, p: &[f64; 6], d: &[f64; 6], f0:
         let (t, ft) = (-step, objective.cost(&along(p, d, -step))?);
         if ft >= fa {
             // The minimum is within one step of 0: bracket [-step, step].
-            return brent(objective, p, d, (-step, ft), (0.0, f0), (step, fb), tolerance);
+            return brent(
+                objective,
+                p,
+                d,
+                (-step, ft),
+                (0.0, f0),
+                (step, fb),
+                tolerance,
+            );
         }
         // Downhill is the negative direction.
         b = t;
@@ -1288,7 +1454,11 @@ fn brent(
             previous = if x >= mid { lo - x } else { hi - x };
             step = CGOLD * previous;
         }
-        let u = if step.abs() >= tol1 { x + step } else { x + tol1.copysign(step) };
+        let u = if step.abs() >= tol1 {
+            x + step
+        } else {
+            x + tol1.copysign(step)
+        };
         let fu = objective.cost(&along(p, d, u))?;
         if fu <= fx {
             if u >= x {
@@ -1323,7 +1493,12 @@ fn brent(
 }
 
 /// Powell's direction-set method from `q = 0`. Returns `(q, cost, iterations, converged)`.
-fn powell(objective: &mut LevelObjective, step: f64, tolerance: f64, max_iterations: u32) -> Result<([f64; 6], f64, u32, bool), Stop> {
+fn powell(
+    objective: &mut LevelObjective,
+    step: f64,
+    tolerance: f64,
+    max_iterations: u32,
+) -> Result<([f64; 6], f64, u32, bool), Stop> {
     let mut directions: Vec<[f64; 6]> = (0..6)
         .map(|i| {
             let mut d = [0.0; 6];
@@ -1348,7 +1523,10 @@ fn powell(objective: &mut LevelObjective, step: f64, tolerance: f64, max_iterati
                 biggest_index = index;
             }
         }
-        let moved: f64 = (0..6).map(|i| (p[i] - p_start[i]).powi(2)).sum::<f64>().sqrt();
+        let moved: f64 = (0..6)
+            .map(|i| (p[i] - p_start[i]).powi(2))
+            .sum::<f64>()
+            .sqrt();
         if 2.0 * (f_start - fp) <= 1e-6 * (f_start.abs() + fp.abs()) + 1e-9 || moved < tolerance {
             return Ok((p, fp, iteration, true));
         }
@@ -1361,7 +1539,8 @@ fn powell(objective: &mut LevelObjective, step: f64, tolerance: f64, max_iterati
         let extrapolated = along(&p, &net, 1.0);
         let fe = objective.cost(&extrapolated)?;
         if fe < f_start {
-            let t = 2.0 * (f_start - 2.0 * fp + fe) * (f_start - fp - biggest_drop).powi(2) - biggest_drop * (f_start - fe).powi(2);
+            let t = 2.0 * (f_start - 2.0 * fp + fe) * (f_start - fp - biggest_drop).powi(2)
+                - biggest_drop * (f_start - fe).powi(2);
             if t < 0.0 {
                 let norm = moved.max(1e-12);
                 let unit = net.map(|x| x / norm);
@@ -1387,18 +1566,31 @@ fn parse_modality(explicit: &Option<String>, volume: &Volume) -> ModalityClass {
 }
 
 fn validate_options(options: &RegistrationOptions) -> Result<(), RegistrationError> {
-    if options.levels_mm.is_empty() || options.levels_mm.iter().any(|&s| !(s.is_finite() && s > 0.0)) {
-        return Err(RegistrationError::InvalidOption("levelsMm must be a non-empty list of positive spacings".into()));
+    if options.levels_mm.is_empty()
+        || options
+            .levels_mm
+            .iter()
+            .any(|&s| !(s.is_finite() && s > 0.0))
+    {
+        return Err(RegistrationError::InvalidOption(
+            "levelsMm must be a non-empty list of positive spacings".into(),
+        ));
     }
     if !(8..=256).contains(&options.histogram_bins) {
-        return Err(RegistrationError::InvalidOption("histogramBins must be between 8 and 256".into()));
+        return Err(RegistrationError::InvalidOption(
+            "histogramBins must be between 8 and 256".into(),
+        ));
     }
     if options.max_samples < 1000 {
-        return Err(RegistrationError::InvalidOption("maxSamples must be at least 1000".into()));
+        return Err(RegistrationError::InvalidOption(
+            "maxSamples must be at least 1000".into(),
+        ));
     }
     if let Some(m) = &options.initial_matrix {
         if m.iter().any(|v| !v.is_finite()) || mat_inverse(m).is_none() {
-            return Err(RegistrationError::InvalidOption("initialMatrix must be 16 finite numbers and invertible".into()));
+            return Err(RegistrationError::InvalidOption(
+                "initialMatrix must be 16 finite numbers and invertible".into(),
+            ));
         }
     }
     Ok(())
@@ -1426,7 +1618,13 @@ const DUPLICATE_START_MM: f64 = 2.0;
 /// falls inside the moving body mask. `(normalized, share of the fixed samples in the moving
 /// body)`. Unlike the optimizer's metric, this does not count the fixed anatomy the moving scan
 /// never saw (a smaller reconstruction field of view, a cropped end) against the alignment.
-fn masked_metric(kind: MetricKind, bins: usize, samples: &Samples, moving: &Prepared, fixed_to_moving_index: &Mat4) -> (f64, f64) {
+fn masked_metric(
+    kind: MetricKind,
+    bins: usize,
+    samples: &Samples,
+    moving: &Prepared,
+    fixed_to_moving_index: &Mat4,
+) -> (f64, f64) {
     let image = &moving.image;
     let [nx, ny, nz] = image.dims;
     let in_body = |index: Vec3| -> bool {
@@ -1439,7 +1637,10 @@ fn masked_metric(kind: MetricKind, bins: usize, samples: &Samples, moving: &Prep
     let mut points = Vec::new();
     let mut values = Vec::new();
     for (p, &v) in samples.points.iter().zip(&samples.values) {
-        let index = transform_point(fixed_to_moving_index, [f64::from(p[0]), f64::from(p[1]), f64::from(p[2])]);
+        let index = transform_point(
+            fixed_to_moving_index,
+            [f64::from(p[0]), f64::from(p[1]), f64::from(p[2])],
+        );
         if in_body(index) {
             points.push(*p);
             values.push(v);
@@ -1450,7 +1651,10 @@ fn masked_metric(kind: MetricKind, bins: usize, samples: &Samples, moving: &Prep
         return (0.0, share);
     }
     let subset = Samples { points, values };
-    (evaluate_metric(kind, bins, &subset, image, fixed_to_moving_index).normalized, share)
+    (
+        evaluate_metric(kind, bins, &subset, image, fixed_to_moving_index).normalized,
+        share,
+    )
 }
 
 /// Quality in 0..1 from the masked metric (`masked_metric`) and the share of the fixed body the
@@ -1488,21 +1692,46 @@ fn quality_label(quality: f64) -> &'static str {
 /// refined at the finest level and returned, `consistent` saying whether another start converged
 /// to within `AGREE_MM` of it and `starts` listing them all. The working images are built once
 /// and shared, so extra starts cost only optimizer time.
-pub fn register_rigid(fixed: &Volume, moving: &Volume, options: &RegistrationOptions) -> Result<RegistrationResult, RegistrationError> {
+pub fn register_rigid(
+    fixed: &Volume,
+    moving: &Volume,
+    options: &RegistrationOptions,
+) -> Result<RegistrationResult, RegistrationError> {
     validate_options(options)?;
     let fixed_class = parse_modality(&options.fixed_modality, fixed);
     let moving_class = parse_modality(&options.moving_modality, moving);
     let kind = match options.metric {
         MetricChoice::Ncc => MetricKind::Ncc,
         MetricChoice::MattesMi => MetricKind::MattesMi,
-        MetricChoice::Auto if fixed_class == moving_class && fixed_class != ModalityClass::Other => MetricKind::Ncc,
+        MetricChoice::Auto
+            if fixed_class == moving_class && fixed_class != ModalityClass::Other =>
+        {
+            MetricKind::Ncc
+        }
         MetricChoice::Auto => MetricKind::MattesMi,
     };
     let started = Instant::now();
-    let budget = Budget { deadline: options.time_limit.map(|limit| started + limit), cancel: options.cancel.clone() };
-    let spacings: Vec<f64> = options.levels_mm.iter().map(|&s| fit_spacing(fixed, moving, s, options.max_memory_bytes)).collect();
+    let budget = Budget {
+        deadline: options.time_limit.map(|limit| started + limit),
+        cancel: options.cancel.clone(),
+    };
+    let spacings: Vec<f64> = options
+        .levels_mm
+        .iter()
+        .map(|&s| fit_spacing(fixed, moving, s, options.max_memory_bytes))
+        .collect();
     let mut levels: Vec<Option<Level>> = (0..spacings.len()).map(|_| None).collect();
-    let mut context = RigidContext { fixed, moving, options, fixed_class, moving_class, spacings, levels: &mut levels, budget: &budget, started };
+    let mut context = RigidContext {
+        fixed,
+        moving,
+        options,
+        fixed_class,
+        moving_class,
+        spacings,
+        levels: &mut levels,
+        budget: &budget,
+        started,
+    };
     let first = context.run(kind)?;
     // MR-MR is often two different weightings (T1 vs T2), which NCC cannot align: if NCC stays
     // poor, try mutual information from the same starts and keep the better result.
@@ -1522,11 +1751,22 @@ pub fn register_rigid(fixed: &Volume, moving: &Volume, options: &RegistrationOpt
 }
 
 fn validate_rotation(options: &RegistrationOptions) -> Result<(), RegistrationError> {
-    if options.max_rotation_deg.is_some_and(|d| !(d.is_finite() && d > 0.0)) {
-        return Err(RegistrationError::InvalidOption("maxRotationDeg must be a positive number".into()));
+    if options
+        .max_rotation_deg
+        .is_some_and(|d| !(d.is_finite() && d > 0.0))
+    {
+        return Err(RegistrationError::InvalidOption(
+            "maxRotationDeg must be a positive number".into(),
+        ));
     }
-    if options.starts.iter().any(|m| m.iter().any(|v| !v.is_finite()) || mat_inverse(m).is_none()) {
-        return Err(RegistrationError::InvalidOption("starts must be matrices of 16 finite numbers, invertible".into()));
+    if options
+        .starts
+        .iter()
+        .any(|m| m.iter().any(|v| !v.is_finite()) || mat_inverse(m).is_none())
+    {
+        return Err(RegistrationError::InvalidOption(
+            "starts must be matrices of 16 finite numbers, invertible".into(),
+        ));
     }
     Ok(())
 }
@@ -1572,11 +1812,23 @@ impl RigidContext<'_> {
     fn level(&mut self, index: usize) -> Result<&Level, RegistrationError> {
         if self.levels[index].is_none() {
             let spacing = self.spacings[index];
-            let fixed = prepare(self.fixed, spacing, self.fixed_class, self.options.mask, self.options.roi);
+            let fixed = prepare(
+                self.fixed,
+                spacing,
+                self.fixed_class,
+                self.options.mask,
+                self.options.roi,
+            );
             if fixed.body.iter().all(|&m| m == 0) {
                 return Err(RegistrationError::EmptyMask("fixed"));
             }
-            let moving = prepare(self.moving, spacing, self.moving_class, self.options.mask, None);
+            let moving = prepare(
+                self.moving,
+                spacing,
+                self.moving_class,
+                self.options.mask,
+                None,
+            );
             if moving.body.iter().all(|&m| m == 0) {
                 return Err(RegistrationError::EmptyMask("moving"));
             }
@@ -1592,8 +1844,17 @@ impl RigidContext<'_> {
                 }
                 (sum / samples.points.len().max(1) as f64).sqrt().max(20.0)
             };
-            let bytes = work_image_bytes(self.fixed, spacing) + work_image_bytes(self.moving, spacing) + samples.points.len() as u64 * 16;
-            self.levels[index] = Some(Level { spacing, moving, samples, center, radius, bytes });
+            let bytes = work_image_bytes(self.fixed, spacing)
+                + work_image_bytes(self.moving, spacing)
+                + samples.points.len() as u64 * 16;
+            self.levels[index] = Some(Level {
+                spacing,
+                moving,
+                samples,
+                center,
+                radius,
+                bytes,
+            });
         }
         Ok(self.levels[index].as_ref().expect("just built"))
     }
@@ -1603,8 +1864,15 @@ impl RigidContext<'_> {
     }
 
     /// Optimizes from `start` (moving -> fixed) through levels `range`.
-    fn optimize(&mut self, kind: MetricKind, start: &Mat4, range: std::ops::Range<usize>) -> Result<LevelRun, RegistrationError> {
-        let mut fixed_to_moving = mat_inverse(start).ok_or_else(|| RegistrationError::InvalidOption("initial transform is singular".into()))?;
+    fn optimize(
+        &mut self,
+        kind: MetricKind,
+        start: &Mat4,
+        range: std::ops::Range<usize>,
+    ) -> Result<LevelRun, RegistrationError> {
+        let mut fixed_to_moving = mat_inverse(start).ok_or_else(|| {
+            RegistrationError::InvalidOption("initial transform is singular".into())
+        })?;
         let mut run = LevelRun {
             fixed_to_moving,
             levels: Vec::new(),
@@ -1612,7 +1880,12 @@ impl RigidContext<'_> {
             evaluations: 0,
             stop_reason: StopReason::Converged,
             converged: true,
-            metric: MetricValue { cost: 1.0, value: 0.0, normalized: 0.0, overlap: 0.0 },
+            metric: MetricValue {
+                cost: 1.0,
+                value: 0.0,
+                normalized: 0.0,
+                overlap: 0.0,
+            },
             initial_metric: 0.0,
             center: [0.0; 3],
         };
@@ -1651,7 +1924,11 @@ impl RigidContext<'_> {
                 }
             };
             // The best point evaluated (Powell's result, or the best before a time limit hit).
-            let q = if objective.best.1.is_finite() { objective.best.0 } else { q };
+            let q = if objective.best.1.is_finite() {
+                objective.best.0
+            } else {
+                q
+            };
             fixed_to_moving = objective.transform(&q);
             let metric = objective.metric(&q);
             run.iterations += iterations;
@@ -1662,7 +1939,12 @@ impl RigidContext<'_> {
                     run.stop_reason = StopReason::MaxIterations;
                 }
             }
-            run.levels.push(LevelResult { spacing_mm: level.spacing, iterations, metric_evaluations: objective.evaluations, metric_value: metric.value });
+            run.levels.push(LevelResult {
+                spacing_mm: level.spacing,
+                iterations,
+                metric_evaluations: objective.evaluations,
+                metric_value: metric.value,
+            });
             run.metric = metric;
             run.center = level.center;
             run.fixed_to_moving = fixed_to_moving;
@@ -1677,13 +1959,30 @@ impl RigidContext<'_> {
     /// `check_optimum`: also look 2 working voxels away along each axis; a result that is not a
     /// local maximum there (the time limit stopped it, or it is on a slope) has its quality
     /// scaled down by how much better a neighbour is.
-    fn assess(&mut self, kind: MetricKind, fixed_to_moving: &Mat4, check_optimum: bool) -> Result<(f64, f64, f64), RegistrationError> {
-        let finest = self.levels.iter().rposition(Option::is_some).unwrap_or(self.spacings.len() - 1);
+    fn assess(
+        &mut self,
+        kind: MetricKind,
+        fixed_to_moving: &Mat4,
+        check_optimum: bool,
+    ) -> Result<(f64, f64, f64), RegistrationError> {
+        let finest = self
+            .levels
+            .iter()
+            .rposition(Option::is_some)
+            .unwrap_or(self.spacings.len() - 1);
         let bins = self.options.histogram_bins;
         let pet = self.fixed_class == ModalityClass::Pt || self.moving_class == ModalityClass::Pt;
         let level = self.level(finest)?;
         let world_to_index = level.moving.image.world_to_index();
-        let at = |m: &Mat4| masked_metric(kind, bins, &level.samples, &level.moving, &mat_mul(&world_to_index, m));
+        let at = |m: &Mat4| {
+            masked_metric(
+                kind,
+                bins,
+                &level.samples,
+                &level.moving,
+                &mat_mul(&world_to_index, m),
+            )
+        };
         let (masked, share) = at(fixed_to_moving);
         let mut quality = quality_score(kind, pet, masked, share);
         if check_optimum {
@@ -1717,7 +2016,11 @@ impl RigidContext<'_> {
         for a in [0.2, 0.8] {
             for b in [0.2, 0.8] {
                 for c in [0.2, 0.8] {
-                    corners.push([lo[0] + a * (hi[0] - lo[0]), lo[1] + b * (hi[1] - lo[1]), lo[2] + c * (hi[2] - lo[2])]);
+                    corners.push([
+                        lo[0] + a * (hi[0] - lo[0]),
+                        lo[1] + b * (hi[1] - lo[1]),
+                        lo[2] + c * (hi[2] - lo[2]),
+                    ]);
                 }
             }
         }
@@ -1737,11 +2040,19 @@ impl RigidContext<'_> {
         for (index, m) in options.starts.iter().enumerate() {
             starts.push((format!("start-{}", index + 1), *m));
         }
-        let estimate = if multi || matches!(options.initialization, Initialization::Translation | Initialization::Multi) {
+        let estimate = if multi
+            || matches!(
+                options.initialization,
+                Initialization::Translation | Initialization::Multi
+            ) {
             estimate_translation(
                 self.fixed,
                 self.moving,
-                &TranslationOptions { fixed_modality: options.fixed_modality.clone(), moving_modality: options.moving_modality.clone(), ..Default::default() },
+                &TranslationOptions {
+                    fixed_modality: options.fixed_modality.clone(),
+                    moving_modality: options.moving_modality.clone(),
+                    ..Default::default()
+                },
             )
             .ok()
         } else {
@@ -1749,8 +2060,20 @@ impl RigidContext<'_> {
         };
         let centroid = |context: &mut Self| -> Option<Mat4> {
             let spacing = context.spacings.last().copied().unwrap_or(4.0).max(4.0);
-            let f = prepare(context.fixed, spacing, context.fixed_class, options.mask, options.roi);
-            let m = prepare(context.moving, spacing, context.moving_class, options.mask, None);
+            let f = prepare(
+                context.fixed,
+                spacing,
+                context.fixed_class,
+                options.mask,
+                options.roi,
+            );
+            let m = prepare(
+                context.moving,
+                spacing,
+                context.moving_class,
+                options.mask,
+                None,
+            );
             match (mask_centroid(&f), mask_centroid(&m)) {
                 (Some(cf), Some(cm)) => Some(translation_matrix(sub(cf, cm))),
                 _ => None,
@@ -1768,13 +2091,15 @@ impl RigidContext<'_> {
         }
         match options.initialization {
             Initialization::None => starts.push(("none".into(), IDENTITY)),
-            Initialization::Translation | Initialization::Centroid | Initialization::Multi => match estimate {
-                Some(e) if e.confidence >= 0.3 => starts.push(("translation".into(), e.matrix)),
-                _ => match centroid(self) {
-                    Some(c) => starts.push(("centroid".into(), c)),
-                    None => starts.push(("none".into(), IDENTITY)),
-                },
-            },
+            Initialization::Translation | Initialization::Centroid | Initialization::Multi => {
+                match estimate {
+                    Some(e) if e.confidence >= 0.3 => starts.push(("translation".into(), e.matrix)),
+                    _ => match centroid(self) {
+                        Some(c) => starts.push(("centroid".into(), c)),
+                        None => starts.push(("none".into(), IDENTITY)),
+                    },
+                }
+            }
         }
         Ok(starts)
     }
@@ -1815,8 +2140,13 @@ impl RigidContext<'_> {
         let mut tried: Vec<Mat4> = Vec::new();
         let mut last_error = None;
         for (name, start) in starts {
-            let Some(start_inverse) = mat_inverse(&start) else { continue };
-            if tried.iter().any(|t| distance(t, &start_inverse) < DUPLICATE_START_MM) {
+            let Some(start_inverse) = mat_inverse(&start) else {
+                continue;
+            };
+            if tried
+                .iter()
+                .any(|t| distance(t, &start_inverse) < DUPLICATE_START_MM)
+            {
                 continue;
             }
             tried.push(start_inverse);
@@ -1852,7 +2182,10 @@ impl RigidContext<'_> {
         let best_coarse = runs[best].1.fixed_to_moving;
         // Coarse results scatter by up to about their level's spacing.
         let agree_mm = AGREE_MM.max(self.spacings[coarse_end - 1]);
-        let agrees: Vec<bool> = runs.iter().map(|(_, r)| distance(&r.fixed_to_moving, &best_coarse) <= agree_mm).collect();
+        let agrees: Vec<bool> = runs
+            .iter()
+            .map(|(_, r)| distance(&r.fixed_to_moving, &best_coarse) <= agree_mm)
+            .collect();
         let consistent = agrees.iter().filter(|&&a| a).count() > 1;
         // Refine the best at the finest level (from where its coarse run ended).
         let (best_name, best_run) = runs.swap_remove(best);
@@ -1878,7 +2211,14 @@ impl RigidContext<'_> {
         if !consistent && coarse_end <= finest && final_run.stop_reason != StopReason::TimeLimit {
             let candidate = (0..runs.len())
                 .filter(|&i| distance(&runs[i].1.fixed_to_moving, &best_coarse) <= 3.0 * agree_mm)
-                .max_by(|&a, &b| runs[a].1.metric.normalized.total_cmp(&runs[b].1.metric.normalized).then(b.cmp(&a)));
+                .max_by(|&a, &b| {
+                    runs[a]
+                        .1
+                        .metric
+                        .normalized
+                        .total_cmp(&runs[b].1.metric.normalized)
+                        .then(b.cmp(&a))
+                });
             if let Some(i) = candidate {
                 let start = mat_inverse(&runs[i].1.fixed_to_moving).expect("rigid");
                 if let Ok(run) = self.optimize(kind, &start, coarse_end..finest + 1) {
@@ -1905,14 +2245,24 @@ impl RigidContext<'_> {
                 matrix,
                 normalized_metric: run.metric.normalized,
                 quality,
-                quality_label: if rotation <= max_rotation { quality_label(quality) } else { "poor" },
+                quality_label: if rotation <= max_rotation {
+                    quality_label(quality)
+                } else {
+                    "poor"
+                },
                 rotation_angle_deg: rotation,
                 plausible: rotation <= max_rotation,
                 agrees: *agree,
                 refined: refined_index == Some(index),
             });
         }
-        self.finish(kind, final_run, name_to_initialization(&best_name), Some((best_name, consistent)), start_results)
+        self.finish(
+            kind,
+            final_run,
+            name_to_initialization(&best_name),
+            Some((best_name, consistent)),
+            start_results,
+        )
     }
 
     fn finish(
@@ -2049,7 +2399,11 @@ struct CellMap {
 impl CellMap {
     fn get(&self, x: i32, y: i32) -> bool {
         let (i, j) = (x - self.x0, y - self.y0);
-        i >= 0 && j >= 0 && (i as usize) < self.nx && (j as usize) < self.ny && self.on[j as usize * self.nx + i as usize]
+        i >= 0
+            && j >= 0
+            && (i as usize) < self.nx
+            && (j as usize) < self.ny
+            && self.on[j as usize * self.nx + i as usize]
     }
 }
 
@@ -2071,12 +2425,24 @@ fn cell_of(v: f64) -> i32 {
 }
 
 /// The working image, body mask and support of one volume for the estimate.
-fn estimate_volume(volume: &Volume, class: ModalityClass, intensity_channel: bool, ct_channels: bool) -> EstimateVolume {
+fn estimate_volume(
+    volume: &Volume,
+    class: ModalityClass,
+    intensity_channel: bool,
+    ct_channels: bool,
+) -> EstimateVolume {
     let image = build_work_image(volume, PROFILE_GRID_MM);
     let body = body_mask(&image, class);
-    let normalized = if intensity_channel { Some(normalize(&image, &body)) } else { None };
+    let normalized = if intensity_channel {
+        Some(normalize(&image, &body))
+    } else {
+        None
+    };
     let [nx, ny, nz] = image.dims;
-    let extent: f64 = (0..3).map(|a| image.axes[a][2].abs() * image.spacing[a]).sum::<f64>().max(PROFILE_BIN_MM);
+    let extent: f64 = (0..3)
+        .map(|a| image.axes[a][2].abs() * image.spacing[a])
+        .sum::<f64>()
+        .max(PROFILE_BIN_MM);
     let voxel_volume = image.spacing[0] * image.spacing[1] * image.spacing[2];
     let (mut lo, mut hi) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
     for &k in &[0, nz - 1] {
@@ -2096,7 +2462,10 @@ fn estimate_volume(volume: &Volume, class: ModalityClass, intensity_channel: boo
     let mut coverage = vec![0.0f64; bins];
     let mut voxels = Vec::new();
     let (cx0, cy0) = (cell_of(lo[0]) - 1, cell_of(lo[1]) - 1);
-    let (cnx, cny) = ((cell_of(hi[0]) - cx0 + 2) as usize, (cell_of(hi[1]) - cy0 + 2) as usize);
+    let (cnx, cny) = (
+        (cell_of(hi[0]) - cx0 + 2) as usize,
+        (cell_of(hi[1]) - cy0 + 2) as usize,
+    );
     let mut union = vec![false; cnx * cny];
     for k in 0..nz {
         for j in 0..ny {
@@ -2119,12 +2488,20 @@ fn estimate_volume(volume: &Volume, class: ModalityClass, intensity_channel: boo
                 }
                 let cell = [cell_of(p[0]), cell_of(p[1])];
                 union[(cell[1] - cy0) as usize * cnx + (cell[0] - cx0) as usize] = true;
-                voxels.push(EstimateVoxel { cell, z: p[2] as f32, flags, intensity: normalized.as_ref().map_or(0.0, |n| n[index]) });
+                voxels.push(EstimateVoxel {
+                    cell,
+                    z: p[2] as f32,
+                    flags,
+                    intensity: normalized.as_ref().map_or(0.0, |n| n[index]),
+                });
             }
         }
     }
     let full = coverage.iter().cloned().fold(0.0, f64::max);
-    let valid = coverage.iter().map(|&c| c >= 0.9 * full && full > 0.0).collect();
+    let valid = coverage
+        .iter()
+        .map(|&c| c >= 0.9 * full && full > 0.0)
+        .collect();
     // The support: the union of the body over all slices, dilated by one cell.
     let mut on = union.clone();
     for y in 0..cny {
@@ -2139,7 +2516,21 @@ fn estimate_volume(volume: &Volume, class: ModalityClass, intensity_channel: boo
             on[y * cnx + x] = near;
         }
     }
-    EstimateVolume { z0, bins, valid, extent, voxel_volume, voxels, support: CellMap { x0: cx0, y0: cy0, nx: cnx, ny: cny, on } }
+    EstimateVolume {
+        z0,
+        bins,
+        valid,
+        extent,
+        voxel_volume,
+        voxels,
+        support: CellMap {
+            x0: cx0,
+            y0: cy0,
+            nx: cnx,
+            ny: cny,
+            on,
+        },
+    }
 }
 
 /// Spreads a voxel centred at `z` with footprint `extent` over the 1 mm bins: `f(bin, share)`,
@@ -2196,7 +2587,12 @@ impl Channels {
 /// Per-bin profiles (one vector per channel; cross-sectional area in mm^2 or integrated
 /// intensity) of the voxels whose cell is in `own` support and, shifted by `shift` cells, in
 /// the `other` support.
-fn channel_profiles(volume: &EstimateVolume, channels: Channels, other: &CellMap, shift: [i32; 2]) -> Vec<Vec<f64>> {
+fn channel_profiles(
+    volume: &EstimateVolume,
+    channels: Channels,
+    other: &CellMap,
+    shift: [i32; 2],
+) -> Vec<Vec<f64>> {
     let count = channels.names().len();
     let mut out = vec![vec![0.0; volume.bins]; count];
     let scale = volume.voxel_volume / PROFILE_BIN_MM;
@@ -2205,11 +2601,17 @@ fn channel_profiles(volume: &EstimateVolume, channels: Channels, other: &CellMap
             continue;
         }
         let w = channels.weights(v);
-        spread(f64::from(v.z), volume.extent, volume.z0, volume.bins, |bin, share| {
-            for c in 0..count {
-                out[c][bin] += w[c] * share * scale;
-            }
-        });
+        spread(
+            f64::from(v.z),
+            volume.extent,
+            volume.z0,
+            volume.bins,
+            |bin, share| {
+                for c in 0..count {
+                    out[c][bin] += w[c] * share * scale;
+                }
+            },
+        );
     }
     out
 }
@@ -2282,7 +2684,8 @@ fn search_z(
             let pairs: Vec<(usize, usize)> = (0..f_bins)
                 .filter_map(|i| {
                     let j = i + offset;
-                    (j >= 0 && j < m_bins && f.valid[i as usize] && m.valid[j as usize]).then_some((i as usize, j as usize))
+                    (j >= 0 && j < m_bins && f.valid[i as usize] && m.valid[j as usize])
+                        .then_some((i as usize, j as usize))
                 })
                 .collect();
             if pairs.len() < min_overlap_bins.max(3) {
@@ -2298,24 +2701,45 @@ fn search_z(
                     pearson(&a, &b) * factor
                 })
                 .collect();
-            let score = per_channel.iter().zip(weights).map(|(r, w)| r * w).sum::<f64>() / weight_sum;
-            Some(ZScore { offset, score, raw: score / factor.max(1e-9), per_channel, overlap_bins: pairs.len() })
+            let score = per_channel
+                .iter()
+                .zip(weights)
+                .map(|(r, w)| r * w)
+                .sum::<f64>()
+                / weight_sum;
+            Some(ZScore {
+                offset,
+                score,
+                raw: score / factor.max(1e-9),
+                per_channel,
+                overlap_bins: pairs.len(),
+            })
         })
         .collect()
 }
 
 /// Index of the best score (ties: the smaller offset, i.e. deterministic).
 fn best_index(scores: &[ZScore], key: impl Fn(&ZScore) -> f64) -> Option<usize> {
-    (0..scores.len()).max_by(|&a, &b| key(&scores[a]).total_cmp(&key(&scores[b])).then(scores[b].offset.cmp(&scores[a].offset)))
+    (0..scores.len()).max_by(|&a, &b| {
+        key(&scores[a])
+            .total_cmp(&key(&scores[b]))
+            .then(scores[b].offset.cmp(&scores[a].offset))
+    })
 }
 
 /// The lobe of `scores[best]`: downhill both ways until the score rises again (contiguous offsets).
 fn lobe(scores: &[ZScore], best: usize, key: impl Fn(&ZScore) -> f64) -> (usize, usize) {
     let (mut left, mut right) = (best, best);
-    while left > 0 && scores[left - 1].offset == scores[left].offset - 1 && key(&scores[left - 1]) <= key(&scores[left]) {
+    while left > 0
+        && scores[left - 1].offset == scores[left].offset - 1
+        && key(&scores[left - 1]) <= key(&scores[left])
+    {
         left -= 1;
     }
-    while right + 1 < scores.len() && scores[right + 1].offset == scores[right].offset + 1 && key(&scores[right + 1]) <= key(&scores[right]) {
+    while right + 1 < scores.len()
+        && scores[right + 1].offset == scores[right].offset + 1
+        && key(&scores[right + 1]) <= key(&scores[right])
+    {
         right += 1;
     }
     (left, right)
@@ -2351,7 +2775,14 @@ fn projections(volume: &EstimateVolume, channels: Channels, z_lo: f64, z_hi: f64
 /// Masked correlation of the projections for the in-plane shift `s` (cells, moving -> fixed),
 /// over the fixed support cells `f_cells` (absolute x, y, map index) inside the moving support
 /// too. Returns (score, cells compared).
-fn xy_score(m: &EstimateVolume, f_cells: &[(i32, i32, usize)], fmaps: &[Vec<f64>], mmaps: &[Vec<f64>], weights: &[f64], s: [i32; 2]) -> (f64, usize) {
+fn xy_score(
+    m: &EstimateVolume,
+    f_cells: &[(i32, i32, usize)],
+    fmaps: &[Vec<f64>],
+    mmaps: &[Vec<f64>],
+    weights: &[f64],
+    s: [i32; 2],
+) -> (f64, usize) {
     let ms = &m.support;
     let count = fmaps.len();
     // Sums per channel: a, b, aa, bb, ab.
@@ -2406,7 +2837,10 @@ fn search_xy(
     let fmaps = projections(f, channels, f_range.0, f_range.1);
     let mmaps = projections(m, channels, m_range.0, m_range.1);
     let fs = &f.support;
-    let f_cells: Vec<(i32, i32, usize)> = (0..fs.nx * fs.ny).filter(|&i| fs.on[i]).map(|i| (fs.x0 + (i % fs.nx) as i32, fs.y0 + (i / fs.nx) as i32, i)).collect();
+    let f_cells: Vec<(i32, i32, usize)> = (0..fs.nx * fs.ny)
+        .filter(|&i| fs.on[i])
+        .map(|i| (fs.x0 + (i % fs.nx) as i32, fs.y0 + (i / fs.nx) as i32, i))
+        .collect();
     let m_cells = m.support.on.iter().filter(|&&o| o).count();
     let smaller = f_cells.len().min(m_cells).max(1) as f64;
     // A shift that leaves little of either support in the comparison is not a match.
@@ -2421,23 +2855,54 @@ fn search_xy(
     };
     // Coarse: a 3-cell (9 mm) lattice over the range, in parallel.
     let (center, reach) = match around {
-        Some(c) => ([(c[0] / XY_CELL_MM).round() as i32, (c[1] / XY_CELL_MM).round() as i32], (XY_LOCAL_MM / XY_CELL_MM).ceil() as i32),
+        Some(c) => (
+            [
+                (c[0] / XY_CELL_MM).round() as i32,
+                (c[1] / XY_CELL_MM).round() as i32,
+            ],
+            (XY_LOCAL_MM / XY_CELL_MM).ceil() as i32,
+        ),
         None => ([0, 0], (XY_SEARCH_MM / XY_CELL_MM).ceil() as i32),
     };
     let step = if around.is_some() { 2 } else { 3 };
     let coarse: Vec<[i32; 2]> = (-reach..=reach)
         .step_by(step)
-        .flat_map(|y| (-reach..=reach).step_by(step).map(move |x| [center[0] + x, center[1] + y]))
+        .flat_map(|y| {
+            (-reach..=reach)
+                .step_by(step)
+                .map(move |x| [center[0] + x, center[1] + y])
+        })
         .collect();
     let coarse_scores: Vec<f64> = coarse.par_iter().map(|&s| scored(s)).collect();
-    let mut best = (0..coarse.len()).max_by(|&a, &b| coarse_scores[a].total_cmp(&coarse_scores[b]).then(b.cmp(&a))).map(|i| coarse[i]).unwrap_or(center);
+    let mut best = (0..coarse.len())
+        .max_by(|&a, &b| {
+            coarse_scores[a]
+                .total_cmp(&coarse_scores[b])
+                .then(b.cmp(&a))
+        })
+        .map(|i| coarse[i])
+        .unwrap_or(center);
     let mut best_score = scored(best);
     // Fine: hill-climb on single cells.
     for _ in 0..32 {
-        let neighbours: Vec<[i32; 2]> =
-            [[-1, 0], [1, 0], [0, -1], [0, 1], [-1, -1], [1, 1], [-1, 1], [1, -1]].iter().map(|d| [best[0] + d[0], best[1] + d[1]]).collect();
+        let neighbours: Vec<[i32; 2]> = [
+            [-1, 0],
+            [1, 0],
+            [0, -1],
+            [0, 1],
+            [-1, -1],
+            [1, 1],
+            [-1, 1],
+            [1, -1],
+        ]
+        .iter()
+        .map(|d| [best[0] + d[0], best[1] + d[1]])
+        .collect();
         let values: Vec<f64> = neighbours.par_iter().map(|&s| scored(s)).collect();
-        let Some(i) = (0..8).max_by(|&a, &b| values[a].total_cmp(&values[b]).then(b.cmp(&a))) else { break };
+        let Some(i) = (0..8).max_by(|&a, &b| values[a].total_cmp(&values[b]).then(b.cmp(&a)))
+        else {
+            break;
+        };
         if values[i] <= best_score {
             break;
         }
@@ -2457,7 +2922,10 @@ fn search_xy(
             refined[axis] += (0.5 * (l - r) / denominator).clamp(-0.5, 0.5);
         }
     }
-    ([refined[0] * XY_CELL_MM, refined[1] * XY_CELL_MM], best_score)
+    (
+        [refined[0] * XY_CELL_MM, refined[1] * XY_CELL_MM],
+        best_score,
+    )
 }
 
 /// Valid z extent of an estimate volume, mm.
@@ -2468,24 +2936,42 @@ fn valid_extent_mm(volume: &EstimateVolume) -> f64 {
 /// A fast moving -> fixed translation (module section "Translation estimate"): z from per-height
 /// profiles over the two scans' common in-plane support, x/y from a masked correlation of their
 /// projections over the matched overlap.
-pub fn estimate_translation(fixed: &Volume, moving: &Volume, options: &TranslationOptions) -> Result<TranslationEstimate, RegistrationError> {
+pub fn estimate_translation(
+    fixed: &Volume,
+    moving: &Volume,
+    options: &TranslationOptions,
+) -> Result<TranslationEstimate, RegistrationError> {
     if !(options.min_overlap_mm.is_finite() && options.min_overlap_mm > 0.0) {
-        return Err(RegistrationError::InvalidOption("minOverlapMm must be a positive number".into()));
+        return Err(RegistrationError::InvalidOption(
+            "minOverlapMm must be a positive number".into(),
+        ));
     }
-    if options.min_overlap_fraction.is_some_and(|f| !(f.is_finite() && f > 0.0 && f <= 1.0)) {
-        return Err(RegistrationError::InvalidOption("minOverlapFraction must be in (0, 1]".into()));
+    if options
+        .min_overlap_fraction
+        .is_some_and(|f| !(f.is_finite() && f > 0.0 && f <= 1.0))
+    {
+        return Err(RegistrationError::InvalidOption(
+            "minOverlapFraction must be in (0, 1]".into(),
+        ));
     }
     let started = Instant::now();
     let fixed_class = parse_modality(&options.fixed_modality, fixed);
     let moving_class = parse_modality(&options.moving_modality, moving);
     let same = fixed_class == moving_class;
-    let channels = Channels { ct: same && fixed_class == ModalityClass::Ct, intensity: same && fixed_class != ModalityClass::Ct };
+    let channels = Channels {
+        ct: same && fixed_class == ModalityClass::Ct,
+        intensity: same && fixed_class != ModalityClass::Ct,
+    };
     let (f, m) = rayon::join(
         || estimate_volume(fixed, fixed_class, channels.intensity, channels.ct),
         || estimate_volume(moving, moving_class, channels.intensity, channels.ct),
     );
     if f.voxels.is_empty() || m.voxels.is_empty() {
-        return Err(RegistrationError::EmptyMask(if f.voxels.is_empty() { "fixed" } else { "moving" }));
+        return Err(RegistrationError::EmptyMask(if f.voxels.is_empty() {
+            "fixed"
+        } else {
+            "moving"
+        }));
     }
     let names = channels.names();
     // Profile channel weights. CT: the body area is the one most changed by truncation, the lung
@@ -2505,7 +2991,9 @@ pub fn estimate_translation(fixed: &Volume, moving: &Volume, options: &Translati
 
     let shorter = valid_extent_mm(&f).min(valid_extent_mm(&m));
     let min_overlap_mm = match options.min_overlap_fraction {
-        Some(fraction) => options.min_overlap_mm.min((fraction * shorter).max(20.0_f64.min(0.75 * shorter))),
+        Some(fraction) => options
+            .min_overlap_mm
+            .min((fraction * shorter).max(20.0_f64.min(0.75 * shorter))),
         None => options.min_overlap_mm,
     };
     let min_overlap_bins = (min_overlap_mm / PROFILE_BIN_MM).ceil() as usize;
@@ -2517,11 +3005,23 @@ pub fn estimate_translation(fixed: &Volume, moving: &Volume, options: &Translati
     let mut xy = xy0;
     let mut result = None;
     for _ in 0..2 {
-        let shift = [(xy[0] / XY_CELL_MM).round() as i32, (xy[1] / XY_CELL_MM).round() as i32];
+        let shift = [
+            (xy[0] / XY_CELL_MM).round() as i32,
+            (xy[1] / XY_CELL_MM).round() as i32,
+        ];
         // Fixed cell c sees moving cell c - shift.
         let fp = channel_profiles(&f, channels, &m.support, [-shift[0], -shift[1]]);
         let mp = channel_profiles(&m, channels, &f.support, shift);
-        let mut scores = search_z(&f, &m, &fp, &mp, &z_weights, min_overlap_bins, options.max_shift_mm, shorter);
+        let mut scores = search_z(
+            &f,
+            &m,
+            &fp,
+            &mp,
+            &z_weights,
+            min_overlap_bins,
+            options.max_shift_mm,
+            shorter,
+        );
         scores.sort_by_key(|s| s.offset);
         let Some(chosen) = best_index(&scores, |s| s.score) else {
             return Err(RegistrationError::NoOverlap);
@@ -2535,10 +3035,18 @@ pub fn estimate_translation(fixed: &Volume, moving: &Volume, options: &Translati
             .unwrap_or(chosen);
         let base = (f.z0 - m.z0) / PROFILE_BIN_MM;
         let peak = scores[best].raw;
-        let refine = if best > 0 && best + 1 < scores.len() && scores[best - 1].offset + 1 == scores[best].offset && scores[best + 1].offset == scores[best].offset + 1 {
+        let refine = if best > 0
+            && best + 1 < scores.len()
+            && scores[best - 1].offset + 1 == scores[best].offset
+            && scores[best + 1].offset == scores[best].offset + 1
+        {
             let (l, r) = (scores[best - 1].raw, scores[best + 1].raw);
             let denominator = l - 2.0 * peak + r;
-            if denominator < -1e-12 { (0.5 * (l - r) / denominator).clamp(-0.5, 0.5) } else { 0.0 }
+            if denominator < -1e-12 {
+                (0.5 * (l - r) / denominator).clamp(-0.5, 0.5)
+            } else {
+                0.0
+            }
         } else {
             0.0
         };
@@ -2551,11 +3059,23 @@ pub fn estimate_translation(fixed: &Volume, moving: &Volume, options: &Translati
             })
             .collect();
         let (lo, hi) = match (pairs.first(), pairs.last()) {
-            (Some(&a), Some(&b)) => (f.z0 + a as f64 * PROFILE_BIN_MM, f.z0 + (b + 1) as f64 * PROFILE_BIN_MM),
+            (Some(&a), Some(&b)) => (
+                f.z0 + a as f64 * PROFILE_BIN_MM,
+                f.z0 + (b + 1) as f64 * PROFILE_BIN_MM,
+            ),
             _ => return Err(RegistrationError::NoOverlap),
         };
-        let (xy_new, xy_score) = search_xy(&f, &m, channels, &xy_weights, (lo, hi), (lo - dz, hi - dz), Some(xy));
-        let converged = (xy_new[0] - xy[0]).abs() < XY_CELL_MM && (xy_new[1] - xy[1]).abs() < XY_CELL_MM;
+        let (xy_new, xy_score) = search_xy(
+            &f,
+            &m,
+            channels,
+            &xy_weights,
+            (lo, hi),
+            (lo - dz, hi - dz),
+            Some(xy),
+        );
+        let converged =
+            (xy_new[0] - xy[0]).abs() < XY_CELL_MM && (xy_new[1] - xy[1]).abs() < XY_CELL_MM;
         xy = xy_new;
         result = Some((scores, chosen, dz, xy_score));
         if converged {
@@ -2569,7 +3089,10 @@ pub fn estimate_translation(fixed: &Volume, moving: &Volume, options: &Translati
     let second = scores
         .iter()
         .enumerate()
-        .filter(|(i, s)| (*i < left || *i > right) && ((s.offset - scores[best].offset).abs() as f64 * PROFILE_BIN_MM) > 20.0)
+        .filter(|(i, s)| {
+            (*i < left || *i > right)
+                && ((s.offset - scores[best].offset).abs() as f64 * PROFILE_BIN_MM) > 20.0
+        })
         .map(|(_, s)| s.score)
         .fold(0.0, f64::max);
     // Each channel on its own: does its best shift agree with the combined one (within 10 mm)?
@@ -2577,7 +3100,8 @@ pub fn estimate_translation(fixed: &Volume, moving: &Volume, options: &Translati
         let mut agree = 0.0;
         for (c, w) in z_weights.iter().enumerate() {
             if let Some(own) = best_index(&scores, |s| s.per_channel[c]) {
-                if (scores[own].offset - scores[best].offset).abs() as f64 * PROFILE_BIN_MM <= 10.0 {
+                if (scores[own].offset - scores[best].offset).abs() as f64 * PROFILE_BIN_MM <= 10.0
+                {
                     agree += w;
                 }
             }

@@ -8,42 +8,39 @@ use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
 use dcmnorm::dicom_io::{
-    dicom_file_to_json,
-    apply_filter_to_object, build_volume as dcm_build_volume, echo_scu as dcm_echo_scu,
-    find_scu as dcm_find_scu, move_scu as dcm_move_scu, parse_attribute_override,
-    parse_filter_requests, parse_tag_key, probe_dicom_file_for_sop_class_uid,
-    read_dicom_file, read_dicom_file_for_frame, read_dicom_json_with_options, read_dcmnorm_object_for_filter,
-    compute_frame_histogram as dcm_compute_frame_histogram,
-    compute_instance_histograms as dcm_compute_instance_histograms,
+    apply_filter_to_object, build_spatial_registration as dcm_build_spatial_registration,
+    build_volume as dcm_build_volume, compute_frame_histogram as dcm_compute_frame_histogram,
+    compute_instance_histograms as dcm_compute_instance_histograms, dicom_file_to_json,
+    echo_scu as dcm_echo_scu, estimate_translation as dcm_estimate_translation,
+    find_scu as dcm_find_scu, move_scu as dcm_move_scu,
     pack_dicom_frame_stack_texture as dcm_pack_dicom_frame_stack_texture,
     pack_dicom_frame_texture as dcm_pack_dicom_frame_texture,
     pack_dicom_rgb_frame_stack_texture as dcm_pack_dicom_rgb_frame_stack_texture,
     pack_dicom_rgb_frame_texture as dcm_pack_dicom_rgb_frame_texture,
-    pack_volume_texture as dcm_pack_volume_texture,
-    reformat_plane as dcm_reformat_plane, remove_attribute, remove_private_tags_inplace,
-    render_dicom_frame as dcm_render_dicom_frame,
+    pack_volume_texture as dcm_pack_volume_texture, parse_attribute_override,
+    parse_filter_requests, parse_tag_key, probe_dicom_file_for_sop_class_uid,
+    read_dcmnorm_object_for_filter, read_dicom_file, read_dicom_file_for_frame,
+    read_dicom_json_with_options, read_spatial_registration as dcm_read_spatial_registration,
+    reformat_plane as dcm_reformat_plane, register_rigid as dcm_register_rigid, remove_attribute,
+    remove_private_tags_inplace, render_dicom_frame as dcm_render_dicom_frame, set_attribute,
+    start_scp as dcm_start_scp, store_scu as dcm_store_scu, transcode_dicom_file,
     try_extract_passthrough_jpeg_frame as dcm_try_extract_passthrough_jpeg_frame,
-    set_attribute, start_scp as dcm_start_scp,
-    store_scu as dcm_store_scu, transcode_dicom_file, write_dicom_file,
-    write_dicom_json_with_options, write_dicom_video as dcm_write_dicom_video, CancelMode as DcmCancelMode,
-    CancelSignal, DicomJsonBulkDataMode, DicomJsonFormat, DicomJsonKeyStyle, DicomJsonReadOptions,
-    DicomJsonWriteOptions, DicomScp, DimseLogger, EchoScuOptions as DcmEchoScuOptions,
+    write_dicom_bytes as dcm_write_dicom_bytes, write_dicom_file, write_dicom_json_with_options,
+    write_dicom_video as dcm_write_dicom_video, write_dicomdir as dcm_write_dicomdir,
+    CancelMode as DcmCancelMode, CancelSignal, DicomJsonBulkDataMode, DicomJsonFormat,
+    DicomJsonKeyStyle, DicomJsonReadOptions, DicomJsonWriteOptions, DicomScp,
+    DicomdirEntry as DcmDicomdirEntry, DicomdirOptions as DcmDicomdirOptions,
+    DicomdirReport as DcmDicomdirReport, DimseLogger, EchoScuOptions as DcmEchoScuOptions,
     FindScuOptions as DcmFindScuOptions, HistogramOptions as DcmHistogramOptions,
-    Interpolation as DcmInterpolation,
-    MoveScuOptions as DcmMoveScuOptions, OverlaySummary as DcmOverlaySummary,
-    QueryRetrieveLevel as DcmQueryRetrieveLevel,
-    PlaneParams as DcmPlaneParams, RenderOutputFormat as DcmRenderOutputFormat,
-    RenderPipelineOptions as DcmRenderPipelineOptions, ScpHandlers as DcmScpHandlers,
-    ScpOptions as DcmScpOptions, SlabProjection as DcmSlabProjection,
-    StoreScuOptions as DcmStoreScuOptions, TextureCompression as DcmTextureCompression,
-    TextureMeta as DcmTextureMeta, Volume as DcmVolume,
-    write_dicomdir as dcm_write_dicomdir, DicomdirEntry as DcmDicomdirEntry,
-    build_spatial_registration as dcm_build_spatial_registration, estimate_translation as dcm_estimate_translation,
-    read_spatial_registration as dcm_read_spatial_registration, register_rigid as dcm_register_rigid,
-    write_dicom_bytes as dcm_write_dicom_bytes, Initialization as DcmInitialization, MaskMode as DcmMaskMode,
-    MetricChoice as DcmMetricChoice, RegistrationOptions as DcmRegistrationOptions,
-    TranslationOptions as DcmTranslationOptions,
-    DicomdirOptions as DcmDicomdirOptions, DicomdirReport as DcmDicomdirReport,
+    Initialization as DcmInitialization, Interpolation as DcmInterpolation,
+    MaskMode as DcmMaskMode, MetricChoice as DcmMetricChoice, MoveScuOptions as DcmMoveScuOptions,
+    OverlaySummary as DcmOverlaySummary, PlaneParams as DcmPlaneParams,
+    QueryRetrieveLevel as DcmQueryRetrieveLevel, RegistrationOptions as DcmRegistrationOptions,
+    RenderOutputFormat as DcmRenderOutputFormat, RenderPipelineOptions as DcmRenderPipelineOptions,
+    ScpHandlers as DcmScpHandlers, ScpOptions as DcmScpOptions,
+    SlabProjection as DcmSlabProjection, StoreScuOptions as DcmStoreScuOptions,
+    TextureCompression as DcmTextureCompression, TextureMeta as DcmTextureMeta,
+    TranslationOptions as DcmTranslationOptions, Volume as DcmVolume,
 };
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 
@@ -54,7 +51,10 @@ mod dataset;
 /// - e.g. ~130KB of a 29MB, 227-frame ultrasound cine instead of all of it. Anything that
 /// shortcut doesn't cover (compressed, deflated, out-of-range frame, malformed, ...) falls back
 /// to a normal full read, which also produces the usual error for a bad file.
-fn read_dicom_file_for_single_frame(path: &std::path::Path, frame_index: usize) -> Result<dcmnorm_object::DefaultDicomObject> {
+fn read_dicom_file_for_single_frame(
+    path: &std::path::Path,
+    frame_index: usize,
+) -> Result<dcmnorm_object::DefaultDicomObject> {
     match read_dicom_file_for_frame(path, frame_index) {
         Ok(Some(object)) => Ok(object),
         _ => read_dicom_file(path).map_err(to_napi_err),
@@ -79,7 +79,9 @@ fn guarded<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {
                 .map(|s| s.to_string())
                 .or_else(|| payload.downcast_ref::<String>().cloned())
                 .unwrap_or_else(|| "dcmnorm panicked while processing this file".to_string());
-            Err(Error::from_reason(format!("dcmnorm internal error: {message}")))
+            Err(Error::from_reason(format!(
+                "dcmnorm internal error: {message}"
+            )))
         }
     }
 }
@@ -344,7 +346,8 @@ impl Task for EditTagsTask {
 
             for (key, value) in &self.sets {
                 let assignment = format!("{key}={value}");
-                let (tag, vr, value) = parse_attribute_override(&assignment).map_err(to_napi_err)?;
+                let (tag, vr, value) =
+                    parse_attribute_override(&assignment).map_err(to_napi_err)?;
                 set_attribute(&mut object, tag, vr, value).map_err(to_napi_err)?;
             }
 
@@ -394,8 +397,12 @@ impl Task for TranscodeTask {
 
     fn compute(&mut self) -> Result<Self::Output> {
         guarded(|| {
-            transcode_dicom_file(&self.file_path, &self.output_path, &self.transfer_syntax_uid)
-                .map_err(to_napi_err)
+            transcode_dicom_file(
+                &self.file_path,
+                &self.output_path,
+                &self.transfer_syntax_uid,
+            )
+            .map_err(to_napi_err)
         })
     }
 
@@ -527,12 +534,22 @@ impl Task for WriteDicomdirTask {
                 let built = match (&entry.json, &entry.path) {
                     (Some(json), None) => {
                         let format = parse_json_format(entry.format.as_deref())?;
-                        DcmDicomdirEntry::from_json(file_id, json, format, entry.transfer_syntax_uid.as_deref())
-                            .map_err(to_napi_err)?
+                        DcmDicomdirEntry::from_json(
+                            file_id,
+                            json,
+                            format,
+                            entry.transfer_syntax_uid.as_deref(),
+                        )
+                        .map_err(to_napi_err)?
                     }
                     (None, Some(path)) => {
-                        let mut built = DcmDicomdirEntry::from_file(file_id, path).map_err(to_napi_err)?;
-                        if let Some(ts) = entry.transfer_syntax_uid.as_deref().filter(|ts| !ts.is_empty()) {
+                        let mut built =
+                            DcmDicomdirEntry::from_file(file_id, path).map_err(to_napi_err)?;
+                        if let Some(ts) = entry
+                            .transfer_syntax_uid
+                            .as_deref()
+                            .filter(|ts| !ts.is_empty())
+                        {
                             built.transfer_syntax_uid = ts.to_owned();
                         }
                         built
@@ -556,7 +573,10 @@ impl Task for WriteDicomdirTask {
             record_types: report
                 .record_types
                 .into_iter()
-                .map(|(record_type, count)| DicomdirRecordCount { record_type, count: count as u32 })
+                .map(|(record_type, count)| DicomdirRecordCount {
+                    record_type,
+                    count: count as u32,
+                })
                 .collect(),
             synthesized: report
                 .synthesized
@@ -613,7 +633,8 @@ struct NapiDimseLogger {
 
 impl DimseLogger for NapiDimseLogger {
     fn log(&self, message: String) {
-        self.callback.call(Ok(message), ThreadsafeFunctionCallMode::NonBlocking);
+        self.callback
+            .call(Ok(message), ThreadsafeFunctionCallMode::NonBlocking);
     }
 }
 
@@ -655,7 +676,10 @@ impl<T: Clone + Send + 'static> ScuCallState<T> {
     // run, leaving every current and future `result()`/`release()`/`abort()` waiter blocked on
     // the condvar forever instead of seeing a rejected Promise.
     fn spawn(work: impl FnOnce() -> std::result::Result<T, String> + Send + 'static) -> Arc<Self> {
-        let state = Arc::new(Self { result: Mutex::new(None), condvar: Condvar::new() });
+        let state = Arc::new(Self {
+            result: Mutex::new(None),
+            condvar: Condvar::new(),
+        });
         let state_thread = state.clone();
         std::thread::spawn(move || {
             let outcome = panic::catch_unwind(AssertUnwindSafe(work)).unwrap_or_else(|payload| {
@@ -730,9 +754,16 @@ impl Task for EchoScuTask {
             dcm_echo_scu(
                 &self.destination,
                 DcmEchoScuOptions {
-                    calling_ae_title: self.options.calling_ae_title.clone().unwrap_or_else(|| "DCMNORM".to_owned()),
+                    calling_ae_title: self
+                        .options
+                        .calling_ae_title
+                        .clone()
+                        .unwrap_or_else(|| "DCMNORM".to_owned()),
                     called_ae_title: self.options.called_ae_title.clone(),
-                    timeout: self.options.timeout_ms.map(|ms| Duration::from_millis(ms as u64)),
+                    timeout: self
+                        .options
+                        .timeout_ms
+                        .map(|ms| Duration::from_millis(ms as u64)),
                     on_log: dimse_logger(self.on_log.take()),
                     cancel: None,
                 },
@@ -757,7 +788,11 @@ pub fn echo_scu(
     options: Option<EchoScuOptions>,
     on_log: Option<ThreadsafeFunction<String>>,
 ) -> AsyncTask<EchoScuTask> {
-    AsyncTask::new(EchoScuTask { destination, options: options.unwrap_or_default(), on_log })
+    AsyncTask::new(EchoScuTask {
+        destination,
+        options: options.unwrap_or_default(),
+        on_log,
+    })
 }
 
 #[napi]
@@ -771,21 +806,30 @@ impl EchoScuHandle {
     /// The eventual Status code (0 = success), without requesting cancellation.
     #[napi(ts_return_type = "Promise<number>")]
     pub fn result(&self) -> AsyncTask<ScuWaitTask<u32>> {
-        AsyncTask::new(ScuWaitTask { state: self.state.clone(), request_cancel: None })
+        AsyncTask::new(ScuWaitTask {
+            state: self.state.clone(),
+            request_cancel: None,
+        })
     }
 
     /// Requests a graceful A-RELEASE and resolves once the association has genuinely closed -
     /// real acknowledgement, not a fire-and-forget signal. Idempotent.
     #[napi(ts_return_type = "Promise<number>")]
     pub fn release(&self) -> AsyncTask<ScuWaitTask<u32>> {
-        AsyncTask::new(ScuWaitTask { state: self.state.clone(), request_cancel: Some((self.cancel.clone(), DcmCancelMode::Release)) })
+        AsyncTask::new(ScuWaitTask {
+            state: self.state.clone(),
+            request_cancel: Some((self.cancel.clone(), DcmCancelMode::Release)),
+        })
     }
 
     /// Requests an immediate A-ABORT (no wait on the peer at all) and resolves once the
     /// association has genuinely closed. Idempotent.
     #[napi(ts_return_type = "Promise<number>")]
     pub fn abort(&self) -> AsyncTask<ScuWaitTask<u32>> {
-        AsyncTask::new(ScuWaitTask { state: self.state.clone(), request_cancel: Some((self.cancel.clone(), DcmCancelMode::Abort)) })
+        AsyncTask::new(ScuWaitTask {
+            state: self.state.clone(),
+            request_cancel: Some((self.cancel.clone(), DcmCancelMode::Abort)),
+        })
     }
 }
 
@@ -800,15 +844,25 @@ pub fn start_echo_scu(
     let options = options.unwrap_or_default();
     let cancel = CancelSignal::new();
     let cancel_for_call = cancel.clone();
-    let calling_ae_title = options.calling_ae_title.unwrap_or_else(|| "DCMNORM".to_owned());
+    let calling_ae_title = options
+        .calling_ae_title
+        .unwrap_or_else(|| "DCMNORM".to_owned());
     let called_ae_title = options.called_ae_title;
-    let timeout = options.timeout_ms.map(|ms| Duration::from_millis(ms as u64));
+    let timeout = options
+        .timeout_ms
+        .map(|ms| Duration::from_millis(ms as u64));
     let logger = dimse_logger(on_log);
 
     let state = ScuCallState::spawn(move || {
         dcm_echo_scu(
             &destination,
-            DcmEchoScuOptions { calling_ae_title, called_ae_title, timeout, on_log: logger, cancel: Some(cancel_for_call) },
+            DcmEchoScuOptions {
+                calling_ae_title,
+                called_ae_title,
+                timeout,
+                on_log: logger,
+                cancel: Some(cancel_for_call),
+            },
         )
         .map(|status| status as u32)
         .map_err(|error| error.to_string())
@@ -852,11 +906,18 @@ impl Task for StoreScuTask {
                 &self.destination,
                 &self.files,
                 DcmStoreScuOptions {
-                    calling_ae_title: self.options.calling_ae_title.clone().unwrap_or_else(|| "DCMNORM".to_owned()),
+                    calling_ae_title: self
+                        .options
+                        .calling_ae_title
+                        .clone()
+                        .unwrap_or_else(|| "DCMNORM".to_owned()),
                     called_ae_title: self.options.called_ae_title.clone(),
                     max_pdu_length: self.options.max_pdu_length.unwrap_or(16384),
                     never_transcode: self.options.never_transcode.unwrap_or(false),
-                    timeout: self.options.timeout_ms.map(|ms| Duration::from_millis(ms as u64)),
+                    timeout: self
+                        .options
+                        .timeout_ms
+                        .map(|ms| Duration::from_millis(ms as u64)),
                     on_log: dimse_logger(self.on_log.take()),
                     cancel: None,
                 },
@@ -864,7 +925,10 @@ impl Task for StoreScuTask {
             .map_err(to_napi_err)?;
             Ok(results
                 .into_iter()
-                .map(|result| StoreScuResult { sop_instance_uid: result.sop_instance_uid, status: result.status as u32 })
+                .map(|result| StoreScuResult {
+                    sop_instance_uid: result.sop_instance_uid,
+                    status: result.status as u32,
+                })
                 .collect())
         })
     }
@@ -907,21 +971,30 @@ impl StoreScuHandle {
     /// cancellation.
     #[napi(ts_return_type = "Promise<Array<StoreScuResult>>")]
     pub fn result(&self) -> AsyncTask<ScuWaitTask<Vec<StoreScuResult>>> {
-        AsyncTask::new(ScuWaitTask { state: self.state.clone(), request_cancel: None })
+        AsyncTask::new(ScuWaitTask {
+            state: self.state.clone(),
+            request_cancel: None,
+        })
     }
 
     /// Requests a graceful A-RELEASE and resolves once the association has genuinely closed -
     /// real acknowledgement, not a fire-and-forget signal. Idempotent.
     #[napi(ts_return_type = "Promise<Array<StoreScuResult>>")]
     pub fn release(&self) -> AsyncTask<ScuWaitTask<Vec<StoreScuResult>>> {
-        AsyncTask::new(ScuWaitTask { state: self.state.clone(), request_cancel: Some((self.cancel.clone(), DcmCancelMode::Release)) })
+        AsyncTask::new(ScuWaitTask {
+            state: self.state.clone(),
+            request_cancel: Some((self.cancel.clone(), DcmCancelMode::Release)),
+        })
     }
 
     /// Requests an immediate A-ABORT (no wait on the peer at all) and resolves once the
     /// association has genuinely closed. Idempotent.
     #[napi(ts_return_type = "Promise<Array<StoreScuResult>>")]
     pub fn abort(&self) -> AsyncTask<ScuWaitTask<Vec<StoreScuResult>>> {
-        AsyncTask::new(ScuWaitTask { state: self.state.clone(), request_cancel: Some((self.cancel.clone(), DcmCancelMode::Abort)) })
+        AsyncTask::new(ScuWaitTask {
+            state: self.state.clone(),
+            request_cancel: Some((self.cancel.clone(), DcmCancelMode::Abort)),
+        })
     }
 }
 
@@ -938,11 +1011,15 @@ pub fn start_store_scu(
     let files: Vec<PathBuf> = files.into_iter().map(PathBuf::from).collect();
     let cancel = CancelSignal::new();
     let cancel_for_call = cancel.clone();
-    let calling_ae_title = options.calling_ae_title.unwrap_or_else(|| "DCMNORM".to_owned());
+    let calling_ae_title = options
+        .calling_ae_title
+        .unwrap_or_else(|| "DCMNORM".to_owned());
     let called_ae_title = options.called_ae_title;
     let max_pdu_length = options.max_pdu_length.unwrap_or(16384);
     let never_transcode = options.never_transcode.unwrap_or(false);
-    let timeout = options.timeout_ms.map(|ms| Duration::from_millis(ms as u64));
+    let timeout = options
+        .timeout_ms
+        .map(|ms| Duration::from_millis(ms as u64));
     let logger = dimse_logger(on_log);
 
     let state = ScuCallState::spawn(move || {
@@ -962,7 +1039,10 @@ pub fn start_store_scu(
         .map(|results| {
             results
                 .into_iter()
-                .map(|result| StoreScuResult { sop_instance_uid: result.sop_instance_uid, status: result.status as u32 })
+                .map(|result| StoreScuResult {
+                    sop_instance_uid: result.sop_instance_uid,
+                    status: result.status as u32,
+                })
                 .collect()
         })
         .map_err(|error| error.to_string())
@@ -997,10 +1077,17 @@ impl Task for FindScuTask {
                 &self.destination,
                 &self.query,
                 DcmFindScuOptions {
-                    calling_ae_title: self.options.calling_ae_title.clone().unwrap_or_else(|| "DCMNORM".to_owned()),
+                    calling_ae_title: self
+                        .options
+                        .calling_ae_title
+                        .clone()
+                        .unwrap_or_else(|| "DCMNORM".to_owned()),
                     called_ae_title: self.options.called_ae_title.clone(),
                     max_pdu_length: self.options.max_pdu_length.unwrap_or(16384),
-                    timeout: self.options.timeout_ms.map(|ms| Duration::from_millis(ms as u64)),
+                    timeout: self
+                        .options
+                        .timeout_ms
+                        .map(|ms| Duration::from_millis(ms as u64)),
                     on_log: dimse_logger(self.on_log.take()),
                     cancel: None,
                 },
@@ -1029,7 +1116,12 @@ pub fn find_scu(
     options: Option<FindScuOptions>,
     on_log: Option<ThreadsafeFunction<String>>,
 ) -> AsyncTask<FindScuTask> {
-    AsyncTask::new(FindScuTask { destination, query, options: options.unwrap_or_default(), on_log })
+    AsyncTask::new(FindScuTask {
+        destination,
+        query,
+        options: options.unwrap_or_default(),
+        on_log,
+    })
 }
 
 #[napi]
@@ -1044,21 +1136,30 @@ impl FindScuHandle {
     /// requesting cancellation.
     #[napi(ts_return_type = "Promise<Array<string>>")]
     pub fn result(&self) -> AsyncTask<ScuWaitTask<Vec<String>>> {
-        AsyncTask::new(ScuWaitTask { state: self.state.clone(), request_cancel: None })
+        AsyncTask::new(ScuWaitTask {
+            state: self.state.clone(),
+            request_cancel: None,
+        })
     }
 
     /// Requests a graceful A-RELEASE and resolves once the association has genuinely closed -
     /// real acknowledgement, not a fire-and-forget signal. Idempotent.
     #[napi(ts_return_type = "Promise<Array<string>>")]
     pub fn release(&self) -> AsyncTask<ScuWaitTask<Vec<String>>> {
-        AsyncTask::new(ScuWaitTask { state: self.state.clone(), request_cancel: Some((self.cancel.clone(), DcmCancelMode::Release)) })
+        AsyncTask::new(ScuWaitTask {
+            state: self.state.clone(),
+            request_cancel: Some((self.cancel.clone(), DcmCancelMode::Release)),
+        })
     }
 
     /// Requests an immediate A-ABORT (no wait on the peer at all) and resolves once the
     /// association has genuinely closed. Idempotent.
     #[napi(ts_return_type = "Promise<Array<string>>")]
     pub fn abort(&self) -> AsyncTask<ScuWaitTask<Vec<String>>> {
-        AsyncTask::new(ScuWaitTask { state: self.state.clone(), request_cancel: Some((self.cancel.clone(), DcmCancelMode::Abort)) })
+        AsyncTask::new(ScuWaitTask {
+            state: self.state.clone(),
+            request_cancel: Some((self.cancel.clone(), DcmCancelMode::Abort)),
+        })
     }
 }
 
@@ -1074,17 +1175,28 @@ pub fn start_find_scu(
     let options = options.unwrap_or_default();
     let cancel = CancelSignal::new();
     let cancel_for_call = cancel.clone();
-    let calling_ae_title = options.calling_ae_title.unwrap_or_else(|| "DCMNORM".to_owned());
+    let calling_ae_title = options
+        .calling_ae_title
+        .unwrap_or_else(|| "DCMNORM".to_owned());
     let called_ae_title = options.called_ae_title;
     let max_pdu_length = options.max_pdu_length.unwrap_or(16384);
-    let timeout = options.timeout_ms.map(|ms| Duration::from_millis(ms as u64));
+    let timeout = options
+        .timeout_ms
+        .map(|ms| Duration::from_millis(ms as u64));
     let logger = dimse_logger(on_log);
 
     let state = ScuCallState::spawn(move || {
         dcm_find_scu(
             &destination,
             &query,
-            DcmFindScuOptions { calling_ae_title, called_ae_title, max_pdu_length, timeout, on_log: logger, cancel: Some(cancel_for_call) },
+            DcmFindScuOptions {
+                calling_ae_title,
+                called_ae_title,
+                max_pdu_length,
+                timeout,
+                on_log: logger,
+                cancel: Some(cancel_for_call),
+            },
         )
         .map_err(|error| error.to_string())
     });
@@ -1145,7 +1257,10 @@ impl MoveScuHandle {
     /// that just wants to await completion.
     #[napi(ts_return_type = "Promise<MoveScuResult>")]
     pub fn result(&self) -> AsyncTask<ScuWaitTask<MoveScuResult>> {
-        AsyncTask::new(ScuWaitTask { state: self.state.clone(), request_cancel: None })
+        AsyncTask::new(ScuWaitTask {
+            state: self.state.clone(),
+            request_cancel: None,
+        })
     }
 
     /// Requests a graceful A-RELEASE and resolves once the association has genuinely closed -
@@ -1153,14 +1268,20 @@ impl MoveScuHandle {
     /// never, if missed). Idempotent: a second call just observes the same outcome.
     #[napi(ts_return_type = "Promise<MoveScuResult>")]
     pub fn release(&self) -> AsyncTask<ScuWaitTask<MoveScuResult>> {
-        AsyncTask::new(ScuWaitTask { state: self.state.clone(), request_cancel: Some((self.cancel.clone(), DcmCancelMode::Release)) })
+        AsyncTask::new(ScuWaitTask {
+            state: self.state.clone(),
+            request_cancel: Some((self.cancel.clone(), DcmCancelMode::Release)),
+        })
     }
 
     /// Requests an immediate A-ABORT (no wait on the peer at all) and resolves once the
     /// association has genuinely closed. Idempotent.
     #[napi(ts_return_type = "Promise<MoveScuResult>")]
     pub fn abort(&self) -> AsyncTask<ScuWaitTask<MoveScuResult>> {
-        AsyncTask::new(ScuWaitTask { state: self.state.clone(), request_cancel: Some((self.cancel.clone(), DcmCancelMode::Abort)) })
+        AsyncTask::new(ScuWaitTask {
+            state: self.state.clone(),
+            request_cancel: Some((self.cancel.clone(), DcmCancelMode::Abort)),
+        })
     }
 }
 
@@ -1188,12 +1309,18 @@ pub fn move_scu(
     let options = options.unwrap_or_default();
     let cancel = CancelSignal::new();
     let cancel_for_call = cancel.clone();
-    let calling_ae_title = options.calling_ae_title.unwrap_or_else(|| "DCMNORM".to_owned());
+    let calling_ae_title = options
+        .calling_ae_title
+        .unwrap_or_else(|| "DCMNORM".to_owned());
     let called_ae_title = options.called_ae_title;
     let max_pdu_length = options.max_pdu_length.unwrap_or(16384);
-    let timeout = options.timeout_ms.map(|ms| Duration::from_millis(ms as u64));
+    let timeout = options
+        .timeout_ms
+        .map(|ms| Duration::from_millis(ms as u64));
     let stale_data_path = options.watch_path.map(PathBuf::from);
-    let stale_data_timeout = options.stale_data_timeout_ms.map(|ms| Duration::from_millis(ms as u64));
+    let stale_data_timeout = options
+        .stale_data_timeout_ms
+        .map(|ms| Duration::from_millis(ms as u64));
     let query_retrieve_level = options.query_retrieve_level;
     let series_instance_uid = options.series_instance_uid;
     let sop_instance_uids = options.sop_instance_uids.unwrap_or_default();
@@ -1201,7 +1328,11 @@ pub fn move_scu(
 
     let state = ScuCallState::spawn(move || {
         let query_retrieve_level = query_retrieve_level
-            .map(|level| level.parse::<DcmQueryRetrieveLevel>().map_err(|error| error.to_string()))
+            .map(|level| {
+                level
+                    .parse::<DcmQueryRetrieveLevel>()
+                    .map_err(|error| error.to_string())
+            })
             .transpose()?;
         dcm_move_scu(
             &destination,
@@ -1328,7 +1459,9 @@ pub struct RenderedFrame {
     pub passthrough: bool,
 }
 
-fn parse_render_output_format(value: Option<&str>) -> Result<(DcmRenderOutputFormat, &'static str)> {
+fn parse_render_output_format(
+    value: Option<&str>,
+) -> Result<(DcmRenderOutputFormat, &'static str)> {
     match value {
         None | Some("jpeg") | Some("jpg") => Ok((DcmRenderOutputFormat::Jpeg, "image/jpeg")),
         Some("png") => Ok((DcmRenderOutputFormat::Png, "image/png")),
@@ -1351,8 +1484,9 @@ fn parse_render_color(value: &str) -> Result<[u8; 3]> {
             )));
         }
         let channel = |range: std::ops::Range<usize>| {
-            u8::from_str_radix(&hex[range], 16)
-                .map_err(|_| Error::from_reason(format!("invalid color '{value}'; not a valid hex color")))
+            u8::from_str_radix(&hex[range], 16).map_err(|_| {
+                Error::from_reason(format!("invalid color '{value}'; not a valid hex color"))
+            })
         };
         return Ok([channel(0..2)?, channel(2..4)?, channel(4..6)?]);
     }
@@ -1379,7 +1513,10 @@ fn overlay_pipeline_fields(
     overlay_index: Option<u32>,
     overlay_color: Option<&str>,
 ) -> Result<(bool, Option<usize>, [u8; 3])> {
-    let color = overlay_color.map(parse_render_color).transpose()?.unwrap_or([0, 255, 0]);
+    let color = overlay_color
+        .map(parse_render_color)
+        .transpose()?
+        .unwrap_or([0, 255, 0]);
     Ok((
         show_overlays.unwrap_or(true),
         overlay_index.map(|value| value as usize),
@@ -1408,16 +1545,22 @@ impl Task for RenderFrameTask {
             let object = read_dicom_file_for_single_frame(&self.file_path, frame_index)?;
 
             if self.options.passthrough.unwrap_or(false) {
-                if let Some(frame) =
-                    dcm_try_extract_passthrough_jpeg_frame(&object, frame_index).map_err(to_napi_err)?
+                if let Some(frame) = dcm_try_extract_passthrough_jpeg_frame(&object, frame_index)
+                    .map_err(to_napi_err)?
                 {
                     return Ok(RenderedFrame {
                         mime_type: "image/jpeg".to_owned(),
                         width: frame.width as u32,
                         height: frame.height as u32,
                         data: frame.bytes.into(),
-                        overlays: frame.overlays.into_iter().map(OverlaySummary::from).collect(),
-                        selected_overlay_index: frame.selected_overlay_index.map(|value| value as u32),
+                        overlays: frame
+                            .overlays
+                            .into_iter()
+                            .map(OverlaySummary::from)
+                            .collect(),
+                        selected_overlay_index: frame
+                            .selected_overlay_index
+                            .map(|value| value as u32),
                         passthrough: true,
                     });
                 }
@@ -1435,13 +1578,18 @@ impl Task for RenderFrameTask {
                 overlay_color,
                 ..Default::default()
             };
-            let rendered = dcm_render_dicom_frame(&object, format, &pipeline_options).map_err(to_napi_err)?;
+            let rendered =
+                dcm_render_dicom_frame(&object, format, &pipeline_options).map_err(to_napi_err)?;
             Ok(RenderedFrame {
                 mime_type: mime_type.to_owned(),
                 width: rendered.width as u32,
                 height: rendered.height as u32,
                 data: rendered.bytes.into(),
-                overlays: rendered.overlays.into_iter().map(OverlaySummary::from).collect(),
+                overlays: rendered
+                    .overlays
+                    .into_iter()
+                    .map(OverlaySummary::from)
+                    .collect(),
                 selected_overlay_index: rendered.selected_overlay_index.map(|value| value as u32),
                 passthrough: false,
             })
@@ -1456,7 +1604,10 @@ impl Task for RenderFrameTask {
 /// Renders a single frame of a DICOM file to JPEG or PNG. Mirrors `dcmnorm --output-width ...
 /// --output-height ... --window-center ... --window-width ... --render-frame ... file.dcm out.jpg`.
 #[napi]
-pub fn render_frame(file_path: String, options: Option<RenderFrameOptions>) -> AsyncTask<RenderFrameTask> {
+pub fn render_frame(
+    file_path: String,
+    options: Option<RenderFrameOptions>,
+) -> AsyncTask<RenderFrameTask> {
     AsyncTask::new(RenderFrameTask {
         file_path: PathBuf::from(file_path),
         options: options.unwrap_or_default(),
@@ -1506,7 +1657,8 @@ impl Task for RenderMovieTask {
             // temp file, then read it back into the Buffer napi hands to JS, same trade-off the
             // CLI itself makes (it also always writes to a real file).
             let temp_path = unique_temp_path("mp4");
-            let result = dcm_write_dicom_video(&object, &temp_path, &pipeline_options, fps).map_err(to_napi_err);
+            let result = dcm_write_dicom_video(&object, &temp_path, &pipeline_options, fps)
+                .map_err(to_napi_err);
             let bytes = result.and_then(|_| std::fs::read(&temp_path).map_err(|e| to_napi_err(e)));
             let _ = std::fs::remove_file(&temp_path);
 
@@ -1525,7 +1677,10 @@ impl Task for RenderMovieTask {
 /// Renders every frame of a multi-frame DICOM file to an MP4 (via a piped `ffmpeg` subprocess -
 /// requires `ffmpeg` on `PATH`). Mirrors `dcmnorm --render-fps ... --output-width ... file.dcm out.mp4`.
 #[napi]
-pub fn render_movie(file_path: String, options: Option<RenderMovieOptions>) -> AsyncTask<RenderMovieTask> {
+pub fn render_movie(
+    file_path: String,
+    options: Option<RenderMovieOptions>,
+) -> AsyncTask<RenderMovieTask> {
     AsyncTask::new(RenderMovieTask {
         file_path: PathBuf::from(file_path),
         options: options.unwrap_or_default(),
@@ -1615,7 +1770,8 @@ impl Task for ComputeHistogramTask {
                 Some(frame_index) => {
                     let frame_index = frame_index as usize;
                     let object = read_dicom_file_for_single_frame(&self.file_path, frame_index)?;
-                    dcm_compute_frame_histogram(&object, frame_index, &dcm_options).map_err(to_napi_err)?
+                    dcm_compute_frame_histogram(&object, frame_index, &dcm_options)
+                        .map_err(to_napi_err)?
                 }
                 None => {
                     let object = read_dicom_file(&self.file_path).map_err(to_napi_err)?;
@@ -1635,7 +1791,10 @@ impl Task for ComputeHistogramTask {
 /// Computes a pixel-value histogram for every frame of a DICOM file (or just one, via
 /// `options.frameIndex`). Mirrors `dcmnorm --histogram --histogram-bins ... file.dcm`.
 #[napi]
-pub fn compute_histogram(file_path: String, options: Option<HistogramOptions>) -> AsyncTask<ComputeHistogramTask> {
+pub fn compute_histogram(
+    file_path: String,
+    options: Option<HistogramOptions>,
+) -> AsyncTask<ComputeHistogramTask> {
     AsyncTask::new(ComputeHistogramTask {
         file_path: PathBuf::from(file_path),
         options: options.unwrap_or_default(),
@@ -1717,7 +1876,9 @@ pub struct ReformatPlaneOptions {
 
 fn parse_vec3(values: &[f64], field_name: &'static str) -> Result<[f64; 3]> {
     if values.len() != 3 {
-        return Err(Error::from_reason(format!("{field_name} must have exactly 3 values (x, y, z)")));
+        return Err(Error::from_reason(format!(
+            "{field_name} must have exactly 3 values (x, y, z)"
+        )));
     }
     Ok([values[0], values[1], values[2]])
 }
@@ -1769,7 +1930,8 @@ impl Task for ReformatPlaneTask {
                 slab_projection: parse_slab_projection(self.options.slab_projection.as_deref())?,
             };
             let jpeg_quality = self.options.jpeg_quality.unwrap_or(90) as u8;
-            let rendered = dcm_reformat_plane(&self.volume, &params, format, jpeg_quality).map_err(to_napi_err)?;
+            let rendered = dcm_reformat_plane(&self.volume, &params, format, jpeg_quality)
+                .map_err(to_napi_err)?;
             Ok(RenderedFrame {
                 mime_type: mime_type.to_owned(),
                 width: u32::from(rendered.width),
@@ -1866,13 +2028,20 @@ impl DicomVolumeHandle {
     /// `release()`.
     #[napi(getter, js_name = "byteLength")]
     pub fn byte_length(&self) -> f64 {
-        if self.is_released() { 0.0 } else { self.byte_length }
+        if self.is_released() {
+            0.0
+        } else {
+            self.byte_length
+        }
     }
 
     /// Whether `release()` has run.
     #[napi(getter, js_name = "released")]
     pub fn is_released(&self) -> bool {
-        self.volume.lock().map(|guard| guard.is_none()).unwrap_or(true)
+        self.volume
+            .lock()
+            .map(|guard| guard.is_none())
+            .unwrap_or(true)
     }
 
     /// Frees the voxel memory now instead of whenever the garbage collector finalizes this
@@ -1960,7 +2129,10 @@ impl DicomVolumeHandle {
     /// image-display code path unchanged.
     #[napi]
     pub fn reformat(&self, options: ReformatPlaneOptions) -> Result<AsyncTask<ReformatPlaneTask>> {
-        Ok(AsyncTask::new(ReformatPlaneTask { volume: self.volume()?, options }))
+        Ok(AsyncTask::new(ReformatPlaneTask {
+            volume: self.volume()?,
+            options,
+        }))
     }
 
     /// Packs this volume's own NATIVE voxel lattice - not a resampled oblique plane, see
@@ -1970,7 +2142,10 @@ impl DicomVolumeHandle {
     /// once and the client does all further rotate/scroll/window-level manipulation itself in a
     /// WebGL2 shader.
     #[napi]
-    pub fn export_texture(&self, options: Option<ExportVolumeTextureOptions>) -> Result<AsyncTask<ExportVolumeTextureTask>> {
+    pub fn export_texture(
+        &self,
+        options: Option<ExportVolumeTextureOptions>,
+    ) -> Result<AsyncTask<ExportVolumeTextureTask>> {
         Ok(AsyncTask::new(ExportVolumeTextureTask {
             volume: self.volume()?,
             options: options.unwrap_or_default(),
@@ -1988,14 +2163,19 @@ impl DicomVolumeHandle {
 
 fn parse_matrix(values: &[f64], field_name: &str) -> Result<[f64; 16]> {
     if values.len() != 16 || values.iter().any(|v| !v.is_finite()) {
-        return Err(Error::from_reason(format!("{field_name} must be 16 finite numbers (row-major 4x4)")));
+        return Err(Error::from_reason(format!(
+            "{field_name} must be 16 finite numbers (row-major 4x4)"
+        )));
     }
     let mut m = [0.0; 16];
     m.copy_from_slice(values);
     Ok(m)
 }
 
-fn volume_pair(fixed: &DicomVolumeHandle, moving: &DicomVolumeHandle) -> Result<(Arc<DcmVolume>, Arc<DcmVolume>)> {
+fn volume_pair(
+    fixed: &DicomVolumeHandle,
+    moving: &DicomVolumeHandle,
+) -> Result<(Arc<DcmVolume>, Arc<DcmVolume>)> {
     Ok((fixed.volume()?, moving.volume()?))
 }
 
@@ -2056,17 +2236,24 @@ impl Task for EstimateTranslationTask {
             let options = DcmTranslationOptions {
                 fixed_modality: self.options.fixed_modality.clone(),
                 moving_modality: self.options.moving_modality.clone(),
-                min_overlap_mm: self.options.min_overlap_mm.unwrap_or(defaults.min_overlap_mm),
+                min_overlap_mm: self
+                    .options
+                    .min_overlap_mm
+                    .unwrap_or(defaults.min_overlap_mm),
                 max_shift_mm: self.options.max_shift_mm,
                 // An explicit minOverlapMm alone means exactly that; 0 turns the fraction off.
-                min_overlap_fraction: match (self.options.min_overlap_fraction, self.options.min_overlap_mm) {
+                min_overlap_fraction: match (
+                    self.options.min_overlap_fraction,
+                    self.options.min_overlap_mm,
+                ) {
                     (Some(f), _) if f <= 0.0 => None,
                     (Some(f), _) => Some(f),
                     (None, Some(_)) => None,
                     (None, None) => defaults.min_overlap_fraction,
                 },
             };
-            let estimate = dcm_estimate_translation(&self.fixed, &self.moving, &options).map_err(to_napi_err)?;
+            let estimate = dcm_estimate_translation(&self.fixed, &self.moving, &options)
+                .map_err(to_napi_err)?;
             Ok(TranslationEstimate {
                 matrix: estimate.matrix.to_vec(),
                 translation_mm: estimate.translation_mm.to_vec(),
@@ -2100,7 +2287,11 @@ pub fn estimate_translation(
     options: Option<EstimateTranslationOptions>,
 ) -> Result<AsyncTask<EstimateTranslationTask>> {
     let (fixed, moving) = volume_pair(fixed, moving)?;
-    Ok(AsyncTask::new(EstimateTranslationTask { fixed, moving, options: options.unwrap_or_default() }))
+    Ok(AsyncTask::new(EstimateTranslationTask {
+        fixed,
+        moving,
+        options: options.unwrap_or_default(),
+    }))
 }
 
 #[napi(object)]
@@ -2232,7 +2423,9 @@ impl RegistrationCancelToken {
     #[napi(constructor)]
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
-        Self { flag: Arc::new(std::sync::atomic::AtomicBool::new(false)) }
+        Self {
+            flag: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
     }
 
     #[napi]
@@ -2258,7 +2451,8 @@ impl Task for RegisterVolumesTask {
 
     fn compute(&mut self) -> Result<Self::Output> {
         guarded(|| {
-            let result = dcm_register_rigid(&self.fixed, &self.moving, &self.options).map_err(to_napi_err)?;
+            let result = dcm_register_rigid(&self.fixed, &self.moving, &self.options)
+                .map_err(to_napi_err)?;
             Ok(RegistrationResult {
                 matrix: result.matrix.to_vec(),
                 rotation_deg: result.rotation_deg.to_vec(),
@@ -2317,25 +2511,38 @@ impl Task for RegisterVolumesTask {
     }
 }
 
-fn registration_options(options: RegisterVolumesOptions, cancel: Option<&RegistrationCancelToken>) -> Result<DcmRegistrationOptions> {
+fn registration_options(
+    options: RegisterVolumesOptions,
+    cancel: Option<&RegistrationCancelToken>,
+) -> Result<DcmRegistrationOptions> {
     let defaults = DcmRegistrationOptions::default();
     let metric = match options.metric.as_deref() {
         None | Some("auto") => DcmMetricChoice::Auto,
         Some("ncc") => DcmMetricChoice::Ncc,
         Some("mattes-mi") | Some("mi") => DcmMetricChoice::MattesMi,
-        Some(other) => return Err(Error::from_reason(format!("invalid metric '{other}'; expected 'auto', 'ncc' or 'mattes-mi'"))),
+        Some(other) => {
+            return Err(Error::from_reason(format!(
+                "invalid metric '{other}'; expected 'auto', 'ncc' or 'mattes-mi'"
+            )))
+        }
     };
     let initialization = match options.initialize.as_deref() {
         None | Some("translation") => DcmInitialization::Translation,
         Some("centroid") => DcmInitialization::Centroid,
         Some("none") => DcmInitialization::None,
         Some("multi") => DcmInitialization::Multi,
-        Some(other) => return Err(Error::from_reason(format!("invalid initialize '{other}'; expected 'translation', 'centroid', 'none' or 'multi'"))),
+        Some(other) => return Err(Error::from_reason(format!(
+            "invalid initialize '{other}'; expected 'translation', 'centroid', 'none' or 'multi'"
+        ))),
     };
     let mask = match options.mask.as_deref() {
         None | Some("auto") => DcmMaskMode::Auto,
         Some("none") => DcmMaskMode::None,
-        Some(other) => return Err(Error::from_reason(format!("invalid mask '{other}'; expected 'auto' or 'none'"))),
+        Some(other) => {
+            return Err(Error::from_reason(format!(
+                "invalid mask '{other}'; expected 'auto' or 'none'"
+            )))
+        }
     };
     let roi = match (&options.roi_min_mm, &options.roi_max_mm) {
         (None, None) => None,
@@ -2344,14 +2551,20 @@ fn registration_options(options: RegisterVolumesOptions, cancel: Option<&Registr
     };
     let time_limit = match options.time_limit_ms {
         None => defaults.time_limit,
-        Some(ms) if ms.is_finite() && ms > 0.0 => Some(std::time::Duration::from_secs_f64(ms / 1000.0)),
+        Some(ms) if ms.is_finite() && ms > 0.0 => {
+            Some(std::time::Duration::from_secs_f64(ms / 1000.0))
+        }
         Some(_) => return Err(Error::from_reason("timeLimitMs must be a positive number")),
     };
     Ok(DcmRegistrationOptions {
         metric,
         fixed_modality: options.fixed_modality,
         moving_modality: options.moving_modality,
-        initial_matrix: options.initial_matrix.as_deref().map(|m| parse_matrix(m, "initialMatrix")).transpose()?,
+        initial_matrix: options
+            .initial_matrix
+            .as_deref()
+            .map(|m| parse_matrix(m, "initialMatrix"))
+            .transpose()?,
         initialization,
         levels_mm: options.levels_mm.unwrap_or(defaults.levels_mm),
         max_iterations: options.max_iterations.unwrap_or(defaults.max_iterations),
@@ -2359,9 +2572,18 @@ fn registration_options(options: RegisterVolumesOptions, cancel: Option<&Registr
         cancel: cancel.map(|token| token.flag.clone()),
         mask,
         roi,
-        histogram_bins: options.histogram_bins.map(|b| b as usize).unwrap_or(defaults.histogram_bins),
-        max_samples: options.max_samples.map(|s| s as usize).unwrap_or(defaults.max_samples),
-        max_memory_bytes: options.max_memory_bytes.map(|b| b.max(0.0) as u64).unwrap_or(defaults.max_memory_bytes),
+        histogram_bins: options
+            .histogram_bins
+            .map(|b| b as usize)
+            .unwrap_or(defaults.histogram_bins),
+        max_samples: options
+            .max_samples
+            .map(|s| s as usize)
+            .unwrap_or(defaults.max_samples),
+        max_memory_bytes: options
+            .max_memory_bytes
+            .map(|b| b.max(0.0) as u64)
+            .unwrap_or(defaults.max_memory_bytes),
         starts: options
             .starts
             .unwrap_or_default()
@@ -2392,7 +2614,11 @@ pub fn register_volumes(
 ) -> Result<AsyncTask<RegisterVolumesTask>> {
     let (fixed, moving) = volume_pair(fixed, moving)?;
     let options = registration_options(options.unwrap_or_default(), cancel)?;
-    Ok(AsyncTask::new(RegisterVolumesTask { fixed, moving, options }))
+    Ok(AsyncTask::new(RegisterVolumesTask {
+        fixed,
+        moving,
+        options,
+    }))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2428,7 +2654,9 @@ impl Task for ReadSpatialRegistrationTask {
 /// Rejects anything that is not a registration object.
 #[napi]
 pub fn read_spatial_registration(file_path: String) -> AsyncTask<ReadSpatialRegistrationTask> {
-    AsyncTask::new(ReadSpatialRegistrationTask { file_path: PathBuf::from(file_path) })
+    AsyncTask::new(ReadSpatialRegistrationTask {
+        file_path: PathBuf::from(file_path),
+    })
 }
 
 #[napi(object)]
@@ -2463,16 +2691,22 @@ impl Task for WriteSpatialRegistrationTask {
 
     fn compute(&mut self) -> Result<Self::Output> {
         guarded(|| {
-            let spec: serde_json::Value = serde_json::from_str(&self.spec_json).map_err(|e| Error::from_reason(format!("spec is not valid JSON: {e}")))?;
+            let spec: serde_json::Value = serde_json::from_str(&self.spec_json)
+                .map_err(|e| Error::from_reason(format!("spec is not valid JSON: {e}")))?;
             let copy_from = match spec.get("copyPatientStudyFrom").and_then(|v| v.as_str()) {
                 Some(path) => Some(read_dicom_file(path).map_err(to_napi_err)?),
                 None => None,
             };
-            let mut object = dcm_build_spatial_registration(&spec, copy_from.as_ref()).map_err(to_napi_err)?;
+            let mut object =
+                dcm_build_spatial_registration(&spec, copy_from.as_ref()).map_err(to_napi_err)?;
             let json = dcm_read_spatial_registration(&object).map_err(to_napi_err)?;
             let dataset = write_dicom_json_with_options(
                 &object,
-                DicomJsonWriteOptions { format: DicomJsonFormat::Standard, key_style: DicomJsonKeyStyle::Hex, ..Default::default() },
+                DicomJsonWriteOptions {
+                    format: DicomJsonFormat::Standard,
+                    key_style: DicomJsonKeyStyle::Hex,
+                    ..Default::default()
+                },
             )
             .map_err(to_napi_err)?;
             let data = match &self.output_path {
@@ -2482,7 +2716,12 @@ impl Task for WriteSpatialRegistrationTask {
                 }
                 None => Some(dcm_write_dicom_bytes(&mut object).map_err(to_napi_err)?),
             };
-            let text = |key: &str| json.get(key).and_then(|v| v.as_str()).unwrap_or_default().to_owned();
+            let text = |key: &str| {
+                json.get(key)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_owned()
+            };
             Ok(WrittenSpatialRegistrationOutput {
                 sop_instance_uid: text("sopInstanceUid"),
                 series_instance_uid: text("seriesInstanceUid"),
@@ -2520,8 +2759,14 @@ impl Task for WriteSpatialRegistrationTask {
 /// not produce a conformant object (missing UIDs, a non-rigid RIGID matrix, fixed and moving in
 /// one Frame of Reference, ...).
 #[napi]
-pub fn write_spatial_registration(spec_json: String, output_path: Option<String>) -> AsyncTask<WriteSpatialRegistrationTask> {
-    AsyncTask::new(WriteSpatialRegistrationTask { spec_json, output_path: output_path.map(PathBuf::from) })
+pub fn write_spatial_registration(
+    spec_json: String,
+    output_path: Option<String>,
+) -> AsyncTask<WriteSpatialRegistrationTask> {
+    AsyncTask::new(WriteSpatialRegistrationTask {
+        spec_json,
+        output_path: output_path.map(PathBuf::from),
+    })
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2666,8 +2911,16 @@ fn texture_export_result(meta: &DcmTextureMeta, payload: Vec<u8>) -> TextureExpo
         default_window_center: meta.default_window_center,
         default_window_width: meta.default_window_width,
         invert: meta.invert,
-        layer_window_centers: meta.layer_default_windows.iter().map(|(center, _)| *center).collect(),
-        layer_window_widths: meta.layer_default_windows.iter().map(|(_, width)| *width).collect(),
+        layer_window_centers: meta
+            .layer_default_windows
+            .iter()
+            .map(|(center, _)| *center)
+            .collect(),
+        layer_window_widths: meta
+            .layer_default_windows
+            .iter()
+            .map(|(_, width)| *width)
+            .collect(),
         layer_invert: meta.layer_invert.clone(),
         native_width: meta.native_dims.0,
         native_height: meta.native_dims.1,
@@ -2695,8 +2948,13 @@ impl Task for ExportVolumeTextureTask {
                 (Some(center), Some(width)) => Some((center, width)),
                 _ => None,
             };
-            let packed = dcm_pack_volume_texture(&self.volume, self.options.target_max_dim, default_window, compression)
-                .map_err(to_napi_err)?;
+            let packed = dcm_pack_volume_texture(
+                &self.volume,
+                self.options.target_max_dim,
+                default_window,
+                compression,
+            )
+            .map_err(to_napi_err)?;
             Ok(texture_export_result(&packed.meta, packed.payload))
         })
     }
@@ -2746,7 +3004,10 @@ impl Task for ExportFrameTextureTask {
 /// texture/shader pipeline as an MPR volume, instead of the lossy zoomed-JPEG path `renderFrame`
 /// produces. Mirrors `dcmnorm --render-frame ... --output-type texture file.dcm out.gputex`.
 #[napi]
-pub fn export_frame_texture(file_path: String, options: Option<ExportFrameTextureOptions>) -> AsyncTask<ExportFrameTextureTask> {
+pub fn export_frame_texture(
+    file_path: String,
+    options: Option<ExportFrameTextureOptions>,
+) -> AsyncTask<ExportFrameTextureTask> {
     AsyncTask::new(ExportFrameTextureTask {
         file_path: PathBuf::from(file_path),
         options: options.unwrap_or_default(),
@@ -2859,7 +3120,9 @@ impl Task for ExportFrameStackTextureTask {
             let objects = self
                 .sources
                 .iter()
-                .map(|source| read_dicom_file(PathBuf::from(&source.file_path)).map_err(to_napi_err))
+                .map(|source| {
+                    read_dicom_file(PathBuf::from(&source.file_path)).map_err(to_napi_err)
+                })
                 .collect::<Result<Vec<_>>>()?;
 
             let mut frame_refs: Vec<(&dcmnorm_object::DefaultDicomObject, usize)> = Vec::new();
@@ -2870,7 +3133,9 @@ impl Task for ExportFrameStackTextureTask {
                 }
             }
 
-            let packed = dcm_pack_dicom_frame_stack_texture(&frame_refs, default_window, compression).map_err(to_napi_err)?;
+            let packed =
+                dcm_pack_dicom_frame_stack_texture(&frame_refs, default_window, compression)
+                    .map_err(to_napi_err)?;
             Ok(texture_export_result(&packed.meta, packed.payload))
         })
     }
@@ -2889,7 +3154,10 @@ pub fn export_frame_stack_texture(
     sources: Vec<FrameStackSource>,
     options: Option<ExportFrameStackTextureOptions>,
 ) -> AsyncTask<ExportFrameStackTextureTask> {
-    AsyncTask::new(ExportFrameStackTextureTask { sources, options: options.unwrap_or_default() })
+    AsyncTask::new(ExportFrameStackTextureTask {
+        sources,
+        options: options.unwrap_or_default(),
+    })
 }
 
 #[napi(object)]
@@ -2916,7 +3184,9 @@ impl Task for ExportFrameStackTextureRgbTask {
             let objects = self
                 .sources
                 .iter()
-                .map(|source| read_dicom_file(PathBuf::from(&source.file_path)).map_err(to_napi_err))
+                .map(|source| {
+                    read_dicom_file(PathBuf::from(&source.file_path)).map_err(to_napi_err)
+                })
                 .collect::<Result<Vec<_>>>()?;
 
             let mut frame_refs: Vec<(&dcmnorm_object::DefaultDicomObject, usize)> = Vec::new();
@@ -2927,7 +3197,8 @@ impl Task for ExportFrameStackTextureRgbTask {
                 }
             }
 
-            let packed = dcm_pack_dicom_rgb_frame_stack_texture(&frame_refs, compression).map_err(to_napi_err)?;
+            let packed = dcm_pack_dicom_rgb_frame_stack_texture(&frame_refs, compression)
+                .map_err(to_napi_err)?;
             Ok(texture_export_result(&packed.meta, packed.payload))
         })
     }
@@ -2944,7 +3215,10 @@ pub fn export_frame_stack_texture_rgb(
     sources: Vec<FrameStackSource>,
     options: Option<ExportFrameStackTextureRgbOptions>,
 ) -> AsyncTask<ExportFrameStackTextureRgbTask> {
-    AsyncTask::new(ExportFrameStackTextureRgbTask { sources, options: options.unwrap_or_default() })
+    AsyncTask::new(ExportFrameStackTextureRgbTask {
+        sources,
+        options: options.unwrap_or_default(),
+    })
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2969,7 +3243,11 @@ type TwoStringCallback = ThreadsafeFunction<(String, String), PromiseRaw<'static
 /// ThreadsafeFunction's argument type.
 fn bridge_promise_result(
     promise_result: Result<PromiseRaw<String>>,
-    tx: std::sync::Arc<std::sync::Mutex<Option<futures::channel::oneshot::Sender<std::result::Result<String, String>>>>>,
+    tx: std::sync::Arc<
+        std::sync::Mutex<
+            Option<futures::channel::oneshot::Sender<std::result::Result<String, String>>>,
+        >,
+    >,
 ) {
     match promise_result {
         Ok(promise) => {
@@ -2982,7 +3260,9 @@ fn bridge_promise_result(
             });
             let _ = promise.catch(move |_ctx: CallbackContext<Unknown>| {
                 if let Some(sender) = tx.lock().unwrap().take() {
-                    let _ = sender.send(Err("DIMSE server callback's returned promise rejected".to_owned()));
+                    let _ = sender.send(Err(
+                        "DIMSE server callback's returned promise rejected".to_owned()
+                    ));
                 }
                 Ok(())
             });
@@ -2999,14 +3279,22 @@ fn bridge_promise_result(
 /// thread until the callback's returned Promise settles - `Ok(value)` if it resolved (`value` is
 /// the resolved string), `Err(message)` if the call itself failed, the callback threw
 /// synchronously, or the returned Promise rejected.
-fn call_json_callback(callback: &JsonCallback, payload: String) -> std::result::Result<String, String> {
+fn call_json_callback(
+    callback: &JsonCallback,
+    payload: String,
+) -> std::result::Result<String, String> {
     let (tx, rx) = futures::channel::oneshot::channel();
     let tx = std::sync::Arc::new(std::sync::Mutex::new(Some(tx)));
-    callback.call_with_return_value(Ok(payload), ThreadsafeFunctionCallMode::NonBlocking, move |result, _env| {
-        bridge_promise_result(result, tx);
-        Ok(())
-    });
-    futures::executor::block_on(rx).unwrap_or_else(|_| Err("DIMSE server callback was dropped before responding".to_owned()))
+    callback.call_with_return_value(
+        Ok(payload),
+        ThreadsafeFunctionCallMode::NonBlocking,
+        move |result, _env| {
+            bridge_promise_result(result, tx);
+            Ok(())
+        },
+    );
+    futures::executor::block_on(rx)
+        .unwrap_or_else(|_| Err("DIMSE server callback was dropped before responding".to_owned()))
 }
 
 /// As [`call_json_callback`], for the two-plain-string-argument callback (`onMove`).
@@ -3016,11 +3304,16 @@ fn call_two_string_callback(
 ) -> std::result::Result<String, String> {
     let (tx, rx) = futures::channel::oneshot::channel();
     let tx = std::sync::Arc::new(std::sync::Mutex::new(Some(tx)));
-    callback.call_with_return_value(Ok(payload), ThreadsafeFunctionCallMode::NonBlocking, move |result, _env| {
-        bridge_promise_result(result, tx);
-        Ok(())
-    });
-    futures::executor::block_on(rx).unwrap_or_else(|_| Err("DIMSE server callback was dropped before responding".to_owned()))
+    callback.call_with_return_value(
+        Ok(payload),
+        ThreadsafeFunctionCallMode::NonBlocking,
+        move |result, _env| {
+            bridge_promise_result(result, tx);
+            Ok(())
+        },
+    );
+    futures::executor::block_on(rx)
+        .unwrap_or_else(|_| Err("DIMSE server callback was dropped before responding".to_owned()))
 }
 
 struct NapiScpHandlers {
@@ -3051,10 +3344,17 @@ impl DcmScpHandlers for NapiScpHandlers {
         self.on_find(&request)
     }
 
-    fn on_move(&self, study_instance_uid: &str, move_destination_ae: &str) -> std::result::Result<bool, String> {
+    fn on_move(
+        &self,
+        study_instance_uid: &str,
+        move_destination_ae: &str,
+    ) -> std::result::Result<bool, String> {
         let response = call_two_string_callback(
             &self.on_move,
-            (study_instance_uid.to_owned(), move_destination_ae.to_owned()),
+            (
+                study_instance_uid.to_owned(),
+                move_destination_ae.to_owned(),
+            ),
         )?;
         serde_json::from_str(&response).map_err(|e| e.to_string())
     }
@@ -3142,12 +3442,18 @@ pub fn start_dicom_server(
         // comment for why this ceiling has to be generous rather than per-requestor.
         max_pdu_length: max_pdu_length.unwrap_or(262_144),
         idle_timeout: Duration::from_millis(u64::from(idle_timeout_ms.unwrap_or(300_000))),
-        on_log: on_log.map(|callback| std::sync::Arc::new(NapiDimseLogger { callback }) as std::sync::Arc<dyn DimseLogger>),
+        on_log: on_log.map(|callback| {
+            std::sync::Arc::new(NapiDimseLogger { callback }) as std::sync::Arc<dyn DimseLogger>
+        }),
         ..Default::default()
     };
 
-    let scp = dcm_start_scp(port as u16, PathBuf::from(cache_path), handlers, options).map_err(to_napi_err)?;
+    let scp = dcm_start_scp(port as u16, PathBuf::from(cache_path), handlers, options)
+        .map_err(to_napi_err)?;
     let local_port = scp.local_port();
 
-    Ok(DicomServerHandle { inner: std::sync::Mutex::new(Some(scp)), local_port })
+    Ok(DicomServerHandle {
+        inner: std::sync::Mutex::new(Some(scp)),
+        local_port,
+    })
 }

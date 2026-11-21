@@ -4,9 +4,14 @@
 //! exactly and a shear or stretch shows up as a measurable position error, not a vague "looks
 //! plausible".
 
-use super::test_support::{remove_stack, write_synthetic_enhanced, write_synthetic_stack, SyntheticStack, Vec3};
-use super::volume::{build_volume, reformat_plane_values, resample_volume, Interpolation, PlaneParams, SlabProjection};
+use super::test_support::{
+    remove_stack, write_synthetic_enhanced, write_synthetic_stack, SyntheticStack, Vec3,
+};
 use super::texture_export::{pack_volume_texture, TextureCompression};
+use super::volume::{
+    build_volume, reformat_plane_values, resample_volume, Interpolation, PlaneParams,
+    SlabProjection,
+};
 
 fn add(a: Vec3, b: Vec3) -> Vec3 {
     [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
@@ -15,7 +20,11 @@ fn scale(a: Vec3, s: f64) -> Vec3 {
     [a[0] * s, a[1] * s, a[2] * s]
 }
 fn cross(a: Vec3, b: Vec3) -> Vec3 {
-    [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
 }
 
 /// A vertical (patient S-I) Gaussian rod at x = 5, y = -8 (sigma 4 mm, peak 1000) plus a
@@ -24,7 +33,8 @@ fn cross(a: Vec3, b: Vec3) -> Vec3 {
 fn phantom(p: Vec3) -> f64 {
     let rod = 1000.0 * (-((p[0] - 5.0).powi(2) + (p[1] + 8.0).powi(2)) / (2.0 * 16.0)).exp();
     let blob = 800.0
-        * (-((p[0] + 10.0).powi(2) + (p[1] - 6.0).powi(2) + (p[2] - 30.0).powi(2)) / (2.0 * 9.0)).exp();
+        * (-((p[0] + 10.0).powi(2) + (p[1] - 6.0).powi(2) + (p[2] - 30.0).powi(2)) / (2.0 * 9.0))
+            .exp();
     rod + blob
 }
 
@@ -92,14 +102,21 @@ fn a_gantry_tilted_stack_is_detected_desheared_and_samples_the_true_anatomy() {
     remove_stack(&paths);
 
     assert!(volume.desheared, "a 20 degree tilt must be desheared");
-    assert!((volume.gantry_tilt_deg - 20.0).abs() < 0.05, "tilt {}", volume.gantry_tilt_deg);
+    assert!(
+        (volume.gantry_tilt_deg - 20.0).abs() < 0.05,
+        "tilt {}",
+        volume.gantry_tilt_deg
+    );
     // The desheared grid covers the union of every slice's footprint: 78 mm of table travel x
     // sin 20 = 26.7 mm of in-plane drift along the column direction, so 27 extra rows.
     assert_eq!(volume.cols, 64);
     assert_eq!(volume.rows, 72 + 27);
     // The normal is the tilted plane's own normal and slices are spaced 2 cos(20) mm along it.
     let normal = cross(stack.row_vector, stack.col_vector);
-    assert!((volume.slice_normal[1] - normal[1]).abs() < 1e-5 && (volume.slice_normal[2] - normal[2]).abs() < 1e-5);
+    assert!(
+        (volume.slice_normal[1] - normal[1]).abs() < 1e-5
+            && (volume.slice_normal[2] - normal[2]).abs() < 1e-5
+    );
     let expected_gap = 2.0 * 20f64.to_radians().cos();
     for pair in volume.slice_zs.windows(2) {
         assert!((pair[1] - pair[0] - expected_gap).abs() < 1e-4);
@@ -110,21 +127,36 @@ fn a_gantry_tilted_stack_is_detected_desheared_and_samples_the_true_anatomy() {
     for z in [8.0, 20.0, 35.0, 50.0] {
         let (x, y) = rod_centroid_at(&volume, z);
         eprintln!("tilt 20 deg: rod centroid at z={z}: ({x:.3}, {y:.3}), truth (5, -8)");
-        assert!((x - 5.0).abs() < 0.1 && (y + 8.0).abs() < 0.1, "rod at z={z} found at ({x:.3}, {y:.3})");
+        assert!(
+            (x - 5.0).abs() < 0.1 && (y + 8.0).abs() < 0.1,
+            "rod at z={z} found at ({x:.3}, {y:.3})"
+        );
     }
 
     // Point samples throughout the interior match the analytic phantom as well as an untilted
     // stack with the same slice spacing does (the residual is plain trilinear interpolation
     // error on 1 mm pixels / 1.9 mm slices, which the control measures).
-    let points = [(5.0, -8.0, 12.0), (-10.0, 6.0, 30.0), (0.0, 0.0, 25.0), (7.0, -5.0, 45.0), (-12.0, 4.0, 28.0), (-9.0, 7.5, 31.0)];
+    let points = [
+        (5.0, -8.0, 12.0),
+        (-10.0, 6.0, 30.0),
+        (0.0, 0.0, 25.0),
+        (7.0, -5.0, 45.0),
+        (-12.0, 4.0, 28.0),
+        (-9.0, 7.5, 31.0),
+    ];
     let worst_error = |volume: &super::volume::Volume| -> f64 {
         points
             .iter()
-            .map(|&(x, y, z)| (volume.sample_world([x, y, z]).expect("inside the volume") - phantom([x, y, z])).abs())
+            .map(|&(x, y, z)| {
+                (volume.sample_world([x, y, z]).expect("inside the volume") - phantom([x, y, z]))
+                    .abs()
+            })
             .fold(0.0, f64::max)
     };
     let control_stack = SyntheticStack {
-        positions: (0..40).map(|k| [-32.0, -40.0, -10.0 + k as f64 * expected_gap]).collect(),
+        positions: (0..40)
+            .map(|k| [-32.0, -40.0, -10.0 + k as f64 * expected_gap])
+            .collect(),
         col_vector: [0.0, 1.0, 0.0],
         ..tilted_axial_stack(0.0, &[])
     };
@@ -165,7 +197,9 @@ fn deshear_also_handles_tilted_non_axial_stacks_with_irregular_spacing() {
     let start = [30.0, -40.0, 70.0];
     let mut positions = vec![start];
     let mut along = 0.0;
-    for gap in [2.0, 2.0, 2.0, 4.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0] {
+    for gap in [
+        2.0, 2.0, 2.0, 4.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0,
+    ] {
         along += gap;
         positions.push(add(start, scale(step_dir, along)));
     }
@@ -186,7 +220,11 @@ fn deshear_also_handles_tilted_non_axial_stacks_with_irregular_spacing() {
     remove_stack(&paths);
 
     assert!(volume.desheared);
-    assert!((volume.gantry_tilt_deg - 15.0).abs() < 0.05, "tilt {}", volume.gantry_tilt_deg);
+    assert!(
+        (volume.gantry_tilt_deg - 15.0).abs() < 0.05,
+        "tilt {}",
+        volume.gantry_tilt_deg
+    );
     assert!(volume.has_irregular_spacing());
     assert_eq!(volume.modality.as_deref(), Some("MR"));
     assert_eq!(volume.frame_of_reference_uid.as_deref(), Some("2.25.2001"));
@@ -218,7 +256,10 @@ fn texture_export_of_an_irregular_stack_is_a_uniform_lattice_by_position() {
         row_vector: [1.0, 0.0, 0.0],
         col_vector: [0.0, 1.0, 0.0],
         pixel_spacing: [1.0, 1.0],
-        positions: [0.0, 2.0, 4.0, 8.0, 10.0].iter().map(|&z| [0.0, 0.0, z]).collect(),
+        positions: [0.0, 2.0, 4.0, 8.0, 10.0]
+            .iter()
+            .map(|&z| [0.0, 0.0, z])
+            .collect(),
         modality: "CT",
         frame_of_reference_uid: "2.25.3001".into(),
         study_instance_uid: "2.25.3002".into(),
@@ -232,7 +273,11 @@ fn texture_export_of_an_irregular_stack_is_a_uniform_lattice_by_position() {
     let uniform = resample_volume(&volume, 8, 8, 5, Interpolation::Trilinear);
     for slice in 0..5 {
         let expected = 100.0 * 2.5 * slice as f32; // uniform 2.5 mm across the 10 mm span
-        assert!((uniform[slice * 64 + 27] - expected).abs() < 1e-3, "slice {slice}: {}", uniform[slice * 64 + 27]);
+        assert!(
+            (uniform[slice * 64 + 27] - expected).abs() < 1e-3,
+            "slice {slice}: {}",
+            uniform[slice * 64 + 27]
+        );
     }
 
     let packed = pack_volume_texture(&volume, None, None, TextureCompression::None).unwrap();
@@ -251,7 +296,11 @@ fn texture_export_of_an_irregular_stack_is_a_uniform_lattice_by_position() {
     };
     for slice in 0..5 {
         let expected = 250.0 * slice as f64;
-        assert!((texel(slice * 64 + 27) - expected).abs() < 1.0, "texture slice {slice}: {}", texel(slice * 64 + 27));
+        assert!(
+            (texel(slice * 64 + 27) - expected).abs() < 1.0,
+            "texture slice {slice}: {}",
+            texel(slice * 64 + 27)
+        );
     }
 }
 
@@ -276,7 +325,10 @@ fn downsampled_texture_spacing_spans_the_native_extent_exactly() {
 #[test]
 fn an_enhanced_multi_frame_object_builds_the_same_volume_as_classic_slices() {
     for modality in ["CT", "MR", "PT"] {
-        let classic_stack = SyntheticStack { modality, ..tilted_axial_stack(0.0, &[2.0; 11]) };
+        let classic_stack = SyntheticStack {
+            modality,
+            ..tilted_axial_stack(0.0, &[2.0; 11])
+        };
         let classic_paths = write_synthetic_stack(&classic_stack, phantom);
         let classic = build_volume(&classic_paths).unwrap();
         remove_stack(&classic_paths);
@@ -287,12 +339,20 @@ fn an_enhanced_multi_frame_object_builds_the_same_volume_as_classic_slices() {
         std::fs::remove_dir_all(enhanced_path.parent().unwrap()).ok();
 
         assert_eq!(enhanced.modality.as_deref(), Some(modality));
-        assert_eq!((enhanced.rows, enhanced.cols, enhanced.num_slices), (classic.rows, classic.cols, classic.num_slices));
+        assert_eq!(
+            (enhanced.rows, enhanced.cols, enhanced.num_slices),
+            (classic.rows, classic.cols, classic.num_slices)
+        );
         assert_eq!(enhanced.origin, classic.origin);
         assert_eq!(enhanced.slice_zs, classic.slice_zs);
         // Both builds round to stored integers: the classic one by 0.5, the per-frame rescaled one
         // by up to slope / 2 (slope <= 2.375 here).
-        let worst = enhanced.samples.iter().zip(&classic.samples).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
+        let worst = enhanced
+            .samples
+            .iter()
+            .zip(&classic.samples)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
         assert!(worst <= 1.7, "{modality}: worst voxel difference {worst}");
     }
 }
@@ -307,7 +367,10 @@ fn a_tilted_enhanced_object_and_a_list_of_enhanced_objects_are_handled() {
     std::fs::remove_dir_all(path.parent().unwrap()).ok();
     assert!(volume.desheared && (volume.gantry_tilt_deg - 15.0).abs() < 0.05);
     let (x, y) = rod_centroid_at(&volume, 20.0);
-    assert!((x - 5.0).abs() < 0.1 && (y + 8.0).abs() < 0.1, "rod found at ({x:.3}, {y:.3})");
+    assert!(
+        (x - 5.0).abs() < 0.1 && (y + 8.0).abs() < 0.1,
+        "rod found at ({x:.3}, {y:.3})"
+    );
 
     // Two enhanced files (two halves of one stack) plus a repeated frame at an existing
     // position (a second temporal position): one volume, the duplicate dropped.

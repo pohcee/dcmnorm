@@ -91,7 +91,10 @@ pub fn read_dcmnorm_object_for_filter(
 
 /// Strips every element from `object` that isn't among `requests`.
 pub fn apply_filter_to_object(object: &mut DefaultDicomObject, requests: &[FilterRequest]) {
-    let keep_tags = requests.iter().map(|request| request.tag).collect::<Vec<_>>();
+    let keep_tags = requests
+        .iter()
+        .map(|request| request.tag)
+        .collect::<Vec<_>>();
     let remove_tags = object
         .iter()
         .map(|element| element.header().tag)

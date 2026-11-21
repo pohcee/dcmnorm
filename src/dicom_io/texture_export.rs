@@ -32,13 +32,19 @@ pub enum TextureExportError {
     Io(io::Error),
     Render(RenderError),
     /// `values.len()` didn't match the declared `width * height` (or `width * height * depth`).
-    SampleCountMismatch { expected: usize, found: usize },
+    SampleCountMismatch {
+        expected: usize,
+        found: usize,
+    },
     InvalidDimensions,
     /// A frame stack's frames didn't all share the same width/height - unlike `Volume`'s slices
     /// (guaranteed consistent Rows/Columns within a series by `build_volume`), frame-stack
     /// sources may come from independently-selected instances, so this is checked explicitly
     /// rather than assumed.
-    FrameDimensionMismatch { expected: (u32, u32), found: (u32, u32) },
+    FrameDimensionMismatch {
+        expected: (u32, u32),
+        found: (u32, u32),
+    },
 }
 
 impl fmt::Display for TextureExportError {
@@ -295,7 +301,11 @@ fn sample_stats(raw: &[f32]) -> SampleStats {
 /// `sample_stats` over several buffers taken as one (the frames of a stack), without
 /// concatenating them first.
 fn sample_stats_parts(parts: &[&[f32]]) -> SampleStats {
-    let identity = || SampleStats { min: f64::INFINITY, max: f64::NEG_INFINITY, all_integral: true };
+    let identity = || SampleStats {
+        min: f64::INFINITY,
+        max: f64::NEG_INFINITY,
+        all_integral: true,
+    };
     parts
         .par_iter()
         .flat_map(|part| part.par_chunks(PAR_CHUNK_SAMPLES))
@@ -339,16 +349,26 @@ fn encode_u16_le_parts(parts: &[&[f32]], encode: impl Fn(f32) -> [u8; 2] + Sync)
 }
 
 /// `quantize_samples` with its min/max/integrality pass already done (see `sample_stats`).
-fn quantize_with_stats(raw: &[f32], stats: &SampleStats) -> (Vec<u8>, SampleFormat, f64, f64, bool) {
+fn quantize_with_stats(
+    raw: &[f32],
+    stats: &SampleStats,
+) -> (Vec<u8>, SampleFormat, f64, f64, bool) {
     quantize_parts_with_stats(&[raw], stats)
 }
 
 /// `quantize_with_stats` over several buffers taken as one (see `sample_stats_parts`).
-fn quantize_parts_with_stats(parts: &[&[f32]], stats: &SampleStats) -> (Vec<u8>, SampleFormat, f64, f64, bool) {
+fn quantize_parts_with_stats(
+    parts: &[&[f32]],
+    stats: &SampleStats,
+) -> (Vec<u8>, SampleFormat, f64, f64, bool) {
     if parts.iter().all(|part| part.is_empty()) {
         return (Vec::new(), SampleFormat::Int16, 1.0, 0.0, true);
     }
-    let SampleStats { min, max, all_integral } = *stats;
+    let SampleStats {
+        min,
+        max,
+        all_integral,
+    } = *stats;
 
     if all_integral && min >= 0.0 && max <= u16::MAX as f64 {
         let bytes = encode_u16_le_parts(parts, |sample| (sample.round() as u16).to_le_bytes());
@@ -362,7 +382,9 @@ fn quantize_parts_with_stats(parts: &[&[f32]], stats: &SampleStats) -> (Vec<u8>,
 
     if all_integral && max - min <= u16::MAX as f64 {
         let intercept = min.round();
-        let bytes = encode_u16_le_parts(parts, |sample| ((sample as f64 - intercept).round() as u16).to_le_bytes());
+        let bytes = encode_u16_le_parts(parts, |sample| {
+            ((sample as f64 - intercept).round() as u16).to_le_bytes()
+        });
         return (bytes, SampleFormat::Uint16, 1.0, intercept, true);
     }
 
@@ -370,7 +392,9 @@ fn quantize_parts_with_stats(parts: &[&[f32]], stats: &SampleStats) -> (Vec<u8>,
     let slope = range / 65535.0;
     let intercept = min;
     let bytes = encode_u16_le_parts(parts, |sample| {
-        let scaled = ((sample as f64 - intercept) / slope).round().clamp(0.0, 65535.0);
+        let scaled = ((sample as f64 - intercept) / slope)
+            .round()
+            .clamp(0.0, 65535.0);
         (scaled as u16).to_le_bytes()
     });
     (bytes, SampleFormat::Uint16, slope, intercept, false)
@@ -390,7 +414,10 @@ fn window_from_stats(stats: &SampleStats) -> (f64, f64) {
     ((min + max) / 2.0, (max - min).max(1.0))
 }
 
-fn apply_compression(quantized: Vec<u8>, compression: TextureCompression) -> Result<(Vec<u8>, u64), TextureExportError> {
+fn apply_compression(
+    quantized: Vec<u8>,
+    compression: TextureCompression,
+) -> Result<(Vec<u8>, u64), TextureExportError> {
     let payload_bytes_raw = quantized.len() as u64;
     let payload = match compression {
         TextureCompression::None => quantized,
@@ -423,14 +450,30 @@ pub fn pack_volume_texture(
             let target_cols = ((native_dims.0 as f64 * scale).round() as u32).max(1);
             let target_rows = ((native_dims.1 as f64 * scale).round() as u32).max(1);
             let target_slices = ((native_dims.2 as f64 * scale).round() as u32).max(1);
-            let resampled = resample_volume(volume, target_cols, target_rows, target_slices, Interpolation::Trilinear);
-            (Cow::Owned(resampled), (target_cols, target_rows, target_slices), true)
+            let resampled = resample_volume(
+                volume,
+                target_cols,
+                target_rows,
+                target_slices,
+                Interpolation::Trilinear,
+            );
+            (
+                Cow::Owned(resampled),
+                (target_cols, target_rows, target_slices),
+                true,
+            )
         }
         // An irregularly spaced stack has no uniform slice spacing to report, so it's resampled
         // by position onto a uniform lattice with the same slice count (the texture's
         // `slice_spacing_mm` is then exact instead of an average that stretches part of it).
         _ if volume.has_irregular_spacing() => {
-            let resampled = resample_volume(volume, native_dims.0, native_dims.1, native_dims.2, Interpolation::Trilinear);
+            let resampled = resample_volume(
+                volume,
+                native_dims.0,
+                native_dims.1,
+                native_dims.2,
+                Interpolation::Trilinear,
+            );
             (Cow::Owned(resampled), native_dims, false)
         }
         _ => (Cow::Borrowed(volume.samples.as_slice()), native_dims, false),
@@ -438,11 +481,15 @@ pub fn pack_volume_texture(
 
     let expected = dims.0 as usize * dims.1 as usize * dims.2 as usize;
     if raw.len() != expected {
-        return Err(TextureExportError::SampleCountMismatch { expected, found: raw.len() });
+        return Err(TextureExportError::SampleCountMismatch {
+            expected,
+            found: raw.len(),
+        });
     }
 
     let stats = sample_stats(&raw);
-    let (quantized, sample_format, rescale_slope, rescale_intercept, lossless) = quantize_with_stats(&raw, &stats);
+    let (quantized, sample_format, rescale_slope, rescale_intercept, lossless) =
+        quantize_with_stats(&raw, &stats);
     let default_window = default_window.or_else(|| Some(window_from_stats(&stats)));
     let (payload, payload_bytes_raw) = apply_compression(quantized, compression)?;
     let payload_bytes_stored = payload.len() as u64;
@@ -504,7 +551,12 @@ pub fn pack_volume_texture(
 /// existing (lossy, 8-bit-targeted) resize path used for `--scale-max-size` - this operates on
 /// raw physical values, before any windowing/quantization. Returns `(values, width, height)`;
 /// a no-op (clone) if the frame already fits.
-pub fn resample_frame_2d(values: &[f32], width: u32, height: u32, target_max_dim: u32) -> (Vec<f32>, u32, u32) {
+pub fn resample_frame_2d(
+    values: &[f32],
+    width: u32,
+    height: u32,
+    target_max_dim: u32,
+) -> (Vec<f32>, u32, u32) {
     let native_max = width.max(height);
     if native_max == 0 || native_max <= target_max_dim.max(1) {
         return (values.to_vec(), width, height);
@@ -514,8 +566,16 @@ pub fn resample_frame_2d(values: &[f32], width: u32, height: u32, target_max_dim
     let target_width = ((width as f64 * scale).round() as u32).max(1);
     let target_height = ((height as f64 * scale).round() as u32).max(1);
 
-    let col_scale = if target_width > 1 { (width as f64 - 1.0) / (target_width as f64 - 1.0) } else { 0.0 };
-    let row_scale = if target_height > 1 { (height as f64 - 1.0) / (target_height as f64 - 1.0) } else { 0.0 };
+    let col_scale = if target_width > 1 {
+        (width as f64 - 1.0) / (target_width as f64 - 1.0)
+    } else {
+        0.0
+    };
+    let row_scale = if target_height > 1 {
+        (height as f64 - 1.0) / (target_height as f64 - 1.0)
+    } else {
+        0.0
+    };
 
     let sample_at = |x_f: f64, y_f: f64| -> f32 {
         let x0 = x_f.floor().clamp(0.0, (width - 1) as f64) as usize;
@@ -543,7 +603,8 @@ pub fn resample_frame_2d(values: &[f32], width: u32, height: u32, target_max_dim
             } else {
                 (width as f64 - 1.0) / 2.0
             };
-            out[target_row as usize * target_width as usize + target_col as usize] = sample_at(x_f, y_f);
+            out[target_row as usize * target_width as usize + target_col as usize] =
+                sample_at(x_f, y_f);
         }
     }
     (out, target_width, target_height)
@@ -567,7 +628,10 @@ pub fn pack_frame_texture(
     }
     let expected = width as usize * height as usize;
     if values.len() != expected {
-        return Err(TextureExportError::SampleCountMismatch { expected, found: values.len() });
+        return Err(TextureExportError::SampleCountMismatch {
+            expected,
+            found: values.len(),
+        });
     }
     let native_dims = (width, height, 1);
 
@@ -580,7 +644,8 @@ pub fn pack_frame_texture(
     };
 
     let stats = sample_stats(&raw);
-    let (quantized, sample_format, rescale_slope, rescale_intercept, lossless) = quantize_with_stats(&raw, &stats);
+    let (quantized, sample_format, rescale_slope, rescale_intercept, lossless) =
+        quantize_with_stats(&raw, &stats);
     let default_window = default_window.or_else(|| Some(window_from_stats(&stats)));
     let (payload, payload_bytes_raw) = apply_compression(quantized, compression)?;
     let payload_bytes_stored = payload.len() as u64;
@@ -644,7 +709,15 @@ pub fn pack_dicom_frame_texture(
     let (metadata, values) = decode_frame_grayscale_values(object, frame_index)?;
     let invert = resolve_grayscale_invert(object, &metadata.photometric_interpretation);
     let raw: Vec<f32> = values.into_iter().map(|value| value as f32).collect();
-    pack_frame_texture(&raw, metadata.cols as u32, metadata.rows as u32, default_window, target_max_dim, compression, invert)
+    pack_frame_texture(
+        &raw,
+        metadata.cols as u32,
+        metadata.rows as u32,
+        default_window,
+        target_max_dim,
+        compression,
+        invert,
+    )
 }
 
 /// One already-decoded 2D frame, as input to `pack_frame_stack_texture` - the frame-stack analog
@@ -700,7 +773,10 @@ pub fn pack_frame_stack_texture(
             });
         }
         if frame.values.len() != expected_per_frame {
-            return Err(TextureExportError::SampleCountMismatch { expected: expected_per_frame, found: frame.values.len() });
+            return Err(TextureExportError::SampleCountMismatch {
+                expected: expected_per_frame,
+                found: frame.values.len(),
+            });
         }
         parts.push(&frame.values);
     }
@@ -709,7 +785,8 @@ pub fn pack_frame_stack_texture(
     let native_dims = (width, height, depth);
 
     let stats = sample_stats_parts(&parts);
-    let (quantized, sample_format, rescale_slope, rescale_intercept, lossless) = quantize_parts_with_stats(&parts, &stats);
+    let (quantized, sample_format, rescale_slope, rescale_intercept, lossless) =
+        quantize_parts_with_stats(&parts, &stats);
     let default_window = default_window.or_else(|| Some(window_from_stats(&stats)));
     let (payload, payload_bytes_raw) = apply_compression(quantized, compression)?;
     let payload_bytes_stored = payload.len() as u64;
@@ -782,8 +859,15 @@ pub fn pack_dicom_frame_stack_texture(
             invert = resolve_grayscale_invert(object, &metadata.photometric_interpretation);
         }
         let raw: Vec<f32> = values.into_iter().map(|value| value as f32).collect();
-        decoded.push(DecodedFrame { values: raw, width: metadata.cols as u32, height: metadata.rows as u32 });
-        layer_invert.push(resolve_grayscale_invert(object, &metadata.photometric_interpretation));
+        decoded.push(DecodedFrame {
+            values: raw,
+            width: metadata.cols as u32,
+            height: metadata.rows as u32,
+        });
+        layer_invert.push(resolve_grayscale_invert(
+            object,
+            &metadata.photometric_interpretation,
+        ));
     }
 
     // Per-layer defaults (see `TextureMeta::layer_default_windows`): a layer's own
@@ -791,7 +875,8 @@ pub fn pack_dicom_frame_stack_texture(
     // min/max span over ALL of its source object's frames in the stack - per object rather than
     // per frame, so an untagged cine loop keeps one stable window instead of flickering
     // frame-to-frame.
-    let mut object_min_max: Vec<(*const dcmnorm_object::DefaultDicomObject, (f64, f64))> = Vec::new();
+    let mut object_min_max: Vec<(*const dcmnorm_object::DefaultDicomObject, (f64, f64))> =
+        Vec::new();
     let mut layer_default_windows = Vec::with_capacity(sources.len());
     for (object, frame_index) in sources {
         let (center, width) = resolve_default_window(object, *frame_index);
@@ -828,7 +913,12 @@ pub fn pack_dicom_frame_stack_texture(
 /// interleaved RGB8 frame. `u8` in/out (round + clamp to 0-255) rather than a raw `f32`
 /// passthrough - RGB8 has no "physical value" concept beyond the display range, unlike the
 /// grayscale path's physical samples.
-pub fn resample_rgb_frame_2d(rgb: &[u8], width: u32, height: u32, target_max_dim: u32) -> (Vec<u8>, u32, u32) {
+pub fn resample_rgb_frame_2d(
+    rgb: &[u8],
+    width: u32,
+    height: u32,
+    target_max_dim: u32,
+) -> (Vec<u8>, u32, u32) {
     let native_max = width.max(height);
     if native_max == 0 || native_max <= target_max_dim.max(1) {
         return (rgb.to_vec(), width, height);
@@ -838,8 +928,16 @@ pub fn resample_rgb_frame_2d(rgb: &[u8], width: u32, height: u32, target_max_dim
     let target_width = ((width as f64 * scale).round() as u32).max(1);
     let target_height = ((height as f64 * scale).round() as u32).max(1);
 
-    let col_scale = if target_width > 1 { (width as f64 - 1.0) / (target_width as f64 - 1.0) } else { 0.0 };
-    let row_scale = if target_height > 1 { (height as f64 - 1.0) / (target_height as f64 - 1.0) } else { 0.0 };
+    let col_scale = if target_width > 1 {
+        (width as f64 - 1.0) / (target_width as f64 - 1.0)
+    } else {
+        0.0
+    };
+    let row_scale = if target_height > 1 {
+        (height as f64 - 1.0) / (target_height as f64 - 1.0)
+    } else {
+        0.0
+    };
 
     let sample_at = |channel: usize, x_f: f64, y_f: f64| -> f64 {
         let x0 = x_f.floor().clamp(0.0, (width - 1) as f64) as usize;
@@ -856,12 +954,21 @@ pub fn resample_rgb_frame_2d(rgb: &[u8], width: u32, height: u32, target_max_dim
 
     let mut out = vec![0u8; target_width as usize * target_height as usize * 3];
     for target_row in 0..target_height {
-        let y_f = if target_height > 1 { target_row as f64 * row_scale } else { (height as f64 - 1.0) / 2.0 };
+        let y_f = if target_height > 1 {
+            target_row as f64 * row_scale
+        } else {
+            (height as f64 - 1.0) / 2.0
+        };
         for target_col in 0..target_width {
-            let x_f = if target_width > 1 { target_col as f64 * col_scale } else { (width as f64 - 1.0) / 2.0 };
+            let x_f = if target_width > 1 {
+                target_col as f64 * col_scale
+            } else {
+                (width as f64 - 1.0) / 2.0
+            };
             let out_index = (target_row as usize * target_width as usize + target_col as usize) * 3;
             for channel in 0..3 {
-                out[out_index + channel] = sample_at(channel, x_f, y_f).round().clamp(0.0, 255.0) as u8;
+                out[out_index + channel] =
+                    sample_at(channel, x_f, y_f).round().clamp(0.0, 255.0) as u8;
             }
         }
     }
@@ -889,7 +996,10 @@ pub fn pack_rgb_frame_texture(
     }
     let expected = width as usize * height as usize * 3;
     if rgb.len() != expected {
-        return Err(TextureExportError::SampleCountMismatch { expected, found: rgb.len() });
+        return Err(TextureExportError::SampleCountMismatch {
+            expected,
+            found: rgb.len(),
+        });
     }
     let native_dims = (width, height, 1);
 
@@ -945,7 +1055,13 @@ pub fn pack_dicom_rgb_frame_texture(
     compression: TextureCompression,
 ) -> Result<PackedTexture, TextureExportError> {
     let (metadata, rgb) = decode_frame_texture_rgb_values(object, frame_index)?;
-    pack_rgb_frame_texture(&rgb, metadata.cols as u32, metadata.rows as u32, target_max_dim, compression)
+    pack_rgb_frame_texture(
+        &rgb,
+        metadata.cols as u32,
+        metadata.rows as u32,
+        target_max_dim,
+        compression,
+    )
 }
 
 /// One already-decoded RGB8 frame, as input to `pack_rgb_frame_stack_texture` - the color analog
@@ -982,7 +1098,10 @@ pub fn pack_rgb_frame_stack_texture(
             });
         }
         if frame.bytes.len() != expected_per_frame {
-            return Err(TextureExportError::SampleCountMismatch { expected: expected_per_frame, found: frame.bytes.len() });
+            return Err(TextureExportError::SampleCountMismatch {
+                expected: expected_per_frame,
+                found: frame.bytes.len(),
+            });
         }
         concatenated.extend_from_slice(&frame.bytes);
     }
@@ -1032,7 +1151,11 @@ pub fn pack_dicom_rgb_frame_stack_texture(
     let mut decoded = Vec::with_capacity(sources.len());
     for (object, frame_index) in sources.iter() {
         let (metadata, bytes) = decode_frame_texture_rgb_values(object, *frame_index)?;
-        decoded.push(DecodedRgbFrame { bytes, width: metadata.cols as u32, height: metadata.rows as u32 });
+        decoded.push(DecodedRgbFrame {
+            bytes,
+            width: metadata.cols as u32,
+            height: metadata.rows as u32,
+        });
     }
     pack_rgb_frame_stack_texture(&decoded, compression)
 }
@@ -1121,7 +1244,10 @@ mod tests {
         assert_eq!(format, SampleFormat::Uint16);
         assert_eq!((slope, intercept, lossless), (1.0, 0.0, true));
         for (index, &expected) in raw.iter().enumerate() {
-            assert_eq!(u16::from_le_bytes(bytes[index * 2..index * 2 + 2].try_into().unwrap()) as f32, expected);
+            assert_eq!(
+                u16::from_le_bytes(bytes[index * 2..index * 2 + 2].try_into().unwrap()) as f32,
+                expected
+            );
         }
     }
 
@@ -1155,12 +1281,16 @@ mod tests {
         let packed = pack_volume_texture(&volume, None, None, TextureCompression::None).unwrap();
         assert!(packed.meta.lossless);
         assert!(!packed.meta.downsampled);
-        assert_eq!((packed.meta.width, packed.meta.height, packed.meta.depth), (4, 4, 4));
+        assert_eq!(
+            (packed.meta.width, packed.meta.height, packed.meta.depth),
+            (4, 4, 4)
+        );
         assert_eq!(packed.meta.native_dims, (4, 4, 4));
         assert_eq!(packed.payload.len(), volume.samples.len() * 2);
 
         for (index, &expected) in volume.samples.iter().enumerate() {
-            let value = i16::from_le_bytes(packed.payload[index * 2..index * 2 + 2].try_into().unwrap());
+            let value =
+                i16::from_le_bytes(packed.payload[index * 2..index * 2 + 2].try_into().unwrap());
             assert_eq!(value as f32, expected);
         }
     }
@@ -1180,9 +1310,13 @@ mod tests {
     #[test]
     fn pack_volume_texture_below_target_max_dim_is_a_no_op() {
         let volume = axis_aligned_test_volume(4, 4, 4);
-        let packed = pack_volume_texture(&volume, Some(64), None, TextureCompression::None).unwrap();
+        let packed =
+            pack_volume_texture(&volume, Some(64), None, TextureCompression::None).unwrap();
         assert!(!packed.meta.downsampled);
-        assert_eq!((packed.meta.width, packed.meta.height, packed.meta.depth), (4, 4, 4));
+        assert_eq!(
+            (packed.meta.width, packed.meta.height, packed.meta.depth),
+            (4, 4, 4)
+        );
     }
 
     #[test]
@@ -1192,7 +1326,10 @@ mod tests {
         let gzipped = pack_volume_texture(&volume, None, None, TextureCompression::Gzip).unwrap();
 
         assert_eq!(gzipped.meta.payload_bytes_raw, plain.payload.len() as u64);
-        assert_eq!(gzipped.meta.payload_bytes_stored, gzipped.payload.len() as u64);
+        assert_eq!(
+            gzipped.meta.payload_bytes_stored,
+            gzipped.payload.len() as u64
+        );
 
         let mut decoder = flate2::read::GzDecoder::new(&gzipped.payload[..]);
         let mut decompressed = Vec::new();
@@ -1203,7 +1340,9 @@ mod tests {
     #[test]
     fn pack_volume_texture_carries_default_window_through_to_meta() {
         let volume = axis_aligned_test_volume(2, 2, 2);
-        let packed = pack_volume_texture(&volume, None, Some((40.0, 400.0)), TextureCompression::None).unwrap();
+        let packed =
+            pack_volume_texture(&volume, None, Some((40.0, 400.0)), TextureCompression::None)
+                .unwrap();
         assert_eq!(packed.meta.default_window_center, Some(40.0));
         assert_eq!(packed.meta.default_window_width, Some(400.0));
     }
@@ -1246,10 +1385,15 @@ mod tests {
 
     #[test]
     fn pack_frame_texture_rejects_a_sample_count_mismatch() {
-        let error = pack_frame_texture(&[0.0; 3], 2, 2, None, None, TextureCompression::None, false).unwrap_err();
+        let error =
+            pack_frame_texture(&[0.0; 3], 2, 2, None, None, TextureCompression::None, false)
+                .unwrap_err();
         assert!(matches!(
             error,
-            TextureExportError::SampleCountMismatch { expected: 4, found: 3 }
+            TextureExportError::SampleCountMismatch {
+                expected: 4,
+                found: 3
+            }
         ));
     }
 
@@ -1258,7 +1402,16 @@ mod tests {
         let width = 8u32;
         let height = 8u32;
         let values: Vec<f32> = (0..width * height).map(|index| index as f32).collect();
-        let packed = pack_frame_texture(&values, width, height, None, Some(4), TextureCompression::None, false).unwrap();
+        let packed = pack_frame_texture(
+            &values,
+            width,
+            height,
+            None,
+            Some(4),
+            TextureCompression::None,
+            false,
+        )
+        .unwrap();
         assert!(packed.meta.downsampled);
         assert_eq!(packed.meta.depth, 1);
         assert_eq!(packed.meta.native_dims, (8, 8, 1));
@@ -1273,7 +1426,16 @@ mod tests {
         let width = 4u32;
         let height = 4u32;
         let values: Vec<f32> = (0..width * height).map(|index| index as f32).collect();
-        let packed = pack_frame_texture(&values, width, height, None, None, TextureCompression::None, true).unwrap();
+        let packed = pack_frame_texture(
+            &values,
+            width,
+            height,
+            None,
+            None,
+            TextureCompression::None,
+            true,
+        )
+        .unwrap();
         assert_eq!(packed.meta.default_window_center, Some(7.5));
         assert_eq!(packed.meta.default_window_width, Some(15.0));
     }
@@ -1284,14 +1446,19 @@ mod tests {
         let packed = pack_volume_texture(&volume, None, None, TextureCompression::None).unwrap();
         // axis_aligned_test_volume fills samples as `index - 1024.0` over 2*2*2=8 voxels (indices
         // 0..7), so min=-1024.0, max=-1017.0.
-        assert_eq!(packed.meta.default_window_center, Some((-1024.0 + -1017.0) / 2.0));
+        assert_eq!(
+            packed.meta.default_window_center,
+            Some((-1024.0 + -1017.0) / 2.0)
+        );
         assert_eq!(packed.meta.default_window_width, Some(7.0));
     }
 
     #[test]
     fn texture_meta_to_json_round_trips_expected_fields() {
         let volume = axis_aligned_test_volume(2, 2, 2);
-        let packed = pack_volume_texture(&volume, None, Some((40.0, 400.0)), TextureCompression::Gzip).unwrap();
+        let packed =
+            pack_volume_texture(&volume, None, Some((40.0, 400.0)), TextureCompression::Gzip)
+                .unwrap();
         let json = packed.meta.to_json();
         assert_eq!(json["formatVersion"], 1);
         assert_eq!(json["contentKind"], "volume");
@@ -1303,16 +1470,30 @@ mod tests {
     }
 
     fn ramp_frame(width: u32, height: u32, base: f32) -> DecodedFrame {
-        let values = (0..width * height).map(|index| base + index as f32).collect();
-        DecodedFrame { values, width, height }
+        let values = (0..width * height)
+            .map(|index| base + index as f32)
+            .collect();
+        DecodedFrame {
+            values,
+            width,
+            height,
+        }
     }
 
     #[test]
     fn pack_frame_stack_texture_concatenates_layers_in_source_order() {
-        let frames = vec![ramp_frame(2, 2, 0.0), ramp_frame(2, 2, 100.0), ramp_frame(2, 2, 200.0)];
-        let packed = pack_frame_stack_texture(&frames, None, TextureCompression::None, false).unwrap();
+        let frames = vec![
+            ramp_frame(2, 2, 0.0),
+            ramp_frame(2, 2, 100.0),
+            ramp_frame(2, 2, 200.0),
+        ];
+        let packed =
+            pack_frame_stack_texture(&frames, None, TextureCompression::None, false).unwrap();
         assert_eq!(packed.meta.content_kind, ContentKind::FrameStack);
-        assert_eq!((packed.meta.width, packed.meta.height, packed.meta.depth), (2, 2, 3));
+        assert_eq!(
+            (packed.meta.width, packed.meta.height, packed.meta.depth),
+            (2, 2, 3)
+        );
         assert_eq!(packed.meta.native_dims, (2, 2, 3));
         assert!(!packed.meta.downsampled);
         // Each layer is exactly 2*2=4 int16 samples (values are all integral here, so this is the
@@ -1320,14 +1501,19 @@ mod tests {
         // byte offset, not interleaved or reordered relative to layer 0/2.
         assert!(packed.meta.lossless);
         let layer1_offset = 1 * 4 * 2; // layer index * samples-per-layer * bytes-per-sample
-        let value = i16::from_le_bytes(packed.payload[layer1_offset..layer1_offset + 2].try_into().unwrap());
+        let value = i16::from_le_bytes(
+            packed.payload[layer1_offset..layer1_offset + 2]
+                .try_into()
+                .unwrap(),
+        );
         assert_eq!(value, 100);
     }
 
     #[test]
     fn pack_frame_stack_texture_never_carries_physical_geometry() {
         let frames = vec![ramp_frame(2, 2, 0.0), ramp_frame(2, 2, 1.0)];
-        let packed = pack_frame_stack_texture(&frames, None, TextureCompression::None, false).unwrap();
+        let packed =
+            pack_frame_stack_texture(&frames, None, TextureCompression::None, false).unwrap();
         assert_eq!(packed.meta.origin, [0.0, 0.0, 0.0]);
         assert_eq!(packed.meta.slice_spacing_mm, 0.0);
         assert_eq!(packed.meta.row_dir, [1.0, 0.0, 0.0]);
@@ -1337,16 +1523,21 @@ mod tests {
     #[test]
     fn pack_frame_stack_texture_rejects_mismatched_frame_dimensions() {
         let frames = vec![ramp_frame(2, 2, 0.0), ramp_frame(3, 2, 0.0)];
-        let error = pack_frame_stack_texture(&frames, None, TextureCompression::None, false).unwrap_err();
+        let error =
+            pack_frame_stack_texture(&frames, None, TextureCompression::None, false).unwrap_err();
         assert!(matches!(
             error,
-            TextureExportError::FrameDimensionMismatch { expected: (2, 2), found: (3, 2) }
+            TextureExportError::FrameDimensionMismatch {
+                expected: (2, 2),
+                found: (3, 2)
+            }
         ));
     }
 
     #[test]
     fn pack_frame_stack_texture_rejects_an_empty_stack() {
-        let error = pack_frame_stack_texture(&[], None, TextureCompression::None, false).unwrap_err();
+        let error =
+            pack_frame_stack_texture(&[], None, TextureCompression::None, false).unwrap_err();
         assert!(matches!(error, TextureExportError::InvalidDimensions));
     }
 
@@ -1357,7 +1548,8 @@ mod tests {
         // module must still come out at native resolution, unlike pack_volume_texture/
         // pack_frame_texture which would shrink it.
         let frames = vec![ramp_frame(16, 16, 0.0)];
-        let packed = pack_frame_stack_texture(&frames, None, TextureCompression::None, false).unwrap();
+        let packed =
+            pack_frame_stack_texture(&frames, None, TextureCompression::None, false).unwrap();
         assert_eq!((packed.meta.width, packed.meta.height), (16, 16));
         assert!(!packed.meta.downsampled);
     }
@@ -1367,21 +1559,32 @@ mod tests {
         // base offsets 0/100/200 over a 2x2 ramp (values 0..3, 100..103, 200..203) - the fallback
         // min/max window must reflect the FULL concatenated range (0..203), not get reset/
         // overwritten by whichever layer happens to be processed last.
-        let frames = vec![ramp_frame(2, 2, 0.0), ramp_frame(2, 2, 100.0), ramp_frame(2, 2, 200.0)];
-        let packed = pack_frame_stack_texture(&frames, None, TextureCompression::None, false).unwrap();
+        let frames = vec![
+            ramp_frame(2, 2, 0.0),
+            ramp_frame(2, 2, 100.0),
+            ramp_frame(2, 2, 200.0),
+        ];
+        let packed =
+            pack_frame_stack_texture(&frames, None, TextureCompression::None, false).unwrap();
         assert_eq!(packed.meta.default_window_center, Some((0.0 + 203.0) / 2.0));
         assert_eq!(packed.meta.default_window_width, Some(203.0));
     }
 
     fn fixture(name: &str) -> std::path::PathBuf {
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test/files").join(name)
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("test/files")
+            .join(name)
     }
 
     fn rgb_ramp(width: u32, height: u32, base: u8) -> DecodedRgbFrame {
         let bytes = (0..width * height * 3)
             .map(|index| base.wrapping_add((index % 251) as u8))
             .collect();
-        DecodedRgbFrame { bytes, width, height }
+        DecodedRgbFrame {
+            bytes,
+            width,
+            height,
+        }
     }
 
     #[test]
@@ -1390,16 +1593,32 @@ mod tests {
         let packed = pack_rgb_frame_texture(&rgb, 2, 2, None, TextureCompression::None).unwrap();
         assert_eq!(packed.meta.sample_format, SampleFormat::Rgb8);
         assert!(packed.meta.lossless);
-        assert_eq!((packed.meta.width, packed.meta.height, packed.meta.depth), (2, 2, 1));
+        assert_eq!(
+            (packed.meta.width, packed.meta.height, packed.meta.depth),
+            (2, 2, 1)
+        );
         assert_eq!(packed.payload, rgb);
-        assert_eq!(packed.meta.default_window_center, None, "color has no window/level concept");
-        assert!(!packed.meta.invert, "color has no MONOCHROME1 invert concept");
+        assert_eq!(
+            packed.meta.default_window_center, None,
+            "color has no window/level concept"
+        );
+        assert!(
+            !packed.meta.invert,
+            "color has no MONOCHROME1 invert concept"
+        );
     }
 
     #[test]
     fn pack_rgb_frame_texture_rejects_wrong_byte_count() {
-        let error = pack_rgb_frame_texture(&[1, 2, 3], 2, 2, None, TextureCompression::None).unwrap_err();
-        assert!(matches!(error, TextureExportError::SampleCountMismatch { expected: 12, found: 3 }));
+        let error =
+            pack_rgb_frame_texture(&[1, 2, 3], 2, 2, None, TextureCompression::None).unwrap_err();
+        assert!(matches!(
+            error,
+            TextureExportError::SampleCountMismatch {
+                expected: 12,
+                found: 3
+            }
+        ));
     }
 
     #[test]
@@ -1411,7 +1630,8 @@ mod tests {
     #[test]
     fn pack_rgb_frame_texture_downsamples_when_over_target_max_dim() {
         let rgb = vec![128u8; 16 * 16 * 3];
-        let packed = pack_rgb_frame_texture(&rgb, 16, 16, Some(8), TextureCompression::None).unwrap();
+        let packed =
+            pack_rgb_frame_texture(&rgb, 16, 16, Some(8), TextureCompression::None).unwrap();
         assert!(packed.meta.downsampled);
         assert_eq!((packed.meta.width, packed.meta.height), (8, 8));
         assert_eq!(packed.meta.native_dims, (16, 16, 1));
@@ -1424,11 +1644,17 @@ mod tests {
         let packed = pack_rgb_frame_stack_texture(&frames, TextureCompression::None).unwrap();
         assert_eq!(packed.meta.content_kind, ContentKind::FrameStack);
         assert_eq!(packed.meta.sample_format, SampleFormat::Rgb8);
-        assert_eq!((packed.meta.width, packed.meta.height, packed.meta.depth), (2, 2, 3));
+        assert_eq!(
+            (packed.meta.width, packed.meta.height, packed.meta.depth),
+            (2, 2, 3)
+        );
         assert!(packed.meta.lossless);
         let bytes_per_layer = 2 * 2 * 3;
         assert_eq!(&packed.payload[0..bytes_per_layer], &frames[0].bytes[..]);
-        assert_eq!(&packed.payload[bytes_per_layer..bytes_per_layer * 2], &frames[1].bytes[..]);
+        assert_eq!(
+            &packed.payload[bytes_per_layer..bytes_per_layer * 2],
+            &frames[1].bytes[..]
+        );
     }
 
     #[test]
@@ -1437,7 +1663,10 @@ mod tests {
         let error = pack_rgb_frame_stack_texture(&frames, TextureCompression::None).unwrap_err();
         assert!(matches!(
             error,
-            TextureExportError::FrameDimensionMismatch { expected: (2, 2), found: (3, 2) }
+            TextureExportError::FrameDimensionMismatch {
+                expected: (2, 2),
+                found: (3, 2)
+            }
         ));
     }
 
@@ -1449,22 +1678,31 @@ mod tests {
 
     #[test]
     fn pack_dicom_rgb_frame_texture_packs_a_real_uncompressed_rgb_fixture() {
-        let object = crate::dicom_io::read_dicom_file(fixture("rgb_interleaved.dcm")).expect("fixture should be readable");
-        let packed = pack_dicom_rgb_frame_texture(&object, 0, None, TextureCompression::None).unwrap();
+        let object = crate::dicom_io::read_dicom_file(fixture("rgb_interleaved.dcm"))
+            .expect("fixture should be readable");
+        let packed =
+            pack_dicom_rgb_frame_texture(&object, 0, None, TextureCompression::None).unwrap();
         assert_eq!(packed.meta.sample_format, SampleFormat::Rgb8);
         assert!(packed.meta.lossless);
-        assert_eq!(packed.payload.len(), packed.meta.width as usize * packed.meta.height as usize * 3);
+        assert_eq!(
+            packed.payload.len(),
+            packed.meta.width as usize * packed.meta.height as usize * 3
+        );
     }
 
     #[test]
     fn pack_dicom_rgb_frame_stack_texture_packs_two_real_instances() {
-        let planar = crate::dicom_io::read_dicom_file(fixture("rgb_planar.dcm")).expect("fixture should be readable");
-        let interleaved = crate::dicom_io::read_dicom_file(fixture("rgb_interleaved.dcm")).expect("fixture should be readable");
+        let planar = crate::dicom_io::read_dicom_file(fixture("rgb_planar.dcm"))
+            .expect("fixture should be readable");
+        let interleaved = crate::dicom_io::read_dicom_file(fixture("rgb_interleaved.dcm"))
+            .expect("fixture should be readable");
         // Same real instance re-encoded two ways (see render.rs's own
         // planar_and_interleaved_rgb_render_to_identical_png_bytes test) - same dimensions, so a
         // legitimate (if synthetic) 2-frame stack.
-        let sources: Vec<(&dcmnorm_object::DefaultDicomObject, usize)> = vec![(&planar, 0), (&interleaved, 0)];
-        let packed = pack_dicom_rgb_frame_stack_texture(&sources, TextureCompression::None).unwrap();
+        let sources: Vec<(&dcmnorm_object::DefaultDicomObject, usize)> =
+            vec![(&planar, 0), (&interleaved, 0)];
+        let packed =
+            pack_dicom_rgb_frame_stack_texture(&sources, TextureCompression::None).unwrap();
         assert_eq!(packed.meta.depth, 2);
         assert_eq!(packed.meta.sample_format, SampleFormat::Rgb8);
     }

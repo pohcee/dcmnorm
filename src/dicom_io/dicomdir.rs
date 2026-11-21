@@ -151,9 +151,10 @@ impl DicomdirEntry {
             (!s.is_empty()).then(|| s.to_owned())
         };
         let dataset: InMemDicomObject = (**object).clone();
-        let sop_class_uid = get_str(&dataset, SOP_CLASS_UID).or_else(|| non_empty(meta.media_storage_sop_class_uid()));
-        let sop_instance_uid =
-            get_str(&dataset, SOP_INSTANCE_UID).or_else(|| non_empty(meta.media_storage_sop_instance_uid()));
+        let sop_class_uid = get_str(&dataset, SOP_CLASS_UID)
+            .or_else(|| non_empty(meta.media_storage_sop_class_uid()));
+        let sop_instance_uid = get_str(&dataset, SOP_INSTANCE_UID)
+            .or_else(|| non_empty(meta.media_storage_sop_instance_uid()));
         DicomdirEntry {
             file_id,
             dataset,
@@ -169,15 +170,20 @@ impl DicomdirEntry {
     /// encoded as UN still has them.
     pub fn from_file(file_id: Vec<String>, path: impl AsRef<Path>) -> Result<Self, DicomdirError> {
         let path = path.as_ref();
-        let read_error = |source| DicomdirError::Read { path: path.display().to_string(), source };
+        let read_error = |source| DicomdirError::Read {
+            path: path.display().to_string(),
+            source,
+        };
         let defer = |header: &dcmnorm_core::header::DataElementHeader| {
             let tag = header.tag;
             let payload = tag.group() >= 0x7FE0
                 || tag == Tag(0x0042, 0x0011)
                 || tag == Tag(0x5400, 0x1010)
                 || (tag.group() & 0xFF01 == 0x6000 && tag.element() == 0x3000);
-            let large_binary = matches!(header.vr, VR::OB | VR::OW | VR::OF | VR::OD | VR::OL | VR::OV)
-                && header.len.get().is_some_and(|len| len > 1024);
+            let large_binary = matches!(
+                header.vr,
+                VR::OB | VR::OW | VR::OF | VR::OD | VR::OL | VR::OV
+            ) && header.len.get().is_some_and(|len| len > 1024);
             payload || large_binary
         };
         let deferred = dcmnorm_object::OpenFileOptions::new()
@@ -203,7 +209,8 @@ impl DicomdirEntry {
         format: DicomJsonFormat,
         transfer_syntax_uid: Option<&str>,
     ) -> Result<Self, DicomdirError> {
-        let mut value: JsonValue = serde_json::from_str(json).map_err(|e| DicomdirError::Json(DicomJsonError::from(e)))?;
+        let mut value: JsonValue =
+            serde_json::from_str(json).map_err(|e| DicomdirError::Json(DicomJsonError::from(e)))?;
         strip_bulk_data_uris(&mut value);
         let object = match format {
             DicomJsonFormat::Flat => read_flat_json_value(&value, None),
@@ -211,7 +218,10 @@ impl DicomdirEntry {
         }
         .map_err(DicomdirError::Json)?;
         let mut entry = Self::from_file_object(file_id, &object);
-        if let Some(ts) = transfer_syntax_uid.map(trim_value).filter(|ts| !ts.is_empty()) {
+        if let Some(ts) = transfer_syntax_uid
+            .map(trim_value)
+            .filter(|ts| !ts.is_empty())
+        {
             entry.transfer_syntax_uid = ts.to_owned();
         }
         Ok(entry)
@@ -263,21 +273,46 @@ pub struct DicomdirReport {
 pub enum DicomdirError {
     /// No entries: PS3.11 D.3.3 doesn't allow a DICOMDIR without directory information.
     NoEntries,
-    InvalidFileId { file_id: String, reason: String },
-    InvalidFileSetId { file_set_id: String, reason: String },
+    InvalidFileId {
+        file_id: String,
+        reason: String,
+    },
+    InvalidFileSetId {
+        file_set_id: String,
+        reason: String,
+    },
     DuplicateFileId(String),
-    DuplicateSopInstance { sop_instance_uid: String, file_ids: (String, String) },
+    DuplicateSopInstance {
+        sop_instance_uid: String,
+        file_ids: (String, String),
+    },
     /// A Type 1 identifying attribute that can't be synthesized (a UID) is missing.
-    MissingAttribute { file_id: String, attribute: &'static str },
+    MissingAttribute {
+        file_id: String,
+        attribute: &'static str,
+    },
     /// The SOP Class has no Directory Record Type in PS3.3 F.5 and doesn't look like an image.
-    NoRecordType { file_id: String, sop_class_uid: String },
+    NoRecordType {
+        file_id: String,
+        sop_class_uid: String,
+    },
     /// Two different patients share a Patient ID (PS3.3 F.5.1: unique per File-set).
-    PatientConflict { patient_id: String, names: (String, String) },
+    PatientConflict {
+        patient_id: String,
+        names: (String, String),
+    },
     /// A Study Instance UID appears under two patients.
-    StudyConflict { study_instance_uid: String },
+    StudyConflict {
+        study_instance_uid: String,
+    },
     /// A Series Instance UID appears in two studies.
-    SeriesConflict { series_instance_uid: String },
-    Read { path: String, source: ReadError },
+    SeriesConflict {
+        series_instance_uid: String,
+    },
+    Read {
+        path: String,
+        source: ReadError,
+    },
     Json(DicomJsonError),
     Write(WriteError),
     Io(std::io::Error),
@@ -342,8 +377,17 @@ impl std::error::Error for DicomdirError {
 /// Check a File ID against PS3.10 8.2/8.5/8.6: 1-8 components, each 1-8 characters from
 /// `A-Z 0-9 _`, and not the reserved File ID `DICOMDIR`.
 pub fn validate_file_id<S: AsRef<str>>(components: &[S]) -> Result<(), DicomdirError> {
-    let joined = || components.iter().map(|c| c.as_ref()).collect::<Vec<_>>().join("\\");
-    let invalid = |reason: String| DicomdirError::InvalidFileId { file_id: joined(), reason };
+    let joined = || {
+        components
+            .iter()
+            .map(|c| c.as_ref())
+            .collect::<Vec<_>>()
+            .join("\\")
+    };
+    let invalid = |reason: String| DicomdirError::InvalidFileId {
+        file_id: joined(),
+        reason,
+    };
     if components.is_empty() {
         return Err(invalid("a File ID needs at least one component".into()));
     }
@@ -367,7 +411,9 @@ pub fn validate_file_id<S: AsRef<str>>(components: &[S]) -> Result<(), DicomdirE
         }
     }
     if components.len() == 1 && components[0].as_ref() == "DICOMDIR" {
-        return Err(invalid("DICOMDIR is the reserved File ID of the directory itself (PS3.10 8.6)".into()));
+        return Err(invalid(
+            "DICOMDIR is the reserved File ID of the directory itself (PS3.10 8.6)".into(),
+        ));
     }
     Ok(())
 }
@@ -375,12 +421,17 @@ pub fn validate_file_id<S: AsRef<str>>(components: &[S]) -> Result<(), DicomdirE
 /// Check a File-set ID: a CS value of at most 16 characters from the PS3.10 8.5 set
 /// (`A-Z 0-9 _`). Empty is allowed (File-set ID is Type 2).
 pub fn validate_file_set_id(file_set_id: &str) -> Result<(), DicomdirError> {
-    let invalid = |reason: String| DicomdirError::InvalidFileSetId { file_set_id: file_set_id.to_owned(), reason };
+    let invalid = |reason: String| DicomdirError::InvalidFileSetId {
+        file_set_id: file_set_id.to_owned(),
+        reason,
+    };
     if file_set_id.len() > MAX_FILE_SET_ID_LEN {
         return Err(invalid(format!("at most {MAX_FILE_SET_ID_LEN} characters")));
     }
     if let Some(c) = file_set_id.chars().find(|c| !is_file_id_char(*c)) {
-        return Err(invalid(format!("{c:?} is not allowed; only A-Z, 0-9 and _ (PS3.10 8.5)")));
+        return Err(invalid(format!(
+            "{c:?} is not allowed; only A-Z, 0-9 and _ (PS3.10 8.5)"
+        )));
     }
     Ok(())
 }
@@ -413,16 +464,25 @@ pub fn file_id_from_relative_path(path: &Path) -> Result<Vec<String>, DicomdirEr
 /// definition. `modality` lets the PLAN and RADIOTHERAPY records (defined by Modality, F.5.40 /
 /// F.5.46) catch SOP Classes newer than this table. Returns `None` for a SOP Class that isn't
 /// one of F.5's non-image record types: the caller decides whether it is an IMAGE.
-pub fn directory_record_type_for_sop_class(sop_class_uid: &str, modality: Option<&str>) -> Option<&'static str> {
+pub fn directory_record_type_for_sop_class(
+    sop_class_uid: &str,
+    modality: Option<&str>,
+) -> Option<&'static str> {
     let uid = trim_value(sop_class_uid);
-    if let Some(record_type) = NON_IMAGE_SOP_CLASSES.iter().find(|(u, _)| *u == uid).map(|(_, t)| *t) {
+    if let Some(record_type) = NON_IMAGE_SOP_CLASSES
+        .iter()
+        .find(|(u, _)| *u == uid)
+        .map(|(_, t)| *t)
+    {
         return Some(record_type);
     }
     match modality.map(trim_value) {
         Some("PLAN") => Some("PLAN"),
         // RT Second Generation IODs (PS3.3 A.8x) all live under 1.2.840.10008.5.1.4.1.1.481.x
         // from .10 on; the explicit table above lists the ones published as of 2026d.
-        Some("RTINTENT" | "RTSEGANN" | "RTRAD" | "RTRECORD") if uid.starts_with("1.2.840.10008.5.1.4.1.1.481.") => {
+        Some("RTINTENT" | "RTSEGANN" | "RTRAD" | "RTRECORD")
+            if uid.starts_with("1.2.840.10008.5.1.4.1.1.481.") =>
+        {
             Some("RADIOTHERAPY")
         }
         _ => None,
@@ -444,7 +504,11 @@ pub fn build_dicomdir(
     let bytes = encode_dicomdir(&tree, &file_set_id, options.sop_instance_uid.as_deref())?;
     report.record_count = tree.records.len();
     for record in &tree.records {
-        match report.record_types.iter_mut().find(|(t, _)| t == record.record_type) {
+        match report
+            .record_types
+            .iter_mut()
+            .find(|(t, _)| t == record.record_type)
+        {
             Some((_, n)) => *n += 1,
             None => report.record_types.push((record.record_type.to_owned(), 1)),
         }
@@ -466,9 +530,14 @@ pub fn write_dicomdir(
 /// Walk a File-set root and make an entry for every DICOM file under it, in sorted path order.
 /// A top-level `DICOMDIR` is ignored; other non-DICOM files (a README.TXT, an INDEX.HTM, ...) are
 /// skipped and returned as the second value. A DICOM file whose path breaks the File ID rules is an error.
-pub fn collect_dicomdir_entries(root: &Path) -> Result<(Vec<DicomdirEntry>, Vec<String>), DicomdirError> {
+pub fn collect_dicomdir_entries(
+    root: &Path,
+) -> Result<(Vec<DicomdirEntry>, Vec<String>), DicomdirError> {
     if !root.is_dir() {
-        return Err(DicomdirError::Tree(format!("{} is not a directory", root.display())));
+        return Err(DicomdirError::Tree(format!(
+            "{} is not a directory",
+            root.display()
+        )));
     }
     let mut files = Vec::new();
     let mut stack = vec![root.to_path_buf()];
@@ -489,7 +558,10 @@ pub fn collect_dicomdir_entries(root: &Path) -> Result<(Vec<DicomdirEntry>, Vec<
     let mut entries = Vec::new();
     let mut skipped = Vec::new();
     for path in files {
-        let relative = path.strip_prefix(root).expect("walked path is below root").to_path_buf();
+        let relative = path
+            .strip_prefix(root)
+            .expect("walked path is below root")
+            .to_path_buf();
         if relative == Path::new("DICOMDIR") {
             continue; // the directory being (re)written
         }
@@ -669,12 +741,24 @@ const NON_IMAGE_SOP_CLASSES: &[(&str, &str)] = &[
 
 /// Record types that sit directly in the Root Directory Entity (Table F.4-1), not under a
 /// PATIENT/STUDY/SERIES.
-const ROOT_LEVEL_RECORD_TYPES: &[&str] =
-    &["HANGING PROTOCOL", "PALETTE", "IMPLANT", "IMPLANT ASSY", "IMPLANT GROUP", "INVENTORY"];
+const ROOT_LEVEL_RECORD_TYPES: &[&str] = &[
+    "HANGING PROTOCOL",
+    "PALETTE",
+    "IMPLANT",
+    "IMPLANT ASSY",
+    "IMPLANT GROUP",
+    "INVENTORY",
+];
 
-fn record_type_for_entry(entry: &DicomdirEntry, sop_class_uid: &str, file_id: &str) -> Result<&'static str, DicomdirError> {
+fn record_type_for_entry(
+    entry: &DicomdirEntry,
+    sop_class_uid: &str,
+    file_id: &str,
+) -> Result<&'static str, DicomdirError> {
     let modality = get_str(&entry.dataset, MODALITY);
-    if let Some(record_type) = directory_record_type_for_sop_class(sop_class_uid, modality.as_deref()) {
+    if let Some(record_type) =
+        directory_record_type_for_sop_class(sop_class_uid, modality.as_deref())
+    {
         return Ok(record_type);
     }
     // IMAGE (F.5.4) "shall be used to reference an Image SOP Instance". Anything not mapped
@@ -685,7 +769,10 @@ fn record_type_for_entry(entry: &DicomdirEntry, sop_class_uid: &str, file_id: &s
     if has_pixels {
         return Ok("IMAGE");
     }
-    Err(DicomdirError::NoRecordType { file_id: file_id.to_owned(), sop_class_uid: sop_class_uid.to_owned() })
+    Err(DicomdirError::NoRecordType {
+        file_id: file_id.to_owned(),
+        sop_class_uid: sop_class_uid.to_owned(),
+    })
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -713,21 +800,61 @@ struct Key {
 }
 
 const fn key(group: u16, element: u16, vr: VR, keyword: &'static str, kind: KeyType) -> Key {
-    Key { tag: Tag(group, element), vr, keyword, kind, fallbacks: &[] }
+    Key {
+        tag: Tag(group, element),
+        vr,
+        keyword,
+        kind,
+        fallbacks: &[],
+    }
 }
 
-const fn key_or(group: u16, element: u16, vr: VR, keyword: &'static str, fallbacks: &'static [Tag]) -> Key {
-    Key { tag: Tag(group, element), vr, keyword, kind: KeyType::One, fallbacks }
+const fn key_or(
+    group: u16,
+    element: u16,
+    vr: VR,
+    keyword: &'static str,
+    fallbacks: &'static [Tag],
+) -> Key {
+    Key {
+        tag: Tag(group, element),
+        vr,
+        keyword,
+        kind: KeyType::One,
+        fallbacks,
+    }
 }
 
 use KeyType::{IfPresent, One, Two};
 
-const DATE_FALLBACKS_FOR_STUDY: &[Tag] = &[SERIES_DATE, ACQUISITION_DATE, CONTENT_DATE, INSTANCE_CREATION_DATE];
-const TIME_FALLBACKS_FOR_STUDY: &[Tag] = &[SERIES_TIME, ACQUISITION_TIME, CONTENT_TIME, INSTANCE_CREATION_TIME];
+const DATE_FALLBACKS_FOR_STUDY: &[Tag] = &[
+    SERIES_DATE,
+    ACQUISITION_DATE,
+    CONTENT_DATE,
+    INSTANCE_CREATION_DATE,
+];
+const TIME_FALLBACKS_FOR_STUDY: &[Tag] = &[
+    SERIES_TIME,
+    ACQUISITION_TIME,
+    CONTENT_TIME,
+    INSTANCE_CREATION_TIME,
+];
 const CONTENT_DATE_FALLBACKS: &[Tag] = &[INSTANCE_CREATION_DATE, SERIES_DATE, STUDY_DATE];
 const CONTENT_TIME_FALLBACKS: &[Tag] = &[INSTANCE_CREATION_TIME, SERIES_TIME, STUDY_TIME];
-const CONTENT_DATE_KEY: Key = key_or(0x0008, 0x0023, VR::DA, "ContentDate", CONTENT_DATE_FALLBACKS);
-const CONTENT_TIME_KEY: Key = key_or(0x0008, 0x0033, VR::TM, "ContentTime", CONTENT_TIME_FALLBACKS);
+const CONTENT_DATE_KEY: Key = key_or(
+    0x0008,
+    0x0023,
+    VR::DA,
+    "ContentDate",
+    CONTENT_DATE_FALLBACKS,
+);
+const CONTENT_TIME_KEY: Key = key_or(
+    0x0008,
+    0x0033,
+    VR::TM,
+    "ContentTime",
+    CONTENT_TIME_FALLBACKS,
+);
 const INSTANCE_NUMBER_KEY: Key = key(0x0020, 0x0013, VR::IS, "InstanceNumber", One);
 
 const PATIENT_ID_KEY: Key = key(0x0010, 0x0020, VR::LO, "PatientID", One);
@@ -745,8 +872,20 @@ const PATIENT_KEYS: &[Key] = &[
 
 /// F.5.2 Table F.5-2 (Study Instance UID is Type 1 there in 2026d).
 const STUDY_KEYS: &[Key] = &[
-    key_or(0x0008, 0x0020, VR::DA, "StudyDate", DATE_FALLBACKS_FOR_STUDY),
-    key_or(0x0008, 0x0030, VR::TM, "StudyTime", TIME_FALLBACKS_FOR_STUDY),
+    key_or(
+        0x0008,
+        0x0020,
+        VR::DA,
+        "StudyDate",
+        DATE_FALLBACKS_FOR_STUDY,
+    ),
+    key_or(
+        0x0008,
+        0x0030,
+        VR::TM,
+        "StudyTime",
+        TIME_FALLBACKS_FOR_STUDY,
+    ),
     key(0x0008, 0x0050, VR::SH, "AccessionNumber", Two),
     key(0x0008, 0x1030, VR::LO, "StudyDescription", Two),
     key(0x0020, 0x000D, VR::UI, "StudyInstanceUID", One),
@@ -771,17 +910,35 @@ const IMAGE_KEYS: &[Key] = &[
     key(0x0008, 0x0008, VR::CS, "ImageType", IfPresent),
     key(0x0008, 0x002A, VR::DT, "AcquisitionDateTime", IfPresent),
     key(0x0008, 0x1140, VR::SQ, "ReferencedImageSequence", IfPresent),
-    key(0x0018, 0x1800, VR::CS, "AcquisitionTimeSynchronized", IfPresent),
+    key(
+        0x0018,
+        0x1800,
+        VR::CS,
+        "AcquisitionTimeSynchronized",
+        IfPresent,
+    ),
     INSTANCE_NUMBER_KEY,
     key(0x0020, 0x0032, VR::DS, "ImagePositionPatient", IfPresent),
     key(0x0020, 0x0037, VR::DS, "ImageOrientationPatient", IfPresent),
     key(0x0020, 0x0052, VR::UI, "FrameOfReferenceUID", IfPresent),
-    key(0x0020, 0x0200, VR::UI, "SynchronizationFrameOfReferenceUID", IfPresent),
+    key(
+        0x0020,
+        0x0200,
+        VR::UI,
+        "SynchronizationFrameOfReferenceUID",
+        IfPresent,
+    ),
     key(0x0028, 0x0008, VR::IS, "NumberOfFrames", IfPresent),
     key(0x0028, 0x0010, VR::US, "Rows", IfPresent),
     key(0x0028, 0x0011, VR::US, "Columns", IfPresent),
     key(0x0028, 0x0030, VR::DS, "PixelSpacing", IfPresent),
-    key(0x0028, 0x2112, VR::DS, "LossyImageCompressionRatio", IfPresent),
+    key(
+        0x0028,
+        0x2112,
+        VR::DS,
+        "LossyImageCompressionRatio",
+        IfPresent,
+    ),
     key(0x0050, 0x0004, VR::CS, "CalibrationImage", IfPresent),
 ];
 
@@ -812,16 +969,35 @@ const RT_TREAT_RECORD_KEYS: &[Key] = &[
 ];
 
 const PRESENTATION_KEYS: &[Key] = &[
-    key(0x0008, 0x1115, VR::SQ, "ReferencedSeriesSequence", IfPresent),
+    key(
+        0x0008,
+        0x1115,
+        VR::SQ,
+        "ReferencedSeriesSequence",
+        IfPresent,
+    ),
     INSTANCE_NUMBER_KEY_IF_PRESENT,
     key(0x0070, 0x0080, VR::CS, "ContentLabel", IfPresent),
     key(0x0070, 0x0081, VR::LO, "ContentDescription", IfPresent),
-    key_or(0x0070, 0x0082, VR::DA, "PresentationCreationDate", CONTENT_DATE_FALLBACKS),
-    key_or(0x0070, 0x0083, VR::TM, "PresentationCreationTime", CONTENT_TIME_FALLBACKS),
+    key_or(
+        0x0070,
+        0x0082,
+        VR::DA,
+        "PresentationCreationDate",
+        CONTENT_DATE_FALLBACKS,
+    ),
+    key_or(
+        0x0070,
+        0x0083,
+        VR::TM,
+        "PresentationCreationTime",
+        CONTENT_TIME_FALLBACKS,
+    ),
     key(0x0070, 0x0084, VR::PN, "ContentCreatorName", IfPresent),
     key(0x0070, 0x0402, VR::SQ, "BlendingSequence", IfPresent),
 ];
-const INSTANCE_NUMBER_KEY_IF_PRESENT: Key = key(0x0020, 0x0013, VR::IS, "InstanceNumber", IfPresent);
+const INSTANCE_NUMBER_KEY_IF_PRESENT: Key =
+    key(0x0020, 0x0013, VR::IS, "InstanceNumber", IfPresent);
 
 const WAVEFORM_KEYS: &[Key] = &[CONTENT_DATE_KEY, CONTENT_TIME_KEY, INSTANCE_NUMBER_KEY];
 
@@ -850,13 +1026,31 @@ const SPECTROSCOPY_KEYS: &[Key] = &[
     CONTENT_TIME_KEY,
     key(0x0008, 0x002A, VR::DT, "AcquisitionDateTime", IfPresent),
     key(0x0008, 0x1140, VR::SQ, "ReferencedImageSequence", IfPresent),
-    key(0x0008, 0x9092, VR::SQ, "ReferencedImageEvidenceSequence", IfPresent),
-    key(0x0018, 0x1800, VR::CS, "AcquisitionTimeSynchronized", IfPresent),
+    key(
+        0x0008,
+        0x9092,
+        VR::SQ,
+        "ReferencedImageEvidenceSequence",
+        IfPresent,
+    ),
+    key(
+        0x0018,
+        0x1800,
+        VR::CS,
+        "AcquisitionTimeSynchronized",
+        IfPresent,
+    ),
     INSTANCE_NUMBER_KEY,
     key(0x0020, 0x0032, VR::DS, "ImagePositionPatient", IfPresent),
     key(0x0020, 0x0037, VR::DS, "ImageOrientationPatient", IfPresent),
     key(0x0020, 0x0052, VR::UI, "FrameOfReferenceUID", IfPresent),
-    key(0x0020, 0x0200, VR::UI, "SynchronizationFrameOfReferenceUID", IfPresent),
+    key(
+        0x0020,
+        0x0200,
+        VR::UI,
+        "SynchronizationFrameOfReferenceUID",
+        IfPresent,
+    ),
     key(0x0028, 0x0008, VR::IS, "NumberOfFrames", One),
     key(0x0028, 0x0010, VR::US, "Rows", One),
     key(0x0028, 0x0011, VR::US, "Columns", One),
@@ -865,7 +1059,11 @@ const SPECTROSCOPY_KEYS: &[Key] = &[
     key(0x0028, 0x9002, VR::UL, "DataPointColumns", One),
 ];
 
-const RAW_DATA_KEYS: &[Key] = &[CONTENT_DATE_KEY, CONTENT_TIME_KEY, key(0x0020, 0x0013, VR::IS, "InstanceNumber", Two)];
+const RAW_DATA_KEYS: &[Key] = &[
+    CONTENT_DATE_KEY,
+    CONTENT_TIME_KEY,
+    key(0x0020, 0x0013, VR::IS, "InstanceNumber", Two),
+];
 
 /// REGISTRATION, FIDUCIAL, VALUE MAP, MEASUREMENT, SURFACE, SURFACE SCAN, TRACT, ANNOTATION:
 /// Content Date and Time, both Type 1.
@@ -876,9 +1074,27 @@ const HANGING_PROTOCOL_KEYS: &[Key] = &[
     key(0x0072, 0x0004, VR::LO, "HangingProtocolDescription", One),
     key(0x0072, 0x0006, VR::CS, "HangingProtocolLevel", One),
     key(0x0072, 0x0008, VR::LO, "HangingProtocolCreator", One),
-    key(0x0072, 0x000A, VR::DT, "HangingProtocolCreationDateTime", One),
-    key(0x0072, 0x000C, VR::SQ, "HangingProtocolDefinitionSequence", One),
-    key(0x0072, 0x000E, VR::SQ, "HangingProtocolUserIdentificationCodeSequence", Two),
+    key(
+        0x0072,
+        0x000A,
+        VR::DT,
+        "HangingProtocolCreationDateTime",
+        One,
+    ),
+    key(
+        0x0072,
+        0x000C,
+        VR::SQ,
+        "HangingProtocolDefinitionSequence",
+        One,
+    ),
+    key(
+        0x0072,
+        0x000E,
+        VR::SQ,
+        "HangingProtocolUserIdentificationCodeSequence",
+        Two,
+    ),
     key(0x0072, 0x0014, VR::US, "NumberOfPriorsReferenced", One),
 ];
 
@@ -889,7 +1105,13 @@ const ENCAP_DOC_KEYS: &[Key] = &[
     key(0x0040, 0xA043, VR::SQ, "ConceptNameCodeSequence", Two),
     key(0x0040, 0xE001, VR::ST, "HL7InstanceIdentifier", IfPresent),
     key(0x0042, 0x0010, VR::ST, "DocumentTitle", Two),
-    key(0x0042, 0x0012, VR::LO, "MIMETypeOfEncapsulatedDocument", One),
+    key(
+        0x0042,
+        0x0012,
+        VR::LO,
+        "MIMETypeOfEncapsulatedDocument",
+        One,
+    ),
 ];
 
 const PALETTE_KEYS: &[Key] = &[
@@ -939,9 +1161,27 @@ const INVENTORY_KEYS: &[Key] = &[
 ];
 
 const WF_PRESENTATION_KEYS: &[Key] = &[
-    key(0x0008, 0x1115, VR::SQ, "ReferencedSeriesSequence", IfPresent),
-    key_or(0x0070, 0x0082, VR::DA, "PresentationCreationDate", CONTENT_DATE_FALLBACKS),
-    key_or(0x0070, 0x0083, VR::TM, "PresentationCreationTime", CONTENT_TIME_FALLBACKS),
+    key(
+        0x0008,
+        0x1115,
+        VR::SQ,
+        "ReferencedSeriesSequence",
+        IfPresent,
+    ),
+    key_or(
+        0x0070,
+        0x0082,
+        VR::DA,
+        "PresentationCreationDate",
+        CONTENT_DATE_FALLBACKS,
+    ),
+    key_or(
+        0x0070,
+        0x0083,
+        VR::TM,
+        "PresentationCreationTime",
+        CONTENT_TIME_FALLBACKS,
+    ),
 ];
 
 /// STEREOMETRIC and PLAN have no keys beyond Specific Character Set.
@@ -960,8 +1200,8 @@ fn leaf_keys(record_type: &str) -> &'static [Key] {
         "KEY OBJECT DOC" => KEY_OBJECT_DOC_KEYS,
         "SPECTROSCOPY" => SPECTROSCOPY_KEYS,
         "RAW DATA" => RAW_DATA_KEYS,
-        "REGISTRATION" | "FIDUCIAL" | "VALUE MAP" | "MEASUREMENT" | "SURFACE" | "SURFACE SCAN" | "TRACT"
-        | "ANNOTATION" => CONTENT_DATE_TIME_KEYS,
+        "REGISTRATION" | "FIDUCIAL" | "VALUE MAP" | "MEASUREMENT" | "SURFACE" | "SURFACE SCAN"
+        | "TRACT" | "ANNOTATION" => CONTENT_DATE_TIME_KEYS,
         "HANGING PROTOCOL" => HANGING_PROTOCOL_KEYS,
         "ENCAP DOC" => ENCAP_DOC_KEYS,
         "PALETTE" => PALETTE_KEYS,
@@ -1024,7 +1264,10 @@ struct PatientGroup {
     studies: Vec<StudyGroup>,
 }
 
-fn build_tree(entries: &[DicomdirEntry], report: &mut DicomdirReport) -> Result<Tree, DicomdirError> {
+fn build_tree(
+    entries: &[DicomdirEntry],
+    report: &mut DicomdirReport,
+) -> Result<Tree, DicomdirError> {
     // 1. Check every entry's identity: File ID, UIDs, record type; no duplicates.
     let mut resolved = Vec::with_capacity(entries.len());
     let mut file_ids = HashSet::new();
@@ -1035,7 +1278,10 @@ fn build_tree(entries: &[DicomdirEntry], report: &mut DicomdirReport) -> Result<
         if !file_ids.insert(file_id.clone()) {
             return Err(DicomdirError::DuplicateFileId(file_id));
         }
-        let missing = |attribute| DicomdirError::MissingAttribute { file_id: file_id.clone(), attribute };
+        let missing = |attribute| DicomdirError::MissingAttribute {
+            file_id: file_id.clone(),
+            attribute,
+        };
         let sop_class_uid = entry
             .sop_class_uid
             .as_deref()
@@ -1056,10 +1302,19 @@ fn build_tree(entries: &[DicomdirEntry], report: &mut DicomdirReport) -> Result<
             return Err(missing("TransferSyntaxUID"));
         }
         if let Some(previous) = sop_instances.insert(sop_instance_uid.clone(), file_id.clone()) {
-            return Err(DicomdirError::DuplicateSopInstance { sop_instance_uid, file_ids: (previous, file_id) });
+            return Err(DicomdirError::DuplicateSopInstance {
+                sop_instance_uid,
+                file_ids: (previous, file_id),
+            });
         }
         let record_type = record_type_for_entry(entry, &sop_class_uid, &file_id)?;
-        resolved.push(Resolved { entry, file_id, sop_class_uid, sop_instance_uid, record_type });
+        resolved.push(Resolved {
+            entry,
+            file_id,
+            sop_class_uid,
+            sop_instance_uid,
+            record_type,
+        });
     }
 
     // 2. Group into patients > studies > series, in first-seen order, refusing a Patient ID
@@ -1074,10 +1329,15 @@ fn build_tree(entries: &[DicomdirEntry], report: &mut DicomdirReport) -> Result<
             continue;
         }
         let ds = &item.entry.dataset;
-        let study_uid = get_str(ds, STUDY_INSTANCE_UID)
-            .ok_or(DicomdirError::MissingAttribute { file_id: item.file_id.clone(), attribute: "StudyInstanceUID" })?;
-        let series_uid = get_str(ds, SERIES_INSTANCE_UID)
-            .ok_or(DicomdirError::MissingAttribute { file_id: item.file_id.clone(), attribute: "SeriesInstanceUID" })?;
+        let study_uid = get_str(ds, STUDY_INSTANCE_UID).ok_or(DicomdirError::MissingAttribute {
+            file_id: item.file_id.clone(),
+            attribute: "StudyInstanceUID",
+        })?;
+        let series_uid =
+            get_str(ds, SERIES_INSTANCE_UID).ok_or(DicomdirError::MissingAttribute {
+                file_id: item.file_id.clone(),
+                attribute: "SeriesInstanceUID",
+            })?;
         let patient_id = get_str(ds, PATIENT_ID);
         let name = normalize_name(&get_str(ds, PATIENT_NAME).unwrap_or_default());
         let birth_date = get_str(ds, PATIENT_BIRTH_DATE).unwrap_or_default();
@@ -1088,11 +1348,15 @@ fn build_tree(entries: &[DicomdirEntry], report: &mut DicomdirReport) -> Result<
                 // Without a Patient ID, studies are one patient when they have the same
                 // (non-empty) name and birth date; with neither ID nor name, nothing says two
                 // studies are the same patient, so each study is its own.
-                let found = patients.iter().position(|p| match (&p.patient_id, &patient_id) {
-                    (Some(a), Some(b)) => a == b,
-                    (None, None) => !name.is_empty() && p.name == name && p.birth_date == birth_date,
-                    _ => false,
-                });
+                let found = patients
+                    .iter()
+                    .position(|p| match (&p.patient_id, &patient_id) {
+                        (Some(a), Some(b)) => a == b,
+                        (None, None) => {
+                            !name.is_empty() && p.name == name && p.birth_date == birth_date
+                        }
+                        _ => false,
+                    });
                 let p = match found {
                     Some(p) => p,
                     None => {
@@ -1117,7 +1381,9 @@ fn build_tree(entries: &[DicomdirEntry], report: &mut DicomdirReport) -> Result<
             _ => false,
         };
         if !same_patient {
-            return Err(DicomdirError::StudyConflict { study_instance_uid: study_uid });
+            return Err(DicomdirError::StudyConflict {
+                study_instance_uid: study_uid,
+            });
         }
         if patient.patient_id.is_some() && !names_match(&patient.name, &name) {
             return Err(DicomdirError::PatientConflict {
@@ -1131,7 +1397,9 @@ fn build_tree(entries: &[DicomdirEntry], report: &mut DicomdirReport) -> Result<
 
         match series_owner.get(&series_uid) {
             Some(owner) if *owner != study_uid => {
-                return Err(DicomdirError::SeriesConflict { series_instance_uid: series_uid })
+                return Err(DicomdirError::SeriesConflict {
+                    series_instance_uid: series_uid,
+                })
             }
             Some(_) => {}
             None => {
@@ -1141,14 +1409,20 @@ fn build_tree(entries: &[DicomdirEntry], report: &mut DicomdirReport) -> Result<
         let study = match patient.studies.iter_mut().position(|s| s.uid == study_uid) {
             Some(s) => &mut patient.studies[s],
             None => {
-                patient.studies.push(StudyGroup { uid: study_uid, series: Vec::new() });
+                patient.studies.push(StudyGroup {
+                    uid: study_uid,
+                    series: Vec::new(),
+                });
                 patient.studies.last_mut().expect("just pushed")
             }
         };
         let series = match study.series.iter_mut().position(|s| s.uid == series_uid) {
             Some(s) => &mut study.series[s],
             None => {
-                study.series.push(SeriesGroup { uid: series_uid, instances: Vec::new() });
+                study.series.push(SeriesGroup {
+                    uid: series_uid,
+                    instances: Vec::new(),
+                });
                 study.series.last_mut().expect("just pushed")
             }
         };
@@ -1156,8 +1430,14 @@ fn build_tree(entries: &[DicomdirEntry], report: &mut DicomdirReport) -> Result<
     }
 
     // 3. Build the records.
-    let mut tree = Tree { records: Vec::new(), roots: Vec::new() };
-    let used_patient_ids: HashSet<String> = patients.iter().filter_map(|p| p.patient_id.clone()).collect();
+    let mut tree = Tree {
+        records: Vec::new(),
+        roots: Vec::new(),
+    };
+    let used_patient_ids: HashSet<String> = patients
+        .iter()
+        .filter_map(|p| p.patient_id.clone())
+        .collect();
     let mut synthetic_patients = 0usize;
     let mut synthetic_studies = 0usize;
     let used_study_ids: HashSet<String> = resolved
@@ -1166,8 +1446,13 @@ fn build_tree(entries: &[DicomdirEntry], report: &mut DicomdirReport) -> Result<
         .collect();
 
     for patient in &patients {
-        let instances: Vec<&Resolved> =
-            patient.studies.iter().flat_map(|s| s.series.iter()).flat_map(|s| s.instances.iter()).map(|&i| &resolved[i]).collect();
+        let instances: Vec<&Resolved> = patient
+            .studies
+            .iter()
+            .flat_map(|s| s.series.iter())
+            .flat_map(|s| s.instances.iter())
+            .map(|&i| &resolved[i])
+            .collect();
         let mut keys = entity_keys(PATIENT_KEYS, &instances, "PATIENT", report, &patient.name);
         if patient.patient_id.is_none() {
             let id = loop {
@@ -1182,14 +1467,30 @@ fn build_tree(entries: &[DicomdirEntry], report: &mut DicomdirReport) -> Result<
             } else {
                 patient.name.clone()
             };
-            synthesize(&mut keys, report, "PATIENT", &entity, &PATIENT_ID_KEY, id, None);
+            synthesize(
+                &mut keys,
+                report,
+                "PATIENT",
+                &entity,
+                &PATIENT_ID_KEY,
+                id,
+                None,
+            );
         }
-        let patient_record = tree.push(Record { record_type: "PATIENT", keys, children: Vec::new() });
+        let patient_record = tree.push(Record {
+            record_type: "PATIENT",
+            keys,
+            children: Vec::new(),
+        });
         tree.roots.push(patient_record);
 
         for study in &patient.studies {
-            let instances: Vec<&Resolved> =
-                study.series.iter().flat_map(|s| s.instances.iter()).map(|&i| &resolved[i]).collect();
+            let instances: Vec<&Resolved> = study
+                .series
+                .iter()
+                .flat_map(|s| s.instances.iter())
+                .map(|&i| &resolved[i])
+                .collect();
             let mut keys = entity_keys(STUDY_KEYS, &instances, "STUDY", report, &study.uid);
             if get_str(&keys, STUDY_ID).is_none() {
                 let id = loop {
@@ -1203,38 +1504,92 @@ fn build_tree(entries: &[DicomdirEntry], report: &mut DicomdirReport) -> Result<
                         break candidate;
                     }
                 };
-                synthesize(&mut keys, report, "STUDY", &study.uid, &STUDY_ID_KEY, id, None);
+                synthesize(
+                    &mut keys,
+                    report,
+                    "STUDY",
+                    &study.uid,
+                    &STUDY_ID_KEY,
+                    id,
+                    None,
+                );
             }
-            let study_record = tree.push(Record { record_type: "STUDY", keys, children: Vec::new() });
+            let study_record = tree.push(Record {
+                record_type: "STUDY",
+                keys,
+                children: Vec::new(),
+            });
             tree.records[patient_record].children.push(study_record);
 
-            let mut next_series_number = max_number(study.series.iter().flat_map(|s| s.instances.iter()).map(|&i| &resolved[i]), SERIES_NUMBER) + 1;
+            let mut next_series_number = max_number(
+                study
+                    .series
+                    .iter()
+                    .flat_map(|s| s.instances.iter())
+                    .map(|&i| &resolved[i]),
+                SERIES_NUMBER,
+            ) + 1;
             for series in &study.series {
-                let instances: Vec<&Resolved> = series.instances.iter().map(|&i| &resolved[i]).collect();
+                let instances: Vec<&Resolved> =
+                    series.instances.iter().map(|&i| &resolved[i]).collect();
                 let mut keys = entity_keys(SERIES_KEYS, &instances, "SERIES", report, &series.uid);
                 if get_str(&keys, MODALITY).is_none() {
-                    synthesize(&mut keys, report, "SERIES", &series.uid, &MODALITY_KEY, "OT".into(), None);
+                    synthesize(
+                        &mut keys,
+                        report,
+                        "SERIES",
+                        &series.uid,
+                        &MODALITY_KEY,
+                        "OT".into(),
+                        None,
+                    );
                 }
                 if get_str(&keys, SERIES_NUMBER).is_none() {
                     let number = next_series_number.to_string();
                     next_series_number += 1;
-                    synthesize(&mut keys, report, "SERIES", &series.uid, &SERIES_NUMBER_KEY, number, None);
+                    synthesize(
+                        &mut keys,
+                        report,
+                        "SERIES",
+                        &series.uid,
+                        &SERIES_NUMBER_KEY,
+                        number,
+                        None,
+                    );
                 }
-                let series_record = tree.push(Record { record_type: "SERIES", keys, children: Vec::new() });
+                let series_record = tree.push(Record {
+                    record_type: "SERIES",
+                    keys,
+                    children: Vec::new(),
+                });
                 tree.records[study_record].children.push(series_record);
 
-                let mut next_instance_number = max_number(instances.iter().copied(), INSTANCE_NUMBER) + 1;
+                let mut next_instance_number =
+                    max_number(instances.iter().copied(), INSTANCE_NUMBER) + 1;
                 for item in &instances {
                     let mut keys = leaf_record(item, report);
-                    let needs_number =
-                        leaf_keys(item.record_type).iter().any(|k| k.tag == INSTANCE_NUMBER && k.kind == One);
+                    let needs_number = leaf_keys(item.record_type)
+                        .iter()
+                        .any(|k| k.tag == INSTANCE_NUMBER && k.kind == One);
                     if needs_number && get_str(&keys, INSTANCE_NUMBER).is_none() {
                         let number = next_instance_number.to_string();
                         next_instance_number += 1;
-                        synthesize(&mut keys, report, item.record_type, &item.sop_instance_uid, &INSTANCE_NUMBER_KEY, number, None);
+                        synthesize(
+                            &mut keys,
+                            report,
+                            item.record_type,
+                            &item.sop_instance_uid,
+                            &INSTANCE_NUMBER_KEY,
+                            number,
+                            None,
+                        );
                     }
                     add_character_set(&mut keys);
-                    let leaf = tree.push(Record { record_type: item.record_type, keys, children: Vec::new() });
+                    let leaf = tree.push(Record {
+                        record_type: item.record_type,
+                        keys,
+                        children: Vec::new(),
+                    });
                     tree.records[series_record].children.push(leaf);
                 }
             }
@@ -1245,7 +1600,11 @@ fn build_tree(entries: &[DicomdirEntry], report: &mut DicomdirReport) -> Result<
         let item = &resolved[index];
         let mut keys = leaf_record(item, report);
         add_character_set(&mut keys);
-        let record = tree.push(Record { record_type: item.record_type, keys, children: Vec::new() });
+        let record = tree.push(Record {
+            record_type: item.record_type,
+            keys,
+            children: Vec::new(),
+        });
         tree.roots.push(record);
     }
 
@@ -1284,13 +1643,23 @@ fn entity_keys(
             Two => out.put(empty_element(key)),
             IfPresent => {}
             One => {
-                let fallback = key
-                    .fallbacks
-                    .iter()
-                    .find_map(|&tag| instances.iter().find_map(|r| non_empty_element(&r.entry.dataset, tag)).map(|e| (e, tag)));
+                let fallback = key.fallbacks.iter().find_map(|&tag| {
+                    instances
+                        .iter()
+                        .find_map(|r| non_empty_element(&r.entry.dataset, tag))
+                        .map(|e| (e, tag))
+                });
                 if let Some((element, from)) = fallback {
                     let value = element_string(element);
-                    synthesize(&mut out, report, record_type, entity, key, value, Some(from));
+                    synthesize(
+                        &mut out,
+                        report,
+                        record_type,
+                        entity,
+                        key,
+                        value,
+                        Some(from),
+                    );
                 } else if let Some(value) = last_resort_value(key) {
                     synthesize(&mut out, report, record_type, entity, key, value, None);
                 }
@@ -1304,10 +1673,14 @@ fn entity_keys(
 /// DICOMDIR is made, or midnight. Other Type 1 keys have no sensible stand-in.
 fn last_resort_value(key: &Key) -> Option<String> {
     match (key.tag, key.vr) {
-        (_, VR::DA) if key.tag == STUDY_DATE || !key.fallbacks.is_empty() => {
-            Some(dcmnorm_core::chrono::Local::now().format("%Y%m%d").to_string())
+        (_, VR::DA) if key.tag == STUDY_DATE || !key.fallbacks.is_empty() => Some(
+            dcmnorm_core::chrono::Local::now()
+                .format("%Y%m%d")
+                .to_string(),
+        ),
+        (_, VR::TM) if key.tag == STUDY_TIME || !key.fallbacks.is_empty() => {
+            Some("000000".to_owned())
         }
-        (_, VR::TM) if key.tag == STUDY_TIME || !key.fallbacks.is_empty() => Some("000000".to_owned()),
         _ => None,
     }
 }
@@ -1317,7 +1690,9 @@ fn leaf_record(item: &Resolved, report: &mut DicomdirReport) -> InMemDicomObject
     let ds = &item.entry.dataset;
     let mut out = InMemDicomObject::new_empty();
     for key in leaf_keys(item.record_type) {
-        if let Some(element) = lookup_leaf_key(ds, key.tag, item.record_type).and_then(|e| key_element(&e, key)) {
+        if let Some(element) =
+            lookup_leaf_key(ds, key.tag, item.record_type).and_then(|e| key_element(&e, key))
+        {
             out.put(element);
             continue;
         }
@@ -1328,12 +1703,31 @@ fn leaf_record(item: &Resolved, report: &mut DicomdirReport) -> InMemDicomObject
                 if key.tag == INSTANCE_NUMBER {
                     continue; // synthesized by the caller, distinct within the series
                 }
-                let fallback = key.fallbacks.iter().find_map(|&tag| non_empty_element(ds, tag).map(|e| (e, tag)));
+                let fallback = key
+                    .fallbacks
+                    .iter()
+                    .find_map(|&tag| non_empty_element(ds, tag).map(|e| (e, tag)));
                 if let Some((element, from)) = fallback {
                     let value = element_string(element);
-                    synthesize(&mut out, report, item.record_type, &item.sop_instance_uid, key, value, Some(from));
+                    synthesize(
+                        &mut out,
+                        report,
+                        item.record_type,
+                        &item.sop_instance_uid,
+                        key,
+                        value,
+                        Some(from),
+                    );
                 } else if let Some(value) = last_resort_value(key) {
-                    synthesize(&mut out, report, item.record_type, &item.sop_instance_uid, key, value, None);
+                    synthesize(
+                        &mut out,
+                        report,
+                        item.record_type,
+                        &item.sop_instance_uid,
+                        key,
+                        value,
+                        None,
+                    );
                 } else {
                     out.put(empty_element(key));
                     report.warnings.push(format!(
@@ -1350,7 +1744,11 @@ fn leaf_record(item: &Resolved, report: &mut DicomdirReport) -> InMemDicomObject
             let verified = get_str(ds, VERIFICATION_FLAG).as_deref() == Some("VERIFIED");
             if verified {
                 if let Some(latest) = latest_verification_datetime(ds) {
-                    out.put(DataElement::new(VERIFICATION_DATE_TIME, VR::DT, PrimitiveValue::from(latest)));
+                    out.put(DataElement::new(
+                        VERIFICATION_DATE_TIME,
+                        VR::DT,
+                        PrimitiveValue::from(latest),
+                    ));
                 } else {
                     report.warnings.push(format!(
                         "SR DOCUMENT {}: VERIFIED but no Verifying Observer Sequence > Verification DateTime",
@@ -1375,7 +1773,11 @@ fn leaf_record(item: &Resolved, report: &mut DicomdirReport) -> InMemDicomObject
         VR::CS,
         PrimitiveValue::Strs(item.entry.file_id.iter().cloned().collect()),
     ));
-    out.put(DataElement::new(REFERENCED_SOP_CLASS_UID_IN_FILE, VR::UI, PrimitiveValue::from(item.sop_class_uid.clone())));
+    out.put(DataElement::new(
+        REFERENCED_SOP_CLASS_UID_IN_FILE,
+        VR::UI,
+        PrimitiveValue::from(item.sop_class_uid.clone()),
+    ));
     out.put(DataElement::new(
         REFERENCED_SOP_INSTANCE_UID_IN_FILE,
         VR::UI,
@@ -1386,11 +1788,18 @@ fn leaf_record(item: &Resolved, report: &mut DicomdirReport) -> InMemDicomObject
         VR::UI,
         PrimitiveValue::from(trim_value(&item.entry.transfer_syntax_uid).to_owned()),
     ));
-    if let Some(related) = ds.get(RELATED_GENERAL_SOP_CLASS_UID).filter(|e| !element_string(e).is_empty()) {
+    if let Some(related) = ds
+        .get(RELATED_GENERAL_SOP_CLASS_UID)
+        .filter(|e| !element_string(e).is_empty())
+    {
         out.put(DataElement::new(
             REFERENCED_RELATED_GENERAL_SOP_CLASS_UID_IN_FILE,
             VR::UI,
-            related.value().primitive().cloned().unwrap_or(PrimitiveValue::Empty),
+            related
+                .value()
+                .primitive()
+                .cloned()
+                .unwrap_or(PrimitiveValue::Empty),
         ));
     }
     out
@@ -1404,16 +1813,29 @@ fn lookup_leaf_key(ds: &InMemDicomObject, tag: Tag, record_type: &str) -> Option
         return Some(element.clone());
     }
     let shared_lookup = matches!(record_type, "IMAGE" | "SPECTROSCOPY")
-        && matches!(tag, REFERENCED_IMAGE_SEQUENCE | IMAGE_POSITION_PATIENT | IMAGE_ORIENTATION_PATIENT | PIXEL_SPACING);
+        && matches!(
+            tag,
+            REFERENCED_IMAGE_SEQUENCE
+                | IMAGE_POSITION_PATIENT
+                | IMAGE_ORIENTATION_PATIENT
+                | PIXEL_SPACING
+        );
     if !shared_lookup {
         return None;
     }
-    let shared = ds.get(SHARED_FUNCTIONAL_GROUPS_SEQUENCE)?.items()?.first()?;
+    let shared = ds
+        .get(SHARED_FUNCTIONAL_GROUPS_SEQUENCE)?
+        .items()?
+        .first()?;
     if let Some(element) = non_empty_element(shared, tag) {
         return Some(element.clone());
     }
     shared.iter().find_map(|group| {
-        group.items()?.first().and_then(|item| non_empty_element(item, tag)).cloned()
+        group
+            .items()?
+            .first()
+            .and_then(|item| non_empty_element(item, tag))
+            .cloned()
     })
 }
 
@@ -1428,7 +1850,11 @@ fn concept_modifier_items(ds: &InMemDicomObject) -> Option<InMemElement> {
         .map(|item| InMemDicomObject::from_element_iter(item.iter().map(clean_element)))
         .collect();
     (!items.is_empty()).then(|| {
-        DataElement::new(CONTENT_SEQUENCE, VR::SQ, DataSetSequence::new(items, Length::UNDEFINED))
+        DataElement::new(
+            CONTENT_SEQUENCE,
+            VR::SQ,
+            DataSetSequence::new(items, Length::UNDEFINED),
+        )
     })
 }
 
@@ -1459,7 +1885,11 @@ fn synthesize(
     value: String,
     from: Option<Tag>,
 ) {
-    keys.put(DataElement::new(key.tag, key.vr, PrimitiveValue::from(value.clone())));
+    keys.put(DataElement::new(
+        key.tag,
+        key.vr,
+        PrimitiveValue::from(value.clone()),
+    ));
     report.synthesized.push(DicomdirSynthesized {
         record_type: record_type.into(),
         entity: entity.to_owned(),
@@ -1492,17 +1922,37 @@ fn max_number<'r, 'e: 'r>(instances: impl IntoIterator<Item = &'r Resolved<'e>>,
 
 /// The four Directory Elements every record starts with (offsets filled in later).
 fn put_record_header(keys: &mut InMemDicomObject, record_type: &str) {
-    keys.put(DataElement::new(OFFSET_NEXT, VR::UL, PrimitiveValue::from(0u32)));
-    keys.put(DataElement::new(RECORD_IN_USE_FLAG, VR::US, PrimitiveValue::from(0xFFFFu16)));
-    keys.put(DataElement::new(OFFSET_LOWER, VR::UL, PrimitiveValue::from(0u32)));
-    keys.put(DataElement::new(DIRECTORY_RECORD_TYPE, VR::CS, PrimitiveValue::from(record_type.to_owned())));
+    keys.put(DataElement::new(
+        OFFSET_NEXT,
+        VR::UL,
+        PrimitiveValue::from(0u32),
+    ));
+    keys.put(DataElement::new(
+        RECORD_IN_USE_FLAG,
+        VR::US,
+        PrimitiveValue::from(0xFFFFu16),
+    ));
+    keys.put(DataElement::new(
+        OFFSET_LOWER,
+        VR::UL,
+        PrimitiveValue::from(0u32),
+    ));
+    keys.put(DataElement::new(
+        DIRECTORY_RECORD_TYPE,
+        VR::CS,
+        PrimitiveValue::from(record_type.to_owned()),
+    ));
 }
 
 /// PS3.3 F.5: Specific Character Set is "Required if an extended or replacement character set
 /// is used in one of the Keys".
 fn add_character_set(keys: &mut InMemDicomObject) {
     if has_non_ascii_text(keys) {
-        keys.put(DataElement::new(SPECIFIC_CHARACTER_SET, VR::CS, PrimitiveValue::from(UTF8_CHARACTER_SET.to_owned())));
+        keys.put(DataElement::new(
+            SPECIFIC_CHARACTER_SET,
+            VR::CS,
+            PrimitiveValue::from(UTF8_CHARACTER_SET.to_owned()),
+        ));
     } else {
         keys.remove_element(SPECIFIC_CHARACTER_SET);
     }
@@ -1521,12 +1971,18 @@ fn has_non_ascii_text(object: &InMemDicomObject) -> bool {
 // Encoding
 // ---------------------------------------------------------------------------------------------
 
-fn encode_dicomdir(tree: &Tree, file_set_id: &str, sop_instance_uid: Option<&str>) -> Result<Vec<u8>, DicomdirError> {
+fn encode_dicomdir(
+    tree: &Tree,
+    file_set_id: &str,
+    sop_instance_uid: Option<&str>,
+) -> Result<Vec<u8>, DicomdirError> {
     let ts = TransferSyntaxRegistry
         .get(uids::EXPLICIT_VR_LITTLE_ENDIAN)
         .expect("Explicit VR Little Endian must be registered");
 
-    let instance_uid = sop_instance_uid.map(str::to_owned).unwrap_or_else(generate_uid);
+    let instance_uid = sop_instance_uid
+        .map(str::to_owned)
+        .unwrap_or_else(generate_uid);
     let meta = FileMetaTableBuilder::new()
         .information_version([0x00, 0x01])
         .media_storage_sop_class_uid(MEDIA_STORAGE_DIRECTORY_STORAGE)
@@ -1535,7 +1991,8 @@ fn encode_dicomdir(tree: &Tree, file_set_id: &str, sop_instance_uid: Option<&str
         .build()
         .map_err(|e| DicomdirError::Io(std::io::Error::other(e.to_string())))?;
     let mut meta_bytes = Vec::new();
-    meta.write_to(&mut meta_bytes).map_err(DicomdirError::Write)?;
+    meta.write_to(&mut meta_bytes)
+        .map_err(DicomdirError::Write)?;
 
     // Depth-first order: a record, then its lower-level entity, then its next sibling.
     let mut order = Vec::with_capacity(tree.records.len());
@@ -1547,18 +2004,29 @@ fn encode_dicomdir(tree: &Tree, file_set_id: &str, sop_instance_uid: Option<&str
 
     let header_with = |first: u32, last: u32| -> Result<Vec<u8>, DicomdirError> {
         let header = InMemDicomObject::from_element_iter([
-            DataElement::new(FILE_SET_ID, VR::CS, PrimitiveValue::from(file_set_id.to_owned())),
+            DataElement::new(
+                FILE_SET_ID,
+                VR::CS,
+                PrimitiveValue::from(file_set_id.to_owned()),
+            ),
             DataElement::new(OFFSET_FIRST_ROOT, VR::UL, PrimitiveValue::from(first)),
             DataElement::new(OFFSET_LAST_ROOT, VR::UL, PrimitiveValue::from(last)),
-            DataElement::new(FILE_SET_CONSISTENCY_FLAG, VR::US, PrimitiveValue::from(0x0000u16)),
+            DataElement::new(
+                FILE_SET_CONSISTENCY_FLAG,
+                VR::US,
+                PrimitiveValue::from(0x0000u16),
+            ),
         ]);
         let mut bytes = Vec::new();
-        header.write_dataset_with_ts(&mut bytes, ts).map_err(DicomdirError::Write)?;
+        header
+            .write_dataset_with_ts(&mut bytes, ts)
+            .map_err(DicomdirError::Write)?;
         Ok(bytes)
     };
     let encode = |keys: &InMemDicomObject| -> Result<Vec<u8>, DicomdirError> {
         let mut bytes = Vec::new();
-        keys.write_dataset_with_ts(&mut bytes, ts).map_err(DicomdirError::Write)?;
+        keys.write_dataset_with_ts(&mut bytes, ts)
+            .map_err(DicomdirError::Write)?;
         Ok(bytes)
     };
 
@@ -1587,13 +2055,29 @@ fn encode_dicomdir(tree: &Tree, file_set_id: &str, sop_instance_uid: Option<&str
     for &index in &order {
         let record = &tree.records[index];
         let mut keys = record.keys.clone();
-        keys.put(DataElement::new(OFFSET_LOWER, VR::UL, PrimitiveValue::from(offset_of_first(&record.children))));
+        keys.put(DataElement::new(
+            OFFSET_LOWER,
+            VR::UL,
+            PrimitiveValue::from(offset_of_first(&record.children)),
+        ));
         let next = next_sibling[index].map(|i| offsets[i]).unwrap_or(0);
-        keys.put(DataElement::new(OFFSET_NEXT, VR::UL, PrimitiveValue::from(next)));
+        keys.put(DataElement::new(
+            OFFSET_NEXT,
+            VR::UL,
+            PrimitiveValue::from(next),
+        ));
         let bytes = encode(&keys)?;
-        assert_eq!(bytes.len(), measured[index], "a DICOMDIR record changed size when its offsets were filled in");
+        assert_eq!(
+            bytes.len(),
+            measured[index],
+            "a DICOMDIR record changed size when its offsets were filled in"
+        );
         items.extend_from_slice(&ITEM_TAG_BYTES);
-        items.extend_from_slice(&u32::try_from(bytes.len()).map_err(|_| too_large())?.to_le_bytes());
+        items.extend_from_slice(
+            &u32::try_from(bytes.len())
+                .map_err(|_| too_large())?
+                .to_le_bytes(),
+        );
         items.extend_from_slice(&bytes);
     }
 
@@ -1610,13 +2094,20 @@ fn encode_dicomdir(tree: &Tree, file_set_id: &str, sop_instance_uid: Option<&str
     out.extend_from_slice(&DIRECTORY_RECORD_SEQUENCE.element().to_le_bytes());
     out.extend_from_slice(b"SQ");
     out.extend_from_slice(&[0, 0]);
-    out.extend_from_slice(&u32::try_from(items.len()).map_err(|_| too_large())?.to_le_bytes());
+    out.extend_from_slice(
+        &u32::try_from(items.len())
+            .map_err(|_| too_large())?
+            .to_le_bytes(),
+    );
     out.extend_from_slice(&items);
     Ok(out)
 }
 
 fn too_large() -> DicomdirError {
-    DicomdirError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, "DICOMDIR would exceed 4 GiB"))
+    DicomdirError::Io(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        "DICOMDIR would exceed 4 GiB",
+    ))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1636,7 +2127,10 @@ fn element_string(element: &InMemElement) -> String {
             .map(|b| trim_value(&String::from_utf8_lossy(&b)).to_owned())
             .unwrap_or_default();
     }
-    element.to_str().map(|s| trim_value(&s).to_owned()).unwrap_or_default()
+    element
+        .to_str()
+        .map(|s| trim_value(&s).to_owned())
+        .unwrap_or_default()
 }
 
 /// A copy of `element` fit for a record key of type `key`: UN values of standard attributes are
@@ -1649,8 +2143,18 @@ fn key_element(element: &InMemElement, key: &Key) -> Option<InMemElement> {
     let bytes = element.to_bytes().ok()?;
     let value = match key.vr {
         VR::SQ => return None,
-        VR::US => PrimitiveValue::U16(bytes.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect()),
-        VR::UL => PrimitiveValue::U32(bytes.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()),
+        VR::US => PrimitiveValue::U16(
+            bytes
+                .chunks_exact(2)
+                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .collect(),
+        ),
+        VR::UL => PrimitiveValue::U32(
+            bytes
+                .chunks_exact(4)
+                .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect(),
+        ),
         _ => {
             let text = String::from_utf8_lossy(&bytes);
             let values: Vec<String> = text.split('\\').map(|v| trim_value(v).to_owned()).collect();
@@ -1674,7 +2178,9 @@ fn non_empty_element(ds: &InMemDicomObject, tag: Tag) -> Option<&InMemElement> {
     let has_value = match element.value() {
         Value::Sequence(seq) => !seq.items().is_empty(),
         Value::Primitive(PrimitiveValue::Empty) => false,
-        Value::Primitive(PrimitiveValue::Str(_) | PrimitiveValue::Strs(_)) => !element_string(element).is_empty(),
+        Value::Primitive(PrimitiveValue::Str(_) | PrimitiveValue::Strs(_)) => {
+            !element_string(element).is_empty()
+        }
         Value::Primitive(_) if element.vr() == VR::UN => !element_string(element).is_empty(),
         Value::Primitive(_) => true,
         Value::PixelSequence(_) => false,
@@ -1684,7 +2190,11 @@ fn non_empty_element(ds: &InMemDicomObject, tag: Tag) -> Option<&InMemElement> {
 
 fn empty_element(key: &Key) -> InMemElement {
     if key.vr == VR::SQ {
-        DataElement::new(key.tag, VR::SQ, DataSetSequence::<InMemDicomObject>::new(Vec::new(), Length::UNDEFINED))
+        DataElement::new(
+            key.tag,
+            VR::SQ,
+            DataSetSequence::<InMemDicomObject>::new(Vec::new(), Length::UNDEFINED),
+        )
     } else {
         DataElement::new(key.tag, key.vr, PrimitiveValue::Empty)
     }
@@ -1704,11 +2214,17 @@ fn clean_element(element: &InMemElement) -> InMemElement {
                 .iter()
                 .map(|item| InMemDicomObject::from_element_iter(item.iter().map(clean_element)))
                 .collect();
-            DataElement::new(element.tag(), VR::SQ, DataSetSequence::new(items, Length::UNDEFINED))
+            DataElement::new(
+                element.tag(),
+                VR::SQ,
+                DataSetSequence::new(items, Length::UNDEFINED),
+            )
         }
-        Value::Primitive(PrimitiveValue::Str(text)) => {
-            DataElement::new(element.tag(), vr, PrimitiveValue::from(clean_text(text, vr)))
-        }
+        Value::Primitive(PrimitiveValue::Str(text)) => DataElement::new(
+            element.tag(),
+            vr,
+            PrimitiveValue::from(clean_text(text, vr)),
+        ),
         Value::Primitive(PrimitiveValue::Strs(values)) => DataElement::new(
             element.tag(),
             vr,
@@ -1724,7 +2240,12 @@ fn clean_text(text: &str, vr: VR) -> String {
         vr,
         VR::AE | VR::CS | VR::DA | VR::DS | VR::DT | VR::IS | VR::LO | VR::SH | VR::TM | VR::UI
     );
-    if leading_insignificant { trimmed.trim_start_matches(' ') } else { trimmed }.to_owned()
+    if leading_insignificant {
+        trimmed.trim_start_matches(' ')
+    } else {
+        trimmed
+    }
+    .to_owned()
 }
 
 /// Trailing component separators and padding don't make a different name ("DOE^JANE^^^" is
@@ -1776,9 +2297,11 @@ mod tests {
             u32::from_le_bytes([v[0], v[1], v[2], v[3]])
         }
         fn text(&self, g: u16, e: u16) -> Option<String> {
-            self.elements
-                .get(&(g, e))
-                .map(|v| String::from_utf8_lossy(v).trim_end_matches([' ', '\0']).to_owned())
+            self.elements.get(&(g, e)).map(|v| {
+                String::from_utf8_lossy(v)
+                    .trim_end_matches([' ', '\0'])
+                    .to_owned()
+            })
         }
         fn record_type(&self) -> String {
             self.text(0x0004, 0x1430).unwrap()
@@ -1802,9 +2325,8 @@ mod tests {
         let tag = (u16_at(b, p), u16_at(b, p + 2));
         let vr = [b[p + 4], b[p + 5]];
         match &vr {
-            b"OB" | b"OW" | b"OF" | b"SQ" | b"UT" | b"UN" | b"UC" | b"UR" | b"OD" | b"OL" | b"OV" | b"SV" | b"UV" => {
-                (tag, vr, u32_at(b, p + 8), 12)
-            }
+            b"OB" | b"OW" | b"OF" | b"SQ" | b"UT" | b"UN" | b"UC" | b"UR" | b"OD" | b"OL"
+            | b"OV" | b"SV" | b"UV" => (tag, vr, u32_at(b, p + 8), 12),
             _ => (tag, vr, u16_at(b, p + 6) as u32, 8),
         }
     }
@@ -1848,7 +2370,11 @@ mod tests {
         while p < end {
             let (tag, _, len, hlen) = header(b, p);
             let next = skip_element(b, p);
-            let value_end = if len == 0xFFFF_FFFF { next } else { p + hlen + len as usize };
+            let value_end = if len == 0xFFFF_FFFF {
+                next
+            } else {
+                p + hlen + len as usize
+            };
             out.insert(tag, b[p + hlen..value_end].to_vec());
             p = next;
         }
@@ -1869,13 +2395,19 @@ mod tests {
             let (tag, vr, len, hlen) = header(b, p);
             if tag == (0x0004, 0x1220) {
                 assert_eq!(&vr, b"SQ");
-                assert_ne!(len, 0xFFFF_FFFF, "the record sequence is written with a defined length");
+                assert_ne!(
+                    len, 0xFFFF_FFFF,
+                    "the record sequence is written with a defined length"
+                );
                 let end = p + hlen + len as usize;
                 let mut q = p + hlen;
                 while q < end {
                     assert_eq!((u16_at(b, q), u16_at(b, q + 2)), (0xFFFE, 0xE000));
                     let item_len = u32_at(b, q + 4) as usize;
-                    records.push(RawRecord { offset: q as u32, elements: parse_elements(b, q + 8, q + 8 + item_len) });
+                    records.push(RawRecord {
+                        offset: q as u32,
+                        elements: parse_elements(b, q + 8, q + 8 + item_len),
+                    });
                     q += 8 + item_len;
                 }
                 p = end;
@@ -1890,18 +2422,35 @@ mod tests {
     /// Follow the offsets from the root, depth first, returning (depth, record index) in walk
     /// order. Every offset must land exactly on a record's item tag.
     fn walk(raw: &RawDicomdir) -> Vec<(usize, usize)> {
-        let by_offset: HashMap<u32, usize> = raw.records.iter().enumerate().map(|(i, r)| (r.offset, i)).collect();
+        let by_offset: HashMap<u32, usize> = raw
+            .records
+            .iter()
+            .enumerate()
+            .map(|(i, r)| (r.offset, i))
+            .collect();
         let first = u32_at(&raw.top[&(0x0004, 0x1200)], 0);
         let last = u32_at(&raw.top[&(0x0004, 0x1202)], 0);
         let mut out = Vec::new();
-        fn entity(raw: &RawDicomdir, by_offset: &HashMap<u32, usize>, mut offset: u32, depth: usize, out: &mut Vec<(usize, usize)>) -> u32 {
+        fn entity(
+            raw: &RawDicomdir,
+            by_offset: &HashMap<u32, usize>,
+            mut offset: u32,
+            depth: usize,
+            out: &mut Vec<(usize, usize)>,
+        ) -> u32 {
             let mut last = 0;
             while offset != 0 {
-                let index = *by_offset.get(&offset).unwrap_or_else(|| panic!("offset {offset} is not a record"));
+                let index = *by_offset
+                    .get(&offset)
+                    .unwrap_or_else(|| panic!("offset {offset} is not a record"));
                 out.push((depth, index));
                 last = offset;
                 let record = &raw.records[index];
-                assert_eq!(record.elements[&(0x0004, 0x1410)], vec![0xFF, 0xFF], "Record In-use Flag FFFFH");
+                assert_eq!(
+                    record.elements[&(0x0004, 0x1410)],
+                    vec![0xFF, 0xFF],
+                    "Record In-use Flag FFFFH"
+                );
                 let lower = record.ul(0x0004, 0x1420);
                 if lower != 0 {
                     entity(raw, by_offset, lower, depth + 1, out);
@@ -1918,12 +2467,18 @@ mod tests {
     // ---- fixtures ------------------------------------------------------------------------------
 
     fn ds(elements: &[(u16, u16, VR, &str)]) -> InMemDicomObject {
-        InMemDicomObject::from_element_iter(
-            elements.iter().map(|&(g, e, vr, v)| DataElement::new(Tag(g, e), vr, PrimitiveValue::from(v.to_owned()))),
-        )
+        InMemDicomObject::from_element_iter(elements.iter().map(|&(g, e, vr, v)| {
+            DataElement::new(Tag(g, e), vr, PrimitiveValue::from(v.to_owned()))
+        }))
     }
 
-    fn image(patient: &str, study: &str, series: &str, sop: &str, number: &str) -> InMemDicomObject {
+    fn image(
+        patient: &str,
+        study: &str,
+        series: &str,
+        sop: &str,
+        number: &str,
+    ) -> InMemDicomObject {
         let mut out = ds(&[
             (0x0008, 0x0016, VR::UI, "1.2.840.10008.5.1.4.1.1.2"),
             (0x0008, 0x0018, VR::UI, sop),
@@ -1940,7 +2495,11 @@ mod tests {
             (0x0020, 0x0013, VR::IS, number),
         ]);
         out.put(DataElement::new(ROWS, VR::US, PrimitiveValue::from(16u16)));
-        out.put(DataElement::new(COLUMNS, VR::US, PrimitiveValue::from(16u16)));
+        out.put(DataElement::new(
+            COLUMNS,
+            VR::US,
+            PrimitiveValue::from(16u16),
+        ));
         out
     }
 
@@ -1955,11 +2514,17 @@ mod tests {
     }
 
     fn options() -> DicomdirOptions {
-        DicomdirOptions { file_set_id: "TESTSET".into(), sop_instance_uid: Some("2.25.1".into()) }
+        DicomdirOptions {
+            file_set_id: "TESTSET".into(),
+            sop_instance_uid: Some("2.25.1".into()),
+        }
     }
 
     fn fixture(name: &str) -> std::path::PathBuf {
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test").join("files").join(name)
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("test")
+            .join("files")
+            .join(name)
     }
 
     // ---- tests -----------------------------------------------------------------------------------
@@ -1967,11 +2532,26 @@ mod tests {
     #[test]
     fn offsets_link_every_record_depth_first() {
         let entries = vec![
-            entry("DICOM/P1/ST1/SE1/IM1", image("P1", "1.2.1", "1.2.1.1", "1.2.1.1.1", "1")),
-            entry("DICOM/P1/ST1/SE1/IM2", image("P1", "1.2.1", "1.2.1.1", "1.2.1.1.2", "2")),
-            entry("DICOM/P1/ST1/SE2/IM1", image("P1", "1.2.1", "1.2.1.2", "1.2.1.2.1", "1")),
-            entry("DICOM/P1/ST2/SE1/IM1", image("P1", "1.2.2", "1.2.2.1", "1.2.2.1.1", "1")),
-            entry("DICOM/P2/ST1/SE1/IM1", image("P2", "1.3.1", "1.3.1.1", "1.3.1.1.1", "1")),
+            entry(
+                "DICOM/P1/ST1/SE1/IM1",
+                image("P1", "1.2.1", "1.2.1.1", "1.2.1.1.1", "1"),
+            ),
+            entry(
+                "DICOM/P1/ST1/SE1/IM2",
+                image("P1", "1.2.1", "1.2.1.1", "1.2.1.1.2", "2"),
+            ),
+            entry(
+                "DICOM/P1/ST1/SE2/IM1",
+                image("P1", "1.2.1", "1.2.1.2", "1.2.1.2.1", "1"),
+            ),
+            entry(
+                "DICOM/P1/ST2/SE1/IM1",
+                image("P1", "1.2.2", "1.2.2.1", "1.2.2.1.1", "1"),
+            ),
+            entry(
+                "DICOM/P2/ST1/SE1/IM1",
+                image("P2", "1.3.1", "1.3.1.1", "1.3.1.1.1", "1"),
+            ),
         ];
         let (bytes, report) = build_dicomdir(&entries, &options()).unwrap();
         let raw = parse_raw(&bytes);
@@ -1979,28 +2559,68 @@ mod tests {
         assert_eq!(report.record_count, 14);
 
         let walked = walk(&raw);
-        assert_eq!(walked.len(), raw.records.len(), "every record reachable exactly once");
-        let shape: Vec<(usize, String)> = walked.iter().map(|&(d, i)| (d, raw.records[i].record_type())).collect();
+        assert_eq!(
+            walked.len(),
+            raw.records.len(),
+            "every record reachable exactly once"
+        );
+        let shape: Vec<(usize, String)> = walked
+            .iter()
+            .map(|&(d, i)| (d, raw.records[i].record_type()))
+            .collect();
         let expected = [
-            (0, "PATIENT"), (1, "STUDY"), (2, "SERIES"), (3, "IMAGE"), (3, "IMAGE"), (2, "SERIES"), (3, "IMAGE"),
-            (1, "STUDY"), (2, "SERIES"), (3, "IMAGE"),
-            (0, "PATIENT"), (1, "STUDY"), (2, "SERIES"), (3, "IMAGE"),
+            (0, "PATIENT"),
+            (1, "STUDY"),
+            (2, "SERIES"),
+            (3, "IMAGE"),
+            (3, "IMAGE"),
+            (2, "SERIES"),
+            (3, "IMAGE"),
+            (1, "STUDY"),
+            (2, "SERIES"),
+            (3, "IMAGE"),
+            (0, "PATIENT"),
+            (1, "STUDY"),
+            (2, "SERIES"),
+            (3, "IMAGE"),
         ];
-        assert_eq!(shape, expected.iter().map(|&(d, t)| (d, t.to_owned())).collect::<Vec<_>>());
+        assert_eq!(
+            shape,
+            expected
+                .iter()
+                .map(|&(d, t)| (d, t.to_owned()))
+                .collect::<Vec<_>>()
+        );
         // depth-first layout: the walk order is the file order
         let file_order: Vec<usize> = walked.iter().map(|&(_, i)| i).collect();
         assert_eq!(file_order, (0..raw.records.len()).collect::<Vec<_>>());
 
         // file-set elements
-        assert_eq!(String::from_utf8_lossy(&raw.top[&(0x0004, 0x1130)]).trim_end(), "TESTSET");
+        assert_eq!(
+            String::from_utf8_lossy(&raw.top[&(0x0004, 0x1130)]).trim_end(),
+            "TESTSET"
+        );
         assert_eq!(raw.top[&(0x0004, 0x1212)], vec![0, 0]);
         // leaf references
         let image = &raw.records[3];
-        assert_eq!(image.text(0x0004, 0x1500).unwrap(), "DICOM\\P1\\ST1\\SE1\\IM1");
-        assert_eq!(image.text(0x0004, 0x1510).unwrap(), "1.2.840.10008.5.1.4.1.1.2");
+        assert_eq!(
+            image.text(0x0004, 0x1500).unwrap(),
+            "DICOM\\P1\\ST1\\SE1\\IM1"
+        );
+        assert_eq!(
+            image.text(0x0004, 0x1510).unwrap(),
+            "1.2.840.10008.5.1.4.1.1.2"
+        );
         assert_eq!(image.text(0x0004, 0x1511).unwrap(), "1.2.1.1.1");
-        assert_eq!(image.text(0x0004, 0x1512).unwrap(), uids::EXPLICIT_VR_LITTLE_ENDIAN);
-        assert_eq!(image.ul(0x0004, 0x1420), 0, "an IMAGE has no lower-level entity");
+        assert_eq!(
+            image.text(0x0004, 0x1512).unwrap(),
+            uids::EXPLICIT_VR_LITTLE_ENDIAN
+        );
+        assert_eq!(
+            image.ul(0x0004, 0x1420),
+            0,
+            "an IMAGE has no lower-level entity"
+        );
         // only leaves reference files
         assert!(raw.records[0].elements.get(&(0x0004, 0x1500)).is_none());
         assert!(report.synthesized.is_empty(), "{:?}", report.synthesized);
@@ -2008,23 +2628,41 @@ mod tests {
 
     #[test]
     fn written_file_reads_back_as_media_storage_directory() {
-        let entries = vec![entry("IM1", image("P1", "1.2.1", "1.2.1.1", "1.2.1.1.1", "1"))];
+        let entries = vec![entry(
+            "IM1",
+            image("P1", "1.2.1", "1.2.1.1", "1.2.1.1.1", "1"),
+        )];
         let (bytes, _) = build_dicomdir(&entries, &options()).unwrap();
         let object = crate::dicom_io::read_dicom_bytes(&bytes).unwrap();
-        assert_eq!(object.meta().media_storage_sop_class_uid(), MEDIA_STORAGE_DIRECTORY_STORAGE);
-        assert_eq!(trim_value(object.meta().transfer_syntax()), uids::EXPLICIT_VR_LITTLE_ENDIAN);
+        assert_eq!(
+            object.meta().media_storage_sop_class_uid(),
+            MEDIA_STORAGE_DIRECTORY_STORAGE
+        );
+        assert_eq!(
+            trim_value(object.meta().transfer_syntax()),
+            uids::EXPLICIT_VR_LITTLE_ENDIAN
+        );
         assert_eq!(object.meta().media_storage_sop_instance_uid(), "2.25.1");
         assert_eq!(object.meta().information_version, [0, 1]);
-        let records = object.get(DIRECTORY_RECORD_SEQUENCE).unwrap().items().unwrap();
+        let records = object
+            .get(DIRECTORY_RECORD_SEQUENCE)
+            .unwrap()
+            .items()
+            .unwrap();
         assert_eq!(records.len(), 4);
     }
 
     #[test]
     fn required_keys_per_level() {
-        let entries = vec![entry("IM1", image("P1", "1.2.1", "1.2.1.1", "1.2.1.1.1", "7"))];
+        let entries = vec![entry(
+            "IM1",
+            image("P1", "1.2.1", "1.2.1.1", "1.2.1.1.1", "7"),
+        )];
         let (bytes, _) = build_dicomdir(&entries, &options()).unwrap();
         let raw = parse_raw(&bytes);
-        let [patient, study, series, image] = &raw.records[..] else { panic!() };
+        let [patient, study, series, image] = &raw.records[..] else {
+            panic!()
+        };
         assert_eq!(patient.text(0x0010, 0x0020).unwrap(), "P1");
         assert_eq!(patient.text(0x0010, 0x0010).unwrap(), "DOE^JANE");
         assert_eq!(study.text(0x0008, 0x0020).unwrap(), "20240102");
@@ -2032,14 +2670,24 @@ mod tests {
         assert_eq!(study.text(0x0020, 0x000D).unwrap(), "1.2.1");
         assert_eq!(study.text(0x0020, 0x0010).unwrap(), "S1");
         assert_eq!(study.text(0x0008, 0x0050).unwrap(), "ACC1");
-        assert_eq!(study.text(0x0008, 0x1030).unwrap(), "", "Type 2 Study Description present, empty");
+        assert_eq!(
+            study.text(0x0008, 0x1030).unwrap(),
+            "",
+            "Type 2 Study Description present, empty"
+        );
         assert_eq!(series.text(0x0008, 0x0060).unwrap(), "CT");
         assert_eq!(series.text(0x0020, 0x000E).unwrap(), "1.2.1.1");
         assert_eq!(series.text(0x0020, 0x0011).unwrap(), "3");
         assert_eq!(image.text(0x0020, 0x0013).unwrap(), "7");
-        assert!(image.elements.contains_key(&(0x0028, 0x0010)), "H.3-2 Rows copied");
+        assert!(
+            image.elements.contains_key(&(0x0028, 0x0010)),
+            "H.3-2 Rows copied"
+        );
         for record in &raw.records {
-            assert!(!record.elements.contains_key(&(0x0008, 0x0005)), "ASCII-only records carry no charset");
+            assert!(
+                !record.elements.contains_key(&(0x0008, 0x0005)),
+                "ASCII-only records carry no charset"
+            );
         }
     }
 
@@ -2051,38 +2699,84 @@ mod tests {
             }
             d
         };
-        let gone = [PATIENT_ID, STUDY_ID, STUDY_DATE, STUDY_TIME, MODALITY, SERIES_NUMBER, INSTANCE_NUMBER];
+        let gone = [
+            PATIENT_ID,
+            STUDY_ID,
+            STUDY_DATE,
+            STUDY_TIME,
+            MODALITY,
+            SERIES_NUMBER,
+            INSTANCE_NUMBER,
+        ];
         let mut a = strip(image("", "1.2.1", "1.2.1.1", "1.2.1.1.1", ""), &gone);
-        a.put(DataElement::new(SERIES_DATE, VR::DA, PrimitiveValue::from("20230505".to_owned())));
+        a.put(DataElement::new(
+            SERIES_DATE,
+            VR::DA,
+            PrimitiveValue::from("20230505".to_owned()),
+        ));
         let b = strip(image("", "1.2.1", "1.2.1.1", "1.2.1.1.2", ""), &gone);
         let c = strip(image("", "1.2.1", "1.2.1.2", "1.2.1.2.1", ""), &gone);
         let d = strip(image("", "1.2.2", "1.2.2.1", "1.2.2.1.1", ""), &gone);
         let entries = vec![entry("A", a), entry("B", b), entry("C", c), entry("D", d)];
         let (bytes, report) = build_dicomdir(&entries, &options()).unwrap();
         let raw = parse_raw(&bytes);
-        let of_type = |t: &str| raw.records.iter().filter(|r| r.record_type() == t).collect::<Vec<_>>();
+        let of_type = |t: &str| {
+            raw.records
+                .iter()
+                .filter(|r| r.record_type() == t)
+                .collect::<Vec<_>>()
+        };
 
         let patients = of_type("PATIENT");
-        assert_eq!(patients.len(), 1, "same name and birth date, no ID: one patient");
+        assert_eq!(
+            patients.len(),
+            1,
+            "same name and birth date, no ID: one patient"
+        );
         assert_eq!(patients[0].text(0x0010, 0x0020).unwrap(), "SYNTH_PAT_0001");
 
         let studies = of_type("STUDY");
-        let ids: HashSet<_> = studies.iter().map(|s| s.text(0x0020, 0x0010).unwrap()).collect();
+        let ids: HashSet<_> = studies
+            .iter()
+            .map(|s| s.text(0x0020, 0x0010).unwrap())
+            .collect();
         assert_eq!(ids.len(), 2, "two studies get two Study IDs");
-        assert_eq!(studies[0].text(0x0008, 0x0020).unwrap(), "20230505", "Study Date from Series Date");
+        assert_eq!(
+            studies[0].text(0x0008, 0x0020).unwrap(),
+            "20230505",
+            "Study Date from Series Date"
+        );
         assert_eq!(studies[0].text(0x0008, 0x0030).unwrap(), "000000");
-        assert_eq!(studies[1].text(0x0008, 0x0020).unwrap().len(), 8, "no date anywhere: today's");
+        assert_eq!(
+            studies[1].text(0x0008, 0x0020).unwrap().len(),
+            8,
+            "no date anywhere: today's"
+        );
 
         let series = of_type("SERIES");
-        assert!(series.iter().all(|s| s.text(0x0008, 0x0060).unwrap() == "OT"));
+        assert!(series
+            .iter()
+            .all(|s| s.text(0x0008, 0x0060).unwrap() == "OT"));
         assert_eq!(series[0].text(0x0020, 0x0011).unwrap(), "1");
-        assert_eq!(series[1].text(0x0020, 0x0011).unwrap(), "2", "distinct within the study");
+        assert_eq!(
+            series[1].text(0x0020, 0x0011).unwrap(),
+            "2",
+            "distinct within the study"
+        );
 
         let images = of_type("IMAGE");
         assert_eq!(images[0].text(0x0020, 0x0013).unwrap(), "1");
-        assert_eq!(images[1].text(0x0020, 0x0013).unwrap(), "2", "distinct within the series");
+        assert_eq!(
+            images[1].text(0x0020, 0x0013).unwrap(),
+            "2",
+            "distinct within the series"
+        );
 
-        let synthesized: HashSet<_> = report.synthesized.iter().map(|s| (s.record_type.as_str(), s.attribute.as_str())).collect();
+        let synthesized: HashSet<_> = report
+            .synthesized
+            .iter()
+            .map(|s| (s.record_type.as_str(), s.attribute.as_str()))
+            .collect();
         for expected in [
             ("PATIENT", "PatientID"),
             ("STUDY", "StudyID"),
@@ -2092,21 +2786,38 @@ mod tests {
             ("SERIES", "SeriesNumber"),
             ("IMAGE", "InstanceNumber"),
         ] {
-            assert!(synthesized.contains(&expected), "{expected:?} not reported: {:?}", report.synthesized);
+            assert!(
+                synthesized.contains(&expected),
+                "{expected:?} not reported: {:?}",
+                report.synthesized
+            );
         }
-        let from_series_date = report.synthesized.iter().find(|s| s.attribute == "StudyDate" && s.value == "20230505").unwrap();
+        let from_series_date = report
+            .synthesized
+            .iter()
+            .find(|s| s.attribute == "StudyDate" && s.value == "20230505")
+            .unwrap();
         assert_eq!(from_series_date.source.as_deref(), Some("SeriesDate"));
     }
 
     #[test]
     fn studies_without_patient_id_or_name_are_separate_patients() {
         let anonymous = |study: &str| {
-            let mut d = image("", study, &format!("{study}.1"), &format!("{study}.1.1"), "1");
+            let mut d = image(
+                "",
+                study,
+                &format!("{study}.1"),
+                &format!("{study}.1.1"),
+                "1",
+            );
             d.remove_element(PATIENT_ID);
             d.remove_element(PATIENT_NAME);
             d
         };
-        let entries = vec![entry("A", anonymous("1.5.1")), entry("B", anonymous("1.5.2"))];
+        let entries = vec![
+            entry("A", anonymous("1.5.1")),
+            entry("B", anonymous("1.5.2")),
+        ];
         let (bytes, report) = build_dicomdir(&entries, &options()).unwrap();
         let raw = parse_raw(&bytes);
         let ids: Vec<_> = raw
@@ -2116,18 +2827,32 @@ mod tests {
             .map(|r| r.text(0x0010, 0x0020).unwrap())
             .collect();
         assert_eq!(ids, ["SYNTH_PAT_0001", "SYNTH_PAT_0002"]);
-        assert_eq!(report.synthesized.iter().filter(|s| s.attribute == "PatientID").count(), 2);
+        assert_eq!(
+            report
+                .synthesized
+                .iter()
+                .filter(|s| s.attribute == "PatientID")
+                .count(),
+            2
+        );
     }
 
     #[test]
     fn synthesized_numbers_skip_existing_ones() {
         let mut no_number = image("P1", "1.2.1", "1.2.1.1", "1.2.1.1.2", "");
         no_number.remove_element(INSTANCE_NUMBER);
-        let entries = vec![entry("A", image("P1", "1.2.1", "1.2.1.1", "1.2.1.1.1", "5")), entry("B", no_number)];
+        let entries = vec![
+            entry("A", image("P1", "1.2.1", "1.2.1.1", "1.2.1.1.1", "5")),
+            entry("B", no_number),
+        ];
         let (bytes, _) = build_dicomdir(&entries, &options()).unwrap();
         let raw = parse_raw(&bytes);
-        let numbers: Vec<_> =
-            raw.records.iter().filter(|r| r.record_type() == "IMAGE").map(|r| r.text(0x0020, 0x0013).unwrap()).collect();
+        let numbers: Vec<_> = raw
+            .records
+            .iter()
+            .filter(|r| r.record_type() == "IMAGE")
+            .map(|r| r.text(0x0020, 0x0013).unwrap())
+            .collect();
         assert_eq!(numbers, ["5", "6"]);
     }
 
@@ -2145,64 +2870,190 @@ mod tests {
                 (0x0020, 0x0013, VR::IS, "1"),
             ]);
             for &(g, e, vr, v) in extra {
-                d.put(DataElement::new(Tag(g, e), vr, PrimitiveValue::from(v.to_owned())));
+                d.put(DataElement::new(
+                    Tag(g, e),
+                    vr,
+                    PrimitiveValue::from(v.to_owned()),
+                ));
             }
             d
         };
-        let mut sr = leaf("1.2.840.10008.5.1.4.1.1.88.33", "1.9.1", &[
-            (0x0040, 0xA491, VR::CS, "COMPLETE"),
-            (0x0040, 0xA493, VR::CS, "VERIFIED"),
+        let mut sr = leaf(
+            "1.2.840.10008.5.1.4.1.1.88.33",
+            "1.9.1",
+            &[
+                (0x0040, 0xA491, VR::CS, "COMPLETE"),
+                (0x0040, 0xA493, VR::CS, "VERIFIED"),
+            ],
+        );
+        let code = ds(&[
+            (0x0008, 0x0100, VR::SH, "18748-4"),
+            (0x0008, 0x0102, VR::SH, "LN"),
+            (0x0008, 0x0104, VR::LO, "Diagnostic Imaging Report"),
         ]);
-        let code = ds(&[(0x0008, 0x0100, VR::SH, "18748-4"), (0x0008, 0x0102, VR::SH, "LN"), (0x0008, 0x0104, VR::LO, "Diagnostic Imaging Report")]);
-        sr.put(DataElement::new(Tag(0x0040, 0xA043), VR::SQ, DataSetSequence::new(vec![code], Length::UNDEFINED)));
+        sr.put(DataElement::new(
+            Tag(0x0040, 0xA043),
+            VR::SQ,
+            DataSetSequence::new(vec![code], Length::UNDEFINED),
+        ));
         let observers = vec![
             ds(&[(0x0040, 0xA030, VR::DT, "20240101120000")]),
             ds(&[(0x0040, 0xA030, VR::DT, "20240103090000")]),
         ];
-        sr.put(DataElement::new(VERIFYING_OBSERVER_SEQUENCE, VR::SQ, DataSetSequence::new(observers, Length::UNDEFINED)));
+        sr.put(DataElement::new(
+            VERIFYING_OBSERVER_SEQUENCE,
+            VR::SQ,
+            DataSetSequence::new(observers, Length::UNDEFINED),
+        ));
         let content = vec![
-            ds(&[(0x0040, 0xA010, VR::CS, "HAS CONCEPT MOD"), (0x0040, 0xA040, VR::CS, "CODE")]),
-            ds(&[(0x0040, 0xA010, VR::CS, "CONTAINS"), (0x0040, 0xA040, VR::CS, "TEXT")]),
+            ds(&[
+                (0x0040, 0xA010, VR::CS, "HAS CONCEPT MOD"),
+                (0x0040, 0xA040, VR::CS, "CODE"),
+            ]),
+            ds(&[
+                (0x0040, 0xA010, VR::CS, "CONTAINS"),
+                (0x0040, 0xA040, VR::CS, "TEXT"),
+            ]),
         ];
-        sr.put(DataElement::new(CONTENT_SEQUENCE, VR::SQ, DataSetSequence::new(content, Length::UNDEFINED)));
+        sr.put(DataElement::new(
+            CONTENT_SEQUENCE,
+            VR::SQ,
+            DataSetSequence::new(content, Length::UNDEFINED),
+        ));
 
         let mut kos = leaf("1.2.840.10008.5.1.4.1.1.88.59", "1.9.2", &[]);
-        let title = ds(&[(0x0008, 0x0100, VR::SH, "113000"), (0x0008, 0x0102, VR::SH, "DCM"), (0x0008, 0x0104, VR::LO, "Of Interest")]);
-        kos.put(DataElement::new(Tag(0x0040, 0xA043), VR::SQ, DataSetSequence::new(vec![title], Length::UNDEFINED)));
+        let title = ds(&[
+            (0x0008, 0x0100, VR::SH, "113000"),
+            (0x0008, 0x0102, VR::SH, "DCM"),
+            (0x0008, 0x0104, VR::LO, "Of Interest"),
+        ]);
+        kos.put(DataElement::new(
+            Tag(0x0040, 0xA043),
+            VR::SQ,
+            DataSetSequence::new(vec![title], Length::UNDEFINED),
+        ));
 
         let cases: Vec<(&str, InMemDicomObject)> = vec![
             ("SR DOCUMENT", sr),
             ("KEY OBJECT DOC", kos),
-            ("PRESENTATION", leaf("1.2.840.10008.5.1.4.1.1.11.1", "1.9.3", &[(0x0070, 0x0082, VR::DA, "20240101"), (0x0070, 0x0083, VR::TM, "1200")])),
-            ("ENCAP DOC", leaf("1.2.840.10008.5.1.4.1.1.104.1", "1.9.4", &[(0x0042, 0x0012, VR::LO, "application/pdf")])),
-            ("WAVEFORM", leaf("1.2.840.10008.5.1.4.1.1.9.1.1", "1.9.5", &[])),
-            ("RT DOSE", leaf("1.2.840.10008.5.1.4.1.1.481.2", "1.9.6", &[(0x3004, 0x000A, VR::CS, "PLAN")])),
-            ("RT STRUCTURE SET", leaf("1.2.840.10008.5.1.4.1.1.481.3", "1.9.7", &[(0x3006, 0x0002, VR::SH, "RS")])),
-            ("RT PLAN", leaf("1.2.840.10008.5.1.4.1.1.481.5", "1.9.8", &[(0x300A, 0x0002, VR::SH, "PLAN1")])),
-            ("REGISTRATION", leaf("1.2.840.10008.5.1.4.1.1.66.1", "1.9.9", &[])),
-            ("RADIOTHERAPY", leaf("1.2.840.10008.5.1.4.1.1.481.10", "1.9.10", &[])),
-            ("WF PRESENTATION", leaf("1.2.840.10008.5.1.4.1.1.9.100.1", "1.9.11", &[(0x0070, 0x0082, VR::DA, "20240101"), (0x0070, 0x0083, VR::TM, "1200")])),
-            ("MEASUREMENT", leaf("1.2.840.10008.5.1.4.1.1.78.1", "1.9.12", &[])),
-            ("ANNOTATION", leaf("1.2.840.10008.5.1.4.1.1.91.1", "1.9.13", &[])),
+            (
+                "PRESENTATION",
+                leaf(
+                    "1.2.840.10008.5.1.4.1.1.11.1",
+                    "1.9.3",
+                    &[
+                        (0x0070, 0x0082, VR::DA, "20240101"),
+                        (0x0070, 0x0083, VR::TM, "1200"),
+                    ],
+                ),
+            ),
+            (
+                "ENCAP DOC",
+                leaf(
+                    "1.2.840.10008.5.1.4.1.1.104.1",
+                    "1.9.4",
+                    &[(0x0042, 0x0012, VR::LO, "application/pdf")],
+                ),
+            ),
+            (
+                "WAVEFORM",
+                leaf("1.2.840.10008.5.1.4.1.1.9.1.1", "1.9.5", &[]),
+            ),
+            (
+                "RT DOSE",
+                leaf(
+                    "1.2.840.10008.5.1.4.1.1.481.2",
+                    "1.9.6",
+                    &[(0x3004, 0x000A, VR::CS, "PLAN")],
+                ),
+            ),
+            (
+                "RT STRUCTURE SET",
+                leaf(
+                    "1.2.840.10008.5.1.4.1.1.481.3",
+                    "1.9.7",
+                    &[(0x3006, 0x0002, VR::SH, "RS")],
+                ),
+            ),
+            (
+                "RT PLAN",
+                leaf(
+                    "1.2.840.10008.5.1.4.1.1.481.5",
+                    "1.9.8",
+                    &[(0x300A, 0x0002, VR::SH, "PLAN1")],
+                ),
+            ),
+            (
+                "REGISTRATION",
+                leaf("1.2.840.10008.5.1.4.1.1.66.1", "1.9.9", &[]),
+            ),
+            (
+                "RADIOTHERAPY",
+                leaf("1.2.840.10008.5.1.4.1.1.481.10", "1.9.10", &[]),
+            ),
+            (
+                "WF PRESENTATION",
+                leaf(
+                    "1.2.840.10008.5.1.4.1.1.9.100.1",
+                    "1.9.11",
+                    &[
+                        (0x0070, 0x0082, VR::DA, "20240101"),
+                        (0x0070, 0x0083, VR::TM, "1200"),
+                    ],
+                ),
+            ),
+            (
+                "MEASUREMENT",
+                leaf("1.2.840.10008.5.1.4.1.1.78.1", "1.9.12", &[]),
+            ),
+            (
+                "ANNOTATION",
+                leaf("1.2.840.10008.5.1.4.1.1.91.1", "1.9.13", &[]),
+            ),
             ("IMAGE", image("P1", "1.2.1", "1.2.1.77", "1.9.14", "1")),
         ];
-        let entries: Vec<DicomdirEntry> =
-            cases.iter().enumerate().map(|(i, (_, d))| entry(&format!("F{i}"), d.clone())).collect();
+        let entries: Vec<DicomdirEntry> = cases
+            .iter()
+            .enumerate()
+            .map(|(i, (_, d))| entry(&format!("F{i}"), d.clone()))
+            .collect();
         let (bytes, report) = build_dicomdir(&entries, &options()).unwrap();
         let raw = parse_raw(&bytes);
         for (i, (expected, _)) in cases.iter().enumerate() {
-            let record = raw.records.iter().find(|r| r.text(0x0004, 0x1500).as_deref() == Some(&format!("F{i}"))).unwrap();
+            let record = raw
+                .records
+                .iter()
+                .find(|r| r.text(0x0004, 0x1500).as_deref() == Some(&format!("F{i}")))
+                .unwrap();
             assert_eq!(record.record_type(), *expected, "F{i}");
         }
-        let sr = raw.records.iter().find(|r| r.record_type() == "SR DOCUMENT").unwrap();
-        assert_eq!(sr.text(0x0040, 0xA030).unwrap(), "20240103090000", "latest verification");
+        let sr = raw
+            .records
+            .iter()
+            .find(|r| r.record_type() == "SR DOCUMENT")
+            .unwrap();
+        assert_eq!(
+            sr.text(0x0040, 0xA030).unwrap(),
+            "20240103090000",
+            "latest verification"
+        );
         assert_eq!(sr.text(0x0040, 0xA491).unwrap(), "COMPLETE");
         let content = &sr.elements[&(0x0040, 0xA730)];
         assert!(content.windows(15).any(|w| w == b"HAS CONCEPT MOD"));
-        assert!(!content.windows(8).any(|w| w == b"CONTAINS"), "only HAS CONCEPT MOD items");
-        let doc = raw.records.iter().find(|r| r.record_type() == "ENCAP DOC").unwrap();
+        assert!(
+            !content.windows(8).any(|w| w == b"CONTAINS"),
+            "only HAS CONCEPT MOD items"
+        );
+        let doc = raw
+            .records
+            .iter()
+            .find(|r| r.record_type() == "ENCAP DOC")
+            .unwrap();
         assert_eq!(doc.text(0x0042, 0x0012).unwrap(), "application/pdf");
-        assert!(doc.elements.contains_key(&(0x0042, 0x0010)), "Type 2 Document Title present");
+        assert!(
+            doc.elements.contains_key(&(0x0042, 0x0010)),
+            "Type 2 Document Title present"
+        );
         assert!(report.warnings.is_empty(), "{:?}", report.warnings);
         assert_eq!(walk(&raw).len(), raw.records.len());
     }
@@ -2214,36 +3065,64 @@ mod tests {
             (0x0008, 0x0018, VR::UI, "1.8.1"),
             (0x0070, 0x0080, VR::CS, "HOT_IRON"),
         ]);
-        let entries = vec![entry("IM1", image("P1", "1.2.1", "1.2.1.1", "1.2.1.1.1", "1")), entry("PAL1", palette)];
+        let entries = vec![
+            entry("IM1", image("P1", "1.2.1", "1.2.1.1", "1.2.1.1.1", "1")),
+            entry("PAL1", palette),
+        ];
         let (bytes, _) = build_dicomdir(&entries, &options()).unwrap();
         let raw = parse_raw(&bytes);
-        let roots: Vec<String> = walk(&raw).iter().filter(|(d, _)| *d == 0).map(|&(_, i)| raw.records[i].record_type()).collect();
+        let roots: Vec<String> = walk(&raw)
+            .iter()
+            .filter(|(d, _)| *d == 0)
+            .map(|&(_, i)| raw.records[i].record_type())
+            .collect();
         assert_eq!(roots, ["PATIENT", "PALETTE"]);
     }
 
     #[test]
     fn non_ascii_records_carry_utf8_character_set() {
         let mut d = image("P1", "1.2.1", "1.2.1.1", "1.2.1.1.1", "1");
-        d.put(DataElement::new(PATIENT_NAME, VR::PN, PrimitiveValue::from("Müller^Jürgen".to_owned())));
+        d.put(DataElement::new(
+            PATIENT_NAME,
+            VR::PN,
+            PrimitiveValue::from("Müller^Jürgen".to_owned()),
+        ));
         let (bytes, _) = build_dicomdir(&[entry("IM1", d)], &options()).unwrap();
         let raw = parse_raw(&bytes);
         let patient = &raw.records[0];
         assert_eq!(patient.text(0x0008, 0x0005).unwrap(), "ISO_IR 192");
         assert_eq!(patient.text(0x0010, 0x0010).unwrap(), "Müller^Jürgen");
-        assert!(!raw.records[1].elements.contains_key(&(0x0008, 0x0005)), "the ASCII STUDY record has none");
+        assert!(
+            !raw.records[1].elements.contains_key(&(0x0008, 0x0005)),
+            "the ASCII STUDY record has none"
+        );
     }
 
     #[test]
     fn copied_values_are_repadded() {
         let mut d = image("P1", "1.2.1", "1.2.1.1", "1.2.1.1.1", "12\0");
-        d.put(DataElement::new(Tag(0x0008, 0x1030), VR::LO, PrimitiveValue::from("HEAD\0".to_owned())));
-        d.put(DataElement::new(Tag(0x0028, 0x0030), VR::DS, PrimitiveValue::Strs(["0.5".to_owned(), "0.5\0".to_owned()].into_iter().collect())));
+        d.put(DataElement::new(
+            Tag(0x0008, 0x1030),
+            VR::LO,
+            PrimitiveValue::from("HEAD\0".to_owned()),
+        ));
+        d.put(DataElement::new(
+            Tag(0x0028, 0x0030),
+            VR::DS,
+            PrimitiveValue::Strs(["0.5".to_owned(), "0.5\0".to_owned()].into_iter().collect()),
+        ));
         let (bytes, _) = build_dicomdir(&[entry("IM1", d)], &options()).unwrap();
-        assert!(!bytes.windows(5).any(|w| w == b"HEAD\0"), "NUL padding from the instance is not copied");
+        assert!(
+            !bytes.windows(5).any(|w| w == b"HEAD\0"),
+            "NUL padding from the instance is not copied"
+        );
         let raw = parse_raw(&bytes);
         assert_eq!(raw.records[1].elements[&(0x0008, 0x1030)], b"HEAD".to_vec());
         assert_eq!(raw.records[3].elements[&(0x0020, 0x0013)], b"12".to_vec());
-        assert_eq!(raw.records[3].elements[&(0x0028, 0x0030)], b"0.5\\0.5 ".to_vec());
+        assert_eq!(
+            raw.records[3].elements[&(0x0028, 0x0030)],
+            b"0.5\\0.5 ".to_vec()
+        );
     }
 
     #[test]
@@ -2259,7 +3138,13 @@ mod tests {
             vec!["A", "B", "C", "D", "E", "F", "G", "H", "I"],
             vec!["SP ACE"],
         ] {
-            assert!(matches!(validate_file_id(&bad), Err(DicomdirError::InvalidFileId { .. })), "{bad:?}");
+            assert!(
+                matches!(
+                    validate_file_id(&bad),
+                    Err(DicomdirError::InvalidFileId { .. })
+                ),
+                "{bad:?}"
+            );
         }
         let none: [&str; 0] = [];
         assert!(validate_file_id(&none).is_err());
@@ -2267,7 +3152,10 @@ mod tests {
         assert!(validate_file_set_id("").is_ok());
         assert!(validate_file_set_id("lower").is_err());
         assert!(validate_file_set_id("SEVENTEEN_CHARS_X").is_err());
-        assert_eq!(file_id_from_relative_path(Path::new("DICOM/IM1")).unwrap(), ["DICOM", "IM1"]);
+        assert_eq!(
+            file_id_from_relative_path(Path::new("DICOM/IM1")).unwrap(),
+            ["DICOM", "IM1"]
+        );
         assert!(file_id_from_relative_path(Path::new("../IM1")).is_err());
     }
 
@@ -2278,22 +3166,50 @@ mod tests {
 
         assert!(matches!(err(vec![]), DicomdirError::NoEntries));
         let one = image("P1", "1.2.1", "1.2.1.1", "1.2.1.1.1", "1");
-        assert!(matches!(err(vec![e("A", one.clone()), e("A", image("P1", "1.2.1", "1.2.1.1", "1.2.1.1.2", "2"))]), DicomdirError::DuplicateFileId(_)));
-        assert!(matches!(err(vec![e("A", one.clone()), e("B", one.clone())]), DicomdirError::DuplicateSopInstance { .. }));
+        assert!(matches!(
+            err(vec![
+                e("A", one.clone()),
+                e("A", image("P1", "1.2.1", "1.2.1.1", "1.2.1.1.2", "2"))
+            ]),
+            DicomdirError::DuplicateFileId(_)
+        ));
+        assert!(matches!(
+            err(vec![e("A", one.clone()), e("B", one.clone())]),
+            DicomdirError::DuplicateSopInstance { .. }
+        ));
 
         let mut other_name = image("P1", "1.2.9", "1.2.9.1", "1.2.9.1.1", "1");
-        other_name.put(DataElement::new(PATIENT_NAME, VR::PN, PrimitiveValue::from("ROE^RICHARD".to_owned())));
-        assert!(matches!(err(vec![e("A", one.clone()), e("B", other_name)]), DicomdirError::PatientConflict { .. }));
+        other_name.put(DataElement::new(
+            PATIENT_NAME,
+            VR::PN,
+            PrimitiveValue::from("ROE^RICHARD".to_owned()),
+        ));
+        assert!(matches!(
+            err(vec![e("A", one.clone()), e("B", other_name)]),
+            DicomdirError::PatientConflict { .. }
+        ));
 
         let study_moved = image("P2", "1.2.1", "1.2.1.5", "1.2.1.5.1", "1");
-        assert!(matches!(err(vec![e("A", one.clone()), e("B", study_moved)]), DicomdirError::StudyConflict { .. }));
+        assert!(matches!(
+            err(vec![e("A", one.clone()), e("B", study_moved)]),
+            DicomdirError::StudyConflict { .. }
+        ));
 
         let series_moved = image("P1", "1.2.7", "1.2.1.1", "1.2.7.1.1", "1");
-        assert!(matches!(err(vec![e("A", one.clone()), e("B", series_moved)]), DicomdirError::SeriesConflict { .. }));
+        assert!(matches!(
+            err(vec![e("A", one.clone()), e("B", series_moved)]),
+            DicomdirError::SeriesConflict { .. }
+        ));
 
         let mut no_study = one.clone();
         no_study.remove_element(STUDY_INSTANCE_UID);
-        assert!(matches!(err(vec![e("A", no_study)]), DicomdirError::MissingAttribute { attribute: "StudyInstanceUID", .. }));
+        assert!(matches!(
+            err(vec![e("A", no_study)]),
+            DicomdirError::MissingAttribute {
+                attribute: "StudyInstanceUID",
+                ..
+            }
+        ));
 
         let not_an_image = ds(&[
             (0x0008, 0x0016, VR::UI, "1.2.840.10008.5.1.4.1.1.200.1"),
@@ -2301,18 +3217,37 @@ mod tests {
             (0x0020, 0x000D, VR::UI, "1.2.1"),
             (0x0020, 0x000E, VR::UI, "1.2.1.1"),
         ]);
-        assert!(matches!(err(vec![e("A", not_an_image)]), DicomdirError::NoRecordType { .. }));
+        assert!(matches!(
+            err(vec![e("A", not_an_image)]),
+            DicomdirError::NoRecordType { .. }
+        ));
 
-        let bad_set = DicomdirOptions { file_set_id: "bad id".into(), sop_instance_uid: None };
-        assert!(matches!(build_dicomdir(&[e("A", one)], &bad_set), Err(DicomdirError::InvalidFileSetId { .. })));
+        let bad_set = DicomdirOptions {
+            file_set_id: "bad id".into(),
+            sop_instance_uid: None,
+        };
+        assert!(matches!(
+            build_dicomdir(&[e("A", one)], &bad_set),
+            Err(DicomdirError::InvalidFileSetId { .. })
+        ));
     }
 
     #[test]
     fn entries_from_fixture_files_and_json() {
-        let files = ["ct.dcm", "mr.dcm", "sr2.dcm", "pdf.dcm", "us2.dcm", "rtdose.dcm"];
+        let files = [
+            "ct.dcm",
+            "mr.dcm",
+            "sr2.dcm",
+            "pdf.dcm",
+            "us2.dcm",
+            "rtdose.dcm",
+        ];
         let mut entries = Vec::new();
         for (i, name) in files.iter().enumerate() {
-            entries.push(DicomdirEntry::from_file(vec!["DICOM".into(), format!("IM{i:06}")], fixture(name)).unwrap());
+            entries.push(
+                DicomdirEntry::from_file(vec!["DICOM".into(), format!("IM{i:06}")], fixture(name))
+                    .unwrap(),
+            );
         }
         // and one from JSON with a BulkDataURI that can't be resolved
         let json = crate::dicom_io::dicom_file_to_json(
@@ -2324,17 +3259,43 @@ mod tests {
         )
         .unwrap();
         assert!(json.contains("BulkDataURI"));
-        entries.push(DicomdirEntry::from_json(vec!["DICOM".into(), "IMJSON".into()], &json, DicomJsonFormat::Flat, None).unwrap());
+        entries.push(
+            DicomdirEntry::from_json(
+                vec!["DICOM".into(), "IMJSON".into()],
+                &json,
+                DicomJsonFormat::Flat,
+                None,
+            )
+            .unwrap(),
+        );
 
         let (bytes, report) = build_dicomdir(&entries, &options()).unwrap();
         let raw = parse_raw(&bytes);
         assert_eq!(walk(&raw).len(), raw.records.len());
         let types: HashSet<String> = raw.records.iter().map(RawRecord::record_type).collect();
-        for t in ["PATIENT", "STUDY", "SERIES", "IMAGE", "SR DOCUMENT", "ENCAP DOC", "RT DOSE"] {
+        for t in [
+            "PATIENT",
+            "STUDY",
+            "SERIES",
+            "IMAGE",
+            "SR DOCUMENT",
+            "ENCAP DOC",
+            "RT DOSE",
+        ] {
             assert!(types.contains(t), "{t} missing from {types:?}");
         }
-        assert!(report.synthesized.iter().any(|s| s.attribute == "PatientID"), "fixtures without Patient ID");
-        let leaves = raw.records.iter().filter(|r| r.elements.contains_key(&(0x0004, 0x1500))).count();
+        assert!(
+            report
+                .synthesized
+                .iter()
+                .any(|s| s.attribute == "PatientID"),
+            "fixtures without Patient ID"
+        );
+        let leaves = raw
+            .records
+            .iter()
+            .filter(|r| r.elements.contains_key(&(0x0004, 0x1500)))
+            .count();
         assert_eq!(leaves, entries.len(), "every file referenced");
     }
 }

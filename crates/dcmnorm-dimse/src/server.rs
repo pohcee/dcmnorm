@@ -114,8 +114,12 @@ impl ServerAssociationOptions {
 
     /// Negotiate an association over an already-accepted TCP connection.
     pub fn establish(self, stream: TcpStream) -> Result<ServerAssociation<TcpStream>> {
-        stream.set_read_timeout(self.read_timeout).map_err(Error::Io)?;
-        stream.set_write_timeout(self.write_timeout).map_err(Error::Io)?;
+        stream
+            .set_read_timeout(self.read_timeout)
+            .map_err(Error::Io)?;
+        stream
+            .set_write_timeout(self.write_timeout)
+            .map_err(Error::Io)?;
         self.establish_over(stream)
     }
 
@@ -131,7 +135,9 @@ impl ServerAssociationOptions {
             other => {
                 let _ = conn::send_pdu(
                     &mut stream,
-                    &Pdu::AbortRQ { source: AbortRQSource::UNEXPECTED_PDU },
+                    &Pdu::AbortRQ {
+                        source: AbortRQSource::UNEXPECTED_PDU,
+                    },
                 );
                 return Err(Error::UnexpectedPdu(Box::new(other)));
             }
@@ -164,8 +170,11 @@ impl ServerAssociationOptions {
                 _ => None,
             })
             .unwrap_or(DEFAULT_MAX_PDU);
-        let requestor_max_pdu_length =
-            if requestor_max_pdu_length == 0 { u32::MAX } else { requestor_max_pdu_length };
+        let requestor_max_pdu_length = if requestor_max_pdu_length == 0 {
+            u32::MAX
+        } else {
+            requestor_max_pdu_length
+        };
 
         // Promiscuous: accept every proposed abstract syntax; per context, accept the first
         // proposed transfer syntax this build's registry can actually decode/write - same
@@ -177,7 +186,9 @@ impl ServerAssociationOptions {
             .map(|pc| {
                 let abstract_syntax_ok = self.abstract_syntax_uids.is_empty()
                     || self.abstract_syntax_uids.contains(&pc.abstract_syntax)
-                    || self.abstract_syntax_uids.contains(pc.abstract_syntax.trim_end_matches(['\0', ' ']));
+                    || self
+                        .abstract_syntax_uids
+                        .contains(pc.abstract_syntax.trim_end_matches(['\0', ' ']));
                 if !abstract_syntax_ok && !self.promiscuous {
                     return PresentationContextNegotiated {
                         id: pc.id,
@@ -279,22 +290,24 @@ impl<S: std::io::Read + std::io::Write> ServerAssociation<S> {
         conn::send_pdu(&mut self.stream, pdu)
     }
 
-
     /// The next PDU (P-DATA fragments left over from an earlier message come first). Prefer
     /// [`Self::receive_command`]/[`Self::receive_data_set`] for DIMSE messages: a PDU may hold several messages' PDVs.
     pub fn receive(&mut self) -> Result<Pdu> {
-        self.receiver.receive_pdu(&mut self.stream, self.acceptor_max_pdu_length)
+        self.receiver
+            .receive_pdu(&mut self.stream, self.acceptor_max_pdu_length)
     }
 
     /// The next complete DIMSE command, or the non-P-DATA PDU (release, abort, ...) that arrived between messages.
     /// Retry after a read timeout: partial PDUs and fragments are kept (see `message.rs`).
     pub fn receive_command(&mut self) -> Result<crate::Incoming> {
-        self.receiver.receive_command(&mut self.stream, self.acceptor_max_pdu_length)
+        self.receiver
+            .receive_command(&mut self.stream, self.acceptor_max_pdu_length)
     }
 
     /// The complete data set following the command just received. Retry after a read timeout, as above.
     pub fn receive_data_set(&mut self) -> Result<Vec<u8>> {
-        self.receiver.receive_data_set(&mut self.stream, self.acceptor_max_pdu_length)
+        self.receiver
+            .receive_data_set(&mut self.stream, self.acceptor_max_pdu_length)
     }
 
     pub fn send_pdata(&mut self, presentation_context_id: u8) -> crate::pdata::PDataWriter<&mut S> {

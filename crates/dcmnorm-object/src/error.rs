@@ -11,11 +11,20 @@ use std::io;
 /// An error occurring while reading a DICOM data set or file.
 #[derive(Debug)]
 pub enum ReadError {
-    Io { source: io::Error, context: &'static str },
-    Dataset { source: dcmnorm_parser::dataset::read::Error },
+    Io {
+        source: io::Error,
+        context: &'static str,
+    },
+    Dataset {
+        source: dcmnorm_parser::dataset::read::Error,
+    },
     NotDicom,
-    UnsupportedTransferSyntax { uid: String },
-    UnexpectedToken { context: &'static str },
+    UnsupportedTransferSyntax {
+        uid: String,
+    },
+    UnexpectedToken {
+        context: &'static str,
+    },
 }
 
 impl fmt::Display for ReadError {
@@ -23,7 +32,9 @@ impl fmt::Display for ReadError {
         match self {
             ReadError::Io { source, context } => write!(f, "I/O error while {context}: {source}"),
             ReadError::Dataset { source } => write!(f, "failed to read data set: {source}"),
-            ReadError::NotDicom => write!(f, "not a valid DICOM file (missing preamble/DICM magic)"),
+            ReadError::NotDicom => {
+                write!(f, "not a valid DICOM file (missing preamble/DICM magic)")
+            }
             ReadError::UnsupportedTransferSyntax { uid } => {
                 write!(f, "unsupported transfer syntax: {uid}")
             }
@@ -53,9 +64,16 @@ impl From<dcmnorm_parser::dataset::read::Error> for ReadError {
 /// An error occurring while writing a DICOM data set or file.
 #[derive(Debug)]
 pub enum WriteError {
-    Io { source: io::Error, context: &'static str },
-    Dataset { source: dcmnorm_parser::dataset::write::Error },
-    UnsupportedTransferSyntax { uid: String },
+    Io {
+        source: io::Error,
+        context: &'static str,
+    },
+    Dataset {
+        source: dcmnorm_parser::dataset::write::Error,
+    },
+    UnsupportedTransferSyntax {
+        uid: String,
+    },
 }
 
 impl fmt::Display for WriteError {
@@ -118,4 +136,3 @@ impl From<ReadError> for WithMetaError {
         WithMetaError::Read { source }
     }
 }
-

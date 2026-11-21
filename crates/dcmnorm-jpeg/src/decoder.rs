@@ -272,7 +272,9 @@ impl<R: Read> Decoder<R> {
             PreferWorkerKind::Immediate => PreferWorkerKind::Immediate,
             // Never actually requested by either call site below (both always pass
             // `Multithreaded`) - kept only so this match stays exhaustive as the enum grows.
-            PreferWorkerKind::HighPrecision(precision) => PreferWorkerKind::HighPrecision(precision),
+            PreferWorkerKind::HighPrecision(precision) => {
+                PreferWorkerKind::HighPrecision(precision)
+            }
             PreferWorkerKind::Multithreaded => {
                 let width: u64 = frame.output_size.width.into();
                 let height: u64 = frame.output_size.width.into();
@@ -388,8 +390,9 @@ impl<R: Read> Decoder<R> {
                     // (color) high-precision Sequential/Progressive DCT stays unsupported: it
                     // would also need generalizing the 8-bit-only chroma-upsampling/color-
                     // conversion pipeline, which no real file has justified yet.
-                    let grayscale_sequential_dct =
-                        frame.coding_process == CodingProcess::DctSequential && component_count == 1;
+                    let grayscale_sequential_dct = frame.coding_process
+                        == CodingProcess::DctSequential
+                        && component_count == 1;
                     if frame.precision != 8
                         && frame.coding_process != CodingProcess::Lossless
                         && !grayscale_sequential_dct
@@ -805,7 +808,8 @@ impl<R: Read> Decoder<R> {
         if frame.components.len() == 4 {
             ColorTransform::YCCK
         } else if frame.components.len() == 3 {
-            self.default_color_transform.unwrap_or(ColorTransform::YCbCr)
+            self.default_color_transform
+                .unwrap_or(ColorTransform::YCbCr)
         } else {
             ColorTransform::Unknown
         }
@@ -838,7 +842,7 @@ impl<R: Read> Decoder<R> {
         }
     }
 
-#[allow(clippy::type_complexity)]
+    #[allow(clippy::type_complexity)]
     fn decode_scan(
         &mut self,
         frame: &FrameInfo,

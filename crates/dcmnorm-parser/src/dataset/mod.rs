@@ -775,8 +775,10 @@ impl<T> IntoTokens for dcmnorm_core::value::C<T>
 where
     T: IntoTokens,
 {
-    type Iter =
-        FlattenTokens<<dcmnorm_core::value::C<T> as IntoIterator>::IntoIter, <T as IntoTokens>::Iter>;
+    type Iter = FlattenTokens<
+        <dcmnorm_core::value::C<T> as IntoIterator>::IntoIter,
+        <T as IntoTokens>::Iter,
+    >;
 
     fn into_tokens(self) -> Self::Iter {
         self.into_tokens_with_options(Default::default())

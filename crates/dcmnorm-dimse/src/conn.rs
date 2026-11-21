@@ -33,7 +33,10 @@ pub(crate) fn receive_pdu<R: Read>(stream: &mut R, max_pdu_length: u32) -> Resul
     let length = u32::from_be_bytes([header[2], header[3], header[4], header[5]]);
 
     if length > max_pdu_length {
-        return Err(Error::Pdu(pdu::Error::PduTooLarge { pdu_length: length, max_pdu_length }));
+        return Err(Error::Pdu(pdu::Error::PduTooLarge {
+            pdu_length: length,
+            max_pdu_length,
+        }));
     }
 
     let mut body = vec![0u8; length as usize];
@@ -75,6 +78,9 @@ mod tests {
         let mut stream = Cursor::new(header);
 
         let result = receive_pdu(&mut stream, max_pdu_length);
-        assert!(matches!(result, Err(Error::Io(_))), "expected a clean I/O error, got {result:?}");
+        assert!(
+            matches!(result, Err(Error::Io(_))),
+            "expected a clean I/O error, got {result:?}"
+        );
     }
 }

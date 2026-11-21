@@ -19,8 +19,8 @@ use rayon::prelude::*;
 
 use super::io::{read_dicom_file, read_dicom_file_deferring_bulk_data};
 use super::render::{
-    apply_voi_window, decode_frame_grayscale_values, encode_rendered_frame, ensure_native_render_object,
-    RenderMetadata, RenderedFramePixels,
+    apply_voi_window, decode_frame_grayscale_values, encode_rendered_frame,
+    ensure_native_render_object, RenderMetadata, RenderedFramePixels,
 };
 pub use super::render::{RenderFrameOutput, RenderOutputFormat};
 use super::types::{ReadError, RenderError};
@@ -98,7 +98,10 @@ pub struct PlaneParams {
 #[derive(Debug)]
 pub enum VolumeError {
     Empty,
-    TooFewSlices { found: usize, required: usize },
+    TooFewSlices {
+        found: usize,
+        required: usize,
+    },
     Read(ReadError),
     Render(RenderError),
     MissingGeometry(&'static str),
@@ -247,7 +250,10 @@ impl Volume {
         let along_slices = mid_z - self.slice_zs[0];
         add3(
             add3(
-                add3(self.origin, scale3(self.row_vector, half_col * self.col_spacing_mm)),
+                add3(
+                    self.origin,
+                    scale3(self.row_vector, half_col * self.col_spacing_mm),
+                ),
                 scale3(self.col_vector, half_row * self.row_spacing_mm),
             ),
             scale3(self.slice_normal, along_slices),
@@ -263,7 +269,10 @@ impl Volume {
         } else {
             f64::INFINITY
         };
-        self.row_spacing_mm.min(self.col_spacing_mm).min(slice_spacing).max(1e-6)
+        self.row_spacing_mm
+            .min(self.col_spacing_mm)
+            .min(slice_spacing)
+            .max(1e-6)
     }
 
     /// Nominal slice spacing, mm: the stack's span divided by its gap count (`0.0` for one slice).
@@ -285,9 +294,9 @@ impl Volume {
         if self.slice_zs.len() < 3 || nominal <= 0.0 {
             return false;
         }
-        self.slice_zs
-            .windows(2)
-            .any(|pair| ((pair[1] - pair[0]) - nominal).abs() > IRREGULAR_SPACING_TOLERANCE * nominal + 1e-4)
+        self.slice_zs.windows(2).any(|pair| {
+            ((pair[1] - pair[0]) - nominal).abs() > IRREGULAR_SPACING_TOLERANCE * nominal + 1e-4
+        })
     }
 
     /// Row-major 4x4 matrix mapping a voxel index `(col, row, slice, 1)` to patient (LPS) mm,
@@ -364,9 +373,17 @@ fn vectors_close(a: Vec3, b: Vec3, tolerance: f64) -> bool {
     norm3(sub3(a, b)) <= tolerance
 }
 
-fn read_multi_f64(object: &DefaultDicomObject, tag: Tag, attribute: &'static str) -> Result<Vec<f64>, VolumeError> {
-    let element = object.get(tag).ok_or(VolumeError::MissingGeometry(attribute))?;
-    let text = element.to_str().map_err(|_| VolumeError::MissingGeometry(attribute))?;
+fn read_multi_f64(
+    object: &DefaultDicomObject,
+    tag: Tag,
+    attribute: &'static str,
+) -> Result<Vec<f64>, VolumeError> {
+    let element = object
+        .get(tag)
+        .ok_or(VolumeError::MissingGeometry(attribute))?;
+    let text = element
+        .to_str()
+        .map_err(|_| VolumeError::MissingGeometry(attribute))?;
     let values: Vec<f64> = text
         .split('\\')
         .filter_map(|part| part.trim().parse::<f64>().ok())
@@ -378,7 +395,11 @@ fn read_multi_f64(object: &DefaultDicomObject, tag: Tag, attribute: &'static str
 }
 
 fn read_orientation(object: &DefaultDicomObject) -> Result<(Vec3, Vec3), VolumeError> {
-    let values = read_multi_f64(object, tags::IMAGE_ORIENTATION_PATIENT, "ImageOrientationPatient")?;
+    let values = read_multi_f64(
+        object,
+        tags::IMAGE_ORIENTATION_PATIENT,
+        "ImageOrientationPatient",
+    )?;
     if values.len() < 6 {
         return Err(VolumeError::MissingGeometry("ImageOrientationPatient"));
     }
@@ -443,7 +464,10 @@ fn read_source_slice(path: &Path) -> Result<(SourceSlice, Vec<f32>), VolumeError
     let study_instance_uid = read_optional_str(&object, tags::STUDY_INSTANCE_UID);
     let (metadata, values) = decode_frame_grayscale_values(&object, 0)?;
     drop(object);
-    if !matches!(metadata.photometric_interpretation.as_str(), "MONOCHROME1" | "MONOCHROME2") {
+    if !matches!(
+        metadata.photometric_interpretation.as_str(),
+        "MONOCHROME1" | "MONOCHROME2"
+    ) {
         return Err(VolumeError::UnsupportedPhotometricInterpretation(
             metadata.photometric_interpretation.clone(),
         ));
@@ -482,10 +506,14 @@ fn permute_planes_in_place(samples: &mut [f32], plane_len: usize, order: &[usize
             placed[destination] = true;
             let source = order[destination];
             if source == start {
-                samples[destination * plane_len..(destination + 1) * plane_len].copy_from_slice(&scratch);
+                samples[destination * plane_len..(destination + 1) * plane_len]
+                    .copy_from_slice(&scratch);
                 break;
             }
-            samples.copy_within(source * plane_len..(source + 1) * plane_len, destination * plane_len);
+            samples.copy_within(
+                source * plane_len..(source + 1) * plane_len,
+                destination * plane_len,
+            );
             destination = source;
         }
     }
@@ -510,18 +538,25 @@ pub fn build_volume<P: AsRef<Path> + Sync>(file_paths: &[P]) -> Result<Volume, V
     }
     match build_volume_from_single_frame_files(file_paths) {
         Err(VolumeError::MultiFrameSource) => build_volume_from_frames(file_paths),
-        Err(VolumeError::TooFewSlices { .. }) if file_paths.len() == 1 => build_volume_from_frames(file_paths),
+        Err(VolumeError::TooFewSlices { .. }) if file_paths.len() == 1 => {
+            build_volume_from_frames(file_paths)
+        }
         other => other,
     }
 }
 
 /// The classic path: one slice per file (CT/MR/PT Image Storage and friends).
-fn build_volume_from_single_frame_files<P: AsRef<Path> + Sync>(file_paths: &[P]) -> Result<Volume, VolumeError> {
+fn build_volume_from_single_frame_files<P: AsRef<Path> + Sync>(
+    file_paths: &[P],
+) -> Result<Volume, VolumeError> {
     if file_paths.len() < 2 {
         if let Some(path) = file_paths.first() {
             // A lone file can still be a whole volume: an Enhanced CT/MR/PET object.
             let object = read_dicom_file_deferring_bulk_data(path.as_ref())?;
-            if object.as_ref().is_some_and(|(object, _)| is_multi_frame(object)) {
+            if object
+                .as_ref()
+                .is_some_and(|(object, _)| is_multi_frame(object))
+            {
                 return Err(VolumeError::MultiFrameSource);
             }
         }
@@ -551,7 +586,10 @@ fn build_volume_from_single_frame_files<P: AsRef<Path> + Sync>(file_paths: &[P])
         .zip(file_paths[1..].par_iter())
         .map(|(plane, path)| {
             let (slice, values) = read_source_slice(path.as_ref())?;
-            if slice.metadata.rows != rows || slice.metadata.cols != cols || values.len() != plane_len {
+            if slice.metadata.rows != rows
+                || slice.metadata.cols != cols
+                || values.len() != plane_len
+            {
                 return Err(VolumeError::InconsistentDimensions);
             }
             plane.copy_from_slice(&values);
@@ -586,7 +624,10 @@ fn build_volume_from_single_frame_files<P: AsRef<Path> + Sync>(file_paths: &[P])
         za.partial_cmp(&zb).unwrap_or(std::cmp::Ordering::Equal)
     });
 
-    let slice_zs: Vec<f64> = order.iter().map(|&i| dot3(slices[i].position, slice_normal)).collect();
+    let slice_zs: Vec<f64> = order
+        .iter()
+        .map(|&i| dot3(slices[i].position, slice_normal))
+        .collect();
     let z_span = slice_zs[slice_zs.len() - 1] - slice_zs[0];
     if z_span.abs() < 1e-3 {
         return Err(VolumeError::InconsistentGeometry(
@@ -633,7 +674,10 @@ fn is_multi_frame(object: &DefaultDicomObject) -> bool {
         .and_then(|element| element.to_str().ok())
         .and_then(|text| text.trim().parse::<u32>().ok())
         .unwrap_or(1);
-    frames > 1 || object.get(tags::PER_FRAME_FUNCTIONAL_GROUPS_SEQUENCE).is_some()
+    frames > 1
+        || object
+            .get(tags::PER_FRAME_FUNCTIONAL_GROUPS_SEQUENCE)
+            .is_some()
 }
 
 fn number_of_frames(object: &DefaultDicomObject) -> usize {
@@ -669,18 +713,34 @@ fn functional_group_item(
 
 fn multi_f64_in(item: &dcmnorm_object::InMemDicomObject, tag: Tag) -> Option<Vec<f64>> {
     let text = item.get(tag)?.to_str().ok()?;
-    let values: Vec<f64> = text.split('\\').filter_map(|part| part.trim().parse::<f64>().ok()).collect();
+    let values: Vec<f64> = text
+        .split('\\')
+        .filter_map(|part| part.trim().parse::<f64>().ok())
+        .collect();
     (!values.is_empty()).then_some(values)
 }
 
 /// Geometry of one frame: the Plane Position / Plane Orientation / Pixel Measures functional
 /// groups (per-frame first, then shared), falling back to the top-level attributes a classic or
 /// legacy multi-frame object carries.
-fn frame_geometry(object: &DefaultDicomObject, frame_index: usize) -> Result<(Vec3, Vec3, Vec3, f64, f64), VolumeError> {
-    let from_group = |sequence: Tag, tag: Tag| functional_group_item(object, frame_index, sequence).and_then(|item| multi_f64_in(item, tag));
-    let orientation = match from_group(tags::PLANE_ORIENTATION_SEQUENCE, tags::IMAGE_ORIENTATION_PATIENT) {
+fn frame_geometry(
+    object: &DefaultDicomObject,
+    frame_index: usize,
+) -> Result<(Vec3, Vec3, Vec3, f64, f64), VolumeError> {
+    let from_group = |sequence: Tag, tag: Tag| {
+        functional_group_item(object, frame_index, sequence)
+            .and_then(|item| multi_f64_in(item, tag))
+    };
+    let orientation = match from_group(
+        tags::PLANE_ORIENTATION_SEQUENCE,
+        tags::IMAGE_ORIENTATION_PATIENT,
+    ) {
         Some(values) => values,
-        None => read_multi_f64(object, tags::IMAGE_ORIENTATION_PATIENT, "ImageOrientationPatient")?,
+        None => read_multi_f64(
+            object,
+            tags::IMAGE_ORIENTATION_PATIENT,
+            "ImageOrientationPatient",
+        )?,
     };
     if orientation.len() < 6 {
         return Err(VolumeError::MissingGeometry("ImageOrientationPatient"));
@@ -733,12 +793,27 @@ fn read_file_header(path: &Path, file: usize) -> Result<FileHeader, VolumeError>
         Some((object, _)) => object,
         None => read_dicom_file(path)?,
     };
-    let rows = object.get(tags::ROWS).and_then(|element| element.uint16().ok()).ok_or(VolumeError::MissingGeometry("Rows"))?;
-    let cols = object.get(tags::COLUMNS).and_then(|element| element.uint16().ok()).ok_or(VolumeError::MissingGeometry("Columns"))?;
+    let rows = object
+        .get(tags::ROWS)
+        .and_then(|element| element.uint16().ok())
+        .ok_or(VolumeError::MissingGeometry("Rows"))?;
+    let cols = object
+        .get(tags::COLUMNS)
+        .and_then(|element| element.uint16().ok())
+        .ok_or(VolumeError::MissingGeometry("Columns"))?;
     let mut frames = Vec::new();
     for frame in 0..number_of_frames(&object) {
-        let (row_vector, col_vector, position, row_spacing_mm, col_spacing_mm) = frame_geometry(&object, frame)?;
-        frames.push(FrameSource { file, frame, row_vector, col_vector, position, row_spacing_mm, col_spacing_mm });
+        let (row_vector, col_vector, position, row_spacing_mm, col_spacing_mm) =
+            frame_geometry(&object, frame)?;
+        frames.push(FrameSource {
+            file,
+            frame,
+            row_vector,
+            col_vector,
+            position,
+            row_spacing_mm,
+            col_spacing_mm,
+        });
     }
     Ok(FileHeader {
         frames,
@@ -759,24 +834,36 @@ fn read_file_header(path: &Path, file: usize) -> Result<FileHeader, VolumeError>
 /// own Pixel Value Transformation (rescale) applies. Frames that repeat a position already taken
 /// (further temporal positions, echoes or stacks of a 4D object) are skipped: the volume holds
 /// the first frame, in file and frame order, at each position.
-fn build_volume_from_frames<P: AsRef<Path> + Sync>(file_paths: &[P]) -> Result<Volume, VolumeError> {
+fn build_volume_from_frames<P: AsRef<Path> + Sync>(
+    file_paths: &[P],
+) -> Result<Volume, VolumeError> {
     let headers: Vec<FileHeader> = file_paths
         .par_iter()
         .enumerate()
         .map(|(file, path)| read_file_header(path.as_ref(), file))
         .collect::<Result<_, _>>()?;
     let (rows, cols) = (headers[0].rows, headers[0].cols);
-    if headers.iter().any(|header| header.rows != rows || header.cols != cols) {
+    if headers
+        .iter()
+        .any(|header| header.rows != rows || header.cols != cols)
+    {
         return Err(VolumeError::InconsistentDimensions);
     }
-    let frames: Vec<&FrameSource> = headers.iter().flat_map(|header| header.frames.iter()).collect();
+    let frames: Vec<&FrameSource> = headers
+        .iter()
+        .flat_map(|header| header.frames.iter())
+        .collect();
     if frames.len() < 2 {
-        return Err(VolumeError::TooFewSlices { found: frames.len(), required: 2 });
+        return Err(VolumeError::TooFewSlices {
+            found: frames.len(),
+            required: 2,
+        });
     }
     let row_vector = frames[0].row_vector;
     let col_vector = frames[0].col_vector;
     if frames.iter().any(|frame| {
-        !vectors_close(frame.row_vector, row_vector, ORIENTATION_EPSILON) || !vectors_close(frame.col_vector, col_vector, ORIENTATION_EPSILON)
+        !vectors_close(frame.row_vector, row_vector, ORIENTATION_EPSILON)
+            || !vectors_close(frame.col_vector, col_vector, ORIENTATION_EPSILON)
     }) {
         return Err(VolumeError::InconsistentGeometry(
             "ImageOrientationPatient differs between frames (non-parallel or multi-orientation stack)".to_owned(),
@@ -806,7 +893,10 @@ fn build_volume_from_frames<P: AsRef<Path> + Sync>(file_paths: &[P]) -> Result<V
             "all frames project to the same spatial position along the stack normal".to_owned(),
         ));
     }
-    let slice_zs: Vec<f64> = kept.iter().map(|&index| dot3(frames[index].position, slice_normal)).collect();
+    let slice_zs: Vec<f64> = kept
+        .iter()
+        .map(|&index| dot3(frames[index].position, slice_normal))
+        .collect();
     if (slice_zs[slice_zs.len() - 1] - slice_zs[0]).abs() < 1e-3 {
         return Err(VolumeError::InconsistentGeometry(
             "all frames project to the same spatial position along the stack normal".to_owned(),
@@ -817,7 +907,8 @@ fn build_volume_from_frames<P: AsRef<Path> + Sync>(file_paths: &[P]) -> Result<V
     let mut samples = vec![0f32; plane_len * kept.len()];
     {
         // Hand each file its own disjoint planes, then decode files (and their frames) in parallel.
-        let mut per_file: Vec<Vec<(usize, &mut [f32])>> = (0..headers.len()).map(|_| Vec::new()).collect();
+        let mut per_file: Vec<Vec<(usize, &mut [f32])>> =
+            (0..headers.len()).map(|_| Vec::new()).collect();
         for (plane, &index) in samples.chunks_mut(plane_len).zip(kept.iter()) {
             per_file[frames[index].file].push((frames[index].frame, plane));
         }
@@ -828,21 +919,32 @@ fn build_volume_from_frames<P: AsRef<Path> + Sync>(file_paths: &[P]) -> Result<V
             .try_for_each(|(file, planes)| -> Result<(), VolumeError> {
                 let object = read_dicom_file(file_paths[file].as_ref())?;
                 // A compressed multi-frame object is decompressed once, not once per frame.
-                let object = if planes.len() > 1 { ensure_native_render_object(&object)? } else { std::borrow::Cow::Borrowed(&object) };
+                let object = if planes.len() > 1 {
+                    ensure_native_render_object(&object)?
+                } else {
+                    std::borrow::Cow::Borrowed(&object)
+                };
                 let object = object.as_ref();
-                planes.into_par_iter().try_for_each(|(frame, plane)| -> Result<(), VolumeError> {
-                    let (metadata, values) = decode_frame_grayscale_values(object, frame)?;
-                    if !matches!(metadata.photometric_interpretation.as_str(), "MONOCHROME1" | "MONOCHROME2") {
-                        return Err(VolumeError::UnsupportedPhotometricInterpretation(metadata.photometric_interpretation.clone()));
-                    }
-                    if values.len() != plane.len() {
-                        return Err(VolumeError::InconsistentDimensions);
-                    }
-                    for (destination, value) in plane.iter_mut().zip(values) {
-                        *destination = value as f32;
-                    }
-                    Ok(())
-                })
+                planes
+                    .into_par_iter()
+                    .try_for_each(|(frame, plane)| -> Result<(), VolumeError> {
+                        let (metadata, values) = decode_frame_grayscale_values(object, frame)?;
+                        if !matches!(
+                            metadata.photometric_interpretation.as_str(),
+                            "MONOCHROME1" | "MONOCHROME2"
+                        ) {
+                            return Err(VolumeError::UnsupportedPhotometricInterpretation(
+                                metadata.photometric_interpretation.clone(),
+                            ));
+                        }
+                        if values.len() != plane.len() {
+                            return Err(VolumeError::InconsistentDimensions);
+                        }
+                        for (destination, value) in plane.iter_mut().zip(values) {
+                            *destination = value as f32;
+                        }
+                        Ok(())
+                    })
             })?;
     }
 
@@ -903,20 +1005,32 @@ fn in_plane_offsets_px(volume: &Volume, positions: &[Vec3]) -> Vec<(f64, f64)> {
 /// desheared grid; ordinary stacks never allocate here.
 fn deshear_if_needed(volume: &mut Volume, positions: &[Vec3]) -> Result<(), VolumeError> {
     let offsets = in_plane_offsets_px(volume, positions);
-    let max_offset = offsets.iter().map(|&(du, dv)| du.abs().max(dv.abs())).fold(0.0, f64::max);
+    let max_offset = offsets
+        .iter()
+        .map(|&(du, dv)| du.abs().max(dv.abs()))
+        .fold(0.0, f64::max);
     if max_offset <= SHEAR_TOLERANCE_PX {
         return Ok(());
     }
 
     let n = positions.len();
     let along = volume.slice_zs[n - 1] - volume.slice_zs[0];
-    let drift = sub3(sub3(positions[n - 1], positions[0]), scale3(volume.slice_normal, along));
+    let drift = sub3(
+        sub3(positions[n - 1], positions[0]),
+        scale3(volume.slice_normal, along),
+    );
     volume.gantry_tilt_deg = norm3(drift).atan2(along.abs()).to_degrees();
 
     let min_du = offsets.iter().map(|o| o.0).fold(f64::INFINITY, f64::min);
-    let max_du = offsets.iter().map(|o| o.0).fold(f64::NEG_INFINITY, f64::max);
+    let max_du = offsets
+        .iter()
+        .map(|o| o.0)
+        .fold(f64::NEG_INFINITY, f64::max);
     let min_dv = offsets.iter().map(|o| o.1).fold(f64::INFINITY, f64::min);
-    let max_dv = offsets.iter().map(|o| o.1).fold(f64::NEG_INFINITY, f64::max);
+    let max_dv = offsets
+        .iter()
+        .map(|o| o.1)
+        .fold(f64::NEG_INFINITY, f64::max);
     let old_cols = volume.cols as usize;
     let old_rows = volume.rows as usize;
     // The union grid starts at the smallest offset (rounded down to a whole pixel, so the first
@@ -935,42 +1049,53 @@ fn deshear_if_needed(volume: &mut Volume, positions: &[Vec3]) -> Result<(), Volu
     }
 
     let background = volume.samples.iter().copied().fold(f32::INFINITY, f32::min);
-    let background = if background.is_finite() { background } else { 0.0 };
+    let background = if background.is_finite() {
+        background
+    } else {
+        0.0
+    };
     let old_plane = old_cols * old_rows;
     let new_plane = new_cols * new_rows;
     let mut desheared = vec![background; new_plane * n];
     let source = &volume.samples;
-    desheared.par_chunks_mut(new_plane).enumerate().for_each(|(k, plane)| {
-        let (du, dv) = offsets[k];
-        let src = &source[k * old_plane..(k + 1) * old_plane];
-        for r in 0..new_rows {
-            // Source pixel of grid pixel (r, c) in slice k: grid point + start - slice offset.
-            let row_f = r as f64 + start_v - dv;
-            if row_f < -0.5 || row_f > old_rows as f64 - 0.5 {
-                continue;
-            }
-            let row_f = row_f.clamp(0.0, (old_rows - 1) as f64);
-            let r0 = row_f.floor() as usize;
-            let r1 = (r0 + 1).min(old_rows - 1);
-            let tr = (row_f - r0 as f64) as f32;
-            for c in 0..new_cols {
-                let col_f = c as f64 + start_u - du;
-                if col_f < -0.5 || col_f > old_cols as f64 - 0.5 {
+    desheared
+        .par_chunks_mut(new_plane)
+        .enumerate()
+        .for_each(|(k, plane)| {
+            let (du, dv) = offsets[k];
+            let src = &source[k * old_plane..(k + 1) * old_plane];
+            for r in 0..new_rows {
+                // Source pixel of grid pixel (r, c) in slice k: grid point + start - slice offset.
+                let row_f = r as f64 + start_v - dv;
+                if row_f < -0.5 || row_f > old_rows as f64 - 0.5 {
                     continue;
                 }
-                let col_f = col_f.clamp(0.0, (old_cols - 1) as f64);
-                let c0 = col_f.floor() as usize;
-                let c1 = (c0 + 1).min(old_cols - 1);
-                let tc = (col_f - c0 as f64) as f32;
-                let top = src[r0 * old_cols + c0] * (1.0 - tc) + src[r0 * old_cols + c1] * tc;
-                let bottom = src[r1 * old_cols + c0] * (1.0 - tc) + src[r1 * old_cols + c1] * tc;
-                plane[r * new_cols + c] = top * (1.0 - tr) + bottom * tr;
+                let row_f = row_f.clamp(0.0, (old_rows - 1) as f64);
+                let r0 = row_f.floor() as usize;
+                let r1 = (r0 + 1).min(old_rows - 1);
+                let tr = (row_f - r0 as f64) as f32;
+                for c in 0..new_cols {
+                    let col_f = c as f64 + start_u - du;
+                    if col_f < -0.5 || col_f > old_cols as f64 - 0.5 {
+                        continue;
+                    }
+                    let col_f = col_f.clamp(0.0, (old_cols - 1) as f64);
+                    let c0 = col_f.floor() as usize;
+                    let c1 = (c0 + 1).min(old_cols - 1);
+                    let tc = (col_f - c0 as f64) as f32;
+                    let top = src[r0 * old_cols + c0] * (1.0 - tc) + src[r0 * old_cols + c1] * tc;
+                    let bottom =
+                        src[r1 * old_cols + c0] * (1.0 - tc) + src[r1 * old_cols + c1] * tc;
+                    plane[r * new_cols + c] = top * (1.0 - tr) + bottom * tr;
+                }
             }
-        }
-    });
+        });
 
     volume.origin = add3(
-        add3(volume.origin, scale3(volume.row_vector, start_u * volume.col_spacing_mm)),
+        add3(
+            volume.origin,
+            scale3(volume.row_vector, start_u * volume.col_spacing_mm),
+        ),
         scale3(volume.col_vector, start_v * volume.row_spacing_mm),
     );
     volume.samples = desheared;
@@ -987,7 +1112,9 @@ fn deshear_if_needed(volume: &mut Volume, positions: &[Vec3]) -> Result<(), Volu
 fn fractional_slice_index(slice_zs: &[f64], z: f64) -> Option<f64> {
     let n = slice_zs.len();
     let nominal_spacing = if n > 1 {
-        ((slice_zs[n - 1] - slice_zs[0]) / (n - 1) as f64).abs().max(1e-6)
+        ((slice_zs[n - 1] - slice_zs[0]) / (n - 1) as f64)
+            .abs()
+            .max(1e-6)
     } else {
         1.0
     };
@@ -999,7 +1126,9 @@ fn fractional_slice_index(slice_zs: &[f64], z: f64) -> Option<f64> {
         return Some(0.0);
     }
 
-    match slice_zs.binary_search_by(|probe| probe.partial_cmp(&z).unwrap_or(std::cmp::Ordering::Equal)) {
+    match slice_zs
+        .binary_search_by(|probe| probe.partial_cmp(&z).unwrap_or(std::cmp::Ordering::Equal))
+    {
         Ok(index) => Some(index as f64),
         Err(index) => {
             if index == 0 {
@@ -1020,7 +1149,11 @@ fn fractional_slice_index(slice_zs: &[f64], z: f64) -> Option<f64> {
 }
 
 fn sample_nearest(volume: &Volume, row_f: f64, col_f: f64, slice_f: f64) -> f64 {
-    f64::from(volume.voxel(row_f.round() as i64, col_f.round() as i64, slice_f.round() as i64))
+    f64::from(volume.voxel(
+        row_f.round() as i64,
+        col_f.round() as i64,
+        slice_f.round() as i64,
+    ))
 }
 
 fn sample_trilinear(volume: &Volume, row_f: f64, col_f: f64, slice_f: f64) -> f64 {
@@ -1032,7 +1165,8 @@ fn sample_trilinear(volume: &Volume, row_f: f64, col_f: f64, slice_f: f64) -> f6
     let slice_t = slice_f - slice0;
     let (row0, col0, slice0) = (row0 as i64, col0 as i64, slice0 as i64);
 
-    let corner = |dr: i64, dc: i64, ds: i64| f64::from(volume.voxel(row0 + dr, col0 + dc, slice0 + ds));
+    let corner =
+        |dr: i64, dc: i64, ds: i64| f64::from(volume.voxel(row0 + dr, col0 + dc, slice0 + ds));
 
     let c00 = corner(0, 0, 0) * (1.0 - col_t) + corner(0, 1, 0) * col_t;
     let c10 = corner(1, 0, 0) * (1.0 - col_t) + corner(1, 1, 0) * col_t;
@@ -1049,7 +1183,11 @@ fn sample_trilinear(volume: &Volume, row_f: f64, col_f: f64, slice_f: f64) -> f6
 /// it, or returns `None` if the point falls outside the volume (beyond a 1-voxel margin) or the
 /// slice stack. The single-point primitive both a thin-plane reformat and a thick slab (many
 /// points along the plane's normal, see `sample_slab`) are built from.
-fn sample_volume_at_world_point(volume: &Volume, world: Vec3, interpolation: Interpolation) -> Option<f64> {
+fn sample_volume_at_world_point(
+    volume: &Volume,
+    world: Vec3,
+    interpolation: Interpolation,
+) -> Option<f64> {
     let delta = sub3(world, volume.origin);
     let col_f = dot3(delta, volume.row_vector) / volume.col_spacing_mm;
     let row_f = dot3(delta, volume.col_vector) / volume.row_spacing_mm;
@@ -1122,8 +1260,15 @@ fn sample_slab(
 /// wants the true intensity values, not a windowed render). Samples outside the volume are
 /// background-filled with the minimum in-bounds value found (same convention `reformat_plane` has
 /// always used), or `0.0` if every sample in the plane misses the volume entirely.
-pub fn reformat_plane_values(volume: &Volume, params: &PlaneParams) -> Result<Vec<f32>, VolumeError> {
-    if params.output_width == 0 || params.output_height == 0 || params.output_width > u16::MAX as u32 || params.output_height > u16::MAX as u32 {
+pub fn reformat_plane_values(
+    volume: &Volume,
+    params: &PlaneParams,
+) -> Result<Vec<f32>, VolumeError> {
+    if params.output_width == 0
+        || params.output_height == 0
+        || params.output_width > u16::MAX as u32
+        || params.output_height > u16::MAX as u32
+    {
         return Err(VolumeError::InvalidOutputDimensions);
     }
     if params.slab_thickness_mm < 0.0 {
@@ -1161,7 +1306,15 @@ pub fn reformat_plane_values(volume: &Volume, params: &PlaneParams) -> Result<Ve
             let world = add3(params.origin, offset);
 
             let sample = if slab_active {
-                sample_slab(volume, world, normal, slab_n_samples, slab_step_mm, params.interpolation, params.slab_projection)
+                sample_slab(
+                    volume,
+                    world,
+                    normal,
+                    slab_n_samples,
+                    slab_step_mm,
+                    params.interpolation,
+                    params.slab_projection,
+                )
             } else {
                 sample_volume_at_world_point(volume, world, params.interpolation)
             };
@@ -1174,8 +1327,15 @@ pub fn reformat_plane_values(volume: &Volume, params: &PlaneParams) -> Result<Ve
         .iter()
         .filter_map(|value| *value)
         .fold(f64::INFINITY, f64::min);
-    let background = if background.is_finite() { background } else { 0.0 };
-    Ok(values.into_iter().map(|value| value.unwrap_or(background) as f32).collect())
+    let background = if background.is_finite() {
+        background
+    } else {
+        0.0
+    };
+    Ok(values
+        .into_iter()
+        .map(|value| value.unwrap_or(background) as f32)
+        .collect())
 }
 
 /// Resamples one plane (or, with `params.slab_thickness_mm > 0.0`, a thick slab projected down
@@ -1212,14 +1372,32 @@ pub fn reformat_plane(
 /// `sample_volume_at_world_point`'s world-to-voxel transform when we're already working in voxel
 /// indices on both ends), so the corner voxels of the coarse grid land exactly on the corner
 /// voxels of the native grid. A target dimension of `1` samples the native axis's midpoint.
-pub fn resample_volume(volume: &Volume, target_cols: u32, target_rows: u32, target_slices: u32, interpolation: Interpolation) -> Vec<f32> {
+pub fn resample_volume(
+    volume: &Volume,
+    target_cols: u32,
+    target_rows: u32,
+    target_slices: u32,
+    interpolation: Interpolation,
+) -> Vec<f32> {
     let target_cols = target_cols.max(1);
     let target_rows = target_rows.max(1);
     let target_slices = target_slices.max(1);
 
-    let col_step = if target_cols > 1 { (volume.cols as f64 - 1.0) / (target_cols as f64 - 1.0) } else { 0.0 };
-    let row_step = if target_rows > 1 { (volume.rows as f64 - 1.0) / (target_rows as f64 - 1.0) } else { 0.0 };
-    let slice_step = if target_slices > 1 { (volume.num_slices as f64 - 1.0) / (target_slices as f64 - 1.0) } else { 0.0 };
+    let col_step = if target_cols > 1 {
+        (volume.cols as f64 - 1.0) / (target_cols as f64 - 1.0)
+    } else {
+        0.0
+    };
+    let row_step = if target_rows > 1 {
+        (volume.rows as f64 - 1.0) / (target_rows as f64 - 1.0)
+    } else {
+        0.0
+    };
+    let slice_step = if target_slices > 1 {
+        (volume.num_slices as f64 - 1.0) / (target_slices as f64 - 1.0)
+    } else {
+        0.0
+    };
 
     let axis_coordinate = |target_index: u32, target_len: u32, step: f64, native_len: u32| -> f64 {
         if target_len > 1 {
@@ -1246,20 +1424,23 @@ pub fn resample_volume(volume: &Volume, target_cols: u32, target_rows: u32, targ
 
     let plane = target_cols as usize * target_rows as usize;
     let mut out = vec![0f32; plane * target_slices as usize];
-    out.par_chunks_mut(plane).enumerate().for_each(|(target_slice, out_plane)| {
-        let slice_f = slice_coordinate(target_slice as u32);
-        for target_row in 0..target_rows {
-            let row_f = axis_coordinate(target_row, target_rows, row_step, volume.rows);
-            for target_col in 0..target_cols {
-                let col_f = axis_coordinate(target_col, target_cols, col_step, volume.cols);
-                let value = match interpolation {
-                    Interpolation::Nearest => sample_nearest(volume, row_f, col_f, slice_f),
-                    Interpolation::Trilinear => sample_trilinear(volume, row_f, col_f, slice_f),
-                };
-                out_plane[target_row as usize * target_cols as usize + target_col as usize] = value as f32;
+    out.par_chunks_mut(plane)
+        .enumerate()
+        .for_each(|(target_slice, out_plane)| {
+            let slice_f = slice_coordinate(target_slice as u32);
+            for target_row in 0..target_rows {
+                let row_f = axis_coordinate(target_row, target_rows, row_step, volume.rows);
+                for target_col in 0..target_cols {
+                    let col_f = axis_coordinate(target_col, target_cols, col_step, volume.cols);
+                    let value = match interpolation {
+                        Interpolation::Nearest => sample_nearest(volume, row_f, col_f, slice_f),
+                        Interpolation::Trilinear => sample_trilinear(volume, row_f, col_f, slice_f),
+                    };
+                    out_plane[target_row as usize * target_cols as usize + target_col as usize] =
+                        value as f32;
+                }
             }
-        }
-    });
+        });
     out
 }
 
@@ -1285,7 +1466,13 @@ pub fn canonical_view_basis(view: &str, volume: &Volume) -> Result<(Vec3, Vec3),
 /// rotation sequence, which is what guarantees the result stays orthonormal (a rotation preserves
 /// the angle - and thus orthogonality - between any two vectors it's applied to; composing each
 /// step around the *other*, already-rotated vector instead would not).
-pub fn rotate_basis(row_dir: Vec3, col_dir: Vec3, yaw_deg: f64, pitch_deg: f64, roll_deg: f64) -> (Vec3, Vec3) {
+pub fn rotate_basis(
+    row_dir: Vec3,
+    col_dir: Vec3,
+    yaw_deg: f64,
+    pitch_deg: f64,
+    roll_deg: f64,
+) -> (Vec3, Vec3) {
     const X_AXIS: Vec3 = [1.0, 0.0, 0.0];
     const Y_AXIS: Vec3 = [0.0, 1.0, 0.0];
     const Z_AXIS: Vec3 = [0.0, 0.0, 1.0];
@@ -1331,7 +1518,11 @@ mod tests {
             super::permute_planes_in_place(&mut samples, plane_len, &order);
             for (destination, &source) in order.iter().enumerate() {
                 for i in 0..plane_len {
-                    assert_eq!(samples[destination * plane_len + i], (source * 10 + i) as f32, "order {order:?}");
+                    assert_eq!(
+                        samples[destination * plane_len + i],
+                        (source * 10 + i) as f32,
+                        "order {order:?}"
+                    );
                 }
             }
         }
@@ -1478,9 +1669,33 @@ mod tests {
         let normal = [0.0, 0.0, 1.0];
         let center = [1.0, 1.0, 1.0];
 
-        let mip = sample_slab(&volume, center, normal, 3, 1.0, Interpolation::Nearest, SlabProjection::MaximumIntensity);
-        let minip = sample_slab(&volume, center, normal, 3, 1.0, Interpolation::Nearest, SlabProjection::MinimumIntensity);
-        let average = sample_slab(&volume, center, normal, 3, 1.0, Interpolation::Nearest, SlabProjection::Average);
+        let mip = sample_slab(
+            &volume,
+            center,
+            normal,
+            3,
+            1.0,
+            Interpolation::Nearest,
+            SlabProjection::MaximumIntensity,
+        );
+        let minip = sample_slab(
+            &volume,
+            center,
+            normal,
+            3,
+            1.0,
+            Interpolation::Nearest,
+            SlabProjection::MinimumIntensity,
+        );
+        let average = sample_slab(
+            &volume,
+            center,
+            normal,
+            3,
+            1.0,
+            Interpolation::Nearest,
+            SlabProjection::Average,
+        );
 
         assert_eq!(mip, Some(37.0));
         assert_eq!(minip, Some(5.0));
@@ -1494,11 +1709,30 @@ mod tests {
         let normal = [0.0, 0.0, 1.0];
         let center = [1.0, 1.0, 0.0];
 
-        let result = sample_slab(&volume, center, normal, 5, 1.0, Interpolation::Nearest, SlabProjection::MaximumIntensity);
-        assert!(result.is_some(), "slab should still combine the in-bounds samples");
+        let result = sample_slab(
+            &volume,
+            center,
+            normal,
+            5,
+            1.0,
+            Interpolation::Nearest,
+            SlabProjection::MaximumIntensity,
+        );
+        assert!(
+            result.is_some(),
+            "slab should still combine the in-bounds samples"
+        );
 
         let far_outside = [1.0, 1.0, 1000.0];
-        let none_in_bounds = sample_slab(&volume, far_outside, normal, 3, 1.0, Interpolation::Nearest, SlabProjection::Average);
+        let none_in_bounds = sample_slab(
+            &volume,
+            far_outside,
+            normal,
+            3,
+            1.0,
+            Interpolation::Nearest,
+            SlabProjection::Average,
+        );
         assert_eq!(none_in_bounds, None);
     }
 
@@ -1525,8 +1759,12 @@ mod tests {
         };
 
         let thin = reformat_plane(&volume, &base_params, RenderOutputFormat::Raw, 90).unwrap();
-        let thick_params = PlaneParams { slab_thickness_mm: 2.0, ..base_params };
-        let thick_mip = reformat_plane(&volume, &thick_params, RenderOutputFormat::Raw, 90).unwrap();
+        let thick_params = PlaneParams {
+            slab_thickness_mm: 2.0,
+            ..base_params
+        };
+        let thick_mip =
+            reformat_plane(&volume, &thick_params, RenderOutputFormat::Raw, 90).unwrap();
 
         // The MIP slab spans slices {0,1,2} at every pixel (this reformat plane sits exactly on
         // volume.slice_normal), and values increase monotonically with slice index in this
@@ -1535,7 +1773,10 @@ mod tests {
         for (thick_byte, thin_byte) in thick_mip.bytes.iter().zip(thin.bytes.iter()) {
             assert!(thick_byte >= thin_byte, "MIP slab must never be dimmer than the thin plane (thick={thick_byte}, thin={thin_byte})");
         }
-        assert_ne!(thick_mip.bytes, thin.bytes, "a 2mm MIP slab should differ from the thin plane somewhere");
+        assert_ne!(
+            thick_mip.bytes, thin.bytes,
+            "a 2mm MIP slab should differ from the thin plane somewhere"
+        );
     }
 
     #[test]
@@ -1564,9 +1805,18 @@ mod tests {
         let volume = axis_aligned_test_volume();
         for view in ["axial", "coronal", "sagittal"] {
             let (row_dir, col_dir) = canonical_view_basis(view, &volume).unwrap();
-            assert!((norm3(row_dir) - 1.0).abs() < 1e-9, "{view} row_dir not unit length");
-            assert!((norm3(col_dir) - 1.0).abs() < 1e-9, "{view} col_dir not unit length");
-            assert!(dot3(row_dir, col_dir).abs() < 1e-9, "{view} row_dir/col_dir not orthogonal");
+            assert!(
+                (norm3(row_dir) - 1.0).abs() < 1e-9,
+                "{view} row_dir not unit length"
+            );
+            assert!(
+                (norm3(col_dir) - 1.0).abs() < 1e-9,
+                "{view} col_dir not unit length"
+            );
+            assert!(
+                dot3(row_dir, col_dir).abs() < 1e-9,
+                "{view} row_dir/col_dir not orthogonal"
+            );
         }
         assert!(canonical_view_basis("oblique-nonsense", &volume).is_err());
     }
@@ -1623,8 +1873,14 @@ mod tests {
         let single = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test/files/ct.dcm");
         assert!(matches!(
             build_volume(&[&single]),
-            Err(VolumeError::TooFewSlices { found: 1, required: 2 })
+            Err(VolumeError::TooFewSlices {
+                found: 1,
+                required: 2
+            })
         ));
-        assert!(matches!(build_volume(&["does-not-exist.dcm"]), Err(VolumeError::Read(_))));
+        assert!(matches!(
+            build_volume(&["does-not-exist.dcm"]),
+            Err(VolumeError::Read(_))
+        ));
     }
 }

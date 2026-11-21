@@ -30,14 +30,14 @@ use dcmnorm_encoding::transfer_syntax::{NeverAdapter, TransferSyntax};
 #[cfg(any(feature = "rle", feature = "jpeg2000"))]
 use dcmnorm_encoding::NeverPixelAdapter;
 
+#[cfg(feature = "deflate")]
+use crate::adapters::deflated::DeflatedImageFrameAdapter;
 #[cfg(feature = "jpeg")]
 use crate::adapters::jpeg::JpegAdapter;
 #[cfg(feature = "jpeg2000")]
 use crate::adapters::jpeg2k::{Htj2kAdapter, Jpeg2000Adapter};
 #[cfg(feature = "rle")]
 use crate::adapters::rle_lossless::RleLosslessAdapter;
-#[cfg(feature = "deflate")]
-use crate::adapters::deflated::DeflatedImageFrameAdapter;
 #[cfg(feature = "deflate")]
 use crate::deflate::FlateAdapter;
 
@@ -414,17 +414,22 @@ pub const JPEG_XL: Ts = create_ts_stub("1.2.840.10008.1.2.4.112", "JPEG XL");
 
 /// **Stub descriptor:** Deflated Image Frame Compression
 #[cfg(not(feature = "deflate"))]
-pub const DEFLATED_IMAGE_FRAME_COMPRESSION: Ts = create_ts_stub(
-    "1.2.840.10008.1.2.8.1",
-    "Deflated Image Frame Compression",
-);
+pub const DEFLATED_IMAGE_FRAME_COMPRESSION: Ts =
+    create_ts_stub("1.2.840.10008.1.2.8.1", "Deflated Image Frame Compression");
 
 /// **Implemented:** Deflated Image Frame Compression
 #[cfg(feature = "deflate")]
-pub const DEFLATED_IMAGE_FRAME_COMPRESSION: TransferSyntax<NeverAdapter, DeflatedImageFrameAdapter, DeflatedImageFrameAdapter> = TransferSyntax::new_ele(
+pub const DEFLATED_IMAGE_FRAME_COMPRESSION: TransferSyntax<
+    NeverAdapter,
+    DeflatedImageFrameAdapter,
+    DeflatedImageFrameAdapter,
+> = TransferSyntax::new_ele(
     "1.2.840.10008.1.2.8.1",
     "Deflated Image Frame Compression",
-    Codec::EncapsulatedPixelData(Some(DeflatedImageFrameAdapter), Some(DeflatedImageFrameAdapter)),
+    Codec::EncapsulatedPixelData(
+        Some(DeflatedImageFrameAdapter),
+        Some(DeflatedImageFrameAdapter),
+    ),
 );
 
 /// **Stub descriptor:** JPIP Referenced

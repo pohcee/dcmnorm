@@ -181,7 +181,9 @@ where
                         // own 2 bytes read as a number (16706-23130) - far less likely than an
                         // explicit file whose first element disagrees with the dictionary, which
                         // real writers produce (e.g. GDCM writing every element as UN).
-                        source.read_exact(&mut buf[2..4]).context(ReadReservedSnafu)?;
+                        source
+                            .read_exact(&mut buf[2..4])
+                            .context(ReadReservedSnafu)?;
                         if buf[2..4] != [0, 0] {
                             self.state.set(VrState::Implicit);
                             let len = LittleEndian::read_u32(&buf);
@@ -595,13 +597,17 @@ mod tests {
         ];
         let reader = AdaptiveVRLittleEndianDecoder::with_std_dict();
         let mut cursor = Cursor::new(RAW);
-        let (elem, bytes_read) = reader.decode_header(&mut cursor).expect("should find an element");
+        let (elem, bytes_read) = reader
+            .decode_header(&mut cursor)
+            .expect("should find an element");
         assert_eq!(elem.tag(), Tag(0x0008, 0x0005));
         assert_eq!(elem.vr(), VR::UN);
         assert_eq!(elem.length(), Length(10));
         assert_eq!(bytes_read, 12);
         cursor.set_position(cursor.position() + 10);
-        let (elem, _) = reader.decode_header(&mut cursor).expect("should find the next element");
+        let (elem, _) = reader
+            .decode_header(&mut cursor)
+            .expect("should find the next element");
         assert_eq!(elem.tag(), Tag(0x0008, 0x0060));
         assert_eq!(elem.vr(), VR::CS);
         assert_eq!(elem.length(), Length(2));

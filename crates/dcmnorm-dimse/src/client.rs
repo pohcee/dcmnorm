@@ -7,9 +7,9 @@ use std::time::Duration;
 use crate::conn;
 use crate::error::{Error, Result};
 use crate::pdu::{
-    AbortRQSource, AssociationRQ, Pdu, PresentationContextNegotiated,
-    PresentationContextProposed, PresentationContextResultReason, UserVariableItem,
-    DEFAULT_IO_TIMEOUT, DEFAULT_MAX_PDU, MAX_PDU_LENGTH_CEILING,
+    AbortRQSource, AssociationRQ, Pdu, PresentationContextNegotiated, PresentationContextProposed,
+    PresentationContextResultReason, UserVariableItem, DEFAULT_IO_TIMEOUT, DEFAULT_MAX_PDU,
+    MAX_PDU_LENGTH_CEILING,
 };
 
 const APPLICATION_CONTEXT_NAME: &str = "1.2.840.10008.3.1.1.1";
@@ -70,7 +70,8 @@ impl ClientAssociationOptions {
         abstract_syntax: impl Into<String>,
         transfer_syntaxes: impl Into<Vec<String>>,
     ) -> Self {
-        self.presentation_contexts.push((abstract_syntax.into(), transfer_syntaxes.into()));
+        self.presentation_contexts
+            .push((abstract_syntax.into(), transfer_syntaxes.into()));
         self
     }
 
@@ -91,10 +92,7 @@ impl ClientAssociationOptions {
 
     /// Connect to `address` and negotiate an association.
     pub fn establish_with(self, address: &str) -> Result<ClientAssociation<TcpStream>> {
-        let addrs: Vec<_> = address
-            .to_socket_addrs()
-            .map_err(Error::Connect)?
-            .collect();
+        let addrs: Vec<_> = address.to_socket_addrs().map_err(Error::Connect)?.collect();
         if addrs.is_empty() {
             return Err(Error::Connect(std::io::Error::new(
                 std::io::ErrorKind::AddrNotAvailable,
@@ -123,8 +121,12 @@ impl ClientAssociationOptions {
             TcpStream::connect(&addrs[..]).map_err(Error::Connect)?
         };
 
-        stream.set_read_timeout(self.read_timeout).map_err(Error::Io)?;
-        stream.set_write_timeout(self.write_timeout).map_err(Error::Io)?;
+        stream
+            .set_read_timeout(self.read_timeout)
+            .map_err(Error::Io)?;
+        stream
+            .set_write_timeout(self.write_timeout)
+            .map_err(Error::Io)?;
 
         self.establish_over(stream)
     }
@@ -138,14 +140,19 @@ impl ClientAssociationOptions {
             .presentation_contexts
             .iter()
             .enumerate()
-            .map(|(i, (abstract_syntax, transfer_syntaxes))| PresentationContextProposed {
-                id: (2 * i + 1) as u8,
-                abstract_syntax: abstract_syntax.clone(),
-                transfer_syntaxes: transfer_syntaxes.clone(),
-            })
+            .map(
+                |(i, (abstract_syntax, transfer_syntaxes))| PresentationContextProposed {
+                    id: (2 * i + 1) as u8,
+                    abstract_syntax: abstract_syntax.clone(),
+                    transfer_syntaxes: transfer_syntaxes.clone(),
+                },
+            )
             .collect();
 
-        let called_ae_title = self.called_ae_title.clone().unwrap_or_else(|| "ANY-SCP".to_owned());
+        let called_ae_title = self
+            .called_ae_title
+            .clone()
+            .unwrap_or_else(|| "ANY-SCP".to_owned());
 
         let rq = Pdu::AssociationRQ(AssociationRQ {
             protocol_version: PROTOCOL_VERSION,
@@ -168,7 +175,9 @@ impl ClientAssociationOptions {
             Err(e) => {
                 let _ = conn::send_pdu(
                     &mut stream,
-                    &Pdu::AbortRQ { source: AbortRQSource::SERVICE_USER },
+                    &Pdu::AbortRQ {
+                        source: AbortRQSource::SERVICE_USER,
+                    },
                 );
                 return Err(e);
             }
@@ -179,7 +188,9 @@ impl ClientAssociationOptions {
                 if ac.protocol_version != PROTOCOL_VERSION {
                     let _ = conn::send_pdu(
                         &mut stream,
-                        &Pdu::AbortRQ { source: AbortRQSource::SERVICE_USER },
+                        &Pdu::AbortRQ {
+                            source: AbortRQSource::SERVICE_USER,
+                        },
                     );
                     return Err(Error::ProtocolVersionMismatch {
                         expected: PROTOCOL_VERSION,
@@ -195,8 +206,11 @@ impl ClientAssociationOptions {
                         _ => None,
                     })
                     .unwrap_or(DEFAULT_MAX_PDU);
-                let acceptor_max_pdu_length =
-                    if acceptor_max_pdu_length == 0 { u32::MAX } else { acceptor_max_pdu_length };
+                let acceptor_max_pdu_length = if acceptor_max_pdu_length == 0 {
+                    u32::MAX
+                } else {
+                    acceptor_max_pdu_length
+                };
 
                 // Only accepted contexts are exposed to the caller - a context this side
                 // proposed but the acceptor rejected isn't usable for anything, so there's
@@ -208,8 +222,11 @@ impl ClientAssociationOptions {
                     .into_iter()
                     .filter(|pc| pc.reason == PresentationContextResultReason::Acceptance)
                     .filter_map(|pc| {
-                        let abstract_syntax =
-                            proposed.iter().find(|p| p.id == pc.id)?.abstract_syntax.clone();
+                        let abstract_syntax = proposed
+                            .iter()
+                            .find(|p| p.id == pc.id)?
+                            .abstract_syntax
+                            .clone();
                         Some(PresentationContextNegotiated {
                             id: pc.id,
                             reason: pc.reason,
@@ -222,7 +239,9 @@ impl ClientAssociationOptions {
                 if presentation_contexts.is_empty() {
                     let _ = conn::send_pdu(
                         &mut stream,
-                        &Pdu::AbortRQ { source: AbortRQSource::SERVICE_USER },
+                        &Pdu::AbortRQ {
+                            source: AbortRQSource::SERVICE_USER,
+                        },
                     );
                     return Err(Error::NoAcceptedPresentationContexts);
                 }
@@ -239,7 +258,9 @@ impl ClientAssociationOptions {
             other => {
                 let _ = conn::send_pdu(
                     &mut stream,
-                    &Pdu::AbortRQ { source: AbortRQSource::SERVICE_USER },
+                    &Pdu::AbortRQ {
+                        source: AbortRQSource::SERVICE_USER,
+                    },
                 );
                 Err(Error::UnexpectedPdu(Box::new(other)))
             }
@@ -274,22 +295,24 @@ impl<S: std::io::Read + std::io::Write> ClientAssociation<S> {
         conn::send_pdu(&mut self.stream, pdu)
     }
 
-
     /// The next PDU (P-DATA fragments left over from an earlier message come first). Prefer
     /// [`Self::receive_command`]/[`Self::receive_data_set`] for DIMSE messages: a PDU may hold several messages' PDVs.
     pub fn receive(&mut self) -> Result<Pdu> {
-        self.receiver.receive_pdu(&mut self.stream, self.requestor_max_pdu_length)
+        self.receiver
+            .receive_pdu(&mut self.stream, self.requestor_max_pdu_length)
     }
 
     /// The next complete DIMSE command, or the non-P-DATA PDU (release, abort, ...) that arrived between messages.
     /// Retry after a read timeout: partial PDUs and fragments are kept (see `message.rs`).
     pub fn receive_command(&mut self) -> Result<crate::Incoming> {
-        self.receiver.receive_command(&mut self.stream, self.requestor_max_pdu_length)
+        self.receiver
+            .receive_command(&mut self.stream, self.requestor_max_pdu_length)
     }
 
     /// The complete data set following the command just received. Retry after a read timeout, as above.
     pub fn receive_data_set(&mut self) -> Result<Vec<u8>> {
-        self.receiver.receive_data_set(&mut self.stream, self.requestor_max_pdu_length)
+        self.receiver
+            .receive_data_set(&mut self.stream, self.requestor_max_pdu_length)
     }
 
     pub fn send_pdata(&mut self, presentation_context_id: u8) -> crate::pdata::PDataWriter<&mut S> {
@@ -316,7 +339,9 @@ impl<S: std::io::Read + std::io::Write> ClientAssociation<S> {
 
     /// Abruptly terminate the association: A-ABORT, no reply expected.
     pub fn abort(mut self) -> Result<()> {
-        self.send(&Pdu::AbortRQ { source: AbortRQSource::SERVICE_USER })
+        self.send(&Pdu::AbortRQ {
+            source: AbortRQSource::SERVICE_USER,
+        })
     }
 }
 

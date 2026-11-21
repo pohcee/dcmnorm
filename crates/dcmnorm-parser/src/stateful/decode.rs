@@ -921,7 +921,9 @@ where
             // extension with JIS X 0208, not the default repertoire (pohcee/dcmnorm#24).
             match SpecificCharacterSet::from_codes(parts) {
                 Some(charset) => self.set_character_set(charset)?,
-                None => tracing::warn!("Unsupported character set `{}`, ignoring", parts.join("\\")),
+                None => {
+                    tracing::warn!("Unsupported character set `{}`, ignoring", parts.join("\\"))
+                }
             }
         }
 
@@ -1206,7 +1208,8 @@ where
     where
         Self::Reader: Seek,
     {
-        let offset = <i64 as std::convert::TryFrom<u64>>::try_from(length).map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput));
+        let offset = <i64 as std::convert::TryFrom<u64>>::try_from(length)
+            .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput));
         offset
             .and_then(|offset| self.from.seek(SeekFrom::Current(offset)))
             .context(SeekReaderSnafu {
@@ -1233,7 +1236,11 @@ where
     /// is the output of the Modality transform (PS3.3 C.11.2.1.1), not the stored Pixel
     /// Representation - signed pixels with a Rescale Intercept of 32768 feed a VOI LUT unsigned
     /// input. A written `US` there is correct and is kept (pohcee/dcmnorm#27).
-    fn determine_vr_based_on_pixel_representation(&self, tag: Tag, explicit_vr: bool) -> Option<VR> {
+    fn determine_vr_based_on_pixel_representation(
+        &self,
+        tag: Tag,
+        explicit_vr: bool,
+    ) -> Option<VR> {
         use dcmnorm_core::dictionary::DataDictionary;
 
         if explicit_vr && is_lut_descriptor(tag) {
@@ -1252,8 +1259,7 @@ where
 /// The LUT Descriptor attributes (`US or SS` first value): LUT Descriptor (0028,3002) of the
 /// Modality and VOI LUT sequences and the (Large / Segmented) Palette Color LUT Descriptors.
 fn is_lut_descriptor(tag: Tag) -> bool {
-    tag.group() == 0x0028
-        && matches!(tag.element(), 0x3002 | 0x1101..=0x1104 | 0x1111..=0x1113)
+    tag.group() == 0x0028 && matches!(tag.element(), 0x3002 | 0x1101..=0x1104 | 0x1111..=0x1113)
 }
 
 /// Remove trailing spaces and null characters.
@@ -1762,7 +1768,11 @@ mod tests {
         );
         let header = decoder.decode_header().unwrap();
         assert_eq!(header.tag, Tag(0x0028, 0x0120));
-        assert_eq!(header.vr, VR::SS, "Pixel Padding Value still follows Pixel Representation");
+        assert_eq!(
+            header.vr,
+            VR::SS,
+            "Pixel Padding Value still follows Pixel Representation"
+        );
 
         #[rustfmt::skip]
         const IMPLICIT: &[u8] = &[

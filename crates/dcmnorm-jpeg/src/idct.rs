@@ -444,7 +444,10 @@ pub(crate) fn dequantize_and_idct_block_high_precision(
     let max_value: i32 = (1 << precision) - 1;
     let x_scale: i32 = 65536 + (level_shift << 17);
 
-    for (chunk, output_chunk) in temp.chunks_exact(8).zip(output.chunks_mut(output_linestride)) {
+    for (chunk, output_chunk) in temp
+        .chunks_exact(8)
+        .zip(output.chunks_mut(output_linestride))
+    {
         let chunk = <&[_; 8]>::try_from(chunk).unwrap();
         let output_chunk = &mut output_chunk[..8];
 
@@ -672,7 +675,8 @@ fn dequantize_and_idct_block_1x1(
 ) {
     debug_assert_eq!(coefficients.len(), 64);
 
-    let s0 = (Wrapping(coefficients[0] as i32 * quantization_table[0] as i32) + Wrapping(128 * 8)) / Wrapping(8);
+    let s0 = (Wrapping(coefficients[0] as i32 * quantization_table[0] as i32) + Wrapping(128 * 8))
+        / Wrapping(8);
     output[0] = stbi_clamp(s0);
 }
 
@@ -811,7 +815,12 @@ fn test_dequantize_and_idct_block_high_precision_matches_8bit_path_at_precision_
 
     for i in 0..64 {
         let diff = (i32::from(actual[i]) - i32::from(expected[i])).abs();
-        assert!(diff <= 1, "mismatch at index {i}: {} vs {}", actual[i], expected[i]);
+        assert!(
+            diff <= 1,
+            "mismatch at index {i}: {} vs {}",
+            actual[i],
+            expected[i]
+        );
     }
 }
 

@@ -14,8 +14,8 @@ use super::io::{read_dicom_bytes, read_dicom_file, write_dicom_bytes};
 use super::json::{read_dicom_json_full, write_dicom_json_with_options};
 use super::registration::{mat_inverse, mat_mul, rigid_about, transform_point};
 use super::spatial_registration::{
-    build_spatial_registration, format_ds, read_spatial_registration, validate_spatial_registration, SpatialRegistrationError,
-    SPATIAL_REGISTRATION_SOP_CLASS_UID,
+    build_spatial_registration, format_ds, read_spatial_registration,
+    validate_spatial_registration, SpatialRegistrationError, SPATIAL_REGISTRATION_SOP_CLASS_UID,
 };
 use super::test_support::{remove_stack, write_synthetic_stack, SyntheticStack};
 use super::types::{DicomJsonFormat, DicomJsonKeyStyle, DicomJsonWriteOptions};
@@ -26,7 +26,12 @@ const FIXED_STUDY: &str = "2.25.333333333333333333333333333333333333";
 const MOVING_STUDY: &str = "2.25.444444444444444444444444444444444444";
 
 fn matrix_of(value: &Json) -> [f64; 16] {
-    let values: Vec<f64> = value.as_array().unwrap().iter().map(|v| v.as_f64().unwrap()).collect();
+    let values: Vec<f64> = value
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_f64().unwrap())
+        .collect();
     let mut m = [0.0; 16];
     m.copy_from_slice(&values);
     m
@@ -37,7 +42,13 @@ fn close(a: &[f64; 16], b: &[f64; 16], tolerance: f64) -> bool {
 }
 
 fn rigid() -> [f64; 16] {
-    rigid_about(0.031, -0.052, 0.104, [14.25, -11.5, 32.125], [10.0, 20.0, 0.0])
+    rigid_about(
+        0.031,
+        -0.052,
+        0.104,
+        [14.25, -11.5, 32.125],
+        [10.0, 20.0, 0.0],
+    )
 }
 
 fn spec() -> Json {
@@ -63,21 +74,44 @@ fn spec() -> Json {
 
 #[test]
 fn format_ds_fits_sixteen_characters_and_round_trips_closely() {
-    for v in [0.0, 1.0, -1.0, 0.999_999_999_999_9, 1e-12, -123_456.789_012_345, std::f64::consts::PI, 1.5e20, -0.000_123_456_789_123] {
+    for v in [
+        0.0,
+        1.0,
+        -1.0,
+        0.999_999_999_999_9,
+        1e-12,
+        -123_456.789_012_345,
+        std::f64::consts::PI,
+        1.5e20,
+        -0.000_123_456_789_123,
+    ] {
         let text = format_ds(v);
         assert!(text.len() <= 16, "{v} -> {text:?}");
         let back: f64 = text.parse().unwrap();
-        assert!((back - v).abs() <= 1e-9 * v.abs().max(1.0) || (v.abs() < 1e-10 && back.abs() < 1e-10), "{v} -> {text}");
+        assert!(
+            (back - v).abs() <= 1e-9 * v.abs().max(1.0) || (v.abs() < 1e-10 && back.abs() < 1e-10),
+            "{v} -> {text}"
+        );
     }
 }
 
 #[test]
 fn a_built_registration_is_conformant_and_round_trips_through_dicom_bytes() {
     let mut object = build_spatial_registration(&spec(), None).unwrap();
-    assert!(validate_spatial_registration(&object).is_empty(), "{:?}", validate_spatial_registration(&object));
+    assert!(
+        validate_spatial_registration(&object).is_empty(),
+        "{:?}",
+        validate_spatial_registration(&object)
+    );
     let bytes = write_dicom_bytes(&mut object).unwrap();
     let read_back = read_dicom_bytes(&bytes).unwrap();
-    assert_eq!(read_back.meta().media_storage_sop_class_uid().trim_end_matches('\0'), SPATIAL_REGISTRATION_SOP_CLASS_UID);
+    assert_eq!(
+        read_back
+            .meta()
+            .media_storage_sop_class_uid()
+            .trim_end_matches('\0'),
+        SPATIAL_REGISTRATION_SOP_CLASS_UID
+    );
     let json = read_spatial_registration(&read_back).unwrap();
 
     assert_eq!(json["frameOfReferenceUid"], FIXED_FOR);
@@ -85,7 +119,12 @@ fn a_built_registration_is_conformant_and_round_trips_through_dicom_bytes() {
     assert_eq!(json["patientId"], "SYN-REG-1");
     assert_eq!(json["contentLabel"], "REGISTRATION");
     assert_eq!(json["deformable"], false);
-    assert_eq!(json["warnings"].as_array().unwrap().len(), 0, "{}", json["warnings"]);
+    assert_eq!(
+        json["warnings"].as_array().unwrap().len(),
+        0,
+        "{}",
+        json["warnings"]
+    );
     let registrations = json["registrations"].as_array().unwrap();
     assert_eq!(registrations.len(), 2);
     assert_eq!(registrations[0]["frameOfReferenceUid"], FIXED_FOR);
@@ -94,9 +133,16 @@ fn a_built_registration_is_conformant_and_round_trips_through_dicom_bytes() {
     assert_eq!(registrations[1]["matrixType"], "RIGID");
     assert_eq!(registrations[1]["registrationType"]["codeValue"], "125024");
     assert_eq!(registrations[1]["comment"], "NCC, quality 0.97");
-    assert_eq!(registrations[1]["referencedImages"][0]["sopInstanceUid"], "2.25.6001001");
+    assert_eq!(
+        registrations[1]["referencedImages"][0]["sopInstanceUid"],
+        "2.25.6001001"
+    );
     // DS keeps at most 16 characters per value: the matrix survives to ~1e-9 relative.
-    assert!(close(&matrix_of(&registrations[1]["matrix"]), &rigid(), 1e-8));
+    assert!(close(
+        &matrix_of(&registrations[1]["matrix"]),
+        &rigid(),
+        1e-8
+    ));
     // Common Instance Reference: the fixed series in this study, the moving one in another.
     let series = json["referencedSeries"].as_array().unwrap();
     assert_eq!(series.len(), 2);
@@ -111,12 +157,19 @@ fn the_standard_dicom_json_form_reads_back_to_the_same_registration() {
     let object = build_spatial_registration(&spec(), None).unwrap();
     let dataset = write_dicom_json_with_options(
         &object,
-        DicomJsonWriteOptions { format: DicomJsonFormat::Standard, key_style: DicomJsonKeyStyle::Hex, ..Default::default() },
+        DicomJsonWriteOptions {
+            format: DicomJsonFormat::Standard,
+            key_style: DicomJsonKeyStyle::Hex,
+            ..Default::default()
+        },
     )
     .unwrap();
     let parsed: Json = serde_json::from_str(&dataset).unwrap();
     assert_eq!(parsed["00080016"]["vr"], "UI");
-    assert_eq!(parsed["00080016"]["Value"][0], SPATIAL_REGISTRATION_SOP_CLASS_UID);
+    assert_eq!(
+        parsed["00080016"]["Value"][0],
+        SPATIAL_REGISTRATION_SOP_CLASS_UID
+    );
     assert_eq!(parsed["00700308"]["vr"], "SQ");
     let from_json = read_dicom_json_full(&dataset).unwrap();
     let a = read_spatial_registration(&object).unwrap();
@@ -147,8 +200,16 @@ fn patient_and_study_are_copied_from_a_fixed_instance_and_overrides_win() {
     s.as_object_mut().unwrap().remove("patient");
     s["study"] = json!({ "accessionNumber": "OVERRIDE1" });
     let object = build_spatial_registration(&s, Some(&source)).unwrap();
-    let text = |tag: Tag| object.get(tag).and_then(|e| e.to_str().ok()).map(|v| v.trim().to_owned());
-    assert_eq!(text(tags::PATIENT_NAME).as_deref(), Some("SYNTHETIC^PHANTOM"));
+    let text = |tag: Tag| {
+        object
+            .get(tag)
+            .and_then(|e| e.to_str().ok())
+            .map(|v| v.trim().to_owned())
+    };
+    assert_eq!(
+        text(tags::PATIENT_NAME).as_deref(),
+        Some("SYNTHETIC^PHANTOM")
+    );
     assert_eq!(text(tags::PATIENT_ID).as_deref(), Some("SYN-0001"));
     assert_eq!(text(tags::STUDY_DATE).as_deref(), Some("20260101"));
     assert_eq!(text(tags::ACCESSION_NUMBER).as_deref(), Some("OVERRIDE1"));
@@ -157,26 +218,68 @@ fn patient_and_study_are_copied_from_a_fixed_instance_and_overrides_win() {
     // A file from another study is refused.
     let mut other = spec();
     other["fixed"]["studyInstanceUid"] = json!("2.25.999");
-    assert!(matches!(build_spatial_registration(&other, Some(&source)), Err(SpatialRegistrationError::InvalidSpec(_))));
+    assert!(matches!(
+        build_spatial_registration(&other, Some(&source)),
+        Err(SpatialRegistrationError::InvalidSpec(_))
+    ));
 }
 
 #[test]
 fn invalid_specs_are_rejected() {
     type Mutation = Box<dyn Fn(&mut Json)>;
     let cases: Vec<(&str, Mutation)> = vec![
-        ("same frame", Box::new(|s: &mut Json| s["moving"]["frameOfReferenceUid"] = json!(FIXED_FOR))),
-        ("15 values", Box::new(|s: &mut Json| s["matrix"].as_array_mut().unwrap().pop().map(|_| ()).unwrap())),
-        ("not rigid", Box::new(|s: &mut Json| s["matrix"][0] = json!(1.2))),
-        ("bad bottom row", Box::new(|s: &mut Json| s["matrix"][12] = json!(0.5))),
-        ("bad uid", Box::new(|s: &mut Json| s["fixed"]["seriesInstanceUid"] = json!("1.2.03"))),
-        ("missing moving", Box::new(|s: &mut Json| { s.as_object_mut().unwrap().remove("moving"); })),
-        ("bad label", Box::new(|s: &mut Json| s["contentLabel"] = json!("lower case"))),
-        ("bad type", Box::new(|s: &mut Json| s["registrationType"] = json!("guess"))),
+        (
+            "same frame",
+            Box::new(|s: &mut Json| s["moving"]["frameOfReferenceUid"] = json!(FIXED_FOR)),
+        ),
+        (
+            "15 values",
+            Box::new(|s: &mut Json| {
+                s["matrix"]
+                    .as_array_mut()
+                    .unwrap()
+                    .pop()
+                    .map(|_| ())
+                    .unwrap()
+            }),
+        ),
+        (
+            "not rigid",
+            Box::new(|s: &mut Json| s["matrix"][0] = json!(1.2)),
+        ),
+        (
+            "bad bottom row",
+            Box::new(|s: &mut Json| s["matrix"][12] = json!(0.5)),
+        ),
+        (
+            "bad uid",
+            Box::new(|s: &mut Json| s["fixed"]["seriesInstanceUid"] = json!("1.2.03")),
+        ),
+        (
+            "missing moving",
+            Box::new(|s: &mut Json| {
+                s.as_object_mut().unwrap().remove("moving");
+            }),
+        ),
+        (
+            "bad label",
+            Box::new(|s: &mut Json| s["contentLabel"] = json!("lower case")),
+        ),
+        (
+            "bad type",
+            Box::new(|s: &mut Json| s["registrationType"] = json!("guess")),
+        ),
     ];
     for (name, mutate) in cases {
         let mut s = spec();
         mutate(&mut s);
-        assert!(matches!(build_spatial_registration(&s, None), Err(SpatialRegistrationError::InvalidSpec(_))), "{name} should be rejected");
+        assert!(
+            matches!(
+                build_spatial_registration(&s, None),
+                Err(SpatialRegistrationError::InvalidSpec(_))
+            ),
+            "{name} should be rejected"
+        );
     }
     // A scaled matrix is fine as RIGID_SCALE, and a sheared one as AFFINE.
     let mut scaled = spec();
@@ -200,7 +303,11 @@ fn invalid_specs_are_rejected() {
 #[test]
 fn validation_reports_broken_objects() {
     let mut object = build_spatial_registration(&spec(), None).unwrap();
-    object.put(DataElement::new(tags::MODALITY, VR::CS, PrimitiveValue::from("OT")));
+    object.put(DataElement::new(
+        tags::MODALITY,
+        VR::CS,
+        PrimitiveValue::from("OT"),
+    ));
     object.remove_element(tags::CONTENT_LABEL);
     object.remove_element(tags::MANUFACTURER);
     object.remove_element(tags::STUDIES_CONTAINING_OTHER_REFERENCED_INSTANCES_SEQUENCE);
@@ -209,7 +316,10 @@ fn validation_reports_broken_objects() {
     assert!(joined.contains("requires REG"), "{joined}");
     assert!(joined.contains("ContentLabel"), "{joined}");
     assert!(joined.contains("Manufacturer"), "{joined}");
-    assert!(joined.contains("not listed in the Common Instance Reference"), "{joined}");
+    assert!(
+        joined.contains("not listed in the Common Instance Reference"),
+        "{joined}"
+    );
     // read still works and reports them.
     let json = read_spatial_registration(&object).unwrap();
     assert!(json["warnings"].as_array().unwrap().len() >= 4);
@@ -217,8 +327,14 @@ fn validation_reports_broken_objects() {
 
 #[test]
 fn a_non_registration_is_refused() {
-    let object = read_dicom_file(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test/files/ct.dcm")).unwrap();
-    assert!(matches!(read_spatial_registration(&object), Err(SpatialRegistrationError::NotARegistration(_))));
+    let object = read_dicom_file(
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test/files/ct.dcm"),
+    )
+    .unwrap();
+    assert!(matches!(
+        read_spatial_registration(&object),
+        Err(SpatialRegistrationError::NotARegistration(_))
+    ));
 }
 
 fn sq(tag: Tag, items: Vec<InMemDicomObject>) -> DataElement<InMemDicomObject> {
@@ -235,7 +351,10 @@ fn item(elements: Vec<DataElement<InMemDicomObject>>) -> InMemDicomObject {
 
 fn ds_text(m: &[f64; 16]) -> String {
     // Vendors write DS in all sorts of ways: exponent form, padding, plus signs.
-    m.iter().map(|v| format!("{v:+.7e}")).collect::<Vec<_>>().join("\\")
+    m.iter()
+        .map(|v| format!("{v:+.7e}"))
+        .collect::<Vec<_>>()
+        .join("\\")
 }
 
 /// A REG the way third-party systems write them: Implicit VR Little Endian, the moving frame's
@@ -256,10 +375,27 @@ fn a_third_party_shaped_registration_is_read_correctly() {
         .build()
         .unwrap();
     let mut object = DefaultDicomObject::new_empty_with_meta(meta);
-    let matrix_item = |m: &[f64; 16], kind: &str| item(vec![st(tags::FRAME_OF_REFERENCE_TRANSFORMATION_MATRIX, VR::DS, &ds_text(m)), st(tags::FRAME_OF_REFERENCE_TRANSFORMATION_MATRIX_TYPE, VR::CS, kind)]);
+    let matrix_item = |m: &[f64; 16], kind: &str| {
+        item(vec![
+            st(
+                tags::FRAME_OF_REFERENCE_TRANSFORMATION_MATRIX,
+                VR::DS,
+                &ds_text(m),
+            ),
+            st(
+                tags::FRAME_OF_REFERENCE_TRANSFORMATION_MATRIX_TYPE,
+                VR::CS,
+                kind,
+            ),
+        ])
+    };
     let identity = rigid_about(0.0, 0.0, 0.0, [0.0; 3], [0.0; 3]);
     for element in [
-        st(tags::SOP_CLASS_UID, VR::UI, SPATIAL_REGISTRATION_SOP_CLASS_UID),
+        st(
+            tags::SOP_CLASS_UID,
+            VR::UI,
+            SPATIAL_REGISTRATION_SOP_CLASS_UID,
+        ),
         st(tags::SOP_INSTANCE_UID, VR::UI, "2.25.7777"),
         st(tags::STUDY_INSTANCE_UID, VR::UI, FIXED_STUDY),
         st(tags::SERIES_INSTANCE_UID, VR::UI, "2.25.7778"),
@@ -282,19 +418,60 @@ fn a_third_party_shaped_registration_is_read_correctly() {
                 sq(
                     tags::MATRIX_REGISTRATION_SEQUENCE,
                     vec![item(vec![
-                        sq(tags::REGISTRATION_TYPE_CODE_SEQUENCE, vec![item(vec![st(tags::CODE_VALUE, VR::SH, "125022"), st(tags::CODING_SCHEME_DESIGNATOR, VR::SH, "DCM"), st(tags::CODE_MEANING, VR::LO, "Fiducial Alignment")])]),
-                        sq(tags::MATRIX_SEQUENCE, vec![matrix_item(&table_correction, "RIGID"), matrix_item(&registration, "RIGID_SCALE")]),
+                        sq(
+                            tags::REGISTRATION_TYPE_CODE_SEQUENCE,
+                            vec![item(vec![
+                                st(tags::CODE_VALUE, VR::SH, "125022"),
+                                st(tags::CODING_SCHEME_DESIGNATOR, VR::SH, "DCM"),
+                                st(tags::CODE_MEANING, VR::LO, "Fiducial Alignment"),
+                            ])],
+                        ),
+                        sq(
+                            tags::MATRIX_SEQUENCE,
+                            vec![
+                                matrix_item(&table_correction, "RIGID"),
+                                matrix_item(&registration, "RIGID_SCALE"),
+                            ],
+                        ),
                     ])],
                 ),
-                sq(tags::USED_FIDUCIALS_SEQUENCE, vec![item(vec![st(tags::FIDUCIAL_UID, VR::UI, "2.25.8888")])]),
+                sq(
+                    tags::USED_FIDUCIALS_SEQUENCE,
+                    vec![item(vec![st(tags::FIDUCIAL_UID, VR::UI, "2.25.8888")])],
+                ),
             ]),
             item(vec![
                 st(tags::FRAME_OF_REFERENCE_UID, VR::UI, FIXED_FOR),
-                sq(tags::MATRIX_REGISTRATION_SEQUENCE, vec![item(vec![sq(tags::REGISTRATION_TYPE_CODE_SEQUENCE, vec![]), sq(tags::MATRIX_SEQUENCE, vec![matrix_item(&identity, "RIGID")])])]),
+                sq(
+                    tags::MATRIX_REGISTRATION_SEQUENCE,
+                    vec![item(vec![
+                        sq(tags::REGISTRATION_TYPE_CODE_SEQUENCE, vec![]),
+                        sq(tags::MATRIX_SEQUENCE, vec![matrix_item(&identity, "RIGID")]),
+                    ])],
+                ),
             ]),
             item(vec![
-                sq(tags::REFERENCED_IMAGE_SEQUENCE, vec![item(vec![st(tags::REFERENCED_SOP_CLASS_UID, VR::UI, uids::MR_IMAGE_STORAGE), st(tags::REFERENCED_SOP_INSTANCE_UID, VR::UI, "2.25.9001")])]),
-                sq(tags::MATRIX_REGISTRATION_SEQUENCE, vec![item(vec![sq(tags::REGISTRATION_TYPE_CODE_SEQUENCE, vec![]), sq(tags::MATRIX_SEQUENCE, vec![matrix_item(&table_correction, "RIGID")])])]),
+                sq(
+                    tags::REFERENCED_IMAGE_SEQUENCE,
+                    vec![item(vec![
+                        st(
+                            tags::REFERENCED_SOP_CLASS_UID,
+                            VR::UI,
+                            uids::MR_IMAGE_STORAGE,
+                        ),
+                        st(tags::REFERENCED_SOP_INSTANCE_UID, VR::UI, "2.25.9001"),
+                    ])],
+                ),
+                sq(
+                    tags::MATRIX_REGISTRATION_SEQUENCE,
+                    vec![item(vec![
+                        sq(tags::REGISTRATION_TYPE_CODE_SEQUENCE, vec![]),
+                        sq(
+                            tags::MATRIX_SEQUENCE,
+                            vec![matrix_item(&table_correction, "RIGID")],
+                        ),
+                    ])],
+                ),
             ]),
         ],
     ));
@@ -311,19 +488,42 @@ fn a_third_party_shaped_registration_is_read_correctly() {
     assert_eq!(registrations[0]["registrationType"]["codeValue"], "125022");
     // Applied in order: the table correction first, then the registration.
     let expected = mat_mul(&registration, &table_correction);
-    assert!(close(&matrix_of(&registrations[0]["matrix"]), &expected, 1e-5));
+    assert!(close(
+        &matrix_of(&registrations[0]["matrix"]),
+        &expected,
+        1e-5
+    ));
     let p = [12.0, -30.0, 44.0];
     let mapped = transform_point(&matrix_of(&registrations[0]["matrix"]), p);
     let by_hand = transform_point(&registration, transform_point(&table_correction, p));
     assert!((0..3).all(|a| (mapped[a] - by_hand[a]).abs() < 1e-4));
     assert_eq!(registrations[1]["isIdentity"], true);
     assert!(registrations[2]["frameOfReferenceUid"].is_null());
-    assert_eq!(registrations[2]["referencedImages"][0]["sopInstanceUid"], "2.25.9001");
+    assert_eq!(
+        registrations[2]["referencedImages"][0]["sopInstanceUid"],
+        "2.25.9001"
+    );
     // This sample leaves out Type 2 attributes and the Common Instance Reference: reported, not fatal.
-    let warnings: Vec<String> = json["warnings"].as_array().unwrap().iter().map(|w| w.as_str().unwrap().to_owned()).collect();
-    assert!(warnings.iter().any(|w| w.contains("Manufacturer")), "{warnings:?}");
-    assert!(warnings.iter().any(|w| w.contains("Common Instance Reference")), "{warnings:?}");
-    assert!(!warnings.iter().any(|w| w.contains("RIGID_SCALE matrix")), "{warnings:?}");
+    let warnings: Vec<String> = json["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|w| w.as_str().unwrap().to_owned())
+        .collect();
+    assert!(
+        warnings.iter().any(|w| w.contains("Manufacturer")),
+        "{warnings:?}"
+    );
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.contains("Common Instance Reference")),
+        "{warnings:?}"
+    );
+    assert!(
+        !warnings.iter().any(|w| w.contains("RIGID_SCALE matrix")),
+        "{warnings:?}"
+    );
 }
 
 #[test]
@@ -336,7 +536,11 @@ fn a_deformable_registration_yields_its_rigid_parts() {
         .build()
         .unwrap();
     let mut object = DefaultDicomObject::new_empty_with_meta(meta);
-    object.put(st(tags::SOP_CLASS_UID, VR::UI, uids::DEFORMABLE_SPATIAL_REGISTRATION_STORAGE));
+    object.put(st(
+        tags::SOP_CLASS_UID,
+        VR::UI,
+        uids::DEFORMABLE_SPATIAL_REGISTRATION_STORAGE,
+    ));
     object.put(st(tags::SOP_INSTANCE_UID, VR::UI, "2.25.4242"));
     object.put(st(tags::FRAME_OF_REFERENCE_UID, VR::UI, FIXED_FOR));
     object.put(sq(
@@ -345,9 +549,23 @@ fn a_deformable_registration_yields_its_rigid_parts() {
             st(tags::SOURCE_FRAME_OF_REFERENCE_UID, VR::UI, MOVING_FOR),
             sq(
                 tags::PRE_DEFORMATION_MATRIX_REGISTRATION_SEQUENCE,
-                vec![item(vec![st(tags::FRAME_OF_REFERENCE_TRANSFORMATION_MATRIX, VR::DS, &ds_text(&pre)), st(tags::FRAME_OF_REFERENCE_TRANSFORMATION_MATRIX_TYPE, VR::CS, "RIGID")])],
+                vec![item(vec![
+                    st(
+                        tags::FRAME_OF_REFERENCE_TRANSFORMATION_MATRIX,
+                        VR::DS,
+                        &ds_text(&pre),
+                    ),
+                    st(
+                        tags::FRAME_OF_REFERENCE_TRANSFORMATION_MATRIX_TYPE,
+                        VR::CS,
+                        "RIGID",
+                    ),
+                ])],
             ),
-            sq(tags::DEFORMABLE_REGISTRATION_GRID_SEQUENCE, vec![item(vec![])]),
+            sq(
+                tags::DEFORMABLE_REGISTRATION_GRID_SEQUENCE,
+                vec![item(vec![])],
+            ),
         ])],
     ));
     let json = read_spatial_registration(&object).unwrap();
@@ -369,10 +587,17 @@ fn a_registration_result_written_as_reg_maps_points_identically() {
     let read_back = read_dicom_bytes(write_dicom_bytes(&mut object).unwrap()).unwrap();
     let json = read_spatial_registration(&read_back).unwrap();
     let stored = matrix_of(&json["registrations"][1]["matrix"]);
-    for p in [[0.0, 0.0, 0.0], [150.0, -120.0, 300.0], [-200.0, 90.0, -400.0]] {
+    for p in [
+        [0.0, 0.0, 0.0],
+        [150.0, -120.0, 300.0],
+        [-200.0, 90.0, -400.0],
+    ] {
         let a = transform_point(&result_matrix, p);
         let b = transform_point(&stored, p);
-        assert!((0..3).all(|axis| (a[axis] - b[axis]).abs() < 1e-5), "{a:?} vs {b:?}");
+        assert!(
+            (0..3).all(|axis| (a[axis] - b[axis]).abs() < 1e-5),
+            "{a:?} vs {b:?}"
+        );
     }
     assert!(mat_inverse(&stored).is_some());
 }

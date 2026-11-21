@@ -55,7 +55,8 @@ struct RawInfo {
     is_signed: u8,
 }
 
-type DecodeFn = unsafe extern "C" fn(*const u8, usize, u32, *mut RawImage, *mut *mut c_char) -> c_int;
+type DecodeFn =
+    unsafe extern "C" fn(*const u8, usize, u32, *mut RawImage, *mut *mut c_char) -> c_int;
 type DecodeIntoFn = unsafe extern "C" fn(
     *const u8,
     usize,
@@ -227,7 +228,9 @@ fn take_error(error_message: *mut c_char, free_buffer: FreeBufferFn) -> String {
     if error_message.is_null() {
         return "OpenHTJ2K failed without an error message".to_owned();
     }
-    let message = unsafe { CStr::from_ptr(error_message) }.to_string_lossy().into_owned();
+    let message = unsafe { CStr::from_ptr(error_message) }
+        .to_string_lossy()
+        .into_owned();
     unsafe { free_buffer(error_message.cast()) };
     message
 }
@@ -237,7 +240,9 @@ pub fn decode(codestream: &[u8]) -> Result<DecodedImage, String> {
     let variant = variant();
     let mut raw = RawImage::empty();
     let mut error: *mut c_char = std::ptr::null_mut();
-    let _guard = CODEC_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _guard = CODEC_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let status = unsafe {
         (variant.decode)(
             codestream.as_ptr(),
@@ -265,7 +270,13 @@ pub fn decode(codestream: &[u8]) -> Result<DecodedImage, String> {
         };
         let len = width as usize * height as usize;
         let data = unsafe { std::slice::from_raw_parts(plane, len) }.to_vec();
-        components.push(DecodedComponent { width, height, precision, signed, data });
+        components.push(DecodedComponent {
+            width,
+            height,
+            precision,
+            signed,
+            data,
+        });
     }
     unsafe { (variant.free_image)(&mut raw) };
     Ok(DecodedImage { components })
@@ -277,7 +288,12 @@ pub enum DecodeIntoError {
     /// The codestream's layout differs from the expected one (component count, dimensions,
     /// per-component size/depth, or a depth too wide for the sample size). Nothing was decoded;
     /// use [`decode`] instead.
-    LayoutMismatch { components: u16, width: u32, height: u32, depth: u8 },
+    LayoutMismatch {
+        components: u16,
+        width: u32,
+        height: u32,
+        depth: u8,
+    },
     /// The codestream couldn't be decoded.
     Failed(String),
 }
@@ -296,7 +312,9 @@ pub fn decode_into(
     let variant = variant();
     let mut info = RawInfo::default();
     let mut error: *mut c_char = std::ptr::null_mut();
-    let _guard = CODEC_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _guard = CODEC_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let status = unsafe {
         (variant.decode_into)(
             codestream.as_ptr(),
@@ -320,7 +338,10 @@ pub fn decode_into(
             height: info.height,
             depth: info.depth,
         }),
-        _ => Err(DecodeIntoError::Failed(take_error(error, variant.free_buffer))),
+        _ => Err(DecodeIntoError::Failed(take_error(
+            error,
+            variant.free_buffer,
+        ))),
     }
 }
 
@@ -346,7 +367,10 @@ pub fn encode_lossless(
         return Err(format!("unsupported component count {}", planes.len()));
     }
     if let Some(bad) = planes.iter().find(|plane| plane.len() != expected) {
-        return Err(format!("plane has {} samples, expected {expected}", bad.len()));
+        return Err(format!(
+            "plane has {} samples, expected {expected}",
+            bad.len()
+        ));
     }
 
     let variant = variant();
@@ -354,7 +378,9 @@ pub fn encode_lossless(
     let mut data: *mut u8 = std::ptr::null_mut();
     let mut len = 0usize;
     let mut error: *mut c_char = std::ptr::null_mut();
-    let _guard = CODEC_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _guard = CODEC_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let status = unsafe {
         (variant.encode)(
             pointers.as_ptr(),
@@ -406,12 +432,14 @@ mod tests {
             (64, 48, 8, false, 3),
             (1, 1, 8, false, 1),
         ] {
-            let planes: Vec<Vec<i32>> = (0..components).map(|c| {
-                let mut p = pattern(width, height, bits, signed);
-                let n = p.len();
-                p.rotate_left(c * 7 % n);
-                p
-            }).collect();
+            let planes: Vec<Vec<i32>> = (0..components)
+                .map(|c| {
+                    let mut p = pattern(width, height, bits, signed);
+                    let n = p.len();
+                    p.rotate_left(c * 7 % n);
+                    p
+                })
+                .collect();
             let refs: Vec<&[i32]> = planes.iter().map(Vec::as_slice).collect();
             for progression in [Progression::Lrcp, Progression::Rpcl] {
                 let encoded = encode_lossless(&refs, width, height, bits, signed, progression)
@@ -422,7 +450,10 @@ mod tests {
                     assert_eq!((component.width, component.height), (width, height));
                     assert_eq!(component.precision, bits);
                     assert_eq!(component.signed, signed);
-                    assert_eq!(component.data, planes[c], "{width}x{height} {bits}-bit c{c}");
+                    assert_eq!(
+                        component.data, planes[c],
+                        "{width}x{height} {bits}-bit c{c}"
+                    );
                 }
             }
         }
@@ -430,16 +461,35 @@ mod tests {
 
     #[test]
     fn decode_into_matches_plane_decode_and_rejects_mismatches() {
-        for &(bits, signed, components) in &[(12u8, false, 1usize), (16, true, 1), (8, false, 3), (8, true, 1)] {
+        for &(bits, signed, components) in &[
+            (12u8, false, 1usize),
+            (16, true, 1),
+            (8, false, 3),
+            (8, true, 1),
+        ] {
             let (width, height) = (97u32, 61u32);
             let planes: Vec<Vec<i32>> = (0..components)
-                .map(|c| pattern(width, height, bits, signed).into_iter().map(|v| v ^ c as i32).collect())
+                .map(|c| {
+                    pattern(width, height, bits, signed)
+                        .into_iter()
+                        .map(|v| v ^ c as i32)
+                        .collect()
+                })
                 .collect();
             let refs: Vec<&[i32]> = planes.iter().map(Vec::as_slice).collect();
-            let encoded = encode_lossless(&refs, width, height, bits, signed, Progression::Lrcp).unwrap();
+            let encoded =
+                encode_lossless(&refs, width, height, bits, signed, Progression::Lrcp).unwrap();
             let bps = if bits > 8 { 2usize } else { 1 };
             let mut out = vec![0u8; width as usize * height as usize * components * bps];
-            decode_into(&encoded, &mut out, bps as u32, components as u16, width, height).unwrap();
+            decode_into(
+                &encoded,
+                &mut out,
+                bps as u32,
+                components as u16,
+                width,
+                height,
+            )
+            .unwrap();
             let mut expected = Vec::with_capacity(out.len());
             for i in 0..(width * height) as usize {
                 for plane in &planes {
@@ -448,10 +498,23 @@ mod tests {
             }
             assert_eq!(out, expected, "{bits}-bit signed={signed} x{components}");
 
-            let mismatch = decode_into(&encoded, &mut out, bps as u32, components as u16, width + 1, height);
-            assert!(matches!(mismatch, Err(DecodeIntoError::LayoutMismatch { width: 97, .. })));
+            let mismatch = decode_into(
+                &encoded,
+                &mut out,
+                bps as u32,
+                components as u16,
+                width + 1,
+                height,
+            );
+            assert!(matches!(
+                mismatch,
+                Err(DecodeIntoError::LayoutMismatch { width: 97, .. })
+            ));
         }
-        assert!(matches!(decode_into(&[1, 2, 3], &mut [0u8; 4], 1, 1, 2, 2), Err(DecodeIntoError::Failed(_))));
+        assert!(matches!(
+            decode_into(&[1, 2, 3], &mut [0u8; 4], 1, 1, 2, 2),
+            Err(DecodeIntoError::Failed(_))
+        ));
     }
 
     #[test]
@@ -472,7 +535,8 @@ mod tests {
                         let decoded = decode(&encoded).unwrap();
                         assert_eq!(decoded.components[0].data, plane);
                         let again =
-                            encode_lossless(&[&plane], 1024, 768, 12, false, Progression::Rpcl).unwrap();
+                            encode_lossless(&[&plane], 1024, 768, 12, false, Progression::Rpcl)
+                                .unwrap();
                         assert_eq!(decode(&again).unwrap().components[0].data, plane);
                     }
                 });

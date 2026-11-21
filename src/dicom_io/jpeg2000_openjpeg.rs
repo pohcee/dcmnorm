@@ -35,7 +35,10 @@ mod imp {
         num_bytes
     }
 
-    unsafe extern "C" fn skip_fn(num_bytes: sys::OPJ_OFF_T, user_data: *mut c_void) -> sys::OPJ_OFF_T {
+    unsafe extern "C" fn skip_fn(
+        num_bytes: sys::OPJ_OFF_T,
+        user_data: *mut c_void,
+    ) -> sys::OPJ_OFF_T {
         let target = unsafe { &mut *(user_data as *mut MemoryTarget) };
         if num_bytes < 0 {
             return -1;
@@ -48,7 +51,10 @@ mod imp {
         num_bytes
     }
 
-    unsafe extern "C" fn seek_fn(num_bytes: sys::OPJ_OFF_T, user_data: *mut c_void) -> sys::OPJ_BOOL {
+    unsafe extern "C" fn seek_fn(
+        num_bytes: sys::OPJ_OFF_T,
+        user_data: *mut c_void,
+    ) -> sys::OPJ_BOOL {
         let target = unsafe { &mut *(user_data as *mut MemoryTarget) };
         if num_bytes < 0 {
             return 0;
@@ -152,7 +158,11 @@ mod imp {
         };
 
         let image = unsafe {
-            sys::opj_image_create(samples_per_pixel, comp_params.as_ptr() as *mut _, color_space)
+            sys::opj_image_create(
+                samples_per_pixel,
+                comp_params.as_ptr() as *mut _,
+                color_space,
+            )
         };
         if image.is_null() {
             return Err("opj_image_create failed".to_owned());
@@ -165,7 +175,8 @@ mod imp {
             (*image.0).x1 = cols;
             (*image.0).y1 = rows;
 
-            let comps = std::slice::from_raw_parts_mut((*image.0).comps, samples_per_pixel as usize);
+            let comps =
+                std::slice::from_raw_parts_mut((*image.0).comps, samples_per_pixel as usize);
             for (c, comp) in comps.iter_mut().enumerate() {
                 let data = std::slice::from_raw_parts_mut(comp.data, (rows * cols) as usize);
                 for (i, sample) in data.iter_mut().enumerate() {
@@ -235,7 +246,10 @@ mod imp {
         }
         let stream = Stream(stream);
 
-        let mut target = Box::new(MemoryTarget { buffer: Vec::new(), pos: 0 });
+        let mut target = Box::new(MemoryTarget {
+            buffer: Vec::new(),
+            pos: 0,
+        });
         unsafe {
             sys::opj_stream_set_write_function(stream.0, Some(write_fn));
             sys::opj_stream_set_skip_function(stream.0, Some(skip_fn));
@@ -253,7 +267,10 @@ mod imp {
                 && sys::opj_end_compress(codec.0, stream.0) != 0
         };
         if !ok {
-            return Err(format!("OpenJPEG JPEG2000 encode failed: {}", errors.join("; ")));
+            return Err(format!(
+                "OpenJPEG JPEG2000 encode failed: {}",
+                errors.join("; ")
+            ));
         }
 
         Ok(target.buffer)
@@ -311,24 +328,66 @@ mod tests {
     }
 
     fn decode_via_full_pipeline(ts_uid: &str, codestream: Vec<u8>, bits_stored: u16) -> Vec<u8> {
-        let meta = FileMetaTableBuilder::new().transfer_syntax(ts_uid).build().unwrap();
+        let meta = FileMetaTableBuilder::new()
+            .transfer_syntax(ts_uid)
+            .build()
+            .unwrap();
         let mut object = DefaultDicomObject::new_empty_with_meta(meta);
         for element in [
-            DataElement::new(dcmnorm_dictionary::tags::ROWS, VR::US, PrimitiveValue::from(HEIGHT as u16)),
-            DataElement::new(dcmnorm_dictionary::tags::COLUMNS, VR::US, PrimitiveValue::from(WIDTH as u16)),
-            DataElement::new(dcmnorm_dictionary::tags::SAMPLES_PER_PIXEL, VR::US, PrimitiveValue::from(1u16)),
-            DataElement::new(dcmnorm_dictionary::tags::BITS_ALLOCATED, VR::US, PrimitiveValue::from(if bits_stored > 8 { 16u16 } else { 8u16 })),
-            DataElement::new(dcmnorm_dictionary::tags::BITS_STORED, VR::US, PrimitiveValue::from(bits_stored)),
-            DataElement::new(dcmnorm_dictionary::tags::HIGH_BIT, VR::US, PrimitiveValue::from(bits_stored - 1)),
-            DataElement::new(dcmnorm_dictionary::tags::PIXEL_REPRESENTATION, VR::US, PrimitiveValue::from(0u16)),
-            DataElement::new(dcmnorm_dictionary::tags::PHOTOMETRIC_INTERPRETATION, VR::CS, PrimitiveValue::from("MONOCHROME2".to_owned())),
-            DataElement::new(dcmnorm_dictionary::tags::PIXEL_DATA, VR::OB, PixelFragmentSequence::new(vec![0], vec![codestream])),
+            DataElement::new(
+                dcmnorm_dictionary::tags::ROWS,
+                VR::US,
+                PrimitiveValue::from(HEIGHT as u16),
+            ),
+            DataElement::new(
+                dcmnorm_dictionary::tags::COLUMNS,
+                VR::US,
+                PrimitiveValue::from(WIDTH as u16),
+            ),
+            DataElement::new(
+                dcmnorm_dictionary::tags::SAMPLES_PER_PIXEL,
+                VR::US,
+                PrimitiveValue::from(1u16),
+            ),
+            DataElement::new(
+                dcmnorm_dictionary::tags::BITS_ALLOCATED,
+                VR::US,
+                PrimitiveValue::from(if bits_stored > 8 { 16u16 } else { 8u16 }),
+            ),
+            DataElement::new(
+                dcmnorm_dictionary::tags::BITS_STORED,
+                VR::US,
+                PrimitiveValue::from(bits_stored),
+            ),
+            DataElement::new(
+                dcmnorm_dictionary::tags::HIGH_BIT,
+                VR::US,
+                PrimitiveValue::from(bits_stored - 1),
+            ),
+            DataElement::new(
+                dcmnorm_dictionary::tags::PIXEL_REPRESENTATION,
+                VR::US,
+                PrimitiveValue::from(0u16),
+            ),
+            DataElement::new(
+                dcmnorm_dictionary::tags::PHOTOMETRIC_INTERPRETATION,
+                VR::CS,
+                PrimitiveValue::from("MONOCHROME2".to_owned()),
+            ),
+            DataElement::new(
+                dcmnorm_dictionary::tags::PIXEL_DATA,
+                VR::OB,
+                PixelFragmentSequence::new(vec![0], vec![codestream]),
+            ),
         ] {
             object.put(element);
         }
 
-        let transcoded = super::super::transcode_dcmnorm_object(&object, dcmnorm_dictionary::uids::EXPLICIT_VR_LITTLE_ENDIAN)
-            .expect("decode of our own encoded codestream should succeed");
+        let transcoded = super::super::transcode_dcmnorm_object(
+            &object,
+            dcmnorm_dictionary::uids::EXPLICIT_VR_LITTLE_ENDIAN,
+        )
+        .expect("decode of our own encoded codestream should succeed");
         transcoded
             .element(dcmnorm_dictionary::tags::PIXEL_DATA)
             .unwrap()
@@ -344,8 +403,9 @@ mod tests {
     #[test]
     fn lossless_8bit_encode_round_trips_exactly_via_full_decode_pipeline() {
         let original = pattern_8bit();
-        let codestream = encode_jpeg2000_with_openjpeg(&original, HEIGHT, WIDTH, 1, 8, false, true, 1.0)
-            .expect("lossless encode should succeed");
+        let codestream =
+            encode_jpeg2000_with_openjpeg(&original, HEIGHT, WIDTH, 1, 8, false, true, 1.0)
+                .expect("lossless encode should succeed");
         let decoded = decode_via_full_pipeline("1.2.840.10008.1.2.4.90", codestream, 8);
         assert_eq!(decoded, original);
     }
@@ -353,8 +413,9 @@ mod tests {
     #[test]
     fn lossless_16bit_encode_round_trips_exactly_via_full_decode_pipeline() {
         let original = pattern_16bit();
-        let codestream = encode_jpeg2000_with_openjpeg(&original, HEIGHT, WIDTH, 1, 12, false, true, 1.0)
-            .expect("lossless encode should succeed");
+        let codestream =
+            encode_jpeg2000_with_openjpeg(&original, HEIGHT, WIDTH, 1, 12, false, true, 1.0)
+                .expect("lossless encode should succeed");
         let decoded = decode_via_full_pipeline("1.2.840.10008.1.2.4.90", codestream, 12);
         assert_eq!(decoded, original);
     }
@@ -365,10 +426,12 @@ mod tests {
     #[test]
     fn lossy_encode_is_smaller_and_not_byte_identical() {
         let original = pattern_8bit();
-        let lossless = encode_jpeg2000_with_openjpeg(&original, HEIGHT, WIDTH, 1, 8, false, true, 1.0)
-            .expect("lossless encode should succeed");
-        let lossy = encode_jpeg2000_with_openjpeg(&original, HEIGHT, WIDTH, 1, 8, false, false, 8.0)
-            .expect("lossy encode should succeed");
+        let lossless =
+            encode_jpeg2000_with_openjpeg(&original, HEIGHT, WIDTH, 1, 8, false, true, 1.0)
+                .expect("lossless encode should succeed");
+        let lossy =
+            encode_jpeg2000_with_openjpeg(&original, HEIGHT, WIDTH, 1, 8, false, false, 8.0)
+                .expect("lossy encode should succeed");
 
         assert!(
             lossy.len() < lossless.len(),
@@ -379,12 +442,16 @@ mod tests {
 
         let decoded = decode_via_full_pipeline("1.2.840.10008.1.2.4.91", lossy, 8);
         assert_eq!(decoded.len(), original.len());
-        assert_ne!(decoded, original, "lossy output should not be byte-identical to the source");
+        assert_ne!(
+            decoded, original,
+            "lossy output should not be byte-identical to the source"
+        );
     }
 
     #[test]
     fn rejects_pixel_data_length_mismatch() {
-        let result = encode_jpeg2000_with_openjpeg(&[0u8; 4], HEIGHT, WIDTH, 1, 8, false, true, 1.0);
+        let result =
+            encode_jpeg2000_with_openjpeg(&[0u8; 4], HEIGHT, WIDTH, 1, 8, false, true, 1.0);
         assert!(result.is_err(), "expected an error, got {result:?}");
     }
 }

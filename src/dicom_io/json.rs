@@ -182,7 +182,10 @@ pub fn dicom_file_to_json(
     if let Ok(Some((object, deferred))) = super::io::read_dicom_file_deferring_bulk_data(path) {
         return Ok(write_dicom_json_with_options(
             &object,
-            DicomJsonWriteOptions { deferred_bulk_data: Some(&deferred), ..options },
+            DicomJsonWriteOptions {
+                deferred_bulk_data: Some(&deferred),
+                ..options
+            },
         )?);
     }
 

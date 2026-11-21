@@ -59,7 +59,10 @@ pub mod jpeg_xl_impl {
         // two's-complement signed values, so rather than guess one, only unsigned pixel data is
         // supported here.
         if pixel_representation != 0 {
-            return Err("JPEG XL decoding only supports unsigned (PixelRepresentation 0) pixel data".to_owned());
+            return Err(
+                "JPEG XL decoding only supports unsigned (PixelRepresentation 0) pixel data"
+                    .to_owned(),
+            );
         }
 
         if bits_allocated != 8 && bits_allocated != 16 {
@@ -151,7 +154,9 @@ pub mod jpeg_xl_impl {
 /// is rejected (as on decode). Photometric Interpretation is kept: the encoder's colour transform
 /// (YCoCg-R) is reversible. zune-jpegxl needs at least 2 rows and 2 columns.
 #[cfg(feature = "jpeg-xl-codec")]
-pub fn encode_jpeg_xl_lossless_pixel_data(object: &DefaultDicomObject) -> Result<Vec<Vec<u8>>, String> {
+pub fn encode_jpeg_xl_lossless_pixel_data(
+    object: &DefaultDicomObject,
+) -> Result<Vec<Vec<u8>>, String> {
     use zune_core::bit_depth::BitDepth;
     use zune_core::colorspace::ColorSpace;
     use zune_core::options::EncoderOptions;
@@ -165,12 +170,25 @@ pub fn encode_jpeg_xl_lossless_pixel_data(object: &DefaultDicomObject) -> Result
     };
     let rows = uint(tags::ROWS, "Rows")?;
     let cols = uint(tags::COLUMNS, "Columns")?;
-    let samples_per_pixel = object.get(tags::SAMPLES_PER_PIXEL).and_then(|e| e.uint16().ok()).unwrap_or(1);
+    let samples_per_pixel = object
+        .get(tags::SAMPLES_PER_PIXEL)
+        .and_then(|e| e.uint16().ok())
+        .unwrap_or(1);
     let bits_allocated = uint(tags::BITS_ALLOCATED, "BitsAllocated")?;
-    let bits_stored = object.get(tags::BITS_STORED).and_then(|e| e.uint16().ok()).unwrap_or(bits_allocated);
-    let signed = object.get(tags::PIXEL_REPRESENTATION).and_then(|e| e.uint16().ok()).unwrap_or(0) != 0;
+    let bits_stored = object
+        .get(tags::BITS_STORED)
+        .and_then(|e| e.uint16().ok())
+        .unwrap_or(bits_allocated);
+    let signed = object
+        .get(tags::PIXEL_REPRESENTATION)
+        .and_then(|e| e.uint16().ok())
+        .unwrap_or(0)
+        != 0;
     let planar = samples_per_pixel > 1
-        && object.get(tags::PLANAR_CONFIGURATION).and_then(|e| e.uint16().ok()) == Some(1);
+        && object
+            .get(tags::PLANAR_CONFIGURATION)
+            .and_then(|e| e.uint16().ok())
+            == Some(1);
     let frames = object
         .get(tags::NUMBER_OF_FRAMES)
         .and_then(|e| e.to_str().ok())
@@ -179,23 +197,37 @@ pub fn encode_jpeg_xl_lossless_pixel_data(object: &DefaultDicomObject) -> Result
         .max(1);
 
     if signed {
-        return Err("JPEG XL encoding only supports unsigned (PixelRepresentation 0) pixel data".to_owned());
+        return Err(
+            "JPEG XL encoding only supports unsigned (PixelRepresentation 0) pixel data".to_owned(),
+        );
     }
     let (depth, bytes_per_sample) = match bits_allocated {
         8 => (BitDepth::Eight, 1usize),
         16 => (BitDepth::Sixteen, 2usize),
-        other => return Err(format!("unsupported BitsAllocated for JPEG XL encoding: {other}")),
+        other => {
+            return Err(format!(
+                "unsupported BitsAllocated for JPEG XL encoding: {other}"
+            ))
+        }
     };
     if bits_stored == 0 || bits_stored > bits_allocated {
-        return Err(format!("invalid BitsStored ({bits_stored}) for BitsAllocated ({bits_allocated})"));
+        return Err(format!(
+            "invalid BitsStored ({bits_stored}) for BitsAllocated ({bits_allocated})"
+        ));
     }
     let colorspace = match samples_per_pixel {
         1 => ColorSpace::Luma,
         3 => ColorSpace::RGB,
-        other => return Err(format!("unsupported SamplesPerPixel for JPEG XL encoding: {other}")),
+        other => {
+            return Err(format!(
+                "unsupported SamplesPerPixel for JPEG XL encoding: {other}"
+            ))
+        }
     };
     if rows < 2 || cols < 2 {
-        return Err(format!("JPEG XL encoding needs at least 2x2 pixels, the image is {rows}x{cols}"));
+        return Err(format!(
+            "JPEG XL encoding needs at least 2x2 pixels, the image is {rows}x{cols}"
+        ));
     }
 
     let pixel_data = object
@@ -214,7 +246,11 @@ pub fn encode_jpeg_xl_lossless_pixel_data(object: &DefaultDicomObject) -> Result
         ));
     }
     // bits above BitsStored (overlays) are not image samples
-    let mask: u16 = if bits_stored >= 16 { u16::MAX } else { (1u16 << bits_stored) - 1 };
+    let mask: u16 = if bits_stored >= 16 {
+        u16::MAX
+    } else {
+        (1u16 << bits_stored) - 1
+    };
 
     let mut fragments = Vec::with_capacity(frames);
     let mut samples = vec![0u8; frame_len];
@@ -244,7 +280,9 @@ pub fn encode_jpeg_xl_lossless_pixel_data(object: &DefaultDicomObject) -> Result
 }
 
 #[cfg(not(feature = "jpeg-xl-codec"))]
-pub fn encode_jpeg_xl_lossless_pixel_data(_object: &DefaultDicomObject) -> Result<Vec<Vec<u8>>, String> {
+pub fn encode_jpeg_xl_lossless_pixel_data(
+    _object: &DefaultDicomObject,
+) -> Result<Vec<Vec<u8>>, String> {
     Err("JPEG XL codec support requires 'jpeg-xl-codec' feature to be enabled".to_owned())
 }
 
@@ -272,7 +310,10 @@ mod tests {
     const HEIGHT: u16 = 24;
 
     fn fixture_bytes(name: &str) -> Vec<u8> {
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test").join("files").join(name);
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("test")
+            .join("files")
+            .join(name);
         std::fs::read(path).expect("fixture should be readable")
     }
 
@@ -281,7 +322,10 @@ mod tests {
     /// distance 0), so a decode bug shows up as a value mismatch rather than passing by
     /// coincidence on a flat/near-flat image.
     fn expected_sample_8bit(x: u16, y: u16) -> u8 {
-        ((x.wrapping_mul(7)).wrapping_add(y.wrapping_mul(13)).wrapping_add(x ^ y) % 256) as u8
+        ((x.wrapping_mul(7))
+            .wrapping_add(y.wrapping_mul(13))
+            .wrapping_add(x ^ y)
+            % 256) as u8
     }
 
     fn expected_sample_16bit(x: u16, y: u16) -> u16 {
@@ -303,7 +347,11 @@ mod tests {
             DataElement::new(tags::BITS_ALLOCATED, VR::US, PrimitiveValue::from(bits)),
             DataElement::new(tags::BITS_STORED, VR::US, PrimitiveValue::from(bits)),
             DataElement::new(tags::HIGH_BIT, VR::US, PrimitiveValue::from(bits - 1)),
-            DataElement::new(tags::PIXEL_REPRESENTATION, VR::US, PrimitiveValue::from(0u16)),
+            DataElement::new(
+                tags::PIXEL_REPRESENTATION,
+                VR::US,
+                PrimitiveValue::from(0u16),
+            ),
             DataElement::new(
                 tags::PHOTOMETRIC_INTERPRETATION,
                 VR::CS,
@@ -325,11 +373,7 @@ mod tests {
     /// genuine third-party-encoder interop, not a self-referential round trip.
     #[test]
     fn decodes_real_8bit_lossless_jpeg_xl_exactly() {
-        let object = grayscale_object(
-            "1.2.840.10008.1.2.4.110",
-            8,
-            fixture_bytes("pattern8.jxl"),
-        );
+        let object = grayscale_object("1.2.840.10008.1.2.4.110", 8, fixture_bytes("pattern8.jxl"));
         let decoded = decode_jpeg_xl_pixel_data(&object).expect("decode should succeed");
         assert_eq!(decoded.len(), usize::from(WIDTH) * usize::from(HEIGHT));
 
@@ -362,14 +406,19 @@ mod tests {
             for x in 0..WIDTH {
                 let index = (usize::from(y) * usize::from(WIDTH) + usize::from(x)) * 2;
                 let sample = u16::from_le_bytes([decoded[index], decoded[index + 1]]);
-                assert_eq!(sample, expected_sample_16bit(x, y), "mismatch at ({x}, {y})");
+                assert_eq!(
+                    sample,
+                    expected_sample_16bit(x, y),
+                    "mismatch at ({x}, {y})"
+                );
             }
         }
     }
 
     #[test]
     fn rejects_signed_pixel_representation() {
-        let mut object = grayscale_object("1.2.840.10008.1.2.4.110", 8, fixture_bytes("pattern8.jxl"));
+        let mut object =
+            grayscale_object("1.2.840.10008.1.2.4.110", 8, fixture_bytes("pattern8.jxl"));
         object.put(DataElement::new(
             tags::PIXEL_REPRESENTATION,
             VR::US,
@@ -381,16 +430,26 @@ mod tests {
 
     #[test]
     fn rejects_dimension_mismatch() {
-        let mut object = grayscale_object("1.2.840.10008.1.2.4.110", 8, fixture_bytes("pattern8.jxl"));
-        object.put(DataElement::new(tags::ROWS, VR::US, PrimitiveValue::from(HEIGHT + 1)));
+        let mut object =
+            grayscale_object("1.2.840.10008.1.2.4.110", 8, fixture_bytes("pattern8.jxl"));
+        object.put(DataElement::new(
+            tags::ROWS,
+            VR::US,
+            PrimitiveValue::from(HEIGHT + 1),
+        ));
         let result = decode_jpeg_xl_pixel_data(&object);
         assert!(result.is_err(), "expected an error, got {result:?}");
     }
 
     #[test]
     fn rejects_channel_count_mismatch() {
-        let mut object = grayscale_object("1.2.840.10008.1.2.4.110", 8, fixture_bytes("pattern8.jxl"));
-        object.put(DataElement::new(tags::SAMPLES_PER_PIXEL, VR::US, PrimitiveValue::from(3u16)));
+        let mut object =
+            grayscale_object("1.2.840.10008.1.2.4.110", 8, fixture_bytes("pattern8.jxl"));
+        object.put(DataElement::new(
+            tags::SAMPLES_PER_PIXEL,
+            VR::US,
+            PrimitiveValue::from(3u16),
+        ));
         let result = decode_jpeg_xl_pixel_data(&object);
         assert!(result.is_err(), "expected an error, got {result:?}");
     }

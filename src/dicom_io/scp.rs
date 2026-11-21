@@ -19,14 +19,14 @@ use std::time::Duration;
 
 use dcmnorm_core::{dicom_value, DataElement, VR};
 use dcmnorm_dictionary::{tags, uids};
-use dcmnorm_encoding::TransferSyntax;
-use dcmnorm_object::InMemDicomObject;
-use dcmnorm_object::FileMetaTableBuilder;
 use dcmnorm_dimse::{
     association::server::ServerAssociationOptions,
     pdu::{PDataValue, PDataValueType, Pdu, PresentationContextResultReason},
     Incoming, ServerAssociation,
 };
+use dcmnorm_encoding::TransferSyntax;
+use dcmnorm_object::FileMetaTableBuilder;
+use dcmnorm_object::InMemDicomObject;
 
 use super::dimse::{implicit_vr_le, log_event, transfer_syntax, DimseLogger};
 use super::io::write_dicom_file;
@@ -42,7 +42,10 @@ pub trait ScpHandlers: Send + Sync {
     /// AccessionNumber/PatientID/PatientName/PatientBirthDate/StudyDate/StudyTime/
     /// StudyDescription/ModalitiesInStudy/NumberOfStudyRelatedSeries/
     /// NumberOfStudyRelatedInstances it has values for.
-    fn on_find(&self, filter: &HashMap<String, String>) -> Result<Vec<HashMap<String, String>>, String>;
+    fn on_find(
+        &self,
+        filter: &HashMap<String, String>,
+    ) -> Result<Vec<HashMap<String, String>>, String>;
 
     /// What the SCP actually calls for a C-FIND: as [`Self::on_find`], plus the request's Affected SOP Class UID (one of
     /// [`ScpOptions::find_sop_classes`]: Study Root or Patient Root FIND by default). The default ignores the SOP class
@@ -208,12 +211,23 @@ pub fn start_scp(
     })
 }
 
-fn handle_association(stream: TcpStream, cache_path: &Path, handlers: &dyn ScpHandlers, options: &ScpOptions) {
+fn handle_association(
+    stream: TcpStream,
+    cache_path: &Path,
+    handlers: &dyn ScpHandlers,
+    options: &ScpOptions,
+) {
     let logger = options.on_log.as_deref();
-    let peer = stream.peer_addr().map(|addr| addr.to_string()).unwrap_or_else(|_| "<unknown>".to_owned());
+    let peer = stream
+        .peer_addr()
+        .map(|addr| addr.to_string())
+        .unwrap_or_else(|_| "<unknown>".to_owned());
 
     log_event(logger, || {
-        format!("accepting association from {peer} (AE title {:?}, max PDU {})", options.ae_title, options.max_pdu_length)
+        format!(
+            "accepting association from {peer} (AE title {:?}, max PDU {})",
+            options.ae_title, options.max_pdu_length
+        )
     });
 
     let association_options = ServerAssociationOptions::new()
@@ -238,10 +252,18 @@ fn handle_association(stream: TcpStream, cache_path: &Path, handlers: &dyn ScpHa
                 // proposing several presentation contexts, releasing without ever sending a
                 // C-STORE, and this line alone giving no hint that most of them may have actually
                 // been rejected.
-                let accepted_count = contexts.iter().filter(|pc| pc.reason == PresentationContextResultReason::Acceptance).count();
+                let accepted_count = contexts
+                    .iter()
+                    .filter(|pc| pc.reason == PresentationContextResultReason::Acceptance)
+                    .count();
                 let negotiated = contexts
                     .iter()
-                    .map(|pc| format!("#{} {} / {} ({:?})", pc.id, pc.abstract_syntax, pc.transfer_syntax, pc.reason))
+                    .map(|pc| {
+                        format!(
+                            "#{} {} / {} ({:?})",
+                            pc.id, pc.abstract_syntax, pc.transfer_syntax, pc.reason
+                        )
+                    })
                     .collect::<Vec<_>>()
                     .join(", ");
                 format!(
@@ -253,7 +275,9 @@ fn handle_association(stream: TcpStream, cache_path: &Path, handlers: &dyn ScpHa
             association
         }
         Err(error) => {
-            log_event(logger, || format!("association with {peer} rejected: {error}"));
+            log_event(logger, || {
+                format!("association with {peer} rejected: {error}")
+            });
             return;
         }
     };
@@ -272,7 +296,9 @@ fn handle_association(stream: TcpStream, cache_path: &Path, handlers: &dyn ScpHa
         let incoming = match received {
             Ok(incoming) => incoming,
             Err(error) => {
-                log_event(logger, || format!("association with {peer} closed: {error}"));
+                log_event(logger, || {
+                    format!("association with {peer} closed: {error}")
+                });
                 break;
             }
         };
@@ -289,16 +315,28 @@ fn handle_association(stream: TcpStream, cache_path: &Path, handlers: &dyn ScpHa
                 break;
             }
             Incoming::Pdu(Pdu::AbortRQ { .. }) => {
-                log_event(logger, || format!("association with {peer} aborted by peer"));
+                log_event(logger, || {
+                    format!("association with {peer} aborted by peer")
+                });
                 break;
             }
-            Incoming::Command { presentation_context_id: pc_id, data: command_data } => {
-                let Ok(command) = InMemDicomObject::read_dataset_with_ts(command_data.as_slice(), implicit_vr_le()) else {
-                    log_event(logger, || format!("association with {peer} closed: failed to parse DIMSE command"));
+            Incoming::Command {
+                presentation_context_id: pc_id,
+                data: command_data,
+            } => {
+                let Ok(command) = InMemDicomObject::read_dataset_with_ts(
+                    command_data.as_slice(),
+                    implicit_vr_le(),
+                ) else {
+                    log_event(logger, || {
+                        format!("association with {peer} closed: failed to parse DIMSE command")
+                    });
                     break;
                 };
                 let Some(negotiated_ts) = negotiated_transfer_syntax(&association, pc_id) else {
-                    log_event(logger, || format!("association with {peer} closed: no negotiated presentation context #{pc_id}"));
+                    log_event(logger, || {
+                        format!("association with {peer} closed: no negotiated presentation context #{pc_id}")
+                    });
                     break;
                 };
 
@@ -324,11 +362,19 @@ fn handle_association(stream: TcpStream, cache_path: &Path, handlers: &dyn ScpHa
                         &mut deferred,
                         logger,
                     ),
-                    0x0021 => handle_move(&mut association, pc_id, &command, negotiated_ts, handlers, logger),
+                    0x0021 => handle_move(
+                        &mut association,
+                        pc_id,
+                        &command,
+                        negotiated_ts,
+                        handlers,
+                        logger,
+                    ),
                     // C-CANCEL-RQ with no C-FIND in progress (it arrived after the final response): nothing to cancel,
                     // and C-CANCEL has no response (PS3.7 9.3.2.3), so it is ignored rather than closing the association.
                     0x0FFF => {
-                        let cancelled_id = command_u16(&command, tags::MESSAGE_ID_BEING_RESPONDED_TO);
+                        let cancelled_id =
+                            command_u16(&command, tags::MESSAGE_ID_BEING_RESPONDED_TO);
                         log_event(logger, || {
                             format!("received C-CANCEL-RQ (message id being responded to {cancelled_id}) with no C-FIND in progress; ignored")
                         });
@@ -344,7 +390,9 @@ fn handle_association(stream: TcpStream, cache_path: &Path, handlers: &dyn ScpHa
                 }
             }
             _ => {
-                log_event(logger, || format!("association with {peer} closed: unexpected PDU"));
+                log_event(logger, || {
+                    format!("association with {peer} closed: unexpected PDU")
+                });
                 break;
             }
         }
@@ -355,7 +403,9 @@ fn handle_association(stream: TcpStream, cache_path: &Path, handlers: &dyn ScpHa
         // association that connects, negotiates presentation contexts, and releases/aborts
         // without ever sending a C-STORE is easy to miss when scanning logs by eye, and looks
         // identical to a real C-STORE whose own logging got lost - this line rules that out.
-        log_event(logger, || format!("association with {peer} ended with no C-STORE received"));
+        log_event(logger, || {
+            format!("association with {peer} ended with no C-STORE received")
+        });
     } else {
         log_event(logger, || {
             let total_instances: usize = stored_instances_by_study.values().map(Vec::len).sum();
@@ -373,20 +423,35 @@ fn negotiated_transfer_syntax(
     association: &ServerAssociation<TcpStream>,
     pc_id: u8,
 ) -> Option<&'static TransferSyntax> {
-    let pc = association.presentation_contexts().iter().find(|pc| pc.id == pc_id)?;
+    let pc = association
+        .presentation_contexts()
+        .iter()
+        .find(|pc| pc.id == pc_id)?;
     transfer_syntax(&pc.transfer_syntax).ok()
 }
 
 fn command_u16(command: &InMemDicomObject, tag: dcmnorm_core::Tag) -> u16 {
-    command.element(tag).ok().and_then(|element| element.to_int::<u16>().ok()).unwrap_or(0)
+    command
+        .element(tag)
+        .ok()
+        .and_then(|element| element.to_int::<u16>().ok())
+        .unwrap_or(0)
 }
 
 fn command_str(command: &InMemDicomObject, tag: dcmnorm_core::Tag) -> Option<String> {
-    command.element(tag).ok().and_then(|element| element.to_str().ok()).map(|value| value.trim().to_owned())
+    command
+        .element(tag)
+        .ok()
+        .and_then(|element| element.to_str().ok())
+        .map(|value| value.trim().to_owned())
 }
 
 fn element_str(object: &InMemDicomObject, tag: dcmnorm_core::Tag) -> Option<String> {
-    object.element(tag).ok().and_then(|element| element.to_str().ok()).map(|value| value.trim().to_owned())
+    object
+        .element(tag)
+        .ok()
+        .and_then(|element| element.to_str().ok())
+        .map(|value| value.trim().to_owned())
 }
 
 fn send_command(
@@ -395,26 +460,47 @@ fn send_command(
     command: &InMemDicomObject,
 ) -> Result<(), ()> {
     let mut data = Vec::with_capacity(128);
-    command.write_dataset_with_ts(&mut data, implicit_vr_le()).map_err(|_| ())?;
+    command
+        .write_dataset_with_ts(&mut data, implicit_vr_le())
+        .map_err(|_| ())?;
     association
         .send(&Pdu::PData {
-            data: vec![PDataValue { presentation_context_id: pc_id, value_type: PDataValueType::Command, is_last: true, data }],
+            data: vec![PDataValue {
+                presentation_context_id: pc_id,
+                value_type: PDataValueType::Command,
+                is_last: true,
+                data,
+            }],
         })
         .map_err(|_| ())
 }
 
-fn send_data(association: &mut ServerAssociation<TcpStream>, pc_id: u8, data: Vec<u8>) -> Result<(), ()> {
+fn send_data(
+    association: &mut ServerAssociation<TcpStream>,
+    pc_id: u8,
+    data: Vec<u8>,
+) -> Result<(), ()> {
     association
         .send(&Pdu::PData {
-            data: vec![PDataValue { presentation_context_id: pc_id, value_type: PDataValueType::Data, is_last: true, data }],
+            data: vec![PDataValue {
+                presentation_context_id: pc_id,
+                value_type: PDataValueType::Data,
+                is_last: true,
+                data,
+            }],
         })
         .map_err(|_| ())
 }
 
 /// The data set that follows the request command just received, reassembled from however many PDVs/PDUs the sender used.
-fn receive_data(association: &mut ServerAssociation<TcpStream>, logger: Option<&dyn DimseLogger>) -> Result<Vec<u8>, ()> {
+fn receive_data(
+    association: &mut ServerAssociation<TcpStream>,
+    logger: Option<&dyn DimseLogger>,
+) -> Result<Vec<u8>, ()> {
     association.receive_data_set().map_err(|error| {
-        log_event(logger, || format!("failed to receive data set PDU(s): {error}"));
+        log_event(logger, || {
+            format!("failed to receive data set PDU(s): {error}")
+        });
     })
 }
 
@@ -425,13 +511,27 @@ fn handle_echo(
     logger: Option<&dyn DimseLogger>,
 ) -> Result<(), ()> {
     let message_id = command_u16(command, tags::MESSAGE_ID);
-    log_event(logger, || format!("received C-ECHO-RQ (message id {message_id})"));
+    log_event(logger, || {
+        format!("received C-ECHO-RQ (message id {message_id})")
+    });
 
     let response = InMemDicomObject::command_from_element_iter([
-        DataElement::new(tags::AFFECTED_SOP_CLASS_UID, VR::UI, dicom_value!(Str, uids::VERIFICATION)),
+        DataElement::new(
+            tags::AFFECTED_SOP_CLASS_UID,
+            VR::UI,
+            dicom_value!(Str, uids::VERIFICATION),
+        ),
         DataElement::new(tags::COMMAND_FIELD, VR::US, dicom_value!(U16, [0x8030])),
-        DataElement::new(tags::MESSAGE_ID_BEING_RESPONDED_TO, VR::US, dicom_value!(U16, [message_id])),
-        DataElement::new(tags::COMMAND_DATA_SET_TYPE, VR::US, dicom_value!(U16, [0x0101])),
+        DataElement::new(
+            tags::MESSAGE_ID_BEING_RESPONDED_TO,
+            VR::US,
+            dicom_value!(U16, [message_id]),
+        ),
+        DataElement::new(
+            tags::COMMAND_DATA_SET_TYPE,
+            VR::US,
+            dicom_value!(U16, [0x0101]),
+        ),
         DataElement::new(tags::STATUS, VR::US, dicom_value!(U16, [0x0000])),
     ]);
     log_event(logger, || "sending C-ECHO-RSP: status=0x0000".to_owned());
@@ -448,10 +548,14 @@ fn handle_store(
     logger: Option<&dyn DimseLogger>,
 ) -> Result<(), ()> {
     let message_id = command_u16(command, tags::MESSAGE_ID);
-    let affected_sop_class_uid = command_str(command, tags::AFFECTED_SOP_CLASS_UID).unwrap_or_default();
-    let affected_sop_instance_uid = command_str(command, tags::AFFECTED_SOP_INSTANCE_UID).unwrap_or_default();
+    let affected_sop_class_uid =
+        command_str(command, tags::AFFECTED_SOP_CLASS_UID).unwrap_or_default();
+    let affected_sop_instance_uid =
+        command_str(command, tags::AFFECTED_SOP_INSTANCE_UID).unwrap_or_default();
 
-    log_event(logger, || format!("received C-STORE-RQ: SOP instance {affected_sop_instance_uid}"));
+    log_event(logger, || {
+        format!("received C-STORE-RQ: SOP instance {affected_sop_instance_uid}")
+    });
 
     let dataset_bytes = receive_data(association, logger)?;
     let status = match store_received_dataset(
@@ -478,15 +582,33 @@ fn handle_store(
         }
     };
 
-    log_event(logger, || format!("sending C-STORE-RSP: status=0x{status:04X}"));
+    log_event(logger, || {
+        format!("sending C-STORE-RSP: status=0x{status:04X}")
+    });
 
     let response = InMemDicomObject::command_from_element_iter([
-        DataElement::new(tags::AFFECTED_SOP_CLASS_UID, VR::UI, dicom_value!(Str, affected_sop_class_uid)),
+        DataElement::new(
+            tags::AFFECTED_SOP_CLASS_UID,
+            VR::UI,
+            dicom_value!(Str, affected_sop_class_uid),
+        ),
         DataElement::new(tags::COMMAND_FIELD, VR::US, dicom_value!(U16, [0x8001])),
-        DataElement::new(tags::MESSAGE_ID_BEING_RESPONDED_TO, VR::US, dicom_value!(U16, [message_id])),
-        DataElement::new(tags::COMMAND_DATA_SET_TYPE, VR::US, dicom_value!(U16, [0x0101])),
+        DataElement::new(
+            tags::MESSAGE_ID_BEING_RESPONDED_TO,
+            VR::US,
+            dicom_value!(U16, [message_id]),
+        ),
+        DataElement::new(
+            tags::COMMAND_DATA_SET_TYPE,
+            VR::US,
+            dicom_value!(U16, [0x0101]),
+        ),
         DataElement::new(tags::STATUS, VR::US, dicom_value!(U16, [status])),
-        DataElement::new(tags::AFFECTED_SOP_INSTANCE_UID, VR::UI, dicom_value!(Str, affected_sop_instance_uid)),
+        DataElement::new(
+            tags::AFFECTED_SOP_INSTANCE_UID,
+            VR::UI,
+            dicom_value!(Str, affected_sop_instance_uid),
+        ),
     ]);
     send_command(association, pc_id, &response)
 }
@@ -508,7 +630,9 @@ fn store_received_dataset(
     // it isn't known until here) - lets an association's accept/negotiate/release lines (logged
     // regardless of whether any C-STORE ever actually arrived) be correlated with which
     // study/instance a given association actually carried.
-    log_event(logger, || format!("received C-STORE-RQ dataset: study {study_instance_uid}, SOP instance {affected_sop_instance_uid}"));
+    log_event(logger, || {
+        format!("received C-STORE-RQ dataset: study {study_instance_uid}, SOP instance {affected_sop_instance_uid}")
+    });
 
     let meta = FileMetaTableBuilder::new()
         .transfer_syntax(negotiated_ts.uid())
@@ -546,8 +670,16 @@ const FIND_RESPONSE_FIELDS: &[(&str, dcmnorm_core::Tag, VR)] = &[
     ("StudyTime", tags::STUDY_TIME, VR::TM),
     ("StudyDescription", tags::STUDY_DESCRIPTION, VR::LO),
     ("ModalitiesInStudy", tags::MODALITIES_IN_STUDY, VR::CS),
-    ("NumberOfStudyRelatedSeries", tags::NUMBER_OF_STUDY_RELATED_SERIES, VR::IS),
-    ("NumberOfStudyRelatedInstances", tags::NUMBER_OF_STUDY_RELATED_INSTANCES, VR::IS),
+    (
+        "NumberOfStudyRelatedSeries",
+        tags::NUMBER_OF_STUDY_RELATED_SERIES,
+        VR::IS,
+    ),
+    (
+        "NumberOfStudyRelatedInstances",
+        tags::NUMBER_OF_STUDY_RELATED_INSTANCES,
+        VR::IS,
+    ),
 ];
 
 /// Error Comment (0000,0902, LO: at most 64 characters) for a C-FIND whose SOP class is not in `find_sop_classes`.
@@ -559,17 +691,38 @@ fn unsupported_find_error_comment(sop_class_uid: &str) -> String {
     comment
 }
 
-fn find_response_command(sop_class_uid: &str, message_id: u16, status: u16, error_comment: Option<String>) -> InMemDicomObject {
+fn find_response_command(
+    sop_class_uid: &str,
+    message_id: u16,
+    status: u16,
+    error_comment: Option<String>,
+) -> InMemDicomObject {
     let mut elements = vec![
-        DataElement::new(tags::AFFECTED_SOP_CLASS_UID, VR::UI, dicom_value!(Str, sop_class_uid.to_owned())),
+        DataElement::new(
+            tags::AFFECTED_SOP_CLASS_UID,
+            VR::UI,
+            dicom_value!(Str, sop_class_uid.to_owned()),
+        ),
         DataElement::new(tags::COMMAND_FIELD, VR::US, dicom_value!(U16, [0x8020])),
-        DataElement::new(tags::MESSAGE_ID_BEING_RESPONDED_TO, VR::US, dicom_value!(U16, [message_id])),
+        DataElement::new(
+            tags::MESSAGE_ID_BEING_RESPONDED_TO,
+            VR::US,
+            dicom_value!(U16, [message_id]),
+        ),
         // 0x0001: an Identifier follows (a Pending response); 0x0101: none (the final response).
-        DataElement::new(tags::COMMAND_DATA_SET_TYPE, VR::US, dicom_value!(U16, [if status == 0xFF00 { 0x0001 } else { 0x0101 }])),
+        DataElement::new(
+            tags::COMMAND_DATA_SET_TYPE,
+            VR::US,
+            dicom_value!(U16, [if status == 0xFF00 { 0x0001 } else { 0x0101 }]),
+        ),
         DataElement::new(tags::STATUS, VR::US, dicom_value!(U16, [status])),
     ];
     if let Some(comment) = error_comment {
-        elements.push(DataElement::new(tags::ERROR_COMMENT, VR::LO, dicom_value!(Str, comment)));
+        elements.push(DataElement::new(
+            tags::ERROR_COMMENT,
+            VR::LO,
+            dicom_value!(Str, comment),
+        ));
     }
     InMemDicomObject::command_from_element_iter(elements)
 }
@@ -586,26 +739,47 @@ fn find_cancel_requested(
     if deferred.is_some() {
         return Ok(false);
     }
-    association.inner_stream().set_nonblocking(true).map_err(|_| ())?;
+    association
+        .inner_stream()
+        .set_nonblocking(true)
+        .map_err(|_| ())?;
     let polled = association.receive_command();
-    association.inner_stream().set_nonblocking(false).map_err(|_| ())?;
+    association
+        .inner_stream()
+        .set_nonblocking(false)
+        .map_err(|_| ())?;
     match polled {
         // Nothing (or only part of a PDU, which the receiver keeps) has arrived.
         Err(dcmnorm_dimse::Error::Io(error))
-            if matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) =>
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            ) =>
         {
             Ok(false)
         }
         Err(error) => {
-            log_event(logger, || format!("failed to read from the association during C-FIND: {error}"));
+            log_event(logger, || {
+                format!("failed to read from the association during C-FIND: {error}")
+            });
             Err(())
         }
-        Ok(Incoming::Command { presentation_context_id, data }) => {
-            let parsed = InMemDicomObject::read_dataset_with_ts(data.as_slice(), implicit_vr_le()).ok();
-            if let Some(command) = parsed.filter(|command| command_u16(command, tags::COMMAND_FIELD) == 0x0FFF) {
+        Ok(Incoming::Command {
+            presentation_context_id,
+            data,
+        }) => {
+            let parsed =
+                InMemDicomObject::read_dataset_with_ts(data.as_slice(), implicit_vr_le()).ok();
+            if let Some(command) =
+                parsed.filter(|command| command_u16(command, tags::COMMAND_FIELD) == 0x0FFF)
+            {
                 let cancelled_id = command_u16(&command, tags::MESSAGE_ID_BEING_RESPONDED_TO);
                 if cancelled_id == message_id {
-                    log_event(logger, || format!("received C-CANCEL-RQ (message id being responded to {cancelled_id})"));
+                    log_event(logger, || {
+                        format!(
+                            "received C-CANCEL-RQ (message id being responded to {cancelled_id})"
+                        )
+                    });
                     return Ok(true);
                 }
                 log_event(logger, || {
@@ -613,7 +787,10 @@ fn find_cancel_requested(
                 });
                 return Ok(false);
             }
-            *deferred = Some(Incoming::Command { presentation_context_id, data });
+            *deferred = Some(Incoming::Command {
+                presentation_context_id,
+                data,
+            });
             Ok(false)
         }
         Ok(other) => {
@@ -635,25 +812,38 @@ fn handle_find(
     logger: Option<&dyn DimseLogger>,
 ) -> Result<(), ()> {
     let message_id = command_u16(command, tags::MESSAGE_ID);
-    let affected_sop_class_uid = command_str(command, tags::AFFECTED_SOP_CLASS_UID).unwrap_or_default();
+    let affected_sop_class_uid =
+        command_str(command, tags::AFFECTED_SOP_CLASS_UID).unwrap_or_default();
 
     let identifier_bytes = receive_data(association, logger)?;
-    let identifier = InMemDicomObject::read_dataset_with_ts(identifier_bytes.as_slice(), negotiated_ts).map_err(|_| ())?;
+    let identifier =
+        InMemDicomObject::read_dataset_with_ts(identifier_bytes.as_slice(), negotiated_ts)
+            .map_err(|_| ())?;
 
     // Only study-level searches go to the handler: answering a Modality Worklist (or any other) C-FIND as a study search
     // would hand archived studies to a device that asked for something else (an MWL query without PatientName/PatientID
     // would match every study).
-    if !find_sop_classes.iter().any(|sop_class| sop_class == &affected_sop_class_uid) {
+    if !find_sop_classes
+        .iter()
+        .any(|sop_class| sop_class == &affected_sop_class_uid)
+    {
         log_event(logger, || {
             format!("received C-FIND-RQ (message id {message_id}); SOP class {affected_sop_class_uid} not supported")
         });
         // 0x0122: "SOP class not supported" (PS3.7 Annex C, general status).
-        log_event(logger, || "sending C-FIND-RSP: 0 match(es), final status=0x0122".to_owned());
+        log_event(logger, || {
+            "sending C-FIND-RSP: 0 match(es), final status=0x0122".to_owned()
+        });
         let error_comment = unsupported_find_error_comment(&affected_sop_class_uid);
         return send_command(
             association,
             pc_id,
-            &find_response_command(&affected_sop_class_uid, message_id, 0x0122, Some(error_comment)),
+            &find_response_command(
+                &affected_sop_class_uid,
+                message_id,
+                0x0122,
+                Some(error_comment),
+            ),
         );
     }
 
@@ -679,62 +869,79 @@ fn handle_find(
     });
 
     let mut match_count = 0usize;
-    let final_status = match handlers.on_find_with_sop_class(&affected_sop_class_uid, &filter) {
-        Ok(studies) => {
-            let mut cancelled = false;
-            for study in &studies {
-                // A C-CANCEL-RQ may arrive at any time before the final response (PS3.4 C.4.1.3.1): stop sending
-                // matches and answer 0xFE00. Checked before each match (the handler may have taken a while).
-                if find_cancel_requested(association, message_id, deferred, logger)? {
-                    cancelled = true;
-                    break;
+    let final_status =
+        match handlers.on_find_with_sop_class(&affected_sop_class_uid, &filter) {
+            Ok(studies) => {
+                let mut cancelled = false;
+                for study in &studies {
+                    // A C-CANCEL-RQ may arrive at any time before the final response (PS3.4 C.4.1.3.1): stop sending
+                    // matches and answer 0xFE00. Checked before each match (the handler may have taken a while).
+                    if find_cancel_requested(association, message_id, deferred, logger)? {
+                        cancelled = true;
+                        break;
+                    }
+                    // SpecificCharacterSet is declared unconditionally (not just when a value
+                    // actually needs it) - PS3.5 6.1.2.3's default repertoire (used when this is
+                    // absent) is 7-bit ASCII, and `on_find` results come from customer data
+                    // (patient/study text) that isn't guaranteed to be ASCII-only. Without this,
+                    // dicom-rs's writer hard-fails on encountering the first non-ASCII byte in any
+                    // LO/SH/PN/etc. value below - aborting the whole C-FIND response (and, since
+                    // that error propagates out of this association's handling loop, the connection
+                    // itself) rather than just garbling that one field.
+                    let mut elements = vec![DataElement::new(
+                        tags::SPECIFIC_CHARACTER_SET,
+                        VR::CS,
+                        dicom_value!(Str, "ISO_IR 192"),
+                    )];
+                    elements.extend(FIND_RESPONSE_FIELDS.iter().filter_map(
+                        |(keyword, tag, vr)| {
+                            study.get(*keyword).map(|value| {
+                                DataElement::new(*tag, *vr, dicom_value!(Str, value.clone()))
+                            })
+                        },
+                    ));
+                    let match_dataset = InMemDicomObject::from_element_iter(elements);
+                    let mut match_bytes = Vec::new();
+                    match_dataset
+                        .write_dataset_with_ts(&mut match_bytes, negotiated_ts)
+                        .map_err(|_| ())?;
+
+                    // 0xFF00: Pending, matches follow (PS3.7 C.4.1) - the standard "another match
+                    // is coming next" status for a C-FIND-RSP.
+                    send_command(
+                        association,
+                        pc_id,
+                        &find_response_command(&affected_sop_class_uid, message_id, 0xFF00, None),
+                    )?;
+                    send_data(association, pc_id, match_bytes)?;
+                    match_count += 1;
                 }
-                // SpecificCharacterSet is declared unconditionally (not just when a value
-                // actually needs it) - PS3.5 6.1.2.3's default repertoire (used when this is
-                // absent) is 7-bit ASCII, and `on_find` results come from customer data
-                // (patient/study text) that isn't guaranteed to be ASCII-only. Without this,
-                // dicom-rs's writer hard-fails on encountering the first non-ASCII byte in any
-                // LO/SH/PN/etc. value below - aborting the whole C-FIND response (and, since
-                // that error propagates out of this association's handling loop, the connection
-                // itself) rather than just garbling that one field.
-                let mut elements = vec![DataElement::new(
-                    tags::SPECIFIC_CHARACTER_SET,
-                    VR::CS,
-                    dicom_value!(Str, "ISO_IR 192"),
-                )];
-                elements.extend(FIND_RESPONSE_FIELDS.iter().filter_map(|(keyword, tag, vr)| {
-                    study.get(*keyword).map(|value| DataElement::new(*tag, *vr, dicom_value!(Str, value.clone())))
-                }));
-                let match_dataset = InMemDicomObject::from_element_iter(elements);
-                let mut match_bytes = Vec::new();
-                match_dataset.write_dataset_with_ts(&mut match_bytes, negotiated_ts).map_err(|_| ())?;
-
-                // 0xFF00: Pending, matches follow (PS3.7 C.4.1) - the standard "another match
-                // is coming next" status for a C-FIND-RSP.
-                send_command(association, pc_id, &find_response_command(&affected_sop_class_uid, message_id, 0xFF00, None))?;
-                send_data(association, pc_id, match_bytes)?;
-                match_count += 1;
+                if cancelled || find_cancel_requested(association, message_id, deferred, logger)? {
+                    // 0xFE00: "Matching terminated due to Cancel request" (PS3.4 C.4.1.1.4).
+                    0xFE00u16
+                } else {
+                    0x0000u16
+                }
             }
-            if cancelled || find_cancel_requested(association, message_id, deferred, logger)? {
-                // 0xFE00: "Matching terminated due to Cancel request" (PS3.4 C.4.1.1.4).
-                0xFE00u16
-            } else {
-                0x0000u16
+            // 0xC000: "Unable to process" (generic C-FIND failure). Logged, not just swallowed - the
+            // handler's own error (e.g. a malformed match JS returned, an HTTP failure it hit) is the
+            // only trace of *why* a C-FIND failed, since the DIMSE status code itself carries none of
+            // that detail to the SCU.
+            Err(error) => {
+                eprintln!("[dicom-scp] C-FIND on_find handler failed: {error}");
+                0xC000u16
             }
-        }
-        // 0xC000: "Unable to process" (generic C-FIND failure). Logged, not just swallowed - the
-        // handler's own error (e.g. a malformed match JS returned, an HTTP failure it hit) is the
-        // only trace of *why* a C-FIND failed, since the DIMSE status code itself carries none of
-        // that detail to the SCU.
-        Err(error) => {
-            eprintln!("[dicom-scp] C-FIND on_find handler failed: {error}");
-            0xC000u16
-        }
-    };
+        };
 
-    log_event(logger, || format!("sending C-FIND-RSP: {match_count} match(es), final status=0x{final_status:04X}"));
+    log_event(logger, || {
+        format!("sending C-FIND-RSP: {match_count} match(es), final status=0x{final_status:04X}")
+    });
 
-    send_command(association, pc_id, &find_response_command(&affected_sop_class_uid, message_id, final_status, None))
+    send_command(
+        association,
+        pc_id,
+        &find_response_command(&affected_sop_class_uid, message_id, final_status, None),
+    )
 }
 
 fn handle_move(
@@ -746,11 +953,14 @@ fn handle_move(
     logger: Option<&dyn DimseLogger>,
 ) -> Result<(), ()> {
     let message_id = command_u16(command, tags::MESSAGE_ID);
-    let affected_sop_class_uid = command_str(command, tags::AFFECTED_SOP_CLASS_UID).unwrap_or_default();
+    let affected_sop_class_uid =
+        command_str(command, tags::AFFECTED_SOP_CLASS_UID).unwrap_or_default();
     let move_destination = command_str(command, tags::MOVE_DESTINATION).unwrap_or_default();
 
     let identifier_bytes = receive_data(association, logger)?;
-    let identifier = InMemDicomObject::read_dataset_with_ts(identifier_bytes.as_slice(), negotiated_ts).map_err(|_| ())?;
+    let identifier =
+        InMemDicomObject::read_dataset_with_ts(identifier_bytes.as_slice(), negotiated_ts)
+            .map_err(|_| ())?;
     let study_instance_uid = element_str(&identifier, tags::STUDY_INSTANCE_UID).unwrap_or_default();
 
     log_event(logger, || {
@@ -777,13 +987,27 @@ fn handle_move(
         }
     };
 
-    log_event(logger, || format!("sending C-MOVE-RSP: status=0x{status:04X}"));
+    log_event(logger, || {
+        format!("sending C-MOVE-RSP: status=0x{status:04X}")
+    });
 
     let response = InMemDicomObject::command_from_element_iter([
-        DataElement::new(tags::AFFECTED_SOP_CLASS_UID, VR::UI, dicom_value!(Str, affected_sop_class_uid)),
+        DataElement::new(
+            tags::AFFECTED_SOP_CLASS_UID,
+            VR::UI,
+            dicom_value!(Str, affected_sop_class_uid),
+        ),
         DataElement::new(tags::COMMAND_FIELD, VR::US, dicom_value!(U16, [0x8021])),
-        DataElement::new(tags::MESSAGE_ID_BEING_RESPONDED_TO, VR::US, dicom_value!(U16, [message_id])),
-        DataElement::new(tags::COMMAND_DATA_SET_TYPE, VR::US, dicom_value!(U16, [0x0101])),
+        DataElement::new(
+            tags::MESSAGE_ID_BEING_RESPONDED_TO,
+            VR::US,
+            dicom_value!(U16, [message_id]),
+        ),
+        DataElement::new(
+            tags::COMMAND_DATA_SET_TYPE,
+            VR::US,
+            dicom_value!(U16, [0x0101]),
+        ),
         DataElement::new(tags::STATUS, VR::US, dicom_value!(U16, [status])),
     ]);
     send_command(association, pc_id, &response)

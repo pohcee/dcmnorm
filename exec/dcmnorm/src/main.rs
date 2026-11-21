@@ -1,34 +1,36 @@
 use std::fs;
-use std::io::{self, BufRead, ErrorKind, Write};
 use std::io::Read;
+use std::io::{self, BufRead, ErrorKind, Write};
 use std::path::{Path, PathBuf};
 
 use clap::{ArgAction, CommandFactory, FromArgMatches, Parser, ValueEnum};
 use dcmnorm::dicom_io::{
-    apply_filter_to_object, compute_frame_histogram, compute_instance_histograms, jpeg2000_codec_summary, jpeg2000_engine_name_for,
-    kakadu_ffi_enabled, list_transfer_syntax_support,
-    parse_attribute_override, parse_filter_requests, read_dicom_bytes, read_dicom_file,
-    read_dicom_file_deferring_bulk_data, read_dicom_file_for_frame, read_dicom_json_with_options, read_dcmnorm_object_for_filter,
-    redact_dicom_pixels_to_transfer_syntax, remove_attribute_path, render_all_dicom_frames,
-    render_dicom_frame, set_attribute, set_attribute_path, transcode_dcmnorm_object_owned, write_dicom_file,
-    write_dicom_json_with_options, write_dicom_video, BoundingBox, BoxLength, DicomJsonBulkDataMode, DicomJsonFormat,
-    DicomJsonKeyStyle, DicomJsonReadOptions, DicomJsonWriteOptions,
-    RenderOutputFormat, RenderPipelineOptions, HistogramOptions, JPEG2000_CODEC_ENV_FLAG, JPEG2000_DEBUG_ENV_FLAG,
-    probe_dicom_file_for_sop_class_uid, check_dicom_logic, ConsistencyReport, Severity,
-    collect_dicomdir_entries, write_dicomdir, DicomdirOptions,
-    build_volume, canonical_view_basis, generate_uid, reformat_plane, reformat_plane_values, rotate_basis,
-    write_nifti, write_nrrd, write_reformatted_dicom_slice,
-    pack_dicom_frame_texture, pack_volume_texture,
-    Interpolation, PackedTexture, PlaneParams, SlabProjection, SliceGeometry, TextureCompression, Volume, VolumeGeometry,
+    apply_filter_to_object, build_volume, canonical_view_basis, check_dicom_logic,
+    collect_dicomdir_entries, compute_frame_histogram, compute_instance_histograms, generate_uid,
+    jpeg2000_codec_summary, jpeg2000_engine_name_for, kakadu_ffi_enabled,
+    list_transfer_syntax_support, pack_dicom_frame_texture, pack_volume_texture,
+    parse_attribute_override, parse_filter_requests, probe_dicom_file_for_sop_class_uid,
+    read_dcmnorm_object_for_filter, read_dicom_bytes, read_dicom_file,
+    read_dicom_file_deferring_bulk_data, read_dicom_file_for_frame, read_dicom_json_with_options,
+    redact_dicom_pixels_to_transfer_syntax, reformat_plane, reformat_plane_values,
+    remove_attribute_path, render_all_dicom_frames, render_dicom_frame, rotate_basis,
+    set_attribute, set_attribute_path, transcode_dcmnorm_object_owned, write_dicom_file,
+    write_dicom_json_with_options, write_dicom_video, write_dicomdir, write_nifti, write_nrrd,
+    write_reformatted_dicom_slice, BoundingBox, BoxLength, ConsistencyReport,
+    DicomJsonBulkDataMode, DicomJsonFormat, DicomJsonKeyStyle, DicomJsonReadOptions,
+    DicomJsonWriteOptions, DicomdirOptions, HistogramOptions, Interpolation, PackedTexture,
+    PlaneParams, RenderOutputFormat, RenderPipelineOptions, Severity, SlabProjection,
+    SliceGeometry, TextureCompression, Volume, VolumeGeometry, JPEG2000_CODEC_ENV_FLAG,
+    JPEG2000_DEBUG_ENV_FLAG,
 };
-use dcmnorm::remove_private_tags_inplace;
 use dcmnorm::perf;
+use dcmnorm::remove_private_tags_inplace;
 use dcmnorm_core::dictionary::{DataDictionary, DataDictionaryEntry};
 use dcmnorm_core::Tag;
 use dcmnorm_dictionary::tags;
 use dcmnorm_dictionary::StandardDataDictionary;
-use sha2::{Digest, Sha256};
 use serde_json::Value as JsonValue;
+use sha2::{Digest, Sha256};
 
 #[derive(Parser, Debug)]
 #[command(name = "dcmnorm")]
@@ -563,7 +565,11 @@ impl Cli {
     /// directly for them instead of going through this derivation.
     fn finalize(mut self) -> Self {
         self.input = self.paths.first().cloned();
-        self.output = if self.paths.len() == 2 { self.paths.get(1).cloned() } else { None };
+        self.output = if self.paths.len() == 2 {
+            self.paths.get(1).cloned()
+        } else {
+            None
+        };
         self
     }
 
@@ -673,7 +679,12 @@ struct DicomdirCli {
     )]
     file_set_id: String,
 
-    #[arg(short = 'o', long, value_name = "PATH", help = "Where to write the DICOMDIR (default ROOT/DICOMDIR)")]
+    #[arg(
+        short = 'o',
+        long,
+        value_name = "PATH",
+        help = "Where to write the DICOMDIR (default ROOT/DICOMDIR)"
+    )]
     output: Option<PathBuf>,
 
     #[arg(long, help = "Print the report as JSON instead of text")]
@@ -686,28 +697,55 @@ struct DicomdirCli {
     long_about = "Registers the MOVING volume onto the FIXED one (rigid, 6 degrees of freedom) and prints the result as JSON: the moving -> fixed patient matrix (row-major 4x4, the DICOM Spatial Registration convention), the metric, a quality score and timing. FIXED and MOVING are each a directory of one series' DICOM files, one Enhanced multi-frame file, or a list of files separated by commas. CT, MR and PT in any combination: NCC for the same modality, Mattes mutual information across modalities. With --reg, the result is also written as a DICOM Spatial Registration object in the fixed study."
 )]
 struct RegisterCli {
-    #[arg(value_name = "FIXED", help = "Fixed series: a directory, one (Enhanced) file, or comma-separated files")]
+    #[arg(
+        value_name = "FIXED",
+        help = "Fixed series: a directory, one (Enhanced) file, or comma-separated files"
+    )]
     fixed: String,
 
     #[arg(value_name = "MOVING", help = "Moving series, same forms as FIXED")]
     moving: String,
 
-    #[arg(long, value_name = "auto|ncc|mattes-mi", default_value = "auto", help = "Similarity metric")]
+    #[arg(
+        long,
+        value_name = "auto|ncc|mattes-mi",
+        default_value = "auto",
+        help = "Similarity metric"
+    )]
     metric: String,
 
-    #[arg(long, help = "Only the fast translation estimate (S-I profiles + body centroid), no rigid optimization")]
+    #[arg(
+        long,
+        help = "Only the fast translation estimate (S-I profiles + body centroid), no rigid optimization"
+    )]
     translation_only: bool,
 
-    #[arg(long, value_name = "MS", default_value_t = 30000.0, help = "Time limit, milliseconds")]
+    #[arg(
+        long,
+        value_name = "MS",
+        default_value_t = 30000.0,
+        help = "Time limit, milliseconds"
+    )]
     time_limit_ms: f64,
 
-    #[arg(long, help = "Try several starts (translation estimate, body centroids, scanner coordinates) and keep the best; reports whether they agree")]
+    #[arg(
+        long,
+        help = "Try several starts (translation estimate, body centroids, scanner coordinates) and keep the best; reports whether they agree"
+    )]
     multi: bool,
 
-    #[arg(long, value_name = "MM,MM,...", help = "Pyramid level spacings, coarse to fine (default 8,4,2)")]
+    #[arg(
+        long,
+        value_name = "MM,MM,...",
+        help = "Pyramid level spacings, coarse to fine (default 8,4,2)"
+    )]
     levels: Option<String>,
 
-    #[arg(long, value_name = "PATH", help = "Also write the result as a DICOM Spatial Registration object")]
+    #[arg(
+        long,
+        value_name = "PATH",
+        help = "Also write the result as a DICOM Spatial Registration object"
+    )]
     reg: Option<PathBuf>,
 }
 
@@ -721,13 +759,19 @@ fn register_input_files(spec: &str) -> Result<Vec<PathBuf>, Box<dyn std::error::
         files.sort();
         return Ok(files);
     }
-    Ok(spec.split(',').filter(|s| !s.is_empty()).map(PathBuf::from).collect())
+    Ok(spec
+        .split(',')
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .collect())
 }
 
-fn run_register_command(args: impl IntoIterator<Item = std::ffi::OsString>) -> Result<(), Box<dyn std::error::Error>> {
+fn run_register_command(
+    args: impl IntoIterator<Item = std::ffi::OsString>,
+) -> Result<(), Box<dyn std::error::Error>> {
     use dcmnorm::dicom_io::{
-        build_spatial_registration, estimate_translation, read_spatial_registration, register_rigid, MetricChoice,
-        RegistrationOptions, TranslationOptions,
+        build_spatial_registration, estimate_translation, read_spatial_registration,
+        register_rigid, MetricChoice, RegistrationOptions, TranslationOptions,
     };
     let cli = RegisterCli::parse_from(args);
     let fixed_files = register_input_files(&cli.fixed)?;
@@ -756,12 +800,24 @@ fn run_register_command(args: impl IntoIterator<Item = std::ffi::OsString>) -> R
             "auto" => MetricChoice::Auto,
             "ncc" => MetricChoice::Ncc,
             "mattes-mi" | "mi" => MetricChoice::MattesMi,
-            other => return Err(io::Error::new(ErrorKind::InvalidInput, format!("--metric {other}: expected auto, ncc or mattes-mi")).into()),
+            other => {
+                return Err(io::Error::new(
+                    ErrorKind::InvalidInput,
+                    format!("--metric {other}: expected auto, ncc or mattes-mi"),
+                )
+                .into())
+            }
         };
         let mut options = RegistrationOptions {
             metric,
-            time_limit: Some(std::time::Duration::from_secs_f64(cli.time_limit_ms.max(1.0) / 1000.0)),
-            initialization: if cli.multi { dcmnorm::dicom_io::Initialization::Multi } else { dcmnorm::dicom_io::Initialization::Translation },
+            time_limit: Some(std::time::Duration::from_secs_f64(
+                cli.time_limit_ms.max(1.0) / 1000.0,
+            )),
+            initialization: if cli.multi {
+                dcmnorm::dicom_io::Initialization::Multi
+            } else {
+                dcmnorm::dicom_io::Initialization::Translation
+            },
             ..Default::default()
         };
         if let Some(levels) = &cli.levels {
@@ -769,7 +825,12 @@ fn run_register_command(args: impl IntoIterator<Item = std::ffi::OsString>) -> R
                 .split(',')
                 .map(|v| v.trim().parse::<f64>())
                 .collect::<Result<_, _>>()
-                .map_err(|_| io::Error::new(ErrorKind::InvalidInput, "--levels: expected comma-separated millimetres"))?;
+                .map_err(|_| {
+                    io::Error::new(
+                        ErrorKind::InvalidInput,
+                        "--levels: expected comma-separated millimetres",
+                    )
+                })?;
         }
         let result = register_rigid(&fixed, &moving, &options)?;
         let report = serde_json::json!({
@@ -792,15 +853,32 @@ fn run_register_command(args: impl IntoIterator<Item = std::ffi::OsString>) -> R
     report["moving"] = geometry(&moving);
 
     if let Some(reg_path) = &cli.reg {
-        let side = |volume: &Volume, files: &[PathBuf], name: &str| -> Result<JsonValue, Box<dyn std::error::Error>> {
-            let missing = |what: &str| io::Error::new(ErrorKind::InvalidInput, format!("the {name} series has no {what}; a Spatial Registration needs it"));
+        let side = |volume: &Volume,
+                    files: &[PathBuf],
+                    name: &str|
+         -> Result<JsonValue, Box<dyn std::error::Error>> {
+            let missing = |what: &str| {
+                io::Error::new(
+                    ErrorKind::InvalidInput,
+                    format!("the {name} series has no {what}; a Spatial Registration needs it"),
+                )
+            };
             let mut instances = Vec::new();
             for file in files {
                 let object = read_dicom_file_deferring_bulk_data(file)?.map(|(object, _)| object);
                 if let Some(object) = object {
-                    let text = |tag| object.get(tag).and_then(|e| e.to_str().ok()).map(|v| v.trim_end_matches('\0').trim().to_owned());
-                    if let (Some(class), Some(instance)) = (text(tags::SOP_CLASS_UID), text(tags::SOP_INSTANCE_UID)) {
-                        instances.push(serde_json::json!({ "sopClassUid": class, "sopInstanceUid": instance }));
+                    let text = |tag| {
+                        object
+                            .get(tag)
+                            .and_then(|e| e.to_str().ok())
+                            .map(|v| v.trim_end_matches('\0').trim().to_owned())
+                    };
+                    if let (Some(class), Some(instance)) =
+                        (text(tags::SOP_CLASS_UID), text(tags::SOP_INSTANCE_UID))
+                    {
+                        instances.push(
+                            serde_json::json!({ "sopClassUid": class, "sopInstanceUid": instance }),
+                        );
                     }
                 }
             }
@@ -827,14 +905,22 @@ fn run_register_command(args: impl IntoIterator<Item = std::ffi::OsString>) -> R
     Ok(())
 }
 
-fn run_dicomdir_command(args: impl IntoIterator<Item = std::ffi::OsString>) -> Result<(), Box<dyn std::error::Error>> {
+fn run_dicomdir_command(
+    args: impl IntoIterator<Item = std::ffi::OsString>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let cli = DicomdirCli::parse_from(args);
     let (entries, skipped) = collect_dicomdir_entries(&cli.root)?;
-    let output = cli.output.clone().unwrap_or_else(|| cli.root.join("DICOMDIR"));
+    let output = cli
+        .output
+        .clone()
+        .unwrap_or_else(|| cli.root.join("DICOMDIR"));
     let report = write_dicomdir(
         &entries,
         &output,
-        &DicomdirOptions { file_set_id: cli.file_set_id.clone(), sop_instance_uid: None },
+        &DicomdirOptions {
+            file_set_id: cli.file_set_id.clone(),
+            sop_instance_uid: None,
+        },
     )?;
 
     if cli.json {
@@ -848,8 +934,11 @@ fn run_dicomdir_command(args: impl IntoIterator<Item = std::ffi::OsString>) -> R
                 })
             })
             .collect();
-        let record_types: serde_json::Map<String, JsonValue> =
-            report.record_types.iter().map(|(t, n)| (t.clone(), JsonValue::from(*n))).collect();
+        let record_types: serde_json::Map<String, JsonValue> = report
+            .record_types
+            .iter()
+            .map(|(t, n)| (t.clone(), JsonValue::from(*n)))
+            .collect();
         let value = serde_json::json!({
             "output": output.display().to_string(),
             "files": entries.len(),
@@ -863,7 +952,11 @@ fn run_dicomdir_command(args: impl IntoIterator<Item = std::ffi::OsString>) -> R
         return Ok(());
     }
 
-    let counts: Vec<String> = report.record_types.iter().map(|(t, n)| format!("{n} {t}")).collect();
+    let counts: Vec<String> = report
+        .record_types
+        .iter()
+        .map(|(t, n)| format!("{n} {t}"))
+        .collect();
     println!(
         "Wrote {}: {} files, {} records ({})",
         output.display(),
@@ -872,8 +965,15 @@ fn run_dicomdir_command(args: impl IntoIterator<Item = std::ffi::OsString>) -> R
         counts.join(", ")
     );
     for s in &report.synthesized {
-        let from = s.source.as_deref().map(|k| format!(" (from {k})")).unwrap_or_default();
-        println!("synthesized {} {} = {:?} ({}){from}", s.record_type, s.attribute, s.value, s.entity);
+        let from = s
+            .source
+            .as_deref()
+            .map(|k| format!(" (from {k})"))
+            .unwrap_or_default();
+        println!(
+            "synthesized {} {} = {:?} ({}){from}",
+            s.record_type, s.attribute, s.value, s.entity
+        );
     }
     for warning in &report.warnings {
         eprintln!("warning: {warning}");
@@ -895,23 +995,33 @@ fn main() {
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let _scope = perf::scope("cli.run");
-    if std::env::args_os().nth(1).is_some_and(|arg| arg == "dicomdir") {
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|arg| arg == "dicomdir")
+    {
         return run_dicomdir_command(std::env::args_os().skip(1));
     }
-    if std::env::args_os().nth(1).is_some_and(|arg| arg == "register") {
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|arg| arg == "register")
+    {
         return run_register_command(std::env::args_os().skip(1));
     }
     // Hashing the running binary means reading all of it (~34MB with FFmpeg statically linked),
     // which used to cost ~30ms on every invocation - only pay that when the version is actually
     // being printed.
-    let version_requested = std::env::args_os().skip(1).any(|arg| arg == "--version" || arg == "-V");
+    let version_requested = std::env::args_os()
+        .skip(1)
+        .any(|arg| arg == "--version" || arg == "-V");
     let version: &'static str = if version_requested {
         Box::leak(cli_version_with_binary_hash().into_boxed_str())
     } else {
         env!("CARGO_PKG_VERSION")
     };
     let matches = Cli::command().version(version).get_matches();
-    let cli = Cli::from_arg_matches(&matches).expect("clap generated invalid matches").finalize();
+    let cli = Cli::from_arg_matches(&matches)
+        .expect("clap generated invalid matches")
+        .finalize();
 
     if cli.jpeg2000_codec == Jpeg2000Codec::Kakadu && !kakadu_ffi_enabled() {
         return Err(io::Error::new(
@@ -1206,7 +1316,13 @@ fn run_check_dicom_logic(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
                     if report.has_errors() || (cli.strict && report.warning_count() > 0) {
                         any_failure = true;
                     }
-                    write_check_dicom_logic_report(&mut out, &input_path, &report, json_output, cli.verbose)?;
+                    write_check_dicom_logic_report(
+                        &mut out,
+                        &input_path,
+                        &report,
+                        json_output,
+                        cli.verbose,
+                    )?;
                 }
                 Err(error) => {
                     any_failure = true;
@@ -1221,7 +1337,10 @@ fn run_check_dicom_logic(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let input_path = cli.input.as_ref().ok_or_else(|| {
-        io::Error::new(ErrorKind::InvalidInput, "an input path is required for --check-dicom-logic")
+        io::Error::new(
+            ErrorKind::InvalidInput,
+            "an input path is required for --check-dicom-logic",
+        )
     })?;
 
     let report = check_dicom_logic_one(input_path)?;
@@ -1277,7 +1396,11 @@ fn write_check_dicom_logic_report(
     } else if error_count == 0 {
         writeln!(out, "WARN {}: {warning_count} warning(s)", path.display())?;
     } else {
-        writeln!(out, "FAIL {}: {error_count} error(s), {warning_count} warning(s)", path.display())?;
+        writeln!(
+            out,
+            "FAIL {}: {error_count} error(s), {warning_count} warning(s)",
+            path.display()
+        )?;
     }
 
     if verbose {
@@ -1380,14 +1503,13 @@ fn process_one(cli: &Cli, input_path: &Path) -> Result<(), Box<dyn std::error::E
         let direction = infer_direction_for_filter(cli, input_path)?;
         // For URI bulk-data JSON output, parse from full bytes so PixelData can
         // keep source mapping needed for BulkDataURI emission.
-        let (mut object, filter_input_bytes) = if direction == Direction::DicomToJson
-            && cli.bulk_data == BulkDataMode::Uri
-        {
-            let input_bytes = fs::read(input_path)?;
-            (read_dicom_bytes(&input_bytes)?, Some(input_bytes))
-        } else {
-            (read_dcmnorm_object_for_filter(input_path, &requests)?, None)
-        };
+        let (mut object, filter_input_bytes) =
+            if direction == Direction::DicomToJson && cli.bulk_data == BulkDataMode::Uri {
+                let input_bytes = fs::read(input_path)?;
+                (read_dicom_bytes(&input_bytes)?, Some(input_bytes))
+            } else {
+                (read_dcmnorm_object_for_filter(input_path, &requests)?, None)
+            };
 
         return match direction {
             Direction::DicomToJson => run_dicom_to_json_with_object(
@@ -1436,11 +1558,14 @@ fn process_one(cli: &Cli, input_path: &Path) -> Result<(), Box<dyn std::error::E
         // Rendering one frame of a native multi-frame object only needs that frame's bytes (see
         // read_dicom_file_for_frame), the way dcmtk's dcmj2pnm reads it. Anything the shortcut
         // doesn't cover - or any error from it - falls back to the full read below.
-        let single_frame = if direction == Direction::DicomToRender && renders_single_frame_as_read(cli) {
-            read_dicom_file_for_frame(input_path, cli.render_frame).ok().flatten()
-        } else {
-            None
-        };
+        let single_frame =
+            if direction == Direction::DicomToRender && renders_single_frame_as_read(cli) {
+                read_dicom_file_for_frame(input_path, cli.render_frame)
+                    .ok()
+                    .flatten()
+            } else {
+                None
+            };
         let object = match single_frame {
             Some(object) => object,
             None => {
@@ -1473,7 +1598,9 @@ fn renders_single_frame_as_read(cli: &Cli) -> bool {
     if cli.render_all_frames || !cli.set.is_empty() || !cli.remove.is_empty() {
         return false;
     }
-    let Some(output_path) = cli.output.as_deref() else { return false };
+    let Some(output_path) = cli.output.as_deref() else {
+        return false;
+    };
     matches!(resolve_render_format(cli, output_path), Ok(format) if format != RenderFormat::Mpeg4)
 }
 
@@ -1481,7 +1608,9 @@ const INPUT_SNIFF_PREFIX_LEN: usize = 64 * 1024;
 
 fn read_file_prefix(path: &Path, max_len: usize) -> io::Result<Vec<u8>> {
     let mut prefix = Vec::with_capacity(max_len);
-    fs::File::open(path)?.take(max_len as u64).read_to_end(&mut prefix)?;
+    fs::File::open(path)?
+        .take(max_len as u64)
+        .read_to_end(&mut prefix)?;
     Ok(prefix)
 }
 
@@ -1714,26 +1843,30 @@ fn run_dicom_to_json_with_deferred(
     let mut output = {
         let _json_scope = perf::scope("cli.dicom_to_json.write_dicom_json_with_options");
         write_dicom_json_with_options(
-        &object,
-        DicomJsonWriteOptions {
-            format: match cli.format {
-                JsonFormat::Flat => DicomJsonFormat::Flat,
-                JsonFormat::Standard => DicomJsonFormat::Standard,
+            &object,
+            DicomJsonWriteOptions {
+                format: match cli.format {
+                    JsonFormat::Flat => DicomJsonFormat::Flat,
+                    JsonFormat::Standard => DicomJsonFormat::Standard,
+                },
+                bulk_data_mode,
+                key_style: match cli.keys {
+                    KeyFormat::Name => DicomJsonKeyStyle::Name,
+                    KeyFormat::Hex => DicomJsonKeyStyle::Hex,
+                },
+                bulk_data_source: if bulk_data_mode == DicomJsonBulkDataMode::Uri {
+                    input_bytes
+                } else {
+                    None
+                },
+                bulk_data_uri_base: uri_base_owned.as_deref(),
+                bulk_scan_failed: Some(&bulk_scan_failed),
+                bulk_scan_cursor: Some(&bulk_scan_cursor),
+                deferred_bulk_data: deferred,
+                omit_keyword_vm: cli.omit_keyword_vm,
+                bulk_data_uri_builder: None,
             },
-            bulk_data_mode,
-            key_style: match cli.keys {
-                KeyFormat::Name => DicomJsonKeyStyle::Name,
-                KeyFormat::Hex => DicomJsonKeyStyle::Hex,
-            },
-            bulk_data_source: if bulk_data_mode == DicomJsonBulkDataMode::Uri { input_bytes } else { None },
-            bulk_data_uri_base: uri_base_owned.as_deref(),
-            bulk_scan_failed: Some(&bulk_scan_failed),
-            bulk_scan_cursor: Some(&bulk_scan_cursor),
-            deferred_bulk_data: deferred,
-            omit_keyword_vm: cli.omit_keyword_vm,
-            bulk_data_uri_builder: None,
-        },
-    )?
+        )?
     };
 
     if !cli.filter.is_empty() {
@@ -1901,11 +2034,11 @@ fn run_dicom_to_dicom_with_object(
         let mut redacted = {
             let _redact_scope = perf::scope("cli.dicom_to_dicom.redact_pixels");
             redact_dicom_pixels_to_transfer_syntax(
-            &object,
-            target_transfer_syntax,
-            &bounding_boxes,
-            bounding_box_color,
-        )?
+                &object,
+                target_transfer_syntax,
+                &bounding_boxes,
+                bounding_box_color,
+            )?
         };
         write_dicom_file(&mut redacted, output_path)?;
         return Ok(());
@@ -2043,14 +2176,24 @@ fn run_dicom_to_render_with_object(
         let compression = resolve_texture_compression(cli);
         let packed = {
             let _scope = perf::scope("cli.dicom_to_render.pack_dicom_frame_texture");
-            pack_dicom_frame_texture(&object, cli.render_frame, cli.texture_max_dim, default_window, compression)
-                .map_err(|error| io::Error::new(ErrorKind::InvalidInput, error.to_string()))?
+            pack_dicom_frame_texture(
+                &object,
+                cli.render_frame,
+                cli.texture_max_dim,
+                default_window,
+                compression,
+            )
+            .map_err(|error| io::Error::new(ErrorKind::InvalidInput, error.to_string()))?
         };
         verbose_log(
             cli,
             format!(
                 "Packed frame texture: {}x{} lossless={} ({} bytes stored, {} bytes raw)",
-                packed.meta.width, packed.meta.height, packed.meta.lossless, packed.meta.payload_bytes_stored, packed.meta.payload_bytes_raw
+                packed.meta.width,
+                packed.meta.height,
+                packed.meta.lossless,
+                packed.meta.payload_bytes_stored,
+                packed.meta.payload_bytes_raw
             ),
         );
         write_packed_texture(output_path, &packed)?;
@@ -2244,7 +2387,11 @@ fn run_dicom_to_render_with_object(
 /// a sane volume-derived value), and writes a single reformatted image to `output_path` - the same
 /// `dicom_io::volume` functions the Node bindings call, so this is both a standalone tool and the
 /// fastest way to exercise `volume.rs` without a render-server round trip.
-fn run_mpr(cli: &Cli, inputs: &[PathBuf], output_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+fn run_mpr(
+    cli: &Cli,
+    inputs: &[PathBuf],
+    output_path: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
     let _scope = perf::scope("cli.run_mpr");
     let paths = inputs;
 
@@ -2274,8 +2421,12 @@ fn run_mpr(cli: &Cli, inputs: &[PathBuf], output_path: &Path) -> Result<(), Box<
         }
     }
 
-    verbose_log(cli, format!("Building MPR volume from {} file(s)", paths.len()));
-    let volume = build_volume(paths).map_err(|error| io::Error::new(ErrorKind::InvalidInput, error.to_string()))?;
+    verbose_log(
+        cli,
+        format!("Building MPR volume from {} file(s)", paths.len()),
+    );
+    let volume = build_volume(paths)
+        .map_err(|error| io::Error::new(ErrorKind::InvalidInput, error.to_string()))?;
     verbose_log(
         cli,
         format!(
@@ -2293,9 +2444,13 @@ fn run_mpr(cli: &Cli, inputs: &[PathBuf], output_path: &Path) -> Result<(), Box<
     // applied to the volume's own native axial basis - not both combined (see the flag's own
     // help text). cli.mpr is guaranteed Some here: run() only reaches run_mpr() once
     // mpr_requested() (== cli.mpr.is_some()) is true.
-    let mpr_value = cli.mpr.as_deref().expect("run_mpr is only called once cli.mpr_requested()");
+    let mpr_value = cli
+        .mpr
+        .as_deref()
+        .expect("run_mpr is only called once cli.mpr_requested()");
     let (row_dir, col_dir) = if matches!(mpr_value, "axial" | "coronal" | "sagittal") {
-        canonical_view_basis(mpr_value, &volume).map_err(|error| io::Error::new(ErrorKind::InvalidInput, error.to_string()))?
+        canonical_view_basis(mpr_value, &volume)
+            .map_err(|error| io::Error::new(ErrorKind::InvalidInput, error.to_string()))?
     } else {
         let (yaw, pitch, roll) = parse_triplet(mpr_value, "--mpr").map_err(|_| {
             io::Error::new(
@@ -2323,36 +2478,61 @@ fn run_mpr(cli: &Cli, inputs: &[PathBuf], output_path: &Path) -> Result<(), Box<
         row_dir[2] * col_dir[0] - row_dir[0] * col_dir[2],
         row_dir[0] * col_dir[1] - row_dir[1] * col_dir[0],
     ];
-    let normal_len = (normal_raw[0].powi(2) + normal_raw[1].powi(2) + normal_raw[2].powi(2)).sqrt().max(1e-9);
-    let normal = [normal_raw[0] / normal_len, normal_raw[1] / normal_len, normal_raw[2] / normal_len];
+    let normal_len = (normal_raw[0].powi(2) + normal_raw[1].powi(2) + normal_raw[2].powi(2))
+        .sqrt()
+        .max(1e-9);
+    let normal = [
+        normal_raw[0] / normal_len,
+        normal_raw[1] / normal_len,
+        normal_raw[2] / normal_len,
+    ];
 
     let slab_thickness_mm = cli.mpr_thickness.unwrap_or(0.0);
     let slab_projection = match cli.mpr_projection.as_deref() {
         None | Some("mip") => SlabProjection::MaximumIntensity,
         Some("minip") => SlabProjection::MinimumIntensity,
         Some("average") => SlabProjection::Average,
-        Some(other) => {
-            return Err(io::Error::new(
-                ErrorKind::InvalidInput,
-                format!("invalid --mpr-projection value '{other}': expected 'mip', 'minip', or 'average'"),
-            )
-            .into())
-        }
+        Some(other) => return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            format!(
+                "invalid --mpr-projection value '{other}': expected 'mip', 'minip', or 'average'"
+            ),
+        )
+        .into()),
     };
 
     let spacing_mm = cli.mpr_spacing.unwrap_or_else(|| volume.min_spacing_mm());
     if !(spacing_mm > 0.0) {
-        return Err(io::Error::new(ErrorKind::InvalidInput, "--mpr-spacing must be greater than zero").into());
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "--mpr-spacing must be greater than zero",
+        )
+        .into());
     }
 
     let depth_spec = match cli.mpr_depth.as_deref() {
         Some(value) => parse_depth_spec(value)?,
         None => DepthSpec::Single(0.0),
     };
-    let default_depth_step = if slab_thickness_mm > 0.0 { slab_thickness_mm } else { spacing_mm };
-    let depths = resolve_depths(depth_spec, &volume, row_dir, col_dir, base_origin, default_depth_step);
+    let default_depth_step = if slab_thickness_mm > 0.0 {
+        slab_thickness_mm
+    } else {
+        spacing_mm
+    };
+    let depths = resolve_depths(
+        depth_spec,
+        &volume,
+        row_dir,
+        col_dir,
+        base_origin,
+        default_depth_step,
+    );
     if depths.is_empty() {
-        return Err(io::Error::new(ErrorKind::InvalidInput, "--mpr-depth resolved to zero slices").into());
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "--mpr-depth resolved to zero slices",
+        )
+        .into());
     }
 
     let output_kind = resolve_mpr_output_kind(cli, output_path)?;
@@ -2417,7 +2597,11 @@ fn run_mpr(cli: &Cli, inputs: &[PathBuf], output_path: &Path) -> Result<(), Box<
     let output_width = cli.output_width.unwrap_or(volume.cols);
     let output_height = cli.output_height.unwrap_or(volume.rows);
     if output_width > 65535 || output_height > 65535 {
-        return Err(io::Error::new(ErrorKind::InvalidInput, "--output-width/--output-height cannot exceed 65535").into());
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "--output-width/--output-height cannot exceed 65535",
+        )
+        .into());
     }
 
     verbose_log(
@@ -2455,29 +2639,51 @@ fn run_mpr(cli: &Cli, inputs: &[PathBuf], output_path: &Path) -> Result<(), Box<
         let half_width = output_width as f64 / 2.0;
         let half_height = output_height as f64 / 2.0;
         [
-            params.origin[0] + row_dir[0] * (-half_width) * spacing_mm + col_dir[0] * (-half_height) * spacing_mm,
-            params.origin[1] + row_dir[1] * (-half_width) * spacing_mm + col_dir[1] * (-half_height) * spacing_mm,
-            params.origin[2] + row_dir[2] * (-half_width) * spacing_mm + col_dir[2] * (-half_height) * spacing_mm,
+            params.origin[0]
+                + row_dir[0] * (-half_width) * spacing_mm
+                + col_dir[0] * (-half_height) * spacing_mm,
+            params.origin[1]
+                + row_dir[1] * (-half_width) * spacing_mm
+                + col_dir[1] * (-half_height) * spacing_mm,
+            params.origin[2]
+                + row_dir[2] * (-half_width) * spacing_mm
+                + col_dir[2] * (-half_height) * spacing_mm,
         ]
     };
 
     match output_kind {
         MprOutputKind::Rendered(format) => {
             if format == RenderFormat::Mpeg4 {
-                return Err(io::Error::new(ErrorKind::InvalidInput, "--mpr does not support MPEG4 output").into());
+                return Err(io::Error::new(
+                    ErrorKind::InvalidInput,
+                    "--mpr does not support MPEG4 output",
+                )
+                .into());
             }
             if depths.len() == 1 {
                 let params = plane_params_at(depths[0]);
-                let rendered = reformat_plane(&volume, &params, to_render_output_format(format), cli.jpeg_quality)
-                    .map_err(|error| io::Error::new(ErrorKind::InvalidInput, error.to_string()))?;
+                let rendered = reformat_plane(
+                    &volume,
+                    &params,
+                    to_render_output_format(format),
+                    cli.jpeg_quality,
+                )
+                .map_err(|error| io::Error::new(ErrorKind::InvalidInput, error.to_string()))?;
                 fs::write(output_path, rendered.bytes)?;
             } else {
                 let mut frames = Vec::with_capacity(depths.len());
                 for depth_mm in &depths {
                     let params = plane_params_at(*depth_mm);
                     frames.push(
-                        reformat_plane(&volume, &params, to_render_output_format(format), cli.jpeg_quality)
-                            .map_err(|error| io::Error::new(ErrorKind::InvalidInput, error.to_string()))?,
+                        reformat_plane(
+                            &volume,
+                            &params,
+                            to_render_output_format(format),
+                            cli.jpeg_quality,
+                        )
+                        .map_err(|error| {
+                            io::Error::new(ErrorKind::InvalidInput, error.to_string())
+                        })?,
                     );
                 }
                 write_multi_frame_outputs(output_path, format, frames)?;
@@ -2486,13 +2692,18 @@ fn run_mpr(cli: &Cli, inputs: &[PathBuf], output_path: &Path) -> Result<(), Box<
         MprOutputKind::DicomSeries => {
             let source_object = read_dicom_file(&paths[0])?;
             let series_instance_uid = generate_uid();
-            let slice_thickness_mm = if slab_thickness_mm > 0.0 { slab_thickness_mm } else { default_depth_step };
+            let slice_thickness_mm = if slab_thickness_mm > 0.0 {
+                slab_thickness_mm
+            } else {
+                default_depth_step
+            };
 
             if depths.len() == 1 {
                 write_reformatted_dicom_slice(
                     &source_object,
-                    &reformat_plane_values(&volume, &plane_params_at(depths[0]))
-                        .map_err(|error| io::Error::new(ErrorKind::InvalidInput, error.to_string()))?,
+                    &reformat_plane_values(&volume, &plane_params_at(depths[0])).map_err(
+                        |error| io::Error::new(ErrorKind::InvalidInput, error.to_string()),
+                    )?,
                     output_height,
                     output_width,
                     &series_instance_uid,
@@ -2513,7 +2724,9 @@ fn run_mpr(cli: &Cli, inputs: &[PathBuf], output_path: &Path) -> Result<(), Box<
                 for (index, depth_mm) in depths.iter().enumerate() {
                     let path = frame_output_path(output_path, index + 1)?;
                     let values = reformat_plane_values(&volume, &plane_params_at(*depth_mm))
-                        .map_err(|error| io::Error::new(ErrorKind::InvalidInput, error.to_string()))?;
+                        .map_err(|error| {
+                            io::Error::new(ErrorKind::InvalidInput, error.to_string())
+                        })?;
                     write_reformatted_dicom_slice(
                         &source_object,
                         &values,
@@ -2537,13 +2750,18 @@ fn run_mpr(cli: &Cli, inputs: &[PathBuf], output_path: &Path) -> Result<(), Box<
             }
         }
         MprOutputKind::Volume(volume_format) => {
-            let mut samples = Vec::with_capacity(output_width as usize * output_height as usize * depths.len());
+            let mut samples =
+                Vec::with_capacity(output_width as usize * output_height as usize * depths.len());
             for depth_mm in &depths {
                 let values = reformat_plane_values(&volume, &plane_params_at(*depth_mm))
                     .map_err(|error| io::Error::new(ErrorKind::InvalidInput, error.to_string()))?;
                 samples.extend(values);
             }
-            let step_mm = if depths.len() > 1 { depths[1] - depths[0] } else { default_depth_step };
+            let step_mm = if depths.len() > 1 {
+                depths[1] - depths[0]
+            } else {
+                default_depth_step
+            };
             let geometry = VolumeGeometry {
                 row_dir,
                 col_dir,
@@ -2556,7 +2774,9 @@ fn run_mpr(cli: &Cli, inputs: &[PathBuf], output_path: &Path) -> Result<(), Box<
             let dims = (output_width, output_height, depths.len() as u32);
             match volume_format {
                 VolumeFormat::Nifti => write_nifti(&samples, dims, &geometry, output_path, false)
-                    .map_err(|error| io::Error::new(ErrorKind::InvalidInput, error.to_string()))?,
+                    .map_err(|error| {
+                    io::Error::new(ErrorKind::InvalidInput, error.to_string())
+                })?,
                 VolumeFormat::NiftiGz => write_nifti(&samples, dims, &geometry, output_path, true)
                     .map_err(|error| io::Error::new(ErrorKind::InvalidInput, error.to_string()))?,
                 VolumeFormat::Nrrd => write_nrrd(&samples, dims, &geometry, output_path)
@@ -2586,8 +2806,15 @@ enum MprOutputKind {
 /// Determines what kind of output `--mpr` should produce from `output_path`'s extension -
 /// checked BEFORE `resolve_render_format` (whose "unknown extension" error doesn't know about
 /// `.nii`/`.nii.gz`/`.nrrd`/`.dcm`).
-fn resolve_mpr_output_kind(cli: &Cli, output_path: &Path) -> Result<MprOutputKind, Box<dyn std::error::Error>> {
-    let file_name = output_path.file_name().and_then(|value| value.to_str()).unwrap_or("").to_ascii_lowercase();
+fn resolve_mpr_output_kind(
+    cli: &Cli,
+    output_path: &Path,
+) -> Result<MprOutputKind, Box<dyn std::error::Error>> {
+    let file_name = output_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
     if file_name.ends_with(".nii.gz") {
         return Ok(MprOutputKind::Volume(VolumeFormat::NiftiGz));
     }
@@ -2600,7 +2827,10 @@ fn resolve_mpr_output_kind(cli: &Cli, output_path: &Path) -> Result<MprOutputKin
     if file_name.ends_with(".dcm") || file_name.ends_with(".dicom") {
         return Ok(MprOutputKind::DicomSeries);
     }
-    Ok(MprOutputKind::Rendered(resolve_render_format(cli, output_path)?))
+    Ok(MprOutputKind::Rendered(resolve_render_format(
+        cli,
+        output_path,
+    )?))
 }
 
 fn parse_triplet(value: &str, flag_name: &str) -> Result<(f64, f64, f64), io::Error> {
@@ -2612,11 +2842,18 @@ fn parse_triplet(value: &str, flag_name: &str) -> Result<(f64, f64, f64), io::Er
         ));
     }
     let parse_one = |raw: &str| -> Result<f64, io::Error> {
-        raw.trim()
-            .parse::<f64>()
-            .map_err(|_| io::Error::new(ErrorKind::InvalidInput, format!("{flag_name} contains an invalid number: '{raw}'")))
+        raw.trim().parse::<f64>().map_err(|_| {
+            io::Error::new(
+                ErrorKind::InvalidInput,
+                format!("{flag_name} contains an invalid number: '{raw}'"),
+            )
+        })
     };
-    Ok((parse_one(parts[0])?, parse_one(parts[1])?, parse_one(parts[2])?))
+    Ok((
+        parse_one(parts[0])?,
+        parse_one(parts[1])?,
+        parse_one(parts[2])?,
+    ))
 }
 
 /// A parsed `--mpr-depth` value - see that flag's own help text for the exact syntax. `Single`
@@ -2625,8 +2862,14 @@ fn parse_triplet(value: &str, flag_name: &str) -> Result<(f64, f64, f64), io::Er
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum DepthSpec {
     Single(f64),
-    Range { start: f64, end: f64, step: Option<f64> },
-    All { step: Option<f64> },
+    Range {
+        start: f64,
+        end: f64,
+        step: Option<f64>,
+    },
+    All {
+        step: Option<f64>,
+    },
 }
 
 fn invalid_mpr_depth_error(value: &str) -> io::Error {
@@ -2645,7 +2888,10 @@ fn parse_depth_spec(value: &str) -> Result<DepthSpec, io::Error> {
         return Ok(DepthSpec::All { step: None });
     }
     if let Some(rest) = lower.strip_prefix("all:") {
-        let step: f64 = rest.trim().parse().map_err(|_| invalid_mpr_depth_error(value))?;
+        let step: f64 = rest
+            .trim()
+            .parse()
+            .map_err(|_| invalid_mpr_depth_error(value))?;
         if !(step > 0.0) {
             return Err(invalid_mpr_depth_error(value));
         }
@@ -2654,20 +2900,47 @@ fn parse_depth_spec(value: &str) -> Result<DepthSpec, io::Error> {
 
     let parts: Vec<&str> = trimmed.split(':').collect();
     match parts.as_slice() {
-        [single] => single.trim().parse().map(DepthSpec::Single).map_err(|_| invalid_mpr_depth_error(value)),
+        [single] => single
+            .trim()
+            .parse()
+            .map(DepthSpec::Single)
+            .map_err(|_| invalid_mpr_depth_error(value)),
         [start, end] => {
-            let start: f64 = start.trim().parse().map_err(|_| invalid_mpr_depth_error(value))?;
-            let end: f64 = end.trim().parse().map_err(|_| invalid_mpr_depth_error(value))?;
-            Ok(DepthSpec::Range { start, end, step: None })
+            let start: f64 = start
+                .trim()
+                .parse()
+                .map_err(|_| invalid_mpr_depth_error(value))?;
+            let end: f64 = end
+                .trim()
+                .parse()
+                .map_err(|_| invalid_mpr_depth_error(value))?;
+            Ok(DepthSpec::Range {
+                start,
+                end,
+                step: None,
+            })
         }
         [start, end, step] => {
-            let start: f64 = start.trim().parse().map_err(|_| invalid_mpr_depth_error(value))?;
-            let end: f64 = end.trim().parse().map_err(|_| invalid_mpr_depth_error(value))?;
-            let step: f64 = step.trim().parse().map_err(|_| invalid_mpr_depth_error(value))?;
+            let start: f64 = start
+                .trim()
+                .parse()
+                .map_err(|_| invalid_mpr_depth_error(value))?;
+            let end: f64 = end
+                .trim()
+                .parse()
+                .map_err(|_| invalid_mpr_depth_error(value))?;
+            let step: f64 = step
+                .trim()
+                .parse()
+                .map_err(|_| invalid_mpr_depth_error(value))?;
             if !(step > 0.0) {
                 return Err(invalid_mpr_depth_error(value));
             }
-            Ok(DepthSpec::Range { start, end, step: Some(step) })
+            Ok(DepthSpec::Range {
+                start,
+                end,
+                step: Some(step),
+            })
         }
         _ => Err(invalid_mpr_depth_error(value)),
     }
@@ -2676,7 +2949,11 @@ fn parse_depth_spec(value: &str) -> Result<DepthSpec, io::Error> {
 /// Every depth offset from `lo` to `hi` (inclusive of `lo`; `hi` is included only if it lands
 /// exactly on a step) at `step` millimeters apart. Always yields at least one depth.
 fn depth_steps(start: f64, end: f64, step: f64) -> Vec<f64> {
-    let (lo, hi) = if start <= end { (start, end) } else { (end, start) };
+    let (lo, hi) = if start <= end {
+        (start, end)
+    } else {
+        (end, start)
+    };
     let span = hi - lo;
     let count = ((span / step).floor() as i64 + 1).max(1) as usize;
     (0..count).map(|index| lo + step * index as f64).collect()
@@ -2686,20 +2963,32 @@ fn depth_steps(start: f64, end: f64, step: f64) -> Vec<f64> {
 /// `base_origin` (i.e. directly usable as `depth_steps`' start/end) - computed by projecting all
 /// 8 corners of the volume's physical bounding box onto the normal, which is correct even for an
 /// oblique plane whose normal differs from the volume's own `slice_normal`.
-fn volume_depth_extent(volume: &Volume, row_dir: [f64; 3], col_dir: [f64; 3], base_origin: [f64; 3]) -> (f64, f64) {
+fn volume_depth_extent(
+    volume: &Volume,
+    row_dir: [f64; 3],
+    col_dir: [f64; 3],
+    base_origin: [f64; 3],
+) -> (f64, f64) {
     let normal_raw = [
         row_dir[1] * col_dir[2] - row_dir[2] * col_dir[1],
         row_dir[2] * col_dir[0] - row_dir[0] * col_dir[2],
         row_dir[0] * col_dir[1] - row_dir[1] * col_dir[0],
     ];
-    let norm_len = (normal_raw[0].powi(2) + normal_raw[1].powi(2) + normal_raw[2].powi(2)).sqrt().max(1e-9);
-    let normal = [normal_raw[0] / norm_len, normal_raw[1] / norm_len, normal_raw[2] / norm_len];
+    let norm_len = (normal_raw[0].powi(2) + normal_raw[1].powi(2) + normal_raw[2].powi(2))
+        .sqrt()
+        .max(1e-9);
+    let normal = [
+        normal_raw[0] / norm_len,
+        normal_raw[1] / norm_len,
+        normal_raw[2] / norm_len,
+    ];
 
     let last_col = volume.cols.saturating_sub(1) as f64 * volume.col_spacing_mm;
     let last_row = volume.rows.saturating_sub(1) as f64 * volume.row_spacing_mm;
     let z_first = volume.slice_zs.first().copied().unwrap_or(0.0);
     let z_last = volume.slice_zs.last().copied().unwrap_or(0.0);
-    let base_proj = base_origin[0] * normal[0] + base_origin[1] * normal[1] + base_origin[2] * normal[2];
+    let base_proj =
+        base_origin[0] * normal[0] + base_origin[1] * normal[1] + base_origin[2] * normal[2];
 
     let mut min_rel = f64::INFINITY;
     let mut max_rel = f64::NEG_INFINITY;
@@ -2707,11 +2996,21 @@ fn volume_depth_extent(volume: &Volume, row_dir: [f64; 3], col_dir: [f64; 3], ba
         for &r in &[0.0, last_row] {
             for &z in &[z_first, z_last] {
                 let world = [
-                    volume.origin[0] + volume.row_vector[0] * c + volume.col_vector[0] * r + volume.slice_normal[0] * (z - z_first),
-                    volume.origin[1] + volume.row_vector[1] * c + volume.col_vector[1] * r + volume.slice_normal[1] * (z - z_first),
-                    volume.origin[2] + volume.row_vector[2] * c + volume.col_vector[2] * r + volume.slice_normal[2] * (z - z_first),
+                    volume.origin[0]
+                        + volume.row_vector[0] * c
+                        + volume.col_vector[0] * r
+                        + volume.slice_normal[0] * (z - z_first),
+                    volume.origin[1]
+                        + volume.row_vector[1] * c
+                        + volume.col_vector[1] * r
+                        + volume.slice_normal[1] * (z - z_first),
+                    volume.origin[2]
+                        + volume.row_vector[2] * c
+                        + volume.col_vector[2] * r
+                        + volume.slice_normal[2] * (z - z_first),
                 ];
-                let proj = world[0] * normal[0] + world[1] * normal[1] + world[2] * normal[2] - base_proj;
+                let proj =
+                    world[0] * normal[0] + world[1] * normal[1] + world[2] * normal[2] - base_proj;
                 min_rel = min_rel.min(proj);
                 max_rel = max_rel.max(proj);
             }
@@ -2722,10 +3021,19 @@ fn volume_depth_extent(volume: &Volume, row_dir: [f64; 3], col_dir: [f64; 3], ba
 
 /// Resolves a `DepthSpec` into the concrete list of depth offsets `run_mpr` reformats - always at
 /// least one. `default_step` is used whenever a `Range`/`All` doesn't specify its own `:STEP`.
-fn resolve_depths(spec: DepthSpec, volume: &Volume, row_dir: [f64; 3], col_dir: [f64; 3], base_origin: [f64; 3], default_step: f64) -> Vec<f64> {
+fn resolve_depths(
+    spec: DepthSpec,
+    volume: &Volume,
+    row_dir: [f64; 3],
+    col_dir: [f64; 3],
+    base_origin: [f64; 3],
+    default_step: f64,
+) -> Vec<f64> {
     match spec {
         DepthSpec::Single(value) => vec![value],
-        DepthSpec::Range { start, end, step } => depth_steps(start, end, step.unwrap_or(default_step)),
+        DepthSpec::Range { start, end, step } => {
+            depth_steps(start, end, step.unwrap_or(default_step))
+        }
         DepthSpec::All { step } => {
             let (start, end) = volume_depth_extent(volume, row_dir, col_dir, base_origin);
             depth_steps(start, end, step.unwrap_or(default_step))
@@ -3101,7 +3409,11 @@ fn detect_output_kind(path: &Path, explicit_type: Option<OutputType>) -> Option<
         return Some(match output_type {
             OutputType::Dicom => FileKind::Dicom,
             OutputType::Json => FileKind::Json,
-            OutputType::Raw | OutputType::Png | OutputType::Jpeg | OutputType::Mpeg4 | OutputType::Texture => FileKind::Render,
+            OutputType::Raw
+            | OutputType::Png
+            | OutputType::Jpeg
+            | OutputType::Mpeg4
+            | OutputType::Texture => FileKind::Render,
         });
     }
 
@@ -3114,7 +3426,9 @@ fn detect_kind_from_extension(path: &Path) -> Option<FileKind> {
     match extension.as_str() {
         "json" => Some(FileKind::Json),
         "dcm" | "dicom" => Some(FileKind::Dicom),
-        "jpg" | "jpeg" | "png" | "raw" | "mp4" | "m4v" | "mpeg4" | "mov" | "gputex" => Some(FileKind::Render),
+        "jpg" | "jpeg" | "png" | "raw" | "mp4" | "m4v" | "mpeg4" | "mov" | "gputex" => {
+            Some(FileKind::Render)
+        }
         _ => None,
     }
 }
@@ -3131,8 +3445,10 @@ fn output_type_to_render_format(output_type: OutputType) -> Option<RenderFormat>
 }
 
 fn validate_no_render_or_redaction_flags(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
-    let is_render_output = cli.output_type.map_or(false, |ot| output_type_to_render_format(ot).is_some());
-    
+    let is_render_output = cli
+        .output_type
+        .map_or(false, |ot| output_type_to_render_format(ot).is_some());
+
     if is_render_output
         || cli.render_frame != 0
         || cli.no_modality_lut
@@ -3223,7 +3539,10 @@ fn validate_histogram_flags(cli: &Cli) -> Result<(), Box<dyn std::error::Error>>
 
 fn run_histogram(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     let input_path = cli.input.as_ref().ok_or_else(|| {
-        io::Error::new(ErrorKind::InvalidInput, "an input path is required for --histogram")
+        io::Error::new(
+            ErrorKind::InvalidInput,
+            "an input path is required for --histogram",
+        )
     })?;
 
     let object = read_dicom_file(input_path)?;
@@ -3270,8 +3589,10 @@ fn run_histogram(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn validate_non_dicom_to_dicom_render_flags(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
-    let is_render_output = cli.output_type.map_or(false, |ot| output_type_to_render_format(ot).is_some());
-    
+    let is_render_output = cli
+        .output_type
+        .map_or(false, |ot| output_type_to_render_format(ot).is_some());
+
     if is_render_output
         || cli.render_frame != 0
         || cli.no_modality_lut
@@ -3430,7 +3751,10 @@ fn resolve_texture_compression(cli: &Cli) -> TextureCompression {
 /// `output_path`-with-`.json`-appended (the `TextureMeta` sidecar) - the standalone,
 /// server-independent contract a texture-format export is meant to expose (see the CLI's
 /// "Texture Export" flags).
-fn write_packed_texture(output_path: &Path, packed: &PackedTexture) -> Result<(), Box<dyn std::error::Error>> {
+fn write_packed_texture(
+    output_path: &Path,
+    packed: &PackedTexture,
+) -> Result<(), Box<dyn std::error::Error>> {
     fs::write(output_path, &packed.payload)?;
     let mut sidecar_name = output_path.as_os_str().to_owned();
     sidecar_name.push(".json");
@@ -3534,21 +3858,21 @@ fn looks_like_dicom(input_bytes: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_filter_to_object, build_volume, canonical_view_basis, depth_steps, detect_output_kind,
-        frame_output_path, infer_direction, parse_attribute_override, parse_depth_spec,
-        parse_filter_requests, parse_redact_box, resolve_depths, resolve_mpr_output_kind,
-        run_check_dicom_logic, run_dicom_to_json_with_object, run_dicom_to_render_with_object, run_mpr,
-        resolve_render_format, validate_check_dicom_logic_flags,
-        Cli, DepthSpec, Direction, FileKind, MprOutputKind, OutputType, RenderFormat, TextureCompressionArg,
-        VolumeFormat,
+        apply_filter_to_object, build_volume, canonical_view_basis, depth_steps,
+        detect_output_kind, frame_output_path, infer_direction, parse_attribute_override,
+        parse_depth_spec, parse_filter_requests, parse_redact_box, resolve_depths,
+        resolve_mpr_output_kind, resolve_render_format, run_check_dicom_logic,
+        run_dicom_to_json_with_object, run_dicom_to_render_with_object, run_mpr,
+        validate_check_dicom_logic_flags, Cli, DepthSpec, Direction, FileKind, MprOutputKind,
+        OutputType, RenderFormat, TextureCompressionArg, VolumeFormat,
     };
     use clap::{CommandFactory, FromArgMatches};
-    use dcmnorm_dictionary::tags;
     use dcmnorm::dicom_io::{next_tag, read_dicom_file, write_dicom_file};
-    use std::fs;
-    use std::time::{SystemTime, UNIX_EPOCH};
     use dcmnorm_core::{DataElement, PrimitiveValue, Tag, VR};
+    use dcmnorm_dictionary::tags;
+    use std::fs;
     use std::path::{Path, PathBuf};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn repo_root() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -3645,7 +3969,14 @@ mod tests {
     #[test]
     fn parses_check_dicom_logic_flag_with_strict_and_json_output() {
         let matches = Cli::command()
-            .try_get_matches_from(["dcmnorm", "--check-dicom-logic", "--strict", "--output-type", "json", "in.dcm"])
+            .try_get_matches_from([
+                "dcmnorm",
+                "--check-dicom-logic",
+                "--strict",
+                "--output-type",
+                "json",
+                "in.dcm",
+            ])
             .unwrap();
         let cli = Cli::from_arg_matches(&matches).unwrap().finalize();
 
@@ -3673,15 +4004,22 @@ mod tests {
     }
 
     #[test]
-    fn run_check_dicom_logic_reports_ok_for_a_clean_file_and_fails_only_in_strict_mode_on_warnings() {
+    fn run_check_dicom_logic_reports_ok_for_a_clean_file_and_fails_only_in_strict_mode_on_warnings()
+    {
         let mut cli = base_cli();
         cli.check_dicom_logic = true;
         cli.input = Some(fixture_path("ct.dcm"));
         cli.output = Some(temp_output_path("check-dicom-logic-ct"));
-        assert!(run_check_dicom_logic(&cli).is_ok(), "ct.dcm only has a warning-level finding");
+        assert!(
+            run_check_dicom_logic(&cli).is_ok(),
+            "ct.dcm only has a warning-level finding"
+        );
 
         cli.strict = true;
-        assert!(run_check_dicom_logic(&cli).is_err(), "--strict should fail on warnings too");
+        assert!(
+            run_check_dicom_logic(&cli).is_err(),
+            "--strict should fail on warnings too"
+        );
     }
 
     #[test]
@@ -3779,11 +4117,9 @@ mod tests {
 
     #[test]
     fn parses_filter_requests_with_keyword_and_tag_expression() {
-        let requests = parse_filter_requests(&[
-            "StudyInstanceUID".to_string(),
-            "(0008,0060)".to_string(),
-        ])
-        .unwrap();
+        let requests =
+            parse_filter_requests(&["StudyInstanceUID".to_string(), "(0008,0060)".to_string()])
+                .unwrap();
 
         assert_eq!(requests.len(), 2);
         assert_eq!(requests[0].tag, tags::STUDY_INSTANCE_UID);
@@ -3841,7 +4177,8 @@ mod tests {
             name.push(".json");
             PathBuf::from(name)
         };
-        let meta: serde_json::Value = serde_json::from_str(&fs::read_to_string(&sidecar_path).unwrap()).unwrap();
+        let meta: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&sidecar_path).unwrap()).unwrap();
         assert_eq!(meta["contentKind"], "image2d");
         assert_eq!(meta["depth"], 1);
         assert_eq!(meta["width"], 512);
@@ -3872,7 +4209,15 @@ mod tests {
     fn parses_mpr_flag_with_a_canonical_view_value() {
         let matches = Cli::command()
             .try_get_matches_from([
-                "dcmnorm", "-I", "--mpr", "coronal", "--mpr-origin", "1,2,3", "--mpr-spacing", "0.5", "out.png",
+                "dcmnorm",
+                "-I",
+                "--mpr",
+                "coronal",
+                "--mpr-origin",
+                "1,2,3",
+                "--mpr-spacing",
+                "0.5",
+                "out.png",
             ])
             .unwrap();
         let cli = Cli::from_arg_matches(&matches).unwrap().finalize();
@@ -3904,7 +4249,10 @@ mod tests {
         // --mpr-origin/--mpr-spacing alone don't imply MPR mode (unlike --mpr itself, they carry
         // no "which plane" information) - run() explicitly rejects this combination rather than
         // silently ignoring them; mpr_requested() reflects that they don't self-trigger MPR.
-        let cli = Cli { mpr_origin: Some("1,2,3".to_string()), ..base_cli() };
+        let cli = Cli {
+            mpr_origin: Some("1,2,3".to_string()),
+            ..base_cli()
+        };
         assert!(!cli.mpr_requested());
     }
 
@@ -3912,8 +4260,18 @@ mod tests {
     fn parses_mpr_depth_thickness_and_projection_flags() {
         let matches = Cli::command()
             .try_get_matches_from([
-                "dcmnorm", "--mpr", "coronal", "--mpr-depth", "-15.5", "--mpr-thickness", "20",
-                "--mpr-projection", "minip", "series_dir/a.dcm", "series_dir/b.dcm", "out.png",
+                "dcmnorm",
+                "--mpr",
+                "coronal",
+                "--mpr-depth",
+                "-15.5",
+                "--mpr-thickness",
+                "20",
+                "--mpr-projection",
+                "minip",
+                "series_dir/a.dcm",
+                "series_dir/b.dcm",
+                "out.png",
             ])
             .unwrap();
         let cli = Cli::from_arg_matches(&matches).unwrap();
@@ -3950,7 +4308,10 @@ mod tests {
         run_mpr(&deep_cli, &paths, &deep_output).unwrap();
         let deep_bytes = fs::read(&deep_output).unwrap();
 
-        assert_ne!(centered_bytes, deep_bytes, "--mpr-depth should move the reformatted plane to a different slice");
+        assert_ne!(
+            centered_bytes, deep_bytes,
+            "--mpr-depth should move the reformatted plane to a different slice"
+        );
 
         fs::remove_file(&centered_output).ok();
         fs::remove_file(&deep_output).ok();
@@ -3984,14 +4345,34 @@ mod tests {
     fn parse_depth_spec_parses_every_syntax_variant() {
         assert_eq!(parse_depth_spec("5").unwrap(), DepthSpec::Single(5.0));
         assert_eq!(parse_depth_spec("-15.5").unwrap(), DepthSpec::Single(-15.5));
-        assert_eq!(parse_depth_spec("-10:10").unwrap(), DepthSpec::Range { start: -10.0, end: 10.0, step: None });
+        assert_eq!(
+            parse_depth_spec("-10:10").unwrap(),
+            DepthSpec::Range {
+                start: -10.0,
+                end: 10.0,
+                step: None
+            }
+        );
         assert_eq!(
             parse_depth_spec("-10:10:2.5").unwrap(),
-            DepthSpec::Range { start: -10.0, end: 10.0, step: Some(2.5) }
+            DepthSpec::Range {
+                start: -10.0,
+                end: 10.0,
+                step: Some(2.5)
+            }
         );
-        assert_eq!(parse_depth_spec("all").unwrap(), DepthSpec::All { step: None });
-        assert_eq!(parse_depth_spec("ALL").unwrap(), DepthSpec::All { step: None });
-        assert_eq!(parse_depth_spec("all:3").unwrap(), DepthSpec::All { step: Some(3.0) });
+        assert_eq!(
+            parse_depth_spec("all").unwrap(),
+            DepthSpec::All { step: None }
+        );
+        assert_eq!(
+            parse_depth_spec("ALL").unwrap(),
+            DepthSpec::All { step: None }
+        );
+        assert_eq!(
+            parse_depth_spec("all:3").unwrap(),
+            DepthSpec::All { step: Some(3.0) }
+        );
     }
 
     #[test]
@@ -4018,7 +4399,14 @@ mod tests {
     fn resolve_depths_single_always_yields_exactly_one_depth_regardless_of_default_step() {
         let paths = write_synthetic_ct_series_for_cli(4, 1.0);
         let volume = build_volume(&paths).unwrap();
-        let depths = resolve_depths(DepthSpec::Single(-7.0), &volume, [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], volume.center(), 2.0);
+        let depths = resolve_depths(
+            DepthSpec::Single(-7.0),
+            &volume,
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            volume.center(),
+            2.0,
+        );
         assert_eq!(depths, vec![-7.0]);
         for path in &paths {
             fs::remove_file(path).ok();
@@ -4032,11 +4420,24 @@ mod tests {
         // Coronal: row_dir=[1,0,0], col_dir=[0,0,-1], normal=[0,1,0] - depth spans the volume's
         // own row-direction (AP) extent, i.e. rows * row_spacing_mm.
         let (row_dir, col_dir) = canonical_view_basis("coronal", &volume).unwrap();
-        let depths = resolve_depths(DepthSpec::All { step: Some(10.0) }, &volume, row_dir, col_dir, volume.center(), 10.0);
-        assert!(depths.len() >= 2, "expected multiple depths spanning the volume, got {depths:?}");
+        let depths = resolve_depths(
+            DepthSpec::All { step: Some(10.0) },
+            &volume,
+            row_dir,
+            col_dir,
+            volume.center(),
+            10.0,
+        );
+        assert!(
+            depths.len() >= 2,
+            "expected multiple depths spanning the volume, got {depths:?}"
+        );
         let span = depths.last().unwrap() - depths.first().unwrap();
         let expected_span = (volume.rows.saturating_sub(1)) as f64 * volume.row_spacing_mm;
-        assert!((span - expected_span).abs() < 15.0, "span {span} should approximate the volume's own extent {expected_span}");
+        assert!(
+            (span - expected_span).abs() < 15.0,
+            "span {span} should approximate the volume's own extent {expected_span}"
+        );
         for path in &paths {
             fs::remove_file(path).ok();
         }
@@ -4045,13 +4446,34 @@ mod tests {
     #[test]
     fn resolve_mpr_output_kind_dispatches_on_extension() {
         let cli = base_cli();
-        assert_eq!(resolve_mpr_output_kind(&cli, Path::new("out.nii")).unwrap(), MprOutputKind::Volume(VolumeFormat::Nifti));
-        assert_eq!(resolve_mpr_output_kind(&cli, Path::new("out.nii.gz")).unwrap(), MprOutputKind::Volume(VolumeFormat::NiftiGz));
-        assert_eq!(resolve_mpr_output_kind(&cli, Path::new("OUT.NRRD")).unwrap(), MprOutputKind::Volume(VolumeFormat::Nrrd));
-        assert_eq!(resolve_mpr_output_kind(&cli, Path::new("out.dcm")).unwrap(), MprOutputKind::DicomSeries);
-        assert_eq!(resolve_mpr_output_kind(&cli, Path::new("out.dicom")).unwrap(), MprOutputKind::DicomSeries);
-        assert_eq!(resolve_mpr_output_kind(&cli, Path::new("out.png")).unwrap(), MprOutputKind::Rendered(RenderFormat::Png));
-        assert_eq!(resolve_mpr_output_kind(&cli, Path::new("out.gputex")).unwrap(), MprOutputKind::Rendered(RenderFormat::Texture));
+        assert_eq!(
+            resolve_mpr_output_kind(&cli, Path::new("out.nii")).unwrap(),
+            MprOutputKind::Volume(VolumeFormat::Nifti)
+        );
+        assert_eq!(
+            resolve_mpr_output_kind(&cli, Path::new("out.nii.gz")).unwrap(),
+            MprOutputKind::Volume(VolumeFormat::NiftiGz)
+        );
+        assert_eq!(
+            resolve_mpr_output_kind(&cli, Path::new("OUT.NRRD")).unwrap(),
+            MprOutputKind::Volume(VolumeFormat::Nrrd)
+        );
+        assert_eq!(
+            resolve_mpr_output_kind(&cli, Path::new("out.dcm")).unwrap(),
+            MprOutputKind::DicomSeries
+        );
+        assert_eq!(
+            resolve_mpr_output_kind(&cli, Path::new("out.dicom")).unwrap(),
+            MprOutputKind::DicomSeries
+        );
+        assert_eq!(
+            resolve_mpr_output_kind(&cli, Path::new("out.png")).unwrap(),
+            MprOutputKind::Rendered(RenderFormat::Png)
+        );
+        assert_eq!(
+            resolve_mpr_output_kind(&cli, Path::new("out.gputex")).unwrap(),
+            MprOutputKind::Rendered(RenderFormat::Texture)
+        );
     }
 
     #[test]
@@ -4100,10 +4522,16 @@ mod tests {
         // Every slice has genuinely distinct pixel content (varying RescaleIntercept fixture).
         for a in 0..written_bytes.len() {
             for b in (a + 1)..written_bytes.len() {
-                assert_ne!(written_bytes[a], written_bytes[b], "frames {a} and {b} should differ");
+                assert_ne!(
+                    written_bytes[a], written_bytes[b],
+                    "frames {a} and {b} should differ"
+                );
             }
         }
-        assert!(!output_path.exists(), "the base (non-numbered) path should not be written for a multi-slice stack");
+        assert!(
+            !output_path.exists(),
+            "the base (non-numbered) path should not be written for a multi-slice stack"
+        );
 
         for path in &paths {
             fs::remove_file(path).ok();
@@ -4123,7 +4551,10 @@ mod tests {
         let bytes = fs::read(&output_path).unwrap();
         assert_eq!(&bytes[344..348], b"n+1\0");
         let dim2 = i16::from_le_bytes(bytes[46..48].try_into().unwrap());
-        assert_eq!(dim2, 5, "5 depths (-2,-1,0,1,2 step 1) should become dim[3] = 5");
+        assert_eq!(
+            dim2, 5,
+            "5 depths (-2,-1,0,1,2 step 1) should become dim[3] = 5"
+        );
 
         fs::remove_file(&output_path).ok();
         for path in &paths {
@@ -4169,7 +4600,8 @@ mod tests {
             name.push(".json");
             PathBuf::from(name)
         };
-        let meta: serde_json::Value = serde_json::from_str(&fs::read_to_string(&sidecar_path).unwrap()).unwrap();
+        let meta: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&sidecar_path).unwrap()).unwrap();
         assert_eq!(meta["contentKind"], "volume");
         assert_eq!(meta["compression"], "gzip");
         assert_eq!(meta["width"], 512);
@@ -4210,7 +4642,8 @@ mod tests {
             name.push(".json");
             PathBuf::from(name)
         };
-        let meta: serde_json::Value = serde_json::from_str(&fs::read_to_string(&sidecar_path).unwrap()).unwrap();
+        let meta: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&sidecar_path).unwrap()).unwrap();
         assert_eq!(meta["downsampled"], true);
         assert_eq!(meta["compression"], "none");
         assert!(meta["width"].as_u64().unwrap() <= 64);
@@ -4252,7 +4685,10 @@ mod tests {
 
         let object = read_dicom_file(&output_path).unwrap();
         // Multi-frame Grayscale Word Secondary Capture Image Storage - see secondary_capture.rs.
-        assert_eq!(object.meta().media_storage_sop_class_uid(), "1.2.840.10008.5.1.4.1.1.7.3");
+        assert_eq!(
+            object.meta().media_storage_sop_class_uid(),
+            "1.2.840.10008.5.1.4.1.1.7.3"
+        );
         assert_eq!(object.element(tags::ROWS).unwrap().uint16().unwrap(), 512);
 
         fs::remove_file(&output_path).ok();
@@ -4276,8 +4712,22 @@ mod tests {
         for index in 1..=3 {
             let frame_path = frame_output_path(&output_path, index).unwrap();
             let object = read_dicom_file(&frame_path).unwrap();
-            series_uids.push(object.element(tags::SERIES_INSTANCE_UID).unwrap().to_str().unwrap().into_owned());
-            instance_numbers.push(object.element(tags::INSTANCE_NUMBER).unwrap().to_str().unwrap().into_owned());
+            series_uids.push(
+                object
+                    .element(tags::SERIES_INSTANCE_UID)
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .into_owned(),
+            );
+            instance_numbers.push(
+                object
+                    .element(tags::INSTANCE_NUMBER)
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .into_owned(),
+            );
             fs::remove_file(&frame_path).ok();
         }
         assert_eq!(series_uids[0], series_uids[1]);
@@ -4330,22 +4780,38 @@ mod tests {
 
     #[test]
     fn finalize_derives_legacy_input_output_only_for_zero_one_or_two_paths() {
-        let zero = Cli { paths: vec![], ..base_cli() }.finalize();
+        let zero = Cli {
+            paths: vec![],
+            ..base_cli()
+        }
+        .finalize();
         assert_eq!(zero.input, None);
         assert_eq!(zero.output, None);
 
-        let one = Cli { paths: vec![PathBuf::from("a.dcm")], ..base_cli() }.finalize();
+        let one = Cli {
+            paths: vec![PathBuf::from("a.dcm")],
+            ..base_cli()
+        }
+        .finalize();
         assert_eq!(one.input, Some(PathBuf::from("a.dcm")));
         assert_eq!(one.output, None);
 
-        let two = Cli { paths: vec![PathBuf::from("a.dcm"), PathBuf::from("b.json")], ..base_cli() }.finalize();
+        let two = Cli {
+            paths: vec![PathBuf::from("a.dcm"), PathBuf::from("b.json")],
+            ..base_cli()
+        }
+        .finalize();
         assert_eq!(two.input, Some(PathBuf::from("a.dcm")));
         assert_eq!(two.output, Some(PathBuf::from("b.json")));
 
         // 3+ paths is multi-input territory (batch or --mpr) - run() reads `paths` directly for
         // that, not these derived fields, so finalize() deliberately leaves output unset here.
         let three = Cli {
-            paths: vec![PathBuf::from("a.dcm"), PathBuf::from("b.dcm"), PathBuf::from("c.dcm")],
+            paths: vec![
+                PathBuf::from("a.dcm"),
+                PathBuf::from("b.dcm"),
+                PathBuf::from("c.dcm"),
+            ],
             ..base_cli()
         }
         .finalize();
@@ -4379,7 +4845,8 @@ mod tests {
                     VR::DS,
                     PrimitiveValue::from(format!("-151.493508\\-36.6564417\\{z}")),
                 ));
-                let path = temp_output_path(&format!("mpr-cli-slice-{index}")).with_extension("dcm");
+                let path =
+                    temp_output_path(&format!("mpr-cli-slice-{index}")).with_extension("dcm");
                 write_dicom_file(&mut object, &path).unwrap();
                 path
             })
@@ -4392,7 +4859,10 @@ mod tests {
     /// plain helper (which reuses the SAME pixel content for every "slice", differing only in
     /// ImagePositionPatient), this makes different depths/slabs through the resulting volume
     /// genuinely distinguishable in absolute value, not just position.
-    fn write_synthetic_ct_series_with_varying_intercept_for_cli(count: usize, spacing_mm: f64) -> Vec<PathBuf> {
+    fn write_synthetic_ct_series_with_varying_intercept_for_cli(
+        count: usize,
+        spacing_mm: f64,
+    ) -> Vec<PathBuf> {
         let base = read_dicom_file(fixture_path("ct.dcm")).unwrap();
         (0..count)
             .map(|index| {
@@ -4409,7 +4879,8 @@ mod tests {
                     VR::DS,
                     PrimitiveValue::from(format!("{intercept}")),
                 ));
-                let path = temp_output_path(&format!("mpr-cli-varying-slice-{index}")).with_extension("dcm");
+                let path = temp_output_path(&format!("mpr-cli-varying-slice-{index}"))
+                    .with_extension("dcm");
                 write_dicom_file(&mut object, &path).unwrap();
                 path
             })
@@ -4500,7 +4971,9 @@ mod tests {
         assert!(run_dicom_to_json_with_object(&cli, Path::new(&input_path), None, object).is_err());
 
         let object = read_dicom_file(&input_path).unwrap();
-        assert!(super::run_dicom_to_dicom_with_object(&cli, Path::new(&input_path), object).is_err());
+        assert!(
+            super::run_dicom_to_dicom_with_object(&cli, Path::new(&input_path), object).is_err()
+        );
     }
 
     #[test]
@@ -4731,34 +5204,57 @@ mod tests {
     fn dicomdir_command_writes_a_directory_for_a_file_tree() {
         let root = std::env::temp_dir().join(format!(
             "dcmnorm-dicomdir-{}",
-            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
         fs::create_dir_all(root.join("DICOM").join("SE000001")).unwrap();
-        fs::copy(fixture_path("mr.dcm"), root.join("DICOM").join("SE000001").join("IM000001")).unwrap();
+        fs::copy(
+            fixture_path("mr.dcm"),
+            root.join("DICOM").join("SE000001").join("IM000001"),
+        )
+        .unwrap();
         fs::copy(fixture_path("pdf.dcm"), root.join("DICOM").join("IM000002")).unwrap();
         fs::write(root.join("README.TXT"), "not DICOM").unwrap();
 
         let args = |extra: &[&str]| {
-            let mut args: Vec<std::ffi::OsString> = vec!["dicomdir".into(), root.clone().into_os_string()];
+            let mut args: Vec<std::ffi::OsString> =
+                vec!["dicomdir".into(), root.clone().into_os_string()];
             args.extend(extra.iter().map(|a| a.into()));
             args
         };
         super::run_dicomdir_command(args(&["--file-set-id", "CLI_TEST"])).unwrap();
         let dicomdir = read_dicom_file(root.join("DICOMDIR")).unwrap();
-        assert_eq!(dicomdir.meta().media_storage_sop_class_uid(), "1.2.840.10008.1.3.10");
+        assert_eq!(
+            dicomdir.meta().media_storage_sop_class_uid(),
+            "1.2.840.10008.1.3.10"
+        );
         let records = dicomdir.get(Tag(0x0004, 0x1220)).unwrap().items().unwrap();
         let types: Vec<String> = records
             .iter()
-            .map(|r| r.get(Tag(0x0004, 0x1430)).unwrap().to_str().unwrap().trim().to_owned())
+            .map(|r| {
+                r.get(Tag(0x0004, 0x1430))
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .trim()
+                    .to_owned()
+            })
             .collect();
-        assert!(types.contains(&"IMAGE".to_owned()) && types.contains(&"ENCAP DOC".to_owned()), "{types:?}");
+        assert!(
+            types.contains(&"IMAGE".to_owned()) && types.contains(&"ENCAP DOC".to_owned()),
+            "{types:?}"
+        );
 
         // rerunning replaces the DICOMDIR (it is not itself taken for a File-set member)
         super::run_dicomdir_command(args(&[])).unwrap();
 
         // a DICOM file whose path breaks the File ID rules is an error
         fs::copy(fixture_path("mr.dcm"), root.join("DICOM").join("im3.dcm")).unwrap();
-        let error = super::run_dicomdir_command(args(&[])).unwrap_err().to_string();
+        let error = super::run_dicomdir_command(args(&[]))
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("File ID"), "{error}");
         fs::remove_dir_all(&root).unwrap();
     }

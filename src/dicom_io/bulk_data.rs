@@ -45,7 +45,10 @@ pub(super) fn bulk_representation<I, P>(
 where
     P: AsRef<[u8]>,
 {
-    if let Some(location) = options.deferred_bulk_data.and_then(|deferred| deferred.value(tag)) {
+    if let Some(location) = options
+        .deferred_bulk_data
+        .and_then(|deferred| deferred.value(tag))
+    {
         // Never loaded, so it can only be referenced: the location came from the parser
         // itself, so unlike a bulk_data_source scan there is nothing to locate or verify.
         if options.bulk_data_mode != DicomJsonBulkDataMode::Uri {
@@ -107,7 +110,13 @@ where
                 // before giving up, so an out-of-order visit can never cause a false miss.
                 let resume_hint = options.bulk_scan_cursor.map(|cell| cell.get()).unwrap_or(0);
                 let value_width = primitive_value_width(value);
-                match locate_element_value(source, tag, expected_bytes_for_lookup, value_width, resume_hint) {
+                match locate_element_value(
+                    source,
+                    tag,
+                    expected_bytes_for_lookup,
+                    value_width,
+                    resume_hint,
+                ) {
                     Ok(Some(location)) => {
                         if let Some(cell) = options.bulk_scan_cursor {
                             let end = location.offset + location.length;
@@ -115,8 +124,12 @@ where
                                 cell.set(end);
                             }
                         }
-                        let uri =
-                            options.bulk_data_uri(tag, vr, location.offset as u64, Some(location.length as u64));
+                        let uri = options.bulk_data_uri(
+                            tag,
+                            vr,
+                            location.offset as u64,
+                            Some(location.length as u64),
+                        );
                         return Ok(BulkRepresentation::Uri(uri));
                     }
                     Ok(None) => {}
@@ -152,13 +165,17 @@ where
     // copy here was a whole-value memcpy just to compare/encode it.
     if let Some(source) = bulk_data_source {
         if let Some(location) = locate_element_value(source, tag, None, 1, 0)? {
-            return Ok(std::borrow::Cow::Borrowed(&source[location.offset..location.offset + location.length]));
+            return Ok(std::borrow::Cow::Borrowed(
+                &source[location.offset..location.offset + location.length],
+            ));
         }
     }
 
     match value {
         DicomValue::Primitive(primitive) => Ok(primitive.to_bytes()),
-        DicomValue::PixelSequence(pixel_sequence) => Ok(std::borrow::Cow::Owned(pixel_sequence_to_bytes(pixel_sequence))),
+        DicomValue::PixelSequence(pixel_sequence) => Ok(std::borrow::Cow::Owned(
+            pixel_sequence_to_bytes(pixel_sequence),
+        )),
         DicomValue::Sequence(_) => Err(DicomJsonError::UnsupportedBulkDataVr { tag, vr }),
     }
 }
@@ -575,8 +592,13 @@ fn locate_tag_in_dataset(
         let (length, next_position) = if let Some(length) = header.length {
             (length, value_offset + length)
         } else {
-            let end_position =
-                skip_undefined_length_value(source, value_offset, explicit_vr, little_endian, steps)?;
+            let end_position = skip_undefined_length_value(
+                source,
+                value_offset,
+                explicit_vr,
+                little_endian,
+                steps,
+            )?;
             (end_position.saturating_sub(value_offset), end_position + 8)
         };
 
@@ -625,8 +647,13 @@ fn locate_tag_in_nested_dataset(
         let (length, next_position) = if let Some(length) = header.length {
             (length, value_offset + length)
         } else {
-            let end_position =
-                skip_undefined_length_value(source, value_offset, explicit_vr, little_endian, steps)?;
+            let end_position = skip_undefined_length_value(
+                source,
+                value_offset,
+                explicit_vr,
+                little_endian,
+                steps,
+            )?;
             (end_position.saturating_sub(value_offset), end_position + 8)
         };
 
@@ -638,7 +665,14 @@ fn locate_tag_in_nested_dataset(
         }
 
         if depth < MAX_NESTED_SCAN_DEPTH
-            && is_sequence_value(source, position, header.tag, value_offset, explicit_vr, little_endian)
+            && is_sequence_value(
+                source,
+                position,
+                header.tag,
+                value_offset,
+                explicit_vr,
+                little_endian,
+            )
         {
             if let Some(location) = locate_tag_in_sequence_items(
                 source,
@@ -835,8 +869,12 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 fn primitive_value_width<I, P>(value: &DicomValue<I, P>) -> usize {
     match value {
         DicomValue::Primitive(PrimitiveValue::U16(_) | PrimitiveValue::I16(_)) => 2,
-        DicomValue::Primitive(PrimitiveValue::U32(_) | PrimitiveValue::I32(_) | PrimitiveValue::F32(_)) => 4,
-        DicomValue::Primitive(PrimitiveValue::U64(_) | PrimitiveValue::I64(_) | PrimitiveValue::F64(_)) => 8,
+        DicomValue::Primitive(
+            PrimitiveValue::U32(_) | PrimitiveValue::I32(_) | PrimitiveValue::F32(_),
+        ) => 4,
+        DicomValue::Primitive(
+            PrimitiveValue::U64(_) | PrimitiveValue::I64(_) | PrimitiveValue::F64(_),
+        ) => 8,
         _ => 1,
     }
 }
@@ -882,7 +920,8 @@ fn skip_undefined_length_value(
             let item_length = read_u32(source, position + 4, little_endian)? as usize;
             position += 8;
             position = if item_length == u32::MAX as usize {
-                skip_undefined_length_value(source, position, explicit_vr, little_endian, steps)? + 8
+                skip_undefined_length_value(source, position, explicit_vr, little_endian, steps)?
+                    + 8
             } else {
                 position + item_length
             };
@@ -894,7 +933,8 @@ fn skip_undefined_length_value(
         position = if let Some(length) = header.length {
             value_offset + length
         } else {
-            skip_undefined_length_value(source, value_offset, explicit_vr, little_endian, steps)? + 8
+            skip_undefined_length_value(source, value_offset, explicit_vr, little_endian, steps)?
+                + 8
         };
     }
 

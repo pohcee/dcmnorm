@@ -28,8 +28,9 @@ impl<W: Write> PDataWriter<W> {
         // Every PDV must fit within one P-DATA-TF PDU: PDU header (6) + PDV item header (6,
         // counted once more since PDV_HEADER_SIZE already covers item-length + context-id +
         // message-control-header) + the fragment bytes themselves.
-        let max_data_len =
-            max_pdu_length.saturating_sub(PDU_HEADER_SIZE + PDV_HEADER_SIZE).max(1) as usize;
+        let max_data_len = max_pdu_length
+            .saturating_sub(PDU_HEADER_SIZE + PDV_HEADER_SIZE)
+            .max(1) as usize;
         PDataWriter {
             stream,
             presentation_context_id,
@@ -87,4 +88,3 @@ impl<W: Write> Drop for PDataWriter<W> {
         let _ = self.finish_impl();
     }
 }
-

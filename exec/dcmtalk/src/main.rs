@@ -7,8 +7,8 @@ use std::time::Duration;
 use clap::{ArgAction, Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 use dcmnorm::dicom_io::{
     echo_scu, find_scu, move_scu, start_scp, store_scu, DimseLogger, EchoScuOptions,
-    FindScuOptions, MoveScuOptions, MoveScuResult, QueryRetrieveLevel, ScpHandlers, ScpOptions, StoreScuOptions,
-    StoreScuResult,
+    FindScuOptions, MoveScuOptions, MoveScuResult, QueryRetrieveLevel, ScpHandlers, ScpOptions,
+    StoreScuOptions, StoreScuResult,
 };
 use sha2::{Digest, Sha256};
 
@@ -21,8 +21,12 @@ const DEFAULT_AE_TITLE: &str = "DCMTALK";
 
 #[derive(Parser)]
 #[command(name = "dcmtalk")]
-#[command(about = "DICOM network (DIMSE) client/server: verify, send, query, retrieve, and receive")]
-#[command(long_about = "A DIMSE command-line tool covering the same ground as dcmtk's echoscu/storescu/findscu/movescu/storescp, built on dcmnorm's native (non-dcmtk) DICOM Upper Layer implementation. Every subcommand accepts --verbose to log association negotiation, presentation contexts, and each DIMSE command/response exchanged.")]
+#[command(
+    about = "DICOM network (DIMSE) client/server: verify, send, query, retrieve, and receive"
+)]
+#[command(
+    long_about = "A DIMSE command-line tool covering the same ground as dcmtk's echoscu/storescu/findscu/movescu/storescp, built on dcmnorm's native (non-dcmtk) DICOM Upper Layer implementation. Every subcommand accepts --verbose to log association negotiation, presentation contexts, and each DIMSE command/response exchanged."
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -116,7 +120,11 @@ struct MovescuArgs {
 
     /// QueryRetrieveLevel: STUDY (the whole study), SERIES (needs --series-uid) or IMAGE (needs
     /// --series-uid and at least one --sop-uid)
-    #[arg(long = "level", default_value = "STUDY", value_name = "STUDY|SERIES|IMAGE")]
+    #[arg(
+        long = "level",
+        default_value = "STUDY",
+        value_name = "STUDY|SERIES|IMAGE"
+    )]
     level: String,
 
     /// SeriesInstanceUID to retrieve (SERIES/IMAGE level)
@@ -261,9 +269,14 @@ fn run_echoscu(args: EchoscuArgs) -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let status = echo_scu(&common.destination, options)?;
-    println!("C-ECHO status=0x{status:04X} ({})", status_description(status));
+    println!(
+        "C-ECHO status=0x{status:04X} ({})",
+        status_description(status)
+    );
     if status != 0x0000 {
-        return Err(other_error(format!("C-ECHO failed with status 0x{status:04X}")));
+        return Err(other_error(format!(
+            "C-ECHO failed with status 0x{status:04X}"
+        )));
     }
     Ok(())
 }
@@ -325,7 +338,10 @@ fn run_storescu(args: StorescuArgs) -> Result<(), Box<dyn std::error::Error>> {
     println!("{} instance(s) sent, {} failed", results.len(), failures);
 
     if failures > 0 {
-        return Err(other_error(format!("{failures} of {} instance(s) failed", results.len())));
+        return Err(other_error(format!(
+            "{failures} of {} instance(s) failed",
+            results.len()
+        )));
     }
     Ok(())
 }
@@ -383,8 +399,12 @@ fn run_movescu(args: MovescuArgs) -> Result<(), Box<dyn std::error::Error>> {
         sop_instance_uids: args.sop_uids,
     };
 
-    let result: MoveScuResult =
-        move_scu(&common.destination, &args.move_destination_ae, &args.study_instance_uid, options)?;
+    let result: MoveScuResult = move_scu(
+        &common.destination,
+        &args.move_destination_ae,
+        &args.study_instance_uid,
+        options,
+    )?;
 
     println!(
         "C-MOVE status=0x{:04X} ({}) completed={} failed={} warning={} remaining={}{}",
@@ -398,7 +418,10 @@ fn run_movescu(args: MovescuArgs) -> Result<(), Box<dyn std::error::Error>> {
     );
 
     if !result.cancelled && result.status != 0x0000 {
-        return Err(other_error(format!("C-MOVE failed with status 0x{:04X}", result.status)));
+        return Err(other_error(format!(
+            "C-MOVE failed with status 0x{:04X}",
+            result.status
+        )));
     }
     Ok(())
 }
@@ -409,17 +432,27 @@ fn run_movescu(args: MovescuArgs) -> Result<(), Box<dyn std::error::Error>> {
 struct StandaloneScpHandlers;
 
 impl ScpHandlers for StandaloneScpHandlers {
-    fn on_find(&self, _filter: &HashMap<String, String>) -> Result<Vec<HashMap<String, String>>, String> {
+    fn on_find(
+        &self,
+        _filter: &HashMap<String, String>,
+    ) -> Result<Vec<HashMap<String, String>>, String> {
         Err("C-FIND is not supported by dcmtalk storescp".to_owned())
     }
 
-    fn on_move(&self, _study_instance_uid: &str, _move_destination_ae: &str) -> Result<bool, String> {
+    fn on_move(
+        &self,
+        _study_instance_uid: &str,
+        _move_destination_ae: &str,
+    ) -> Result<bool, String> {
         Err("C-MOVE is not supported by dcmtalk storescp".to_owned())
     }
 
     fn on_association_complete(&self, stored_instances_by_study: &HashMap<String, Vec<String>>) {
         for (study_instance_uid, paths) in stored_instances_by_study {
-            println!("stored study {study_instance_uid}: {} instance(s)", paths.len());
+            println!(
+                "stored study {study_instance_uid}: {} instance(s)",
+                paths.len()
+            );
             for path in paths {
                 println!("  {path}");
             }
@@ -438,7 +471,12 @@ fn run_storescp(args: StorescpArgs) -> Result<(), Box<dyn std::error::Error>> {
         ..Default::default()
     };
 
-    let scp = start_scp(args.port, args.cache_path.clone(), Arc::new(StandaloneScpHandlers), options)?;
+    let scp = start_scp(
+        args.port,
+        args.cache_path.clone(),
+        Arc::new(StandaloneScpHandlers),
+        options,
+    )?;
 
     println!(
         "dcmtalk storescp listening on port {} (AE title {:?}, cache {}). Press Ctrl+C to stop.",

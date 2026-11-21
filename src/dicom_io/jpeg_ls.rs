@@ -39,7 +39,11 @@ pub mod jpeg_ls_impl {
             if let Some(ranges) = ranges {
                 let mut decoded = Vec::new();
                 for range in ranges {
-                    decoded.extend_from_slice(&decode_codestream(&frame_codestream(fragments, range), rows, cols)?);
+                    decoded.extend_from_slice(&decode_codestream(
+                        &frame_codestream(fragments, range),
+                        rows,
+                        cols,
+                    )?);
                 }
                 return Ok(decoded);
             }
@@ -166,8 +170,10 @@ pub mod jpeg_ls_impl {
             .get(tags::COLUMNS)
             .and_then(|e| e.uint16().ok())
             .ok_or_else(|| "missing Columns attribute".to_owned())?;
-        let samples_per_pixel =
-            object.get(tags::SAMPLES_PER_PIXEL).and_then(|e| e.uint16().ok()).unwrap_or(1);
+        let samples_per_pixel = object
+            .get(tags::SAMPLES_PER_PIXEL)
+            .and_then(|e| e.uint16().ok())
+            .unwrap_or(1);
         let bits_allocated = object
             .get(tags::BITS_ALLOCATED)
             .and_then(|e| e.uint16().ok())
@@ -187,14 +193,21 @@ pub mod jpeg_ls_impl {
             .and_then(|s| s.trim().parse::<usize>().ok())
             .unwrap_or(1)
             .max(1);
-        let planar_configuration =
-            object.get(tags::PLANAR_CONFIGURATION).and_then(|e| e.uint16().ok()).unwrap_or(0);
+        let planar_configuration = object
+            .get(tags::PLANAR_CONFIGURATION)
+            .and_then(|e| e.uint16().ok())
+            .unwrap_or(0);
 
         if bits_allocated == 0 || bits_allocated > 16 {
-            return Err(format!("unsupported BitsAllocated for JPEG-LS encoding: {bits_allocated}"));
+            return Err(format!(
+                "unsupported BitsAllocated for JPEG-LS encoding: {bits_allocated}"
+            ));
         }
         let bytes_per_sample = if bits_allocated <= 8 { 1usize } else { 2usize };
-        let frame_len = usize::from(rows) * usize::from(cols) * usize::from(samples_per_pixel) * bytes_per_sample;
+        let frame_len = usize::from(rows)
+            * usize::from(cols)
+            * usize::from(samples_per_pixel)
+            * bytes_per_sample;
         let expected_len = frame_len * number_of_frames;
         if pixel_data.len() < expected_len {
             return Err(format!(
@@ -262,7 +275,9 @@ pub mod jpeg_ls_impl {
     }
 }
 
-pub use jpeg_ls_impl::{decode_jpeg_ls_frame, decode_jpeg_ls_pixel_data, encode_jpeg_ls_pixel_data};
+pub use jpeg_ls_impl::{
+    decode_jpeg_ls_frame, decode_jpeg_ls_pixel_data, encode_jpeg_ls_pixel_data,
+};
 
 #[cfg(test)]
 mod tests {
@@ -272,7 +287,10 @@ mod tests {
     use std::path::PathBuf;
 
     fn fixture(name: &str) -> DefaultDicomObject {
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test").join("files").join(name);
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("test")
+            .join("files")
+            .join(name);
         read_dicom_file(path).expect("fixture should be readable")
     }
 
@@ -284,11 +302,20 @@ mod tests {
     #[test]
     fn lossless_encode_then_decode_round_trips_exactly() {
         let object = fixture("mr_small.dcm");
-        let original_bytes =
-            object.element(dcmnorm_dictionary::tags::PIXEL_DATA).unwrap().to_bytes().unwrap().to_vec();
+        let original_bytes = object
+            .element(dcmnorm_dictionary::tags::PIXEL_DATA)
+            .unwrap()
+            .to_bytes()
+            .unwrap()
+            .to_vec();
 
-        let fragments = encode_jpeg_ls_pixel_data(&object, true).expect("lossless encode should succeed");
-        assert_eq!(fragments.len(), 1, "single-frame source should produce exactly one fragment");
+        let fragments =
+            encode_jpeg_ls_pixel_data(&object, true).expect("lossless encode should succeed");
+        assert_eq!(
+            fragments.len(),
+            1,
+            "single-frame source should produce exactly one fragment"
+        );
 
         // Rebuild an object carrying the encoded fragment as encapsulated PixelData, the same
         // shape decode_jpeg_ls_pixel_data expects from a real file.
@@ -310,8 +337,12 @@ mod tests {
     #[test]
     fn near_lossless_encode_bounds_error_to_the_configured_step() {
         let object = fixture("mr_small.dcm");
-        let original_bytes =
-            object.element(dcmnorm_dictionary::tags::PIXEL_DATA).unwrap().to_bytes().unwrap().to_vec();
+        let original_bytes = object
+            .element(dcmnorm_dictionary::tags::PIXEL_DATA)
+            .unwrap()
+            .to_bytes()
+            .unwrap()
+            .to_vec();
 
         let fragments =
             encode_jpeg_ls_pixel_data(&object, false).expect("near-lossless encode should succeed");
@@ -324,8 +355,12 @@ mod tests {
         let decoded = decode_jpeg_ls_pixel_data(&encoded_object).expect("decode should succeed");
 
         assert_eq!(decoded.len(), original_bytes.len());
-        assert_ne!(decoded, original_bytes, "near-lossless should not be byte-identical to lossless");
-        for (original, roundtripped) in original_bytes.chunks_exact(2).zip(decoded.chunks_exact(2)) {
+        assert_ne!(
+            decoded, original_bytes,
+            "near-lossless should not be byte-identical to lossless"
+        );
+        for (original, roundtripped) in original_bytes.chunks_exact(2).zip(decoded.chunks_exact(2))
+        {
             let a = u16::from_le_bytes([original[0], original[1]]);
             let b = u16::from_le_bytes([roundtripped[0], roundtripped[1]]);
             assert!(
@@ -343,7 +378,8 @@ mod tests {
     #[test]
     fn reencoding_a_real_third_party_jpeg_ls_file_round_trips_exactly() {
         let source = fixture("mr_jpegls_lossless.dcm");
-        let first_decode = decode_jpeg_ls_pixel_data(&source).expect("initial decode should succeed");
+        let first_decode =
+            decode_jpeg_ls_pixel_data(&source).expect("initial decode should succeed");
 
         let mut native_object = source.clone();
         native_object.put(dcmnorm_core::DataElement::new(

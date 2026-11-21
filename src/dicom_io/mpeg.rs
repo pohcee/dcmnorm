@@ -2,15 +2,21 @@ use dcmnorm_dictionary::tags;
 use dcmnorm_object::DefaultDicomObject;
 
 pub(crate) fn transfer_syntax_uid(object: &DefaultDicomObject) -> String {
-    object.meta().transfer_syntax.trim_end_matches(['\0', ' ']).to_owned()
+    object
+        .meta()
+        .transfer_syntax
+        .trim_end_matches(['\0', ' '])
+        .to_owned()
 }
 
 /// Frames per second to encode at: `CineRate` (0018,0040) if present, else derived from
 /// `FrameTime` (0018,1063, milliseconds/frame), else a plain default. Real-world cine
 /// loops nearly always carry one of these; the default only matters for synthetic inputs.
 pub(crate) fn frames_per_second(object: &DefaultDicomObject) -> f64 {
-    if let Some(rate) =
-        object.get(tags::CINE_RATE).and_then(|e| e.to_str().ok()).and_then(|s| s.trim().parse::<f64>().ok())
+    if let Some(rate) = object
+        .get(tags::CINE_RATE)
+        .and_then(|e| e.to_str().ok())
+        .and_then(|s| s.trim().parse::<f64>().ok())
     {
         if rate > 0.0 {
             return rate;
@@ -34,11 +40,11 @@ pub mod mpeg_impl {
     use dcmnorm_object::DefaultDicomObject;
 
     use super::{frames_per_second, transfer_syntax_uid};
-    use ffmpeg_next as ffmpeg;
     use ffmpeg::codec::{self, packet::Packet};
     use ffmpeg::format::Pixel;
     use ffmpeg::frame;
     use ffmpeg::software::scaling;
+    use ffmpeg_next as ffmpeg;
 
     /// Splits a concatenated elementary stream into individual access-unit-sized packets using
     /// FFmpeg's own bitstream parser (`av_parser_*`, not exposed by `ffmpeg-next`'s safe API, so
@@ -74,7 +80,9 @@ pub mod mpeg_impl {
         // recognize an access unit's end once they see the *next* one's start code, so the very
         // last access unit sits in the parser's internal buffer until explicitly flushed. Without
         // this, the last frame of every stream would silently go missing.
-        let parse_one = |parser: *mut ffmpeg::ffi::AVCodecParserContext, buf: &[u8]| -> Result<(i32, Vec<u8>), String> {
+        let parse_one = |parser: *mut ffmpeg::ffi::AVCodecParserContext,
+                         buf: &[u8]|
+         -> Result<(i32, Vec<u8>), String> {
             let mut out_ptr: *mut u8 = std::ptr::null_mut();
             let mut out_size: std::os::raw::c_int = 0;
             let consumed = unsafe {
@@ -129,7 +137,8 @@ pub mod mpeg_impl {
         static INIT: std::sync::Once = std::sync::Once::new();
         static INIT_RESULT: std::sync::OnceLock<Result<(), String>> = std::sync::OnceLock::new();
         INIT.call_once(|| {
-            let _ = INIT_RESULT.set(ffmpeg::init().map_err(|e| format!("ffmpeg::init failed: {e}")));
+            let _ =
+                INIT_RESULT.set(ffmpeg::init().map_err(|e| format!("ffmpeg::init failed: {e}")));
         });
         INIT_RESULT.get().cloned().unwrap_or(Ok(()))
     }
@@ -152,9 +161,10 @@ pub mod mpeg_impl {
     /// (those come from libx264 / libx265), so those transfer syntaxes decode but don't encode.
     pub fn can_encode_video(uid: &str) -> bool {
         ensure_ffmpeg_init().is_ok()
-            && codec_id_for_transfer_syntax(uid).and_then(ffmpeg::encoder::find).is_some()
+            && codec_id_for_transfer_syntax(uid)
+                .and_then(ffmpeg::encoder::find)
+                .is_some()
     }
-
 
     /// Decode MPEG2/H.264/HEVC-encoded pixel data using FFmpeg's raw codec API (not a
     /// container/demuxer - DICOM stores a bare elementary stream, not an MP4/MPEG-TS wrapper).
@@ -194,9 +204,15 @@ pub mod mpeg_impl {
             .get(tags::COLUMNS)
             .and_then(|e| e.uint16().ok())
             .ok_or_else(|| "missing Columns attribute".to_owned())?;
-        let samples_per_pixel =
-            object.get(tags::SAMPLES_PER_PIXEL).and_then(|e| e.uint16().ok()).unwrap_or(1);
-        let dst_format = if samples_per_pixel == 1 { Pixel::GRAY8 } else { Pixel::RGB24 };
+        let samples_per_pixel = object
+            .get(tags::SAMPLES_PER_PIXEL)
+            .and_then(|e| e.uint16().ok())
+            .unwrap_or(1);
+        let dst_format = if samples_per_pixel == 1 {
+            Pixel::GRAY8
+        } else {
+            Pixel::RGB24
+        };
 
         let decoder_codec = ffmpeg::decoder::find(codec_id)
             .ok_or_else(|| format!("no {codec_id:?} decoder available in this FFmpeg build"))?;
@@ -225,7 +241,9 @@ pub mod mpeg_impl {
                                     u32::from(rows),
                                     scaling::flag::Flags::BILINEAR,
                                 )
-                                .map_err(|e| format!("failed to create pixel format converter: {e}"))?,
+                                .map_err(|e| {
+                                    format!("failed to create pixel format converter: {e}")
+                                })?,
                             );
                         }
                         let mut converted = frame::Video::empty();
@@ -262,7 +280,9 @@ pub mod mpeg_impl {
                 .map_err(|e| format!("failed to send video data to decoder: {e}"))?;
             drain_frames(&mut decoder)?;
         }
-        decoder.send_eof().map_err(|e| format!("failed to flush decoder: {e}"))?;
+        decoder
+            .send_eof()
+            .map_err(|e| format!("failed to flush decoder: {e}"))?;
         drain_frames(&mut decoder)?;
 
         if out.is_empty() {
@@ -270,7 +290,6 @@ pub mod mpeg_impl {
         }
         Ok(out)
     }
-
 
     /// Encode raw native pixel data to MPEG2/H.264/HEVC using FFmpeg's raw codec API, producing
     /// a single fragment holding the entire bitstream - the encoded-side mirror of
@@ -293,8 +312,10 @@ pub mod mpeg_impl {
             .get(tags::COLUMNS)
             .and_then(|e| e.uint16().ok())
             .ok_or_else(|| "missing Columns attribute".to_owned())?;
-        let samples_per_pixel =
-            object.get(tags::SAMPLES_PER_PIXEL).and_then(|e| e.uint16().ok()).unwrap_or(1);
+        let samples_per_pixel = object
+            .get(tags::SAMPLES_PER_PIXEL)
+            .and_then(|e| e.uint16().ok())
+            .unwrap_or(1);
         let bits_allocated = object
             .get(tags::BITS_ALLOCATED)
             .and_then(|e| e.uint16().ok())
@@ -318,7 +339,11 @@ pub mod mpeg_impl {
             .map_err(|e| format!("failed to access pixel data: {e}"))?
             .to_vec();
 
-        let src_format = if samples_per_pixel == 1 { Pixel::GRAY8 } else { Pixel::RGB24 };
+        let src_format = if samples_per_pixel == 1 {
+            Pixel::GRAY8
+        } else {
+            Pixel::RGB24
+        };
         let frame_len = usize::from(rows) * usize::from(cols) * usize::from(samples_per_pixel);
         let expected_len = frame_len * number_of_frames;
         if pixel_data.len() < expected_len {
@@ -365,7 +390,9 @@ pub mod mpeg_impl {
         let mut bitstream = Vec::new();
         let mut encoded = Packet::empty();
 
-        let mut drain_packets = |encoder: &mut ffmpeg::encoder::Video, bitstream: &mut Vec<u8>| -> Result<(), String> {
+        let mut drain_packets = |encoder: &mut ffmpeg::encoder::Video,
+                                 bitstream: &mut Vec<u8>|
+         -> Result<(), String> {
             loop {
                 match encoder.receive_packet(&mut encoded) {
                     Ok(()) => {
@@ -410,7 +437,9 @@ pub mod mpeg_impl {
             drain_packets(&mut encoder, &mut bitstream)?;
         }
 
-        encoder.send_eof().map_err(|e| format!("failed to flush encoder: {e}"))?;
+        encoder
+            .send_eof()
+            .map_err(|e| format!("failed to flush encoder: {e}"))?;
         drain_packets(&mut encoder, &mut bitstream)?;
 
         if bitstream.is_empty() {
@@ -476,7 +505,11 @@ pub mod mpeg_impl {
         run_program("ffmpeg", args, input)
     }
 
-    pub(super) fn run_program(program: &str, args: &[String], input: Vec<u8>) -> Result<Vec<u8>, String> {
+    pub(super) fn run_program(
+        program: &str,
+        args: &[String],
+        input: Vec<u8>,
+    ) -> Result<Vec<u8>, String> {
         let mut child = Command::new(program)
             .args(["-hide_banner", "-loglevel", "error"])
             .args(args)
@@ -511,7 +544,9 @@ pub mod mpeg_impl {
             .expect("stdout is piped")
             .read_to_end(&mut output)
             .map_err(|e| format!("failed to read ffmpeg output: {e}"))?;
-        let status = child.wait().map_err(|e| format!("failed to wait for ffmpeg: {e}"))?;
+        let status = child
+            .wait()
+            .map_err(|e| format!("failed to wait for ffmpeg: {e}"))?;
         let _ = writer.join();
         let stderr_text = stderr_reader.join().unwrap_or_default();
 
@@ -560,15 +595,24 @@ pub mod mpeg_impl {
             .get(tags::COLUMNS)
             .and_then(|e| e.uint16().ok())
             .ok_or_else(|| "missing Columns attribute".to_owned())?;
-        let samples_per_pixel =
-            object.get(tags::SAMPLES_PER_PIXEL).and_then(|e| e.uint16().ok()).unwrap_or(1);
+        let samples_per_pixel = object
+            .get(tags::SAMPLES_PER_PIXEL)
+            .and_then(|e| e.uint16().ok())
+            .unwrap_or(1);
 
         let args: Vec<String> = [
-            "-f", format, "-i", "pipe:0",
-            "-f", "rawvideo",
-            "-pix_fmt", raw_pixel_format(samples_per_pixel),
-            "-s", &format!("{cols}x{rows}"),
-            "-sws_flags", "bilinear",
+            "-f",
+            format,
+            "-i",
+            "pipe:0",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            raw_pixel_format(samples_per_pixel),
+            "-s",
+            &format!("{cols}x{rows}"),
+            "-sws_flags",
+            "bilinear",
             "pipe:1",
         ]
         .iter()
@@ -604,8 +648,10 @@ pub mod mpeg_impl {
             .get(tags::COLUMNS)
             .and_then(|e| e.uint16().ok())
             .ok_or_else(|| "missing Columns attribute".to_owned())?;
-        let samples_per_pixel =
-            object.get(tags::SAMPLES_PER_PIXEL).and_then(|e| e.uint16().ok()).unwrap_or(1);
+        let samples_per_pixel = object
+            .get(tags::SAMPLES_PER_PIXEL)
+            .and_then(|e| e.uint16().ok())
+            .unwrap_or(1);
         let bits_allocated = object
             .get(tags::BITS_ALLOCATED)
             .and_then(|e| e.uint16().ok())
@@ -642,14 +688,22 @@ pub mod mpeg_impl {
 
         let fps = (frames_per_second(object).round() as i64).max(1);
         let args: Vec<String> = [
-            "-f", "rawvideo",
-            "-pix_fmt", raw_pixel_format(samples_per_pixel),
-            "-s", &format!("{cols}x{rows}"),
-            "-framerate", &fps.to_string(),
-            "-i", "pipe:0",
-            "-pix_fmt", "yuv420p",
-            "-sws_flags", "bilinear",
-            "-f", format,
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            raw_pixel_format(samples_per_pixel),
+            "-s",
+            &format!("{cols}x{rows}"),
+            "-framerate",
+            &fps.to_string(),
+            "-i",
+            "pipe:0",
+            "-pix_fmt",
+            "yuv420p",
+            "-sws_flags",
+            "bilinear",
+            "-f",
+            format,
             "pipe:1",
         ]
         .iter()
@@ -750,8 +804,16 @@ mod tests {
             DataElement::new(tags::COLUMNS, VR::US, PrimitiveValue::from(COLS)),
             DataElement::new(tags::SAMPLES_PER_PIXEL, VR::US, PrimitiveValue::from(3u16)),
             DataElement::new(tags::BITS_ALLOCATED, VR::US, PrimitiveValue::from(8u16)),
-            DataElement::new(tags::PIXEL_REPRESENTATION, VR::US, PrimitiveValue::from(0u16)),
-            DataElement::new(tags::PLANAR_CONFIGURATION, VR::US, PrimitiveValue::from(0u16)),
+            DataElement::new(
+                tags::PIXEL_REPRESENTATION,
+                VR::US,
+                PrimitiveValue::from(0u16),
+            ),
+            DataElement::new(
+                tags::PLANAR_CONFIGURATION,
+                VR::US,
+                PrimitiveValue::from(0u16),
+            ),
             DataElement::new(
                 tags::PHOTOMETRIC_INTERPRETATION,
                 VR::CS,
@@ -811,16 +873,30 @@ mod tests {
         let source = native_rgb_object(3, pixel_data);
         let fragments = encode_mpeg_pixel_data(&source, "1.2.840.10008.1.2.4.102")
             .expect("H.264 encode should succeed");
-        assert_eq!(fragments.len(), 1, "PS3.5 requires the whole bitstream in one fragment");
+        assert_eq!(
+            fragments.len(),
+            1,
+            "PS3.5 requires the whole bitstream in one fragment"
+        );
 
-        let encoded = encapsulated_video_object(&source, "1.2.840.10008.1.2.4.102", fragments[0].clone());
+        let encoded =
+            encapsulated_video_object(&source, "1.2.840.10008.1.2.4.102", fragments[0].clone());
         let decoded = decode_mpeg_pixel_data(&encoded).expect("H.264 decode should succeed");
         assert_eq!(decoded.len(), FRAME_LEN * 3, "expected all 3 frames back");
 
         let decoded_frames: Vec<&[u8]> = decoded.chunks_exact(FRAME_LEN).collect();
-        assert!(top_band_match_ratio(decoded_frames[0], [0, 0, 0]) > 0.9, "frame 0 should stay black");
-        assert!(top_band_match_ratio(decoded_frames[1], [255, 0, 0]) > 0.9, "frame 1 should be red");
-        assert!(top_band_match_ratio(decoded_frames[2], [0, 255, 0]) > 0.9, "frame 2 should be green");
+        assert!(
+            top_band_match_ratio(decoded_frames[0], [0, 0, 0]) > 0.9,
+            "frame 0 should stay black"
+        );
+        assert!(
+            top_band_match_ratio(decoded_frames[1], [255, 0, 0]) > 0.9,
+            "frame 1 should be red"
+        );
+        assert!(
+            top_band_match_ratio(decoded_frames[2], [0, 255, 0]) > 0.9,
+            "frame 2 should be green"
+        );
     }
 
     /// Same multi-frame round trip for MPEG2 and HEVC, through the same shared
@@ -851,7 +927,11 @@ mod tests {
             let encoded = encapsulated_video_object(&source, ts_uid, fragments[0].clone());
             let decoded = decode_mpeg_pixel_data(&encoded)
                 .unwrap_or_else(|e| panic!("decode for {ts_uid} should succeed: {e}"));
-            assert_eq!(decoded.len(), FRAME_LEN * 3, "{ts_uid}: expected all 3 frames back");
+            assert_eq!(
+                decoded.len(),
+                FRAME_LEN * 3,
+                "{ts_uid}: expected all 3 frames back"
+            );
 
             let decoded_frames: Vec<&[u8]> = decoded.chunks_exact(FRAME_LEN).collect();
             assert!(
@@ -884,12 +964,10 @@ mod tests {
         assert_eq!(result.unwrap_err(), super::mpeg_impl::FFMPEG_NOT_FOUND);
     }
 
-
     /// MPEG-2 always encodes (FFmpeg's own mpeg2video encoder, or the ffmpeg command's).
     #[test]
     fn mpeg2_is_always_encodable() {
         assert!(super::can_encode_video("1.2.840.10008.1.2.4.100"));
         assert!(!super::can_encode_video("1.2.840.10008.1.2.4.90"));
     }
-
 }

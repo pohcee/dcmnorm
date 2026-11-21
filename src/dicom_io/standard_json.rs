@@ -6,8 +6,8 @@ use dcmnorm_object::{DefaultDicomObject, InMemDicomObject};
 use serde_json::{Map as JsonMap, Number as JsonNumber, Value as JsonValue};
 
 use super::bulk_data::{
-    bulk_representation, is_bulk_value, primitive_is_bulk, resolve_standard_bulk_bytes,
-    raw_bytes_to_dicom_value,
+    bulk_representation, is_bulk_value, primitive_is_bulk, raw_bytes_to_dicom_value,
+    resolve_standard_bulk_bytes,
 };
 use super::common::{
     apply_meta_element, extract_transfer_syntax_from_standard, json_number_from_f32,
@@ -28,12 +28,8 @@ pub(super) fn write_standard_json_value(
             continue;
         }
 
-        let value = write_standard_element(
-            element.header().tag,
-            element.vr(),
-            element.value(),
-            options,
-        )?;
+        let value =
+            write_standard_element(element.header().tag, element.vr(), element.value(), options)?;
 
         json.insert(
             tag_key(element.header().tag),
@@ -50,12 +46,8 @@ pub(super) fn write_standard_json_value(
     }
 
     for element in object.iter() {
-        let value = write_standard_element(
-            element.header().tag,
-            element.vr(),
-            element.value(),
-            options,
-        )?;
+        let value =
+            write_standard_element(element.header().tag, element.vr(), element.value(), options)?;
 
         json.insert(
             tag_key(element.header().tag),
@@ -135,7 +127,10 @@ where
     P: AsRef<[u8]>,
 {
     let mut object = JsonMap::new();
-    object.insert("vr".to_owned(), JsonValue::String(vr.to_string().to_owned()));
+    object.insert(
+        "vr".to_owned(),
+        JsonValue::String(vr.to_string().to_owned()),
+    );
 
     match value {
         // PS3.18 F.2.5: a sequence with no items (zero length) has no "Value"; an empty item
@@ -147,7 +142,8 @@ where
                 .iter()
                 .enumerate()
                 .map(|(index, item)| {
-                    item.to_standard_json(options.for_sequence_item(tag, index)).map(JsonValue::Object)
+                    item.to_standard_json(options.for_sequence_item(tag, index))
+                        .map(JsonValue::Object)
                 })
                 .collect::<Result<Vec<_>, DicomJsonError>>()?;
             object.insert("Value".to_owned(), JsonValue::Array(items));
@@ -160,7 +156,10 @@ where
             insert_bulk_representation(&mut object, tag, vr, value, options)?;
         }
         DicomValue::Primitive(primitive) => {
-            object.insert("Value".to_owned(), standard_primitive_to_json(vr, primitive));
+            object.insert(
+                "Value".to_owned(),
+                standard_primitive_to_json(vr, primitive),
+            );
         }
     }
 
@@ -237,13 +236,21 @@ fn standard_primitive_to_json(vr: VR, primitive: &PrimitiveValue) -> JsonValue {
             primitive
                 .to_multi_str()
                 .iter()
-                .map(|name| if name.is_empty() { JsonValue::Null } else { person_name_to_json(name) })
+                .map(|name| {
+                    if name.is_empty() {
+                        JsonValue::Null
+                    } else {
+                        person_name_to_json(name)
+                    }
+                })
                 .collect(),
         ),
         VR::AT => match primitive {
             PrimitiveValue::Tags(tags) => JsonValue::Array(
                 tags.iter()
-                    .map(|tag| JsonValue::String(format!("{:04X}{:04X}", tag.group(), tag.element())))
+                    .map(|tag| {
+                        JsonValue::String(format!("{:04X}{:04X}", tag.group(), tag.element()))
+                    })
                     .collect(),
             ),
             // an AT read as raw integers: each pair of 16-bit words is (group, element)
@@ -254,19 +261,29 @@ fn standard_primitive_to_json(vr: VR, primitive: &PrimitiveValue) -> JsonValue {
                     .collect(),
             ),
             PrimitiveValue::U32(values) => JsonValue::Array(
-                values.iter().map(|v| JsonValue::String(format!("{v:08X}"))).collect(),
+                values
+                    .iter()
+                    .map(|v| JsonValue::String(format!("{v:08X}")))
+                    .collect(),
             ),
             other => text_values_json(other),
         },
-        VR::FD | VR::IS | VR::FL | VR::DS | VR::SL | VR::SS | VR::SV | VR::UL | VR::US
-        | VR::UV => standard_numbers_json(primitive),
+        VR::FD | VR::IS | VR::FL | VR::DS | VR::SL | VR::SS | VR::SV | VR::UL | VR::US | VR::UV => {
+            standard_numbers_json(primitive)
+        }
         _ => text_values_json(primitive),
     }
 }
 
 /// A string array, with `null` for each empty component (PS3.18 F.2.5).
 fn text_values_json(primitive: &PrimitiveValue) -> JsonValue {
-    JsonValue::Array(primitive.to_multi_str().iter().map(|text| text_or_null(text)).collect())
+    JsonValue::Array(
+        primitive
+            .to_multi_str()
+            .iter()
+            .map(|text| text_or_null(text))
+            .collect(),
+    )
 }
 
 fn text_or_null(text: &str) -> JsonValue {
@@ -316,30 +333,42 @@ fn standard_numbers_json(primitive: &PrimitiveValue) -> JsonValue {
     match primitive {
         PrimitiveValue::Empty => JsonValue::Array(Vec::new()),
         PrimitiveValue::Str(text) => JsonValue::Array(vec![text_or_null(text.trim())]),
-        PrimitiveValue::Strs(strings) => {
-            JsonValue::Array(strings.iter().map(|text| text_or_null(text.trim())).collect())
-        }
-        PrimitiveValue::U8(values) => {
-            JsonValue::Array(values.iter().map(|v| JsonValue::Number((*v).into())).collect())
-        }
+        PrimitiveValue::Strs(strings) => JsonValue::Array(
+            strings
+                .iter()
+                .map(|text| text_or_null(text.trim()))
+                .collect(),
+        ),
+        PrimitiveValue::U8(values) => JsonValue::Array(
+            values
+                .iter()
+                .map(|v| JsonValue::Number((*v).into()))
+                .collect(),
+        ),
         PrimitiveValue::I16(values) => JsonValue::Array(
             values
                 .iter()
                 .map(|v| JsonValue::Number(JsonNumber::from(*v)))
                 .collect(),
         ),
-        PrimitiveValue::U16(values) => {
-            JsonValue::Array(values.iter().map(|v| JsonValue::Number((*v).into())).collect())
-        }
+        PrimitiveValue::U16(values) => JsonValue::Array(
+            values
+                .iter()
+                .map(|v| JsonValue::Number((*v).into()))
+                .collect(),
+        ),
         PrimitiveValue::I32(values) => JsonValue::Array(
             values
                 .iter()
                 .map(|v| JsonValue::Number(JsonNumber::from(*v)))
                 .collect(),
         ),
-        PrimitiveValue::U32(values) => {
-            JsonValue::Array(values.iter().map(|v| JsonValue::Number((*v).into())).collect())
-        }
+        PrimitiveValue::U32(values) => JsonValue::Array(
+            values
+                .iter()
+                .map(|v| JsonValue::Number((*v).into()))
+                .collect(),
+        ),
         PrimitiveValue::I64(values) => JsonValue::Array(
             values
                 .iter()
@@ -548,14 +577,46 @@ fn standard_json_to_primitive(
     }
 
     match vr {
-        VR::SS => return Ok(PrimitiveValue::I16(json_value_to_numbers(tag_text, value)?.into())),
-        VR::US => return Ok(PrimitiveValue::U16(json_value_to_numbers(tag_text, value)?.into())),
-        VR::SL => return Ok(PrimitiveValue::I32(json_value_to_numbers(tag_text, value)?.into())),
-        VR::UL => return Ok(PrimitiveValue::U32(json_value_to_numbers(tag_text, value)?.into())),
-        VR::SV => return Ok(PrimitiveValue::I64(json_value_to_numbers(tag_text, value)?.into())),
-        VR::UV => return Ok(PrimitiveValue::U64(json_value_to_numbers(tag_text, value)?.into())),
-        VR::FL => return Ok(PrimitiveValue::F32(json_value_to_numbers(tag_text, value)?.into())),
-        VR::FD => return Ok(PrimitiveValue::F64(json_value_to_numbers(tag_text, value)?.into())),
+        VR::SS => {
+            return Ok(PrimitiveValue::I16(
+                json_value_to_numbers(tag_text, value)?.into(),
+            ))
+        }
+        VR::US => {
+            return Ok(PrimitiveValue::U16(
+                json_value_to_numbers(tag_text, value)?.into(),
+            ))
+        }
+        VR::SL => {
+            return Ok(PrimitiveValue::I32(
+                json_value_to_numbers(tag_text, value)?.into(),
+            ))
+        }
+        VR::UL => {
+            return Ok(PrimitiveValue::U32(
+                json_value_to_numbers(tag_text, value)?.into(),
+            ))
+        }
+        VR::SV => {
+            return Ok(PrimitiveValue::I64(
+                json_value_to_numbers(tag_text, value)?.into(),
+            ))
+        }
+        VR::UV => {
+            return Ok(PrimitiveValue::U64(
+                json_value_to_numbers(tag_text, value)?.into(),
+            ))
+        }
+        VR::FL => {
+            return Ok(PrimitiveValue::F32(
+                json_value_to_numbers(tag_text, value)?.into(),
+            ))
+        }
+        VR::FD => {
+            return Ok(PrimitiveValue::F64(
+                json_value_to_numbers(tag_text, value)?.into(),
+            ))
+        }
         _ => {}
     }
 
@@ -592,7 +653,10 @@ fn standard_json_to_primitive(
     Ok(PrimitiveValue::Strs(strings.into()))
 }
 
-fn standard_json_to_person_name(tag_text: &str, item: &JsonValue) -> Result<String, DicomJsonError> {
+fn standard_json_to_person_name(
+    tag_text: &str,
+    item: &JsonValue,
+) -> Result<String, DicomJsonError> {
     let JsonValue::Object(object) = item else {
         return Err(DicomJsonError::InvalidStandardElement {
             tag: tag_text.to_owned(),

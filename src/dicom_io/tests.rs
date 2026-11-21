@@ -47,7 +47,9 @@ fn deflated_transfer_syntax_falls_back_to_inline_binary_for_bulk_data() {
         pixel.get("BulkDataURI").is_none(),
         "a deflated dataset has no valid file-byte-offset for BulkDataURI"
     );
-    let inline = pixel["InlineBinary"].as_str().expect("PixelData should fall back to InlineBinary");
+    let inline = pixel["InlineBinary"]
+        .as_str()
+        .expect("PixelData should fall back to InlineBinary");
 
     use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
     use base64::Engine as _;
@@ -58,7 +60,10 @@ fn deflated_transfer_syntax_falls_back_to_inline_binary_for_bulk_data() {
         .to_bytes()
         .unwrap()
         .to_vec();
-    assert_eq!(decoded, expected, "InlineBinary must still carry the real pixel data, not garbage");
+    assert_eq!(
+        decoded, expected,
+        "InlineBinary must still carry the real pixel data, not garbage"
+    );
 }
 
 #[test]
@@ -164,9 +169,15 @@ fn writes_flat_json_with_source_uri_mode_for_wsi_nested_icc_profile() {
     let value: serde_json::Value = serde_json::from_str(&json).unwrap();
 
     let icc = &value["OpticalPathSequence"][0]["ICCProfile"];
-    assert!(icc["InlineBinary"].is_null(), "wsi ICCProfile fell back to InlineBinary");
+    assert!(
+        icc["InlineBinary"].is_null(),
+        "wsi ICCProfile fell back to InlineBinary"
+    );
     let (offset, length) = parse_offset_length(icc["BulkDataURI"].as_str().unwrap());
-    assert!(length > 64 * 1024, "expected a large ICC profile, got {length} bytes");
+    assert!(
+        length > 64 * 1024,
+        "expected a large ICC profile, got {length} bytes"
+    );
     // An ICC profile header carries the "acsp" signature at byte 36.
     assert_eq!(&source[offset + 36..offset + 40], b"acsp");
 }
@@ -262,7 +273,17 @@ fn append_sequence_delimitation(bytes: &mut Vec<u8>) {
 fn uses_32_bit_vr_length(vr: [u8; 2]) -> bool {
     matches!(
         &vr,
-        b"OB" | b"OD" | b"OF" | b"OL" | b"OV" | b"OW" | b"SQ" | b"UC" | b"UR" | b"UT" | b"UN"
+        b"OB"
+            | b"OD"
+            | b"OF"
+            | b"OL"
+            | b"OV"
+            | b"OW"
+            | b"SQ"
+            | b"UC"
+            | b"UR"
+            | b"UT"
+            | b"UN"
             | b"ox"
     )
 }
@@ -277,24 +298,26 @@ use dcmnorm_dictionary::uids;
 use dcmnorm_object::InMemDicomObject;
 use serde_json::Value as JsonValue;
 
-use super::{
-    detect_jpeg2000_backend_from_search_path, echo_scu, find_scu, kakadu_ffi_enabled,
-    list_transfer_syntax_support, move_scu, parse_attribute_override,
-    probe_dicom_file_for_sop_class_uid, read_dicom_bytes,
-    dicom_file_to_json, read_dicom_file, read_dicom_file_deferring_bulk_data, read_dicom_file_for_frame, read_dicom_json, read_dicom_json_full, read_dicom_json_full_with_source,
-    read_dicom_json_with_options, read_dicom_json_with_source,
-    redact_dicom_pixels_to_transfer_syntax, remove_attribute, render_all_dicom_video_frames, render_dicom_frame,
-    set_attribute, start_scp, store_scu, transcode_dcmnorm_object, transcode_dicom_bytes, write_dataset_as_dicom_file, write_dicom_bytes, write_dicom_file,
-    write_dicom_json, write_dicom_json_full, write_dicom_json_full_with_source,
-    write_dicom_json_with_options, write_dicom_json_with_source, BoundingBox, BoxLength,
-    DicomJsonBulkDataMode, DicomJsonFormat, DicomJsonKeyStyle, DicomJsonReadOptions,
-    CancelMode, CancelSignal, DicomJsonWriteOptions, DimseError, DimseLogger, EchoScuOptions, FindScuOptions,
-    Jpeg2000Backend, MoveScuOptions, QueryRetrieveLevel, RenderError, RenderOutputFormat, RenderPipelineOptions,
-    ScpHandlers, ScpOptions, StoreScuOptions,
-    build_volume, reformat_plane, Interpolation, PlaneParams, SlabProjection, VolumeError,
-    pack_dicom_frame_stack_texture, pack_dicom_frame_texture, ContentKind, TextureCompression, TextureExportError,
-};
 use super::dimse::build_move_identifier;
+use super::{
+    build_volume, detect_jpeg2000_backend_from_search_path, dicom_file_to_json, echo_scu, find_scu,
+    kakadu_ffi_enabled, list_transfer_syntax_support, move_scu, pack_dicom_frame_stack_texture,
+    pack_dicom_frame_texture, parse_attribute_override, probe_dicom_file_for_sop_class_uid,
+    read_dicom_bytes, read_dicom_file, read_dicom_file_deferring_bulk_data,
+    read_dicom_file_for_frame, read_dicom_json, read_dicom_json_full,
+    read_dicom_json_full_with_source, read_dicom_json_with_options, read_dicom_json_with_source,
+    redact_dicom_pixels_to_transfer_syntax, reformat_plane, remove_attribute,
+    render_all_dicom_video_frames, render_dicom_frame, set_attribute, start_scp, store_scu,
+    transcode_dcmnorm_object, transcode_dicom_bytes, write_dataset_as_dicom_file,
+    write_dicom_bytes, write_dicom_file, write_dicom_json, write_dicom_json_full,
+    write_dicom_json_full_with_source, write_dicom_json_with_options, write_dicom_json_with_source,
+    BoundingBox, BoxLength, CancelMode, CancelSignal, ContentKind, DicomJsonBulkDataMode,
+    DicomJsonFormat, DicomJsonKeyStyle, DicomJsonReadOptions, DicomJsonWriteOptions, DimseError,
+    DimseLogger, EchoScuOptions, FindScuOptions, Interpolation, Jpeg2000Backend, MoveScuOptions,
+    PlaneParams, QueryRetrieveLevel, RenderError, RenderOutputFormat, RenderPipelineOptions,
+    ScpHandlers, ScpOptions, SlabProjection, StoreScuOptions, TextureCompression,
+    TextureExportError, VolumeError,
+};
 
 #[test]
 fn set_attribute_writes_media_storage_sop_class_uid_to_meta_not_dataset() {
@@ -321,17 +344,18 @@ fn set_attribute_writes_media_storage_sop_instance_uid_to_meta() {
     let source = fixture_bytes(fixture_path("dx.dcm"));
     let mut object = read_dicom_bytes(&source).unwrap();
 
-    let (tag, vr, value) = parse_attribute_override(
-        "MediaStorageSOPInstanceUID=1.2.840.10008.114051.1.2.3.4.5",
-    )
-    .unwrap();
+    let (tag, vr, value) =
+        parse_attribute_override("MediaStorageSOPInstanceUID=1.2.840.10008.114051.1.2.3.4.5")
+            .unwrap();
     set_attribute(&mut object, tag, vr, value).unwrap();
 
     assert_eq!(
         object.meta().media_storage_sop_instance_uid,
         "1.2.840.10008.114051.1.2.3.4.5"
     );
-    assert!(object.element(tags::MEDIA_STORAGE_SOP_INSTANCE_UID).is_err());
+    assert!(object
+        .element(tags::MEDIA_STORAGE_SOP_INSTANCE_UID)
+        .is_err());
 }
 
 #[test]
@@ -360,7 +384,11 @@ fn set_attribute_still_writes_dataset_elements() {
     set_attribute(&mut object, tag, vr, value).unwrap();
 
     assert_eq!(
-        object.element(tags::PATIENT_NAME).unwrap().to_str().unwrap(),
+        object
+            .element(tags::PATIENT_NAME)
+            .unwrap()
+            .to_str()
+            .unwrap(),
         "DOE^JOHN"
     );
 }
@@ -386,7 +414,8 @@ fn remove_attribute_on_absent_meta_field_reports_not_present() {
     let mut object = read_dicom_bytes(&source).unwrap();
     remove_attribute(&mut object, tags::MEDIA_STORAGE_SOP_INSTANCE_UID);
 
-    let was_present_second_time = remove_attribute(&mut object, tags::MEDIA_STORAGE_SOP_INSTANCE_UID);
+    let was_present_second_time =
+        remove_attribute(&mut object, tags::MEDIA_STORAGE_SOP_INSTANCE_UID);
 
     assert!(!was_present_second_time);
 }
@@ -1051,7 +1080,10 @@ fn writes_and_reads_full_json_pn_with_ideographic_and_phonetic() {
     let json = write_dicom_json_full(&object).unwrap();
     let value: JsonValue = serde_json::from_str(&json).unwrap();
     let name = &value["00100010"]["Value"][0];
-    assert_eq!(name["Alphabetic"], JsonValue::String("Yamada^Tarou".to_owned()));
+    assert_eq!(
+        name["Alphabetic"],
+        JsonValue::String("Yamada^Tarou".to_owned())
+    );
     assert_eq!(
         name["Ideographic"],
         JsonValue::String("山田^太郎".to_owned())
@@ -1221,8 +1253,8 @@ fn reports_jpeg_2000_transfer_syntax_capabilities() {
         JPEG_2000_IMAGE_COMPRESSION_UID
     );
 
-    let decoded_object =
-        transcode_dcmnorm_object(&encoded, uids::EXPLICIT_VR_LITTLE_ENDIAN).expect("decode should succeed");
+    let decoded_object = transcode_dcmnorm_object(&encoded, uids::EXPLICIT_VR_LITTLE_ENDIAN)
+        .expect("decode should succeed");
     let decoded_bytes = decoded_object
         .element(tags::PIXEL_DATA)
         .unwrap()
@@ -1231,7 +1263,10 @@ fn reports_jpeg_2000_transfer_syntax_capabilities() {
         .to_vec();
 
     assert_eq!(decoded_bytes.len(), original_bytes.len());
-    assert_ne!(decoded_bytes, original_bytes, "lossy JPEG2000 output should not be byte-identical");
+    assert_ne!(
+        decoded_bytes, original_bytes,
+        "lossy JPEG2000 output should not be byte-identical"
+    );
 
     let mean_abs_error: f64 = original_bytes
         .chunks_exact(2)
@@ -1265,8 +1300,8 @@ fn jpeg_2000_lossless_only_round_trips_exactly() {
 
     let encoded = transcode_dcmnorm_object(&original, JPEG_2000_LOSSLESS_ONLY_UID)
         .expect("encoding to JPEG2000 Lossless Only should succeed");
-    let decoded_object =
-        transcode_dcmnorm_object(&encoded, uids::EXPLICIT_VR_LITTLE_ENDIAN).expect("decode should succeed");
+    let decoded_object = transcode_dcmnorm_object(&encoded, uids::EXPLICIT_VR_LITTLE_ENDIAN)
+        .expect("decode should succeed");
     let decoded_bytes = decoded_object
         .element(tags::PIXEL_DATA)
         .unwrap()
@@ -1541,7 +1576,11 @@ fn overlay_can_be_disabled() {
     assert_eq!(rendered.selected_overlay_index, None);
 
     let image = image::load_from_memory(&rendered.bytes).unwrap().to_luma8();
-    assert_eq!(image.get_pixel(0, 0).0[0], 0, "overlay pixel should be untouched when disabled");
+    assert_eq!(
+        image.get_pixel(0, 0).0[0],
+        0,
+        "overlay pixel should be untouched when disabled"
+    );
 }
 
 #[test]
@@ -1592,20 +1631,31 @@ fn selects_among_multiple_overlays_by_index() {
     .unwrap();
     assert_eq!(default_rendered.overlays.len(), 2);
     assert_eq!(default_rendered.overlays[0].group, 0x6000);
-    assert_eq!(default_rendered.overlays[0].label.as_deref(), Some("Diagonal"));
+    assert_eq!(
+        default_rendered.overlays[0].label.as_deref(),
+        Some("Diagonal")
+    );
     assert_eq!(default_rendered.overlays[1].group, 0x6002);
-    assert_eq!(default_rendered.overlays[1].label.as_deref(), Some("Anti-diagonal"));
+    assert_eq!(
+        default_rendered.overlays[1].label.as_deref(),
+        Some("Anti-diagonal")
+    );
     assert_eq!(default_rendered.selected_overlay_index, Some(0));
 
     let second_options = RenderPipelineOptions {
         overlay_index: Some(1),
         ..RenderPipelineOptions::default()
     };
-    let second_rendered = render_dicom_frame(&object, RenderOutputFormat::Png, &second_options).unwrap();
+    let second_rendered =
+        render_dicom_frame(&object, RenderOutputFormat::Png, &second_options).unwrap();
     assert_eq!(second_rendered.selected_overlay_index, Some(1));
 
-    let default_image = image::load_from_memory(&default_rendered.bytes).unwrap().to_luma8();
-    let second_image = image::load_from_memory(&second_rendered.bytes).unwrap().to_luma8();
+    let default_image = image::load_from_memory(&default_rendered.bytes)
+        .unwrap()
+        .to_luma8();
+    let second_image = image::load_from_memory(&second_rendered.bytes)
+        .unwrap()
+        .to_luma8();
 
     // Row 0: the diagonal overlay sets column 0, the anti-diagonal overlay sets column 7.
     assert_eq!(default_image.get_pixel(0, 0).0[0], 182);
@@ -1745,12 +1795,28 @@ fn shared_functional_groups_sequence_with_rescale_and_window(
     use dcmnorm_core::Length;
 
     let pixel_value_transformation = InMemDicomObject::from_element_iter([
-        DataElement::new(tags::RESCALE_SLOPE, VR::DS, PrimitiveValue::from(rescale_slope)),
-        DataElement::new(tags::RESCALE_INTERCEPT, VR::DS, PrimitiveValue::from(rescale_intercept)),
+        DataElement::new(
+            tags::RESCALE_SLOPE,
+            VR::DS,
+            PrimitiveValue::from(rescale_slope),
+        ),
+        DataElement::new(
+            tags::RESCALE_INTERCEPT,
+            VR::DS,
+            PrimitiveValue::from(rescale_intercept),
+        ),
     ]);
     let frame_voi_lut = InMemDicomObject::from_element_iter([
-        DataElement::new(tags::WINDOW_CENTER, VR::DS, PrimitiveValue::from(window_center)),
-        DataElement::new(tags::WINDOW_WIDTH, VR::DS, PrimitiveValue::from(window_width)),
+        DataElement::new(
+            tags::WINDOW_CENTER,
+            VR::DS,
+            PrimitiveValue::from(window_center),
+        ),
+        DataElement::new(
+            tags::WINDOW_WIDTH,
+            VR::DS,
+            PrimitiveValue::from(window_width),
+        ),
     ]);
     let shared_group = InMemDicomObject::from_element_iter([
         DataElement::new(
@@ -1824,7 +1890,8 @@ fn pack_dicom_frame_texture_resolves_default_window_from_shared_functional_group
         "2", "-100", "300", "500",
     ));
 
-    let packed = pack_dicom_frame_texture(&object, 0, None, None, TextureCompression::None).unwrap();
+    let packed =
+        pack_dicom_frame_texture(&object, 0, None, None, TextureCompression::None).unwrap();
 
     // Same 300/500 the classic render pipeline resolves above (not a min/max span) - the two
     // rendering pipelines must not silently disagree about a file's own default window.
@@ -1866,7 +1933,8 @@ fn resolve_grayscale_invert_prefers_presentation_lut_shape_over_photometric_inte
 }
 
 #[test]
-fn render_dicom_frame_honors_presentation_lut_shape_override_when_it_disagrees_with_photometric_interpretation() {
+fn render_dicom_frame_honors_presentation_lut_shape_override_when_it_disagrees_with_photometric_interpretation(
+) {
     // RenderOutputFormat::Raw returns undecoded frame bytes (no VOI windowing or invert applied
     // at all - see ignores_invalid_window_width_from_dataset above), so this needs an actually
     // rendered format to exercise render_grayscale_frame's invert step.
@@ -1878,8 +1946,12 @@ fn render_dicom_frame_honors_presentation_lut_shape_override_when_it_disagrees_w
         VR::CS,
         PrimitiveValue::from("MONOCHROME2"),
     ));
-    let baseline_rendered =
-        render_dicom_frame(&baseline, RenderOutputFormat::Png, &RenderPipelineOptions::default()).unwrap();
+    let baseline_rendered = render_dicom_frame(
+        &baseline,
+        RenderOutputFormat::Png,
+        &RenderPipelineOptions::default(),
+    )
+    .unwrap();
     let baseline_luma = decode_luma(&baseline_rendered.bytes);
 
     let mut overridden = baseline.clone();
@@ -1888,8 +1960,12 @@ fn render_dicom_frame_honors_presentation_lut_shape_override_when_it_disagrees_w
         VR::CS,
         PrimitiveValue::from("INVERSE"),
     ));
-    let overridden_rendered =
-        render_dicom_frame(&overridden, RenderOutputFormat::Png, &RenderPipelineOptions::default()).unwrap();
+    let overridden_rendered = render_dicom_frame(
+        &overridden,
+        RenderOutputFormat::Png,
+        &RenderPipelineOptions::default(),
+    )
+    .unwrap();
     let overridden_luma = decode_luma(&overridden_rendered.bytes);
 
     // An explicit INVERSE shape must flip every pixel relative to the MONOCHROME2 (no shape)
@@ -1914,7 +1990,8 @@ fn pack_dicom_frame_texture_resolves_invert_from_presentation_lut_shape_override
         PrimitiveValue::from("INVERSE"),
     ));
 
-    let packed = pack_dicom_frame_texture(&object, 0, None, None, TextureCompression::None).unwrap();
+    let packed =
+        pack_dicom_frame_texture(&object, 0, None, None, TextureCompression::None).unwrap();
 
     assert!(packed.meta.invert);
 }
@@ -2077,8 +2154,8 @@ fn renders_jpeg_baseline_frame_mislabeled_ybr_full_422_without_pink_cast() {
         .get_pixel(0, 0);
 
     for channel in 0..3 {
-        let diff = (i16::from(reference_pixel[channel]) - i16::from(mislabeled_pixel[channel]))
-            .abs();
+        let diff =
+            (i16::from(reference_pixel[channel]) - i16::from(mislabeled_pixel[channel])).abs();
         assert!(
             diff <= 4,
             "channel {} diverged after YBR_FULL_422 mislabel: reference={:?} mislabeled={:?}",
@@ -2162,7 +2239,11 @@ fn average_row_rgb(image: &image::RgbImage, row: usize) -> (f64, f64, f64) {
     }
 
     let count = f64::from(width.max(1));
-    (red as f64 / count, green as f64 / count, blue as f64 / count)
+    (
+        red as f64 / count,
+        green as f64 / count,
+        blue as f64 / count,
+    )
 }
 
 fn fixture_bytes(path: impl AsRef<Path>) -> Vec<u8> {
@@ -2253,7 +2334,11 @@ fn temp_file_path(prefix: &str) -> PathBuf {
     std::env::temp_dir().join(format!("{prefix}-{nanos}.dcm"))
 }
 
-fn mono_sample_value(object: &dcmnorm_object::DefaultDicomObject, x: usize, y: usize) -> Option<u16> {
+fn mono_sample_value(
+    object: &dcmnorm_object::DefaultDicomObject,
+    x: usize,
+    y: usize,
+) -> Option<u16> {
     let cols = object.element(tags::COLUMNS).ok()?.uint16().ok()? as usize;
     let rows = object.element(tags::ROWS).ok()?.uint16().ok()? as usize;
     if x >= cols || y >= rows {
@@ -2340,7 +2425,9 @@ fn spawn_mock_scp(
         handler(&mut association);
         let pdu = association.receive().unwrap();
         assert_eq!(pdu, dcmnorm_dimse::pdu::Pdu::ReleaseRQ);
-        association.send(&dcmnorm_dimse::pdu::Pdu::ReleaseRP).unwrap();
+        association
+            .send(&dcmnorm_dimse::pdu::Pdu::ReleaseRP)
+            .unwrap();
     });
     (handle, addr)
 }
@@ -2352,7 +2439,8 @@ fn dimse_recv_command(
 ) -> InMemDicomObject {
     match association.receive().unwrap() {
         dcmnorm_dimse::pdu::Pdu::PData { data } => {
-            InMemDicomObject::read_dataset_with_ts(data[0].data.as_slice(), dimse_implicit_vr_le()).unwrap()
+            InMemDicomObject::read_dataset_with_ts(data[0].data.as_slice(), dimse_implicit_vr_le())
+                .unwrap()
         }
         other => panic!("expected a Command P-Data PDU, got {other:?}"),
     }
@@ -2364,7 +2452,9 @@ fn dimse_send_command(
     command: &InMemDicomObject,
 ) {
     let mut data = Vec::new();
-    command.write_dataset_with_ts(&mut data, dimse_implicit_vr_le()).unwrap();
+    command
+        .write_dataset_with_ts(&mut data, dimse_implicit_vr_le())
+        .unwrap();
     association
         .send(&dcmnorm_dimse::pdu::Pdu::PData {
             data: vec![dcmnorm_dimse::pdu::PDataValue {
@@ -2389,10 +2479,22 @@ fn echo_scu_round_trips_success_status() {
         let pc_id = association.presentation_contexts()[0].id;
 
         let response = InMemDicomObject::command_from_element_iter([
-            DataElement::new(tags::AFFECTED_SOP_CLASS_UID, VR::UI, dicom_value!(Str, uids::VERIFICATION)),
+            DataElement::new(
+                tags::AFFECTED_SOP_CLASS_UID,
+                VR::UI,
+                dicom_value!(Str, uids::VERIFICATION),
+            ),
             DataElement::new(tags::COMMAND_FIELD, VR::US, dicom_value!(U16, [0x8030])),
-            DataElement::new(tags::MESSAGE_ID_BEING_RESPONDED_TO, VR::US, dicom_value!(U16, [message_id])),
-            DataElement::new(tags::COMMAND_DATA_SET_TYPE, VR::US, dicom_value!(U16, [0x0101])),
+            DataElement::new(
+                tags::MESSAGE_ID_BEING_RESPONDED_TO,
+                VR::US,
+                dicom_value!(U16, [message_id]),
+            ),
+            DataElement::new(
+                tags::COMMAND_DATA_SET_TYPE,
+                VR::US,
+                dicom_value!(U16, [0x0101]),
+            ),
             DataElement::new(tags::STATUS, VR::US, dicom_value!(U16, [0x0000])),
         ]);
         dimse_send_command(association, pc_id, &response);
@@ -2456,11 +2558,18 @@ fn echo_scu_returns_cancelled_error_when_signalled_mid_wait() {
         },
     );
 
-    assert!(matches!(result, Err(DimseError::Cancelled(CancelMode::Release))), "expected Cancelled, got {result:?}");
+    assert!(
+        matches!(result, Err(DimseError::Cancelled(CancelMode::Release))),
+        "expected Cancelled, got {result:?}"
+    );
     // Cancel is only actually observed at the next `poll_bounded` tick (up to one `POLL_INTERVAL`
     // after it's set, not immediately) - bounded well above that, well below the mock SCP's own
     // 2s silence window above.
-    assert!(started.elapsed() < std::time::Duration::from_millis(900), "cancel took too long to be noticed: {:?}", started.elapsed());
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(900),
+        "cancel took too long to be noticed: {:?}",
+        started.elapsed()
+    );
     scp_handle.join().unwrap();
 }
 
@@ -2470,9 +2579,18 @@ fn dimse_recv_command_with_data(
     association: &mut dcmnorm_dimse::ServerAssociation<std::net::TcpStream>,
 ) -> (u8, InMemDicomObject, Vec<u8>) {
     match association.receive_command().unwrap() {
-        dcmnorm_dimse::Incoming::Command { presentation_context_id, data } => {
-            let command = InMemDicomObject::read_dataset_with_ts(data.as_slice(), dimse_implicit_vr_le()).unwrap();
-            (presentation_context_id, command, association.receive_data_set().unwrap())
+        dcmnorm_dimse::Incoming::Command {
+            presentation_context_id,
+            data,
+        } => {
+            let command =
+                InMemDicomObject::read_dataset_with_ts(data.as_slice(), dimse_implicit_vr_le())
+                    .unwrap();
+            (
+                presentation_context_id,
+                command,
+                association.receive_data_set().unwrap(),
+            )
         }
         other => panic!("expected a Command, got {other:?}"),
     }
@@ -2484,24 +2602,48 @@ fn store_scu_round_trips_status_per_file() {
     // a large-file (split/streamed) run is covered by store_scu_streams_data_for_large_files.
     let source = fixture_path("sr.dcm");
     let object = read_dicom_file(&source).unwrap();
-    let sop_class_uid = object.meta().media_storage_sop_class_uid.trim_end_matches(['\0', ' ']).to_owned();
-    let sop_instance_uid = object.meta().media_storage_sop_instance_uid.trim_end_matches(['\0', ' ']).to_owned();
+    let sop_class_uid = object
+        .meta()
+        .media_storage_sop_class_uid
+        .trim_end_matches(['\0', ' '])
+        .to_owned();
+    let sop_instance_uid = object
+        .meta()
+        .media_storage_sop_instance_uid
+        .trim_end_matches(['\0', ' '])
+        .to_owned();
 
     let expected_sop_class_uid = sop_class_uid.clone();
     let (scp_handle, addr) = spawn_mock_scp(sop_class_uid, move |association| {
         let (pc_id, request, dataset_bytes) = dimse_recv_command_with_data(association);
         assert!(!dataset_bytes.is_empty());
         assert_eq!(
-            request.element(tags::AFFECTED_SOP_CLASS_UID).unwrap().to_str().unwrap(),
+            request
+                .element(tags::AFFECTED_SOP_CLASS_UID)
+                .unwrap()
+                .to_str()
+                .unwrap(),
             expected_sop_class_uid,
         );
         let message_id = dimse_message_id(&request);
 
         let response = InMemDicomObject::command_from_element_iter([
-            DataElement::new(tags::AFFECTED_SOP_CLASS_UID, VR::UI, dicom_value!(Str, expected_sop_class_uid.clone())),
+            DataElement::new(
+                tags::AFFECTED_SOP_CLASS_UID,
+                VR::UI,
+                dicom_value!(Str, expected_sop_class_uid.clone()),
+            ),
             DataElement::new(tags::COMMAND_FIELD, VR::US, dicom_value!(U16, [0x8001])),
-            DataElement::new(tags::MESSAGE_ID_BEING_RESPONDED_TO, VR::US, dicom_value!(U16, [message_id])),
-            DataElement::new(tags::COMMAND_DATA_SET_TYPE, VR::US, dicom_value!(U16, [0x0101])),
+            DataElement::new(
+                tags::MESSAGE_ID_BEING_RESPONDED_TO,
+                VR::US,
+                dicom_value!(U16, [message_id]),
+            ),
+            DataElement::new(
+                tags::COMMAND_DATA_SET_TYPE,
+                VR::US,
+                dicom_value!(U16, [0x0101]),
+            ),
             DataElement::new(tags::STATUS, VR::US, dicom_value!(U16, [0x0000])),
         ]);
         dimse_send_command(association, pc_id, &response);
@@ -2535,24 +2677,52 @@ fn store_scu_streams_data_for_large_files() {
     // store_scu_round_trips_status_per_file).
     let source = fixture_path("dx.dcm");
     let object = read_dicom_file(&source).unwrap();
-    let sop_class_uid = object.meta().media_storage_sop_class_uid.trim_end_matches(['\0', ' ']).to_owned();
-    let sop_instance_uid = object.meta().media_storage_sop_instance_uid.trim_end_matches(['\0', ' ']).to_owned();
+    let sop_class_uid = object
+        .meta()
+        .media_storage_sop_class_uid
+        .trim_end_matches(['\0', ' '])
+        .to_owned();
+    let sop_instance_uid = object
+        .meta()
+        .media_storage_sop_instance_uid
+        .trim_end_matches(['\0', ' '])
+        .to_owned();
 
     let expected_sop_class_uid = sop_class_uid.clone();
     let (scp_handle, addr) = spawn_mock_scp(sop_class_uid, move |association| {
         let (pc_id, request, dataset_bytes) = dimse_recv_command_with_data(association);
-        assert!(dataset_bytes.len() > 16384, "expected a large streamed dataset, got {} bytes", dataset_bytes.len());
+        assert!(
+            dataset_bytes.len() > 16384,
+            "expected a large streamed dataset, got {} bytes",
+            dataset_bytes.len()
+        );
         assert_eq!(
-            request.element(tags::AFFECTED_SOP_CLASS_UID).unwrap().to_str().unwrap(),
+            request
+                .element(tags::AFFECTED_SOP_CLASS_UID)
+                .unwrap()
+                .to_str()
+                .unwrap(),
             expected_sop_class_uid,
         );
         let message_id = dimse_message_id(&request);
 
         let response = InMemDicomObject::command_from_element_iter([
-            DataElement::new(tags::AFFECTED_SOP_CLASS_UID, VR::UI, dicom_value!(Str, expected_sop_class_uid.clone())),
+            DataElement::new(
+                tags::AFFECTED_SOP_CLASS_UID,
+                VR::UI,
+                dicom_value!(Str, expected_sop_class_uid.clone()),
+            ),
             DataElement::new(tags::COMMAND_FIELD, VR::US, dicom_value!(U16, [0x8001])),
-            DataElement::new(tags::MESSAGE_ID_BEING_RESPONDED_TO, VR::US, dicom_value!(U16, [message_id])),
-            DataElement::new(tags::COMMAND_DATA_SET_TYPE, VR::US, dicom_value!(U16, [0x0101])),
+            DataElement::new(
+                tags::MESSAGE_ID_BEING_RESPONDED_TO,
+                VR::US,
+                dicom_value!(U16, [message_id]),
+            ),
+            DataElement::new(
+                tags::COMMAND_DATA_SET_TYPE,
+                VR::US,
+                dicom_value!(U16, [0x0101]),
+            ),
             DataElement::new(tags::STATUS, VR::US, dicom_value!(U16, [0x0000])),
         ]);
         dimse_send_command(association, pc_id, &response);
@@ -2601,16 +2771,43 @@ fn store_scu_avoids_transcoding_into_a_decode_only_transfer_syntax_shared_by_sop
 
     let object_a = read_dicom_file(&path_a).unwrap();
     let object_b = read_dicom_file(&path_b).unwrap();
-    let sop_class_uid = object_a.meta().media_storage_sop_class_uid.trim_end_matches(['\0', ' ']).to_owned();
-    let sop_instance_a = object_a.meta().media_storage_sop_instance_uid.trim_end_matches(['\0', ' ']).to_owned();
-    let sop_instance_b = object_b.meta().media_storage_sop_instance_uid.trim_end_matches(['\0', ' ']).to_owned();
+    let sop_class_uid = object_a
+        .meta()
+        .media_storage_sop_class_uid
+        .trim_end_matches(['\0', ' '])
+        .to_owned();
+    let sop_instance_a = object_a
+        .meta()
+        .media_storage_sop_instance_uid
+        .trim_end_matches(['\0', ' '])
+        .to_owned();
+    let sop_instance_b = object_b
+        .meta()
+        .media_storage_sop_instance_uid
+        .trim_end_matches(['\0', ' '])
+        .to_owned();
     assert_eq!(
-        object_b.meta().media_storage_sop_class_uid.trim_end_matches(['\0', ' ']),
+        object_b
+            .meta()
+            .media_storage_sop_class_uid
+            .trim_end_matches(['\0', ' ']),
         sop_class_uid,
         "fixtures must share a SOP class for this test to be meaningful"
     );
-    assert_eq!(object_a.meta().transfer_syntax.trim_end_matches(['\0', ' ']), "1.2.840.10008.1.2.4.90");
-    assert_eq!(object_b.meta().transfer_syntax.trim_end_matches(['\0', ' ']), uids::EXPLICIT_VR_LITTLE_ENDIAN);
+    assert_eq!(
+        object_a
+            .meta()
+            .transfer_syntax
+            .trim_end_matches(['\0', ' ']),
+        "1.2.840.10008.1.2.4.90"
+    );
+    assert_eq!(
+        object_b
+            .meta()
+            .transfer_syntax
+            .trim_end_matches(['\0', ' ']),
+        uids::EXPLICIT_VR_LITTLE_ENDIAN
+    );
 
     let expected_sop_class_uid = sop_class_uid.clone();
     let (scp_handle, addr) = spawn_mock_scp(sop_class_uid, move |association| {
@@ -2618,15 +2815,31 @@ fn store_scu_avoids_transcoding_into_a_decode_only_transfer_syntax_shared_by_sop
             let (pc_id, request, dataset_bytes) = dimse_recv_command_with_data(association);
             assert!(!dataset_bytes.is_empty());
             assert_eq!(
-                request.element(tags::AFFECTED_SOP_CLASS_UID).unwrap().to_str().unwrap(),
+                request
+                    .element(tags::AFFECTED_SOP_CLASS_UID)
+                    .unwrap()
+                    .to_str()
+                    .unwrap(),
                 expected_sop_class_uid,
             );
             let message_id = dimse_message_id(&request);
             let response = InMemDicomObject::command_from_element_iter([
-                DataElement::new(tags::AFFECTED_SOP_CLASS_UID, VR::UI, dicom_value!(Str, expected_sop_class_uid.clone())),
+                DataElement::new(
+                    tags::AFFECTED_SOP_CLASS_UID,
+                    VR::UI,
+                    dicom_value!(Str, expected_sop_class_uid.clone()),
+                ),
                 DataElement::new(tags::COMMAND_FIELD, VR::US, dicom_value!(U16, [0x8001])),
-                DataElement::new(tags::MESSAGE_ID_BEING_RESPONDED_TO, VR::US, dicom_value!(U16, [message_id])),
-                DataElement::new(tags::COMMAND_DATA_SET_TYPE, VR::US, dicom_value!(U16, [0x0101])),
+                DataElement::new(
+                    tags::MESSAGE_ID_BEING_RESPONDED_TO,
+                    VR::US,
+                    dicom_value!(U16, [message_id]),
+                ),
+                DataElement::new(
+                    tags::COMMAND_DATA_SET_TYPE,
+                    VR::US,
+                    dicom_value!(U16, [0x0101]),
+                ),
                 DataElement::new(tags::STATUS, VR::US, dicom_value!(U16, [0x0000])),
             ]);
             dimse_send_command(association, pc_id, &response);
@@ -2649,7 +2862,10 @@ fn store_scu_avoids_transcoding_into_a_decode_only_transfer_syntax_shared_by_sop
     .unwrap();
 
     assert_eq!(results.len(), 2);
-    assert!(results.iter().all(|result| result.status == 0), "expected both sends to succeed: {results:?}");
+    assert!(
+        results.iter().all(|result| result.status == 0),
+        "expected both sends to succeed: {results:?}"
+    );
     assert_eq!(results[0].sop_instance_uid, sop_instance_a);
     assert_eq!(results[1].sop_instance_uid, sop_instance_b);
 
@@ -2670,9 +2886,20 @@ fn store_scu_avoids_transcoding_into_a_decode_only_transfer_syntax_shared_by_sop
 fn store_scu_transcodes_into_fallback_context_when_peer_rejects_native_transfer_syntax() {
     let source = fixture_path("dx2.dcm");
     let object = read_dicom_file(&source).unwrap();
-    let sop_class_uid = object.meta().media_storage_sop_class_uid.trim_end_matches(['\0', ' ']).to_owned();
-    let sop_instance_uid = object.meta().media_storage_sop_instance_uid.trim_end_matches(['\0', ' ']).to_owned();
-    assert_eq!(object.meta().transfer_syntax.trim_end_matches(['\0', ' ']), "1.2.840.10008.1.2.4.90");
+    let sop_class_uid = object
+        .meta()
+        .media_storage_sop_class_uid
+        .trim_end_matches(['\0', ' '])
+        .to_owned();
+    let sop_instance_uid = object
+        .meta()
+        .media_storage_sop_instance_uid
+        .trim_end_matches(['\0', ' '])
+        .to_owned();
+    assert_eq!(
+        object.meta().transfer_syntax.trim_end_matches(['\0', ' ']),
+        "1.2.840.10008.1.2.4.90"
+    );
 
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
@@ -2691,23 +2918,41 @@ fn store_scu_transcodes_into_fallback_context_when_peer_rejects_native_transfer_
         let (pc_id, request, dataset_bytes) = dimse_recv_command_with_data(&mut association);
         assert!(!dataset_bytes.is_empty());
         assert_eq!(
-            request.element(tags::AFFECTED_SOP_CLASS_UID).unwrap().to_str().unwrap(),
+            request
+                .element(tags::AFFECTED_SOP_CLASS_UID)
+                .unwrap()
+                .to_str()
+                .unwrap(),
             expected_sop_class_uid,
         );
         let message_id = dimse_message_id(&request);
 
         let response = InMemDicomObject::command_from_element_iter([
-            DataElement::new(tags::AFFECTED_SOP_CLASS_UID, VR::UI, dicom_value!(Str, expected_sop_class_uid.clone())),
+            DataElement::new(
+                tags::AFFECTED_SOP_CLASS_UID,
+                VR::UI,
+                dicom_value!(Str, expected_sop_class_uid.clone()),
+            ),
             DataElement::new(tags::COMMAND_FIELD, VR::US, dicom_value!(U16, [0x8001])),
-            DataElement::new(tags::MESSAGE_ID_BEING_RESPONDED_TO, VR::US, dicom_value!(U16, [message_id])),
-            DataElement::new(tags::COMMAND_DATA_SET_TYPE, VR::US, dicom_value!(U16, [0x0101])),
+            DataElement::new(
+                tags::MESSAGE_ID_BEING_RESPONDED_TO,
+                VR::US,
+                dicom_value!(U16, [message_id]),
+            ),
+            DataElement::new(
+                tags::COMMAND_DATA_SET_TYPE,
+                VR::US,
+                dicom_value!(U16, [0x0101]),
+            ),
             DataElement::new(tags::STATUS, VR::US, dicom_value!(U16, [0x0000])),
         ]);
         dimse_send_command(&mut association, pc_id, &response);
 
         let pdu = association.receive().unwrap();
         assert_eq!(pdu, dcmnorm_dimse::pdu::Pdu::ReleaseRQ);
-        association.send(&dcmnorm_dimse::pdu::Pdu::ReleaseRP).unwrap();
+        association
+            .send(&dcmnorm_dimse::pdu::Pdu::ReleaseRP)
+            .unwrap();
     });
 
     let results = store_scu(
@@ -2738,31 +2983,62 @@ fn find_scu_collects_pending_matches_until_success_status() {
         let pc = association.presentation_contexts()[0].clone();
         let ts = {
             use dcmnorm_encoding::TransferSyntaxIndex;
-            dcmnorm_transcode::TransferSyntaxRegistry.get(&pc.transfer_syntax).unwrap()
+            dcmnorm_transcode::TransferSyntaxRegistry
+                .get(&pc.transfer_syntax)
+                .unwrap()
         };
 
         let (_pc_id, request, identifier_bytes) = dimse_recv_command_with_data(association);
         let message_id = dimse_message_id(&request);
-        let query = InMemDicomObject::read_dataset_with_ts(identifier_bytes.as_slice(), ts).unwrap();
-        assert_eq!(query.element(tags::QUERY_RETRIEVE_LEVEL).unwrap().to_str().unwrap(), "STUDY");
-        assert_eq!(query.element(tags::PATIENT_ID).unwrap().to_str().unwrap(), "MRN123");
+        let query =
+            InMemDicomObject::read_dataset_with_ts(identifier_bytes.as_slice(), ts).unwrap();
+        assert_eq!(
+            query
+                .element(tags::QUERY_RETRIEVE_LEVEL)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "STUDY"
+        );
+        assert_eq!(
+            query.element(tags::PATIENT_ID).unwrap().to_str().unwrap(),
+            "MRN123"
+        );
 
         // one pending match: Command (status=pending) + Data (the matched Identifier)
         let pending_command = InMemDicomObject::command_from_element_iter([
-            DataElement::new(tags::AFFECTED_SOP_CLASS_UID, VR::UI, dicom_value!(Str, abstract_syntax)),
+            DataElement::new(
+                tags::AFFECTED_SOP_CLASS_UID,
+                VR::UI,
+                dicom_value!(Str, abstract_syntax),
+            ),
             DataElement::new(tags::COMMAND_FIELD, VR::US, dicom_value!(U16, [0x8020])),
-            DataElement::new(tags::MESSAGE_ID_BEING_RESPONDED_TO, VR::US, dicom_value!(U16, [message_id])),
-            DataElement::new(tags::COMMAND_DATA_SET_TYPE, VR::US, dicom_value!(U16, [0x0001])),
+            DataElement::new(
+                tags::MESSAGE_ID_BEING_RESPONDED_TO,
+                VR::US,
+                dicom_value!(U16, [message_id]),
+            ),
+            DataElement::new(
+                tags::COMMAND_DATA_SET_TYPE,
+                VR::US,
+                dicom_value!(U16, [0x0001]),
+            ),
             DataElement::new(tags::STATUS, VR::US, dicom_value!(U16, [0xFF00])),
         ]);
         dimse_send_command(association, pc.id, &pending_command);
 
         let matched = InMemDicomObject::from_element_iter([
-            DataElement::new(tags::STUDY_INSTANCE_UID, VR::UI, dicom_value!(Str, "1.2.3.4.5")),
+            DataElement::new(
+                tags::STUDY_INSTANCE_UID,
+                VR::UI,
+                dicom_value!(Str, "1.2.3.4.5"),
+            ),
             DataElement::new(tags::PATIENT_NAME, VR::PN, dicom_value!(Str, "DOE^JANE")),
         ]);
         let mut matched_bytes = Vec::new();
-        matched.write_dataset_with_ts(&mut matched_bytes, ts).unwrap();
+        matched
+            .write_dataset_with_ts(&mut matched_bytes, ts)
+            .unwrap();
         association
             .send(&dcmnorm_dimse::pdu::Pdu::PData {
                 data: vec![dcmnorm_dimse::pdu::PDataValue {
@@ -2776,10 +3052,22 @@ fn find_scu_collects_pending_matches_until_success_status() {
 
         // final response: Command only, status=success
         let final_command = InMemDicomObject::command_from_element_iter([
-            DataElement::new(tags::AFFECTED_SOP_CLASS_UID, VR::UI, dicom_value!(Str, abstract_syntax)),
+            DataElement::new(
+                tags::AFFECTED_SOP_CLASS_UID,
+                VR::UI,
+                dicom_value!(Str, abstract_syntax),
+            ),
             DataElement::new(tags::COMMAND_FIELD, VR::US, dicom_value!(U16, [0x8020])),
-            DataElement::new(tags::MESSAGE_ID_BEING_RESPONDED_TO, VR::US, dicom_value!(U16, [message_id])),
-            DataElement::new(tags::COMMAND_DATA_SET_TYPE, VR::US, dicom_value!(U16, [0x0101])),
+            DataElement::new(
+                tags::MESSAGE_ID_BEING_RESPONDED_TO,
+                VR::US,
+                dicom_value!(U16, [message_id]),
+            ),
+            DataElement::new(
+                tags::COMMAND_DATA_SET_TYPE,
+                VR::US,
+                dicom_value!(U16, [0x0101]),
+            ),
             DataElement::new(tags::STATUS, VR::US, dicom_value!(U16, [0x0000])),
         ]);
         dimse_send_command(association, pc.id, &final_command);
@@ -2815,33 +3103,93 @@ fn move_scu_collects_suboperation_progress_until_terminal_status() {
         let (pc_id, request, _identifier_bytes) = dimse_recv_command_with_data(association);
         let message_id = dimse_message_id(&request);
         assert_eq!(
-            request.element(tags::MOVE_DESTINATION).unwrap().to_str().unwrap(),
+            request
+                .element(tags::MOVE_DESTINATION)
+                .unwrap()
+                .to_str()
+                .unwrap(),
             "MOVE-DEST",
         );
 
         let pending = InMemDicomObject::command_from_element_iter([
-            DataElement::new(tags::AFFECTED_SOP_CLASS_UID, VR::UI, dicom_value!(Str, abstract_syntax)),
+            DataElement::new(
+                tags::AFFECTED_SOP_CLASS_UID,
+                VR::UI,
+                dicom_value!(Str, abstract_syntax),
+            ),
             DataElement::new(tags::COMMAND_FIELD, VR::US, dicom_value!(U16, [0x8021])),
-            DataElement::new(tags::MESSAGE_ID_BEING_RESPONDED_TO, VR::US, dicom_value!(U16, [message_id])),
-            DataElement::new(tags::COMMAND_DATA_SET_TYPE, VR::US, dicom_value!(U16, [0x0101])),
+            DataElement::new(
+                tags::MESSAGE_ID_BEING_RESPONDED_TO,
+                VR::US,
+                dicom_value!(U16, [message_id]),
+            ),
+            DataElement::new(
+                tags::COMMAND_DATA_SET_TYPE,
+                VR::US,
+                dicom_value!(U16, [0x0101]),
+            ),
             DataElement::new(tags::STATUS, VR::US, dicom_value!(U16, [0xFF00])),
-            DataElement::new(tags::NUMBER_OF_REMAINING_SUBOPERATIONS, VR::US, dicom_value!(U16, [1])),
-            DataElement::new(tags::NUMBER_OF_COMPLETED_SUBOPERATIONS, VR::US, dicom_value!(U16, [0])),
-            DataElement::new(tags::NUMBER_OF_FAILED_SUBOPERATIONS, VR::US, dicom_value!(U16, [0])),
-            DataElement::new(tags::NUMBER_OF_WARNING_SUBOPERATIONS, VR::US, dicom_value!(U16, [0])),
+            DataElement::new(
+                tags::NUMBER_OF_REMAINING_SUBOPERATIONS,
+                VR::US,
+                dicom_value!(U16, [1]),
+            ),
+            DataElement::new(
+                tags::NUMBER_OF_COMPLETED_SUBOPERATIONS,
+                VR::US,
+                dicom_value!(U16, [0]),
+            ),
+            DataElement::new(
+                tags::NUMBER_OF_FAILED_SUBOPERATIONS,
+                VR::US,
+                dicom_value!(U16, [0]),
+            ),
+            DataElement::new(
+                tags::NUMBER_OF_WARNING_SUBOPERATIONS,
+                VR::US,
+                dicom_value!(U16, [0]),
+            ),
         ]);
         dimse_send_command(association, pc_id, &pending);
 
         let final_response = InMemDicomObject::command_from_element_iter([
-            DataElement::new(tags::AFFECTED_SOP_CLASS_UID, VR::UI, dicom_value!(Str, abstract_syntax)),
+            DataElement::new(
+                tags::AFFECTED_SOP_CLASS_UID,
+                VR::UI,
+                dicom_value!(Str, abstract_syntax),
+            ),
             DataElement::new(tags::COMMAND_FIELD, VR::US, dicom_value!(U16, [0x8021])),
-            DataElement::new(tags::MESSAGE_ID_BEING_RESPONDED_TO, VR::US, dicom_value!(U16, [message_id])),
-            DataElement::new(tags::COMMAND_DATA_SET_TYPE, VR::US, dicom_value!(U16, [0x0101])),
+            DataElement::new(
+                tags::MESSAGE_ID_BEING_RESPONDED_TO,
+                VR::US,
+                dicom_value!(U16, [message_id]),
+            ),
+            DataElement::new(
+                tags::COMMAND_DATA_SET_TYPE,
+                VR::US,
+                dicom_value!(U16, [0x0101]),
+            ),
             DataElement::new(tags::STATUS, VR::US, dicom_value!(U16, [0x0000])),
-            DataElement::new(tags::NUMBER_OF_REMAINING_SUBOPERATIONS, VR::US, dicom_value!(U16, [0])),
-            DataElement::new(tags::NUMBER_OF_COMPLETED_SUBOPERATIONS, VR::US, dicom_value!(U16, [1])),
-            DataElement::new(tags::NUMBER_OF_FAILED_SUBOPERATIONS, VR::US, dicom_value!(U16, [0])),
-            DataElement::new(tags::NUMBER_OF_WARNING_SUBOPERATIONS, VR::US, dicom_value!(U16, [0])),
+            DataElement::new(
+                tags::NUMBER_OF_REMAINING_SUBOPERATIONS,
+                VR::US,
+                dicom_value!(U16, [0]),
+            ),
+            DataElement::new(
+                tags::NUMBER_OF_COMPLETED_SUBOPERATIONS,
+                VR::US,
+                dicom_value!(U16, [1]),
+            ),
+            DataElement::new(
+                tags::NUMBER_OF_FAILED_SUBOPERATIONS,
+                VR::US,
+                dicom_value!(U16, [0]),
+            ),
+            DataElement::new(
+                tags::NUMBER_OF_WARNING_SUBOPERATIONS,
+                VR::US,
+                dicom_value!(U16, [0]),
+            ),
         ]);
         dimse_send_command(association, pc_id, &final_response);
     });
@@ -2891,15 +3239,43 @@ fn move_scu_drains_failed_sop_instance_uid_list_sent_as_separate_pdu() {
         // Final response: status=Failure (0xA702, "refused: out of resources - unable to
         // perform sub-operations"), CommandDataSetType != 0x0101 so an Identifier follows.
         let final_response = InMemDicomObject::command_from_element_iter([
-            DataElement::new(tags::AFFECTED_SOP_CLASS_UID, VR::UI, dicom_value!(Str, abstract_syntax)),
+            DataElement::new(
+                tags::AFFECTED_SOP_CLASS_UID,
+                VR::UI,
+                dicom_value!(Str, abstract_syntax),
+            ),
             DataElement::new(tags::COMMAND_FIELD, VR::US, dicom_value!(U16, [0x8021])),
-            DataElement::new(tags::MESSAGE_ID_BEING_RESPONDED_TO, VR::US, dicom_value!(U16, [message_id])),
-            DataElement::new(tags::COMMAND_DATA_SET_TYPE, VR::US, dicom_value!(U16, [0x0001])),
+            DataElement::new(
+                tags::MESSAGE_ID_BEING_RESPONDED_TO,
+                VR::US,
+                dicom_value!(U16, [message_id]),
+            ),
+            DataElement::new(
+                tags::COMMAND_DATA_SET_TYPE,
+                VR::US,
+                dicom_value!(U16, [0x0001]),
+            ),
             DataElement::new(tags::STATUS, VR::US, dicom_value!(U16, [0xA702])),
-            DataElement::new(tags::NUMBER_OF_REMAINING_SUBOPERATIONS, VR::US, dicom_value!(U16, [0])),
-            DataElement::new(tags::NUMBER_OF_COMPLETED_SUBOPERATIONS, VR::US, dicom_value!(U16, [0])),
-            DataElement::new(tags::NUMBER_OF_FAILED_SUBOPERATIONS, VR::US, dicom_value!(U16, [1])),
-            DataElement::new(tags::NUMBER_OF_WARNING_SUBOPERATIONS, VR::US, dicom_value!(U16, [0])),
+            DataElement::new(
+                tags::NUMBER_OF_REMAINING_SUBOPERATIONS,
+                VR::US,
+                dicom_value!(U16, [0]),
+            ),
+            DataElement::new(
+                tags::NUMBER_OF_COMPLETED_SUBOPERATIONS,
+                VR::US,
+                dicom_value!(U16, [0]),
+            ),
+            DataElement::new(
+                tags::NUMBER_OF_FAILED_SUBOPERATIONS,
+                VR::US,
+                dicom_value!(U16, [1]),
+            ),
+            DataElement::new(
+                tags::NUMBER_OF_WARNING_SUBOPERATIONS,
+                VR::US,
+                dicom_value!(U16, [0]),
+            ),
         ]);
         dimse_send_command(association, pc_id, &final_response);
 
@@ -2911,7 +3287,9 @@ fn move_scu_drains_failed_sop_instance_uid_list_sent_as_separate_pdu() {
             dicom_value!(Str, "1.2.3.4.5.6"),
         )]);
         let mut identifier_bytes = Vec::new();
-        identifier.write_dataset_with_ts(&mut identifier_bytes, dimse_implicit_vr_le()).unwrap();
+        identifier
+            .write_dataset_with_ts(&mut identifier_bytes, dimse_implicit_vr_le())
+            .unwrap();
         association
             .send(&dcmnorm_dimse::pdu::Pdu::PData {
                 data: vec![dcmnorm_dimse::pdu::PDataValue {
@@ -2981,14 +3359,38 @@ fn move_scu_still_returns_the_terminal_result_when_the_peer_does_not_send_releas
         // A normal terminal Success response, no trailing dataset - nothing unusual about the
         // move itself, only about what happens next.
         let final_response = InMemDicomObject::command_from_element_iter([
-            DataElement::new(tags::AFFECTED_SOP_CLASS_UID, VR::UI, dicom_value!(Str, abstract_syntax)),
+            DataElement::new(
+                tags::AFFECTED_SOP_CLASS_UID,
+                VR::UI,
+                dicom_value!(Str, abstract_syntax),
+            ),
             DataElement::new(tags::COMMAND_FIELD, VR::US, dicom_value!(U16, [0x8021])),
-            DataElement::new(tags::MESSAGE_ID_BEING_RESPONDED_TO, VR::US, dicom_value!(U16, [message_id])),
-            DataElement::new(tags::COMMAND_DATA_SET_TYPE, VR::US, dicom_value!(U16, [0x0101])),
+            DataElement::new(
+                tags::MESSAGE_ID_BEING_RESPONDED_TO,
+                VR::US,
+                dicom_value!(U16, [message_id]),
+            ),
+            DataElement::new(
+                tags::COMMAND_DATA_SET_TYPE,
+                VR::US,
+                dicom_value!(U16, [0x0101]),
+            ),
             DataElement::new(tags::STATUS, VR::US, dicom_value!(U16, [0x0000])),
-            DataElement::new(tags::NUMBER_OF_COMPLETED_SUBOPERATIONS, VR::US, dicom_value!(U16, [1])),
-            DataElement::new(tags::NUMBER_OF_FAILED_SUBOPERATIONS, VR::US, dicom_value!(U16, [0])),
-            DataElement::new(tags::NUMBER_OF_WARNING_SUBOPERATIONS, VR::US, dicom_value!(U16, [0])),
+            DataElement::new(
+                tags::NUMBER_OF_COMPLETED_SUBOPERATIONS,
+                VR::US,
+                dicom_value!(U16, [1]),
+            ),
+            DataElement::new(
+                tags::NUMBER_OF_FAILED_SUBOPERATIONS,
+                VR::US,
+                dicom_value!(U16, [0]),
+            ),
+            DataElement::new(
+                tags::NUMBER_OF_WARNING_SUBOPERATIONS,
+                VR::US,
+                dicom_value!(U16, [0]),
+            ),
         ]);
         dimse_send_command(&mut association, pc_id, &final_response);
 
@@ -3027,7 +3429,8 @@ fn move_scu_still_returns_the_terminal_result_when_the_peer_does_not_send_releas
         },
     );
 
-    let result = result.expect("a release-phase failure must not turn an already-successful move into an Err");
+    let result = result
+        .expect("a release-phase failure must not turn an already-successful move into an Err");
     assert_eq!(result.status, 0x0000);
     assert_eq!(result.completed, 1);
     scp_handle.join().unwrap();
@@ -3060,28 +3463,61 @@ fn move_scu_aborts_on_absolute_timeout_despite_continued_pending_responses() {
         // aborts, further sends here fail (broken pipe) - expected, not a test failure.
         for _ in 0..20 {
             let pending = InMemDicomObject::command_from_element_iter([
-                DataElement::new(tags::AFFECTED_SOP_CLASS_UID, VR::UI, dicom_value!(Str, abstract_syntax)),
+                DataElement::new(
+                    tags::AFFECTED_SOP_CLASS_UID,
+                    VR::UI,
+                    dicom_value!(Str, abstract_syntax),
+                ),
                 DataElement::new(tags::COMMAND_FIELD, VR::US, dicom_value!(U16, [0x8021])),
-                DataElement::new(tags::MESSAGE_ID_BEING_RESPONDED_TO, VR::US, dicom_value!(U16, [message_id])),
-                DataElement::new(tags::COMMAND_DATA_SET_TYPE, VR::US, dicom_value!(U16, [0x0101])),
+                DataElement::new(
+                    tags::MESSAGE_ID_BEING_RESPONDED_TO,
+                    VR::US,
+                    dicom_value!(U16, [message_id]),
+                ),
+                DataElement::new(
+                    tags::COMMAND_DATA_SET_TYPE,
+                    VR::US,
+                    dicom_value!(U16, [0x0101]),
+                ),
                 DataElement::new(tags::STATUS, VR::US, dicom_value!(U16, [0xFF00])),
-                DataElement::new(tags::NUMBER_OF_REMAINING_SUBOPERATIONS, VR::US, dicom_value!(U16, [1])),
-                DataElement::new(tags::NUMBER_OF_COMPLETED_SUBOPERATIONS, VR::US, dicom_value!(U16, [0])),
-                DataElement::new(tags::NUMBER_OF_FAILED_SUBOPERATIONS, VR::US, dicom_value!(U16, [0])),
-                DataElement::new(tags::NUMBER_OF_WARNING_SUBOPERATIONS, VR::US, dicom_value!(U16, [0])),
+                DataElement::new(
+                    tags::NUMBER_OF_REMAINING_SUBOPERATIONS,
+                    VR::US,
+                    dicom_value!(U16, [1]),
+                ),
+                DataElement::new(
+                    tags::NUMBER_OF_COMPLETED_SUBOPERATIONS,
+                    VR::US,
+                    dicom_value!(U16, [0]),
+                ),
+                DataElement::new(
+                    tags::NUMBER_OF_FAILED_SUBOPERATIONS,
+                    VR::US,
+                    dicom_value!(U16, [0]),
+                ),
+                DataElement::new(
+                    tags::NUMBER_OF_WARNING_SUBOPERATIONS,
+                    VR::US,
+                    dicom_value!(U16, [0]),
+                ),
             ]);
-            if association.send(&dcmnorm_dimse::pdu::Pdu::PData {
-                data: vec![dcmnorm_dimse::pdu::PDataValue {
-                    presentation_context_id: pc_id,
-                    value_type: dcmnorm_dimse::pdu::PDataValueType::Command,
-                    is_last: true,
-                    data: {
-                        let mut buf = Vec::new();
-                        pending.write_dataset_with_ts(&mut buf, dimse_implicit_vr_le()).unwrap();
-                        buf
-                    },
-                }],
-            }).is_err() {
+            if association
+                .send(&dcmnorm_dimse::pdu::Pdu::PData {
+                    data: vec![dcmnorm_dimse::pdu::PDataValue {
+                        presentation_context_id: pc_id,
+                        value_type: dcmnorm_dimse::pdu::PDataValueType::Command,
+                        is_last: true,
+                        data: {
+                            let mut buf = Vec::new();
+                            pending
+                                .write_dataset_with_ts(&mut buf, dimse_implicit_vr_le())
+                                .unwrap();
+                            buf
+                        },
+                    }],
+                })
+                .is_err()
+            {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(40));
@@ -3107,7 +3543,10 @@ fn move_scu_aborts_on_absolute_timeout_despite_continued_pending_responses() {
         },
     );
 
-    assert!(matches!(result, Err(DimseError::AbsoluteTimeout)), "expected AbsoluteTimeout, got {result:?}");
+    assert!(
+        matches!(result, Err(DimseError::AbsoluteTimeout)),
+        "expected AbsoluteTimeout, got {result:?}"
+    );
     scp_handle.join().unwrap();
 }
 
@@ -3133,28 +3572,61 @@ fn move_scu_aborts_when_stale_data_path_receives_no_new_files() {
 
         for _ in 0..20 {
             let pending = InMemDicomObject::command_from_element_iter([
-                DataElement::new(tags::AFFECTED_SOP_CLASS_UID, VR::UI, dicom_value!(Str, abstract_syntax)),
+                DataElement::new(
+                    tags::AFFECTED_SOP_CLASS_UID,
+                    VR::UI,
+                    dicom_value!(Str, abstract_syntax),
+                ),
                 DataElement::new(tags::COMMAND_FIELD, VR::US, dicom_value!(U16, [0x8021])),
-                DataElement::new(tags::MESSAGE_ID_BEING_RESPONDED_TO, VR::US, dicom_value!(U16, [message_id])),
-                DataElement::new(tags::COMMAND_DATA_SET_TYPE, VR::US, dicom_value!(U16, [0x0101])),
+                DataElement::new(
+                    tags::MESSAGE_ID_BEING_RESPONDED_TO,
+                    VR::US,
+                    dicom_value!(U16, [message_id]),
+                ),
+                DataElement::new(
+                    tags::COMMAND_DATA_SET_TYPE,
+                    VR::US,
+                    dicom_value!(U16, [0x0101]),
+                ),
                 DataElement::new(tags::STATUS, VR::US, dicom_value!(U16, [0xFF00])),
-                DataElement::new(tags::NUMBER_OF_REMAINING_SUBOPERATIONS, VR::US, dicom_value!(U16, [1])),
-                DataElement::new(tags::NUMBER_OF_COMPLETED_SUBOPERATIONS, VR::US, dicom_value!(U16, [0])),
-                DataElement::new(tags::NUMBER_OF_FAILED_SUBOPERATIONS, VR::US, dicom_value!(U16, [0])),
-                DataElement::new(tags::NUMBER_OF_WARNING_SUBOPERATIONS, VR::US, dicom_value!(U16, [0])),
+                DataElement::new(
+                    tags::NUMBER_OF_REMAINING_SUBOPERATIONS,
+                    VR::US,
+                    dicom_value!(U16, [1]),
+                ),
+                DataElement::new(
+                    tags::NUMBER_OF_COMPLETED_SUBOPERATIONS,
+                    VR::US,
+                    dicom_value!(U16, [0]),
+                ),
+                DataElement::new(
+                    tags::NUMBER_OF_FAILED_SUBOPERATIONS,
+                    VR::US,
+                    dicom_value!(U16, [0]),
+                ),
+                DataElement::new(
+                    tags::NUMBER_OF_WARNING_SUBOPERATIONS,
+                    VR::US,
+                    dicom_value!(U16, [0]),
+                ),
             ]);
-            if association.send(&dcmnorm_dimse::pdu::Pdu::PData {
-                data: vec![dcmnorm_dimse::pdu::PDataValue {
-                    presentation_context_id: pc_id,
-                    value_type: dcmnorm_dimse::pdu::PDataValueType::Command,
-                    is_last: true,
-                    data: {
-                        let mut buf = Vec::new();
-                        pending.write_dataset_with_ts(&mut buf, dimse_implicit_vr_le()).unwrap();
-                        buf
-                    },
-                }],
-            }).is_err() {
+            if association
+                .send(&dcmnorm_dimse::pdu::Pdu::PData {
+                    data: vec![dcmnorm_dimse::pdu::PDataValue {
+                        presentation_context_id: pc_id,
+                        value_type: dcmnorm_dimse::pdu::PDataValueType::Command,
+                        is_last: true,
+                        data: {
+                            let mut buf = Vec::new();
+                            pending
+                                .write_dataset_with_ts(&mut buf, dimse_implicit_vr_le())
+                                .unwrap();
+                            buf
+                        },
+                    }],
+                })
+                .is_err()
+            {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(40));
@@ -3165,7 +3637,10 @@ fn move_scu_aborts_when_stale_data_path_receives_no_new_files() {
     // peer's continued pending responses.
     let watch_dir = std::env::temp_dir().join(format!(
         "dcmnorm-stale-data-test-{}",
-        SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
     ));
     fs::create_dir_all(&watch_dir).unwrap();
 
@@ -3214,33 +3689,64 @@ fn move_scu_returns_cancelled_result_when_signalled_mid_wait() {
         let (pc_id, request, _identifier_bytes) = dimse_recv_command_with_data(association);
         let message_id = dimse_message_id(&request);
 
-        let send_pending = |association: &mut dcmnorm_dimse::ServerAssociation<std::net::TcpStream>| {
-            let pending = InMemDicomObject::command_from_element_iter([
-                DataElement::new(tags::AFFECTED_SOP_CLASS_UID, VR::UI, dicom_value!(Str, abstract_syntax)),
-                DataElement::new(tags::COMMAND_FIELD, VR::US, dicom_value!(U16, [0x8021])),
-                DataElement::new(tags::MESSAGE_ID_BEING_RESPONDED_TO, VR::US, dicom_value!(U16, [message_id])),
-                DataElement::new(tags::COMMAND_DATA_SET_TYPE, VR::US, dicom_value!(U16, [0x0101])),
-                DataElement::new(tags::STATUS, VR::US, dicom_value!(U16, [0xFF00])),
-                DataElement::new(tags::NUMBER_OF_REMAINING_SUBOPERATIONS, VR::US, dicom_value!(U16, [1])),
-                DataElement::new(tags::NUMBER_OF_COMPLETED_SUBOPERATIONS, VR::US, dicom_value!(U16, [0])),
-                DataElement::new(tags::NUMBER_OF_FAILED_SUBOPERATIONS, VR::US, dicom_value!(U16, [0])),
-                DataElement::new(tags::NUMBER_OF_WARNING_SUBOPERATIONS, VR::US, dicom_value!(U16, [0])),
-            ]);
-            association
-                .send(&dcmnorm_dimse::pdu::Pdu::PData {
-                    data: vec![dcmnorm_dimse::pdu::PDataValue {
-                        presentation_context_id: pc_id,
-                        value_type: dcmnorm_dimse::pdu::PDataValueType::Command,
-                        is_last: true,
-                        data: {
-                            let mut buf = Vec::new();
-                            pending.write_dataset_with_ts(&mut buf, dimse_implicit_vr_le()).unwrap();
-                            buf
-                        },
-                    }],
-                })
-                .unwrap();
-        };
+        let send_pending =
+            |association: &mut dcmnorm_dimse::ServerAssociation<std::net::TcpStream>| {
+                let pending = InMemDicomObject::command_from_element_iter([
+                    DataElement::new(
+                        tags::AFFECTED_SOP_CLASS_UID,
+                        VR::UI,
+                        dicom_value!(Str, abstract_syntax),
+                    ),
+                    DataElement::new(tags::COMMAND_FIELD, VR::US, dicom_value!(U16, [0x8021])),
+                    DataElement::new(
+                        tags::MESSAGE_ID_BEING_RESPONDED_TO,
+                        VR::US,
+                        dicom_value!(U16, [message_id]),
+                    ),
+                    DataElement::new(
+                        tags::COMMAND_DATA_SET_TYPE,
+                        VR::US,
+                        dicom_value!(U16, [0x0101]),
+                    ),
+                    DataElement::new(tags::STATUS, VR::US, dicom_value!(U16, [0xFF00])),
+                    DataElement::new(
+                        tags::NUMBER_OF_REMAINING_SUBOPERATIONS,
+                        VR::US,
+                        dicom_value!(U16, [1]),
+                    ),
+                    DataElement::new(
+                        tags::NUMBER_OF_COMPLETED_SUBOPERATIONS,
+                        VR::US,
+                        dicom_value!(U16, [0]),
+                    ),
+                    DataElement::new(
+                        tags::NUMBER_OF_FAILED_SUBOPERATIONS,
+                        VR::US,
+                        dicom_value!(U16, [0]),
+                    ),
+                    DataElement::new(
+                        tags::NUMBER_OF_WARNING_SUBOPERATIONS,
+                        VR::US,
+                        dicom_value!(U16, [0]),
+                    ),
+                ]);
+                association
+                    .send(&dcmnorm_dimse::pdu::Pdu::PData {
+                        data: vec![dcmnorm_dimse::pdu::PDataValue {
+                            presentation_context_id: pc_id,
+                            value_type: dcmnorm_dimse::pdu::PDataValueType::Command,
+                            is_last: true,
+                            data: {
+                                let mut buf = Vec::new();
+                                pending
+                                    .write_dataset_with_ts(&mut buf, dimse_implicit_vr_le())
+                                    .unwrap();
+                                buf
+                            },
+                        }],
+                    })
+                    .unwrap();
+            };
 
         // Sends exactly two pending responses, then stops (never reaches, or releases at, a
         // terminal one) - only `cancel`, set once the client is known to have already seen the
@@ -3277,7 +3783,10 @@ fn move_scu_returns_cancelled_result_when_signalled_mid_wait() {
     )
     .unwrap();
 
-    assert!(result.cancelled, "expected a cancelled result, got {result:?}");
+    assert!(
+        result.cancelled,
+        "expected a cancelled result, got {result:?}"
+    );
     assert_eq!(result.cancelled_via, Some(CancelMode::Release));
     assert_eq!(result.status, 0);
     assert_eq!(result.remaining, 1);
@@ -3306,7 +3815,10 @@ fn move_scu_hard_aborts_immediately_when_cancel_mode_is_abort() {
         // Never sends any C-MOVE-RSP at all - proves the abort doesn't wait on the peer for
         // anything, unlike the graceful `Release` case.
         let pdu = association.receive().unwrap();
-        assert!(matches!(pdu, dcmnorm_dimse::pdu::Pdu::AbortRQ { .. }), "expected AbortRQ, got {pdu:?}");
+        assert!(
+            matches!(pdu, dcmnorm_dimse::pdu::Pdu::AbortRQ { .. }),
+            "expected AbortRQ, got {pdu:?}"
+        );
     });
 
     let cancel = CancelSignal::new();
@@ -3337,11 +3849,18 @@ fn move_scu_hard_aborts_immediately_when_cancel_mode_is_abort() {
     )
     .unwrap();
 
-    assert!(result.cancelled, "expected a cancelled result, got {result:?}");
+    assert!(
+        result.cancelled,
+        "expected a cancelled result, got {result:?}"
+    );
     assert_eq!(result.cancelled_via, Some(CancelMode::Abort));
     // Cancel is only actually observed at the next `poll_bounded` tick (up to one
     // `POLL_INTERVAL` after it's set, not immediately).
-    assert!(started.elapsed() < std::time::Duration::from_millis(900), "abort took too long to be noticed: {:?}", started.elapsed());
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(900),
+        "abort took too long to be noticed: {:?}",
+        started.elapsed()
+    );
     scp_handle.join().unwrap();
 }
 
@@ -3382,7 +3901,10 @@ fn find_scu_aborts_on_absolute_timeout_when_peer_never_responds() {
         },
     );
 
-    assert!(matches!(result, Err(DimseError::AbsoluteTimeout)), "expected AbsoluteTimeout, got {result:?}");
+    assert!(
+        matches!(result, Err(DimseError::AbsoluteTimeout)),
+        "expected AbsoluteTimeout, got {result:?}"
+    );
     scp_handle.join().unwrap();
 }
 
@@ -3430,8 +3952,15 @@ fn find_scu_returns_cancelled_error_when_signalled_mid_wait() {
         },
     );
 
-    assert!(matches!(result, Err(DimseError::Cancelled(CancelMode::Release))), "expected Cancelled, got {result:?}");
-    assert!(started.elapsed() < std::time::Duration::from_millis(900), "cancel took too long to be noticed: {:?}", started.elapsed());
+    assert!(
+        matches!(result, Err(DimseError::Cancelled(CancelMode::Release))),
+        "expected Cancelled, got {result:?}"
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(900),
+        "cancel took too long to be noticed: {:?}",
+        started.elapsed()
+    );
     scp_handle.join().unwrap();
 }
 
@@ -3442,7 +3971,11 @@ fn find_scu_returns_cancelled_error_when_signalled_mid_wait() {
 fn store_scu_aborts_on_absolute_timeout_when_peer_never_responds() {
     let source = fixture_path("sr.dcm");
     let object = read_dicom_file(&source).unwrap();
-    let sop_class_uid = object.meta().media_storage_sop_class_uid.trim_end_matches(['\0', ' ']).to_owned();
+    let sop_class_uid = object
+        .meta()
+        .media_storage_sop_class_uid
+        .trim_end_matches(['\0', ' '])
+        .to_owned();
 
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
@@ -3472,7 +4005,10 @@ fn store_scu_aborts_on_absolute_timeout_when_peer_never_responds() {
         },
     );
 
-    assert!(matches!(result, Err(DimseError::AbsoluteTimeout)), "expected AbsoluteTimeout, got {result:?}");
+    assert!(
+        matches!(result, Err(DimseError::AbsoluteTimeout)),
+        "expected AbsoluteTimeout, got {result:?}"
+    );
     scp_handle.join().unwrap();
 }
 
@@ -3483,7 +4019,11 @@ fn store_scu_aborts_on_absolute_timeout_when_peer_never_responds() {
 fn store_scu_returns_cancelled_error_when_signalled_mid_wait() {
     let source = fixture_path("sr.dcm");
     let object = read_dicom_file(&source).unwrap();
-    let sop_class_uid = object.meta().media_storage_sop_class_uid.trim_end_matches(['\0', ' ']).to_owned();
+    let sop_class_uid = object
+        .meta()
+        .media_storage_sop_class_uid
+        .trim_end_matches(['\0', ' '])
+        .to_owned();
 
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
@@ -3522,8 +4062,15 @@ fn store_scu_returns_cancelled_error_when_signalled_mid_wait() {
         },
     );
 
-    assert!(matches!(result, Err(DimseError::Cancelled(CancelMode::Release))), "expected Cancelled, got {result:?}");
-    assert!(started.elapsed() < std::time::Duration::from_millis(900), "cancel took too long to be noticed: {:?}", started.elapsed());
+    assert!(
+        matches!(result, Err(DimseError::Cancelled(CancelMode::Release))),
+        "expected Cancelled, got {result:?}"
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(900),
+        "cancel took too long to be noticed: {:?}",
+        started.elapsed()
+    );
     scp_handle.join().unwrap();
 }
 
@@ -3549,11 +4096,17 @@ impl ScpHandlers for TestScpHandlers {
     }
 
     fn on_move(&self, study_instance_uid: &str, move_destination_ae: &str) -> Result<bool, String> {
-        self.move_calls.lock().unwrap().push((study_instance_uid.to_owned(), move_destination_ae.to_owned()));
+        self.move_calls.lock().unwrap().push((
+            study_instance_uid.to_owned(),
+            move_destination_ae.to_owned(),
+        ));
         Ok(self.move_result)
     }
 
-    fn on_association_complete(&self, stored_instances_by_study: &std::collections::HashMap<String, Vec<String>>) {
+    fn on_association_complete(
+        &self,
+        stored_instances_by_study: &std::collections::HashMap<String, Vec<String>>,
+    ) {
         *self.association_complete.lock().unwrap() = Some(stored_instances_by_study.clone());
     }
 }
@@ -3572,7 +4125,10 @@ fn wait_for<T: Clone>(mut poll: impl FnMut() -> Option<T>) -> T {
 fn scp_round_trips_echo_store_find_move_against_the_scu_functions() {
     let cache_dir = std::env::temp_dir().join(format!(
         "dcmnorm-scp-test-{}",
-        SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
     ));
     fs::create_dir_all(&cache_dir).unwrap();
 
@@ -3592,7 +4148,10 @@ fn scp_round_trips_echo_store_find_move_against_the_scu_functions() {
         0,
         cache_dir.clone(),
         handlers.clone(),
-        ScpOptions { ae_title: "TEST-SCP".to_owned(), ..Default::default() },
+        ScpOptions {
+            ae_title: "TEST-SCP".to_owned(),
+            ..Default::default()
+        },
     )
     .unwrap();
     let destination = format!("127.0.0.1:{}", scp.local_port());
@@ -3600,7 +4159,13 @@ fn scp_round_trips_echo_store_find_move_against_the_scu_functions() {
     // C-ECHO
     let status = echo_scu(
         &destination,
-        EchoScuOptions { calling_ae_title: "TEST-SCU".to_owned(), called_ae_title: None, timeout: None, on_log: None, cancel: None },
+        EchoScuOptions {
+            calling_ae_title: "TEST-SCU".to_owned(),
+            called_ae_title: None,
+            timeout: None,
+            on_log: None,
+            cancel: None,
+        },
     )
     .unwrap();
     assert_eq!(status, 0);
@@ -3608,9 +4173,25 @@ fn scp_round_trips_echo_store_find_move_against_the_scu_functions() {
     // C-STORE
     let source = fixture_path("sr.dcm");
     let object = read_dicom_file(&source).unwrap();
-    let sop_instance_uid = object.meta().media_storage_sop_instance_uid.trim_end_matches(['\0', ' ']).to_owned();
-    let study_instance_uid = object.element(tags::STUDY_INSTANCE_UID).unwrap().to_str().unwrap().trim().to_owned();
-    let modality = object.element(tags::MODALITY).unwrap().to_str().unwrap().trim().to_owned();
+    let sop_instance_uid = object
+        .meta()
+        .media_storage_sop_instance_uid
+        .trim_end_matches(['\0', ' '])
+        .to_owned();
+    let study_instance_uid = object
+        .element(tags::STUDY_INSTANCE_UID)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .trim()
+        .to_owned();
+    let modality = object
+        .element(tags::MODALITY)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .trim()
+        .to_owned();
 
     let results = store_scu(
         &destination,
@@ -3630,12 +4211,20 @@ fn scp_round_trips_echo_store_find_move_against_the_scu_functions() {
     assert_eq!(results[0].status, 0);
     assert_eq!(results[0].sop_instance_uid, sop_instance_uid);
 
-    let expected_path = cache_dir.join(format!("S_{study_instance_uid}")).join(format!("{modality}_{sop_instance_uid}.dcm"));
-    assert!(expected_path.exists(), "expected stored file at {expected_path:?}");
+    let expected_path = cache_dir
+        .join(format!("S_{study_instance_uid}"))
+        .join(format!("{modality}_{sop_instance_uid}.dcm"));
+    assert!(
+        expected_path.exists(),
+        "expected stored file at {expected_path:?}"
+    );
     // The file that got written must itself be valid, readable DICOM with the same SOP instance.
     let stored_object = read_dicom_file(&expected_path).unwrap();
     assert_eq!(
-        stored_object.meta().media_storage_sop_instance_uid.trim_end_matches(['\0', ' ']),
+        stored_object
+            .meta()
+            .media_storage_sop_instance_uid
+            .trim_end_matches(['\0', ' ']),
         sop_instance_uid
     );
 
@@ -3659,7 +4248,10 @@ fn scp_round_trips_echo_store_find_move_against_the_scu_functions() {
     let match_value: serde_json::Value = serde_json::from_str(&matches[0]).unwrap();
     assert_eq!(match_value["0020000D"], "1.2.3.4.5");
     let seen_query = handlers.find_query.lock().unwrap().clone().unwrap();
-    assert_eq!(seen_query.get("PatientID").map(String::as_str), Some("MRN123"));
+    assert_eq!(
+        seen_query.get("PatientID").map(String::as_str),
+        Some("MRN123")
+    );
 
     // C-MOVE
     let move_result = move_scu(
@@ -3683,7 +4275,10 @@ fn scp_round_trips_echo_store_find_move_against_the_scu_functions() {
     .unwrap();
     assert_eq!(move_result.status, 0);
     let move_calls = handlers.move_calls.lock().unwrap().clone();
-    assert_eq!(move_calls, vec![("1.2.3.4.5".to_owned(), "MOVE-DEST".to_owned())]);
+    assert_eq!(
+        move_calls,
+        vec![("1.2.3.4.5".to_owned(), "MOVE-DEST".to_owned())]
+    );
 
     // Association-complete fires after the C-STORE association's release completes, which can
     // race this test observing it - poll rather than assume synchronous completion.
@@ -3714,7 +4309,10 @@ impl DimseLogger for MockLogger {
 fn scp_on_log_reports_association_negotiation_and_per_message_detail() {
     let cache_dir = std::env::temp_dir().join(format!(
         "dcmnorm-scp-onlog-test-{}",
-        SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
     ));
     fs::create_dir_all(&cache_dir).unwrap();
 
@@ -3726,20 +4324,32 @@ fn scp_on_log_reports_association_negotiation_and_per_message_detail() {
         association_complete: std::sync::Mutex::new(None),
     });
 
-    let logger = std::sync::Arc::new(MockLogger { lines: std::sync::Mutex::new(Vec::new()) });
+    let logger = std::sync::Arc::new(MockLogger {
+        lines: std::sync::Mutex::new(Vec::new()),
+    });
 
     let scp = start_scp(
         0,
         cache_dir.clone(),
         handlers,
-        ScpOptions { ae_title: "TEST-SCP".to_owned(), on_log: Some(logger.clone()), ..Default::default() },
+        ScpOptions {
+            ae_title: "TEST-SCP".to_owned(),
+            on_log: Some(logger.clone()),
+            ..Default::default()
+        },
     )
     .unwrap();
     let destination = format!("127.0.0.1:{}", scp.local_port());
 
     let status = echo_scu(
         &destination,
-        EchoScuOptions { calling_ae_title: "TEST-SCU".to_owned(), called_ae_title: None, timeout: None, on_log: None, cancel: None },
+        EchoScuOptions {
+            calling_ae_title: "TEST-SCU".to_owned(),
+            called_ae_title: None,
+            timeout: None,
+            on_log: None,
+            cancel: None,
+        },
     )
     .unwrap();
     assert_eq!(status, 0);
@@ -3748,14 +4358,26 @@ fn scp_on_log_reports_association_negotiation_and_per_message_detail() {
     fs::remove_dir_all(&cache_dir).ok();
 
     let joined = logger.lines.lock().unwrap().join("\n");
-    assert!(joined.contains("accepting association from"), "missing association-accept log, got: {joined}");
+    assert!(
+        joined.contains("accepting association from"),
+        "missing association-accept log, got: {joined}"
+    );
     assert!(
         joined.contains("established; negotiated presentation context(s)"),
         "missing presentation-context negotiation log, got: {joined}"
     );
-    assert!(joined.contains("received C-ECHO-RQ"), "missing per-message request log, got: {joined}");
-    assert!(joined.contains("sending C-ECHO-RSP: status=0x0000"), "missing per-message response log, got: {joined}");
-    assert!(joined.contains("released"), "missing association-release log, got: {joined}");
+    assert!(
+        joined.contains("received C-ECHO-RQ"),
+        "missing per-message request log, got: {joined}"
+    );
+    assert!(
+        joined.contains("sending C-ECHO-RSP: status=0x0000"),
+        "missing per-message response log, got: {joined}"
+    );
+    assert!(
+        joined.contains("released"),
+        "missing association-release log, got: {joined}"
+    );
 }
 
 /// Regression coverage for a production incident: a source PACS reported an in-progress C-MOVE
@@ -3770,7 +4392,10 @@ fn scp_on_log_reports_association_negotiation_and_per_message_detail() {
 fn scp_on_log_reports_study_uid_and_a_completion_summary_for_a_stored_instance() {
     let cache_dir = std::env::temp_dir().join(format!(
         "dcmnorm-scp-storelog-test-{}",
-        SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
     ));
     fs::create_dir_all(&cache_dir).unwrap();
 
@@ -3782,21 +4407,37 @@ fn scp_on_log_reports_study_uid_and_a_completion_summary_for_a_stored_instance()
         association_complete: std::sync::Mutex::new(None),
     });
 
-    let logger = std::sync::Arc::new(MockLogger { lines: std::sync::Mutex::new(Vec::new()) });
+    let logger = std::sync::Arc::new(MockLogger {
+        lines: std::sync::Mutex::new(Vec::new()),
+    });
 
     let scp = start_scp(
         0,
         cache_dir.clone(),
         handlers,
-        ScpOptions { ae_title: "TEST-SCP".to_owned(), on_log: Some(logger.clone()), ..Default::default() },
+        ScpOptions {
+            ae_title: "TEST-SCP".to_owned(),
+            on_log: Some(logger.clone()),
+            ..Default::default()
+        },
     )
     .unwrap();
     let destination = format!("127.0.0.1:{}", scp.local_port());
 
     let source = fixture_path("sr.dcm");
     let object = read_dicom_file(&source).unwrap();
-    let sop_instance_uid = object.meta().media_storage_sop_instance_uid.trim_end_matches(['\0', ' ']).to_owned();
-    let study_instance_uid = object.element(tags::STUDY_INSTANCE_UID).unwrap().to_str().unwrap().trim().to_owned();
+    let sop_instance_uid = object
+        .meta()
+        .media_storage_sop_instance_uid
+        .trim_end_matches(['\0', ' '])
+        .to_owned();
+    let study_instance_uid = object
+        .element(tags::STUDY_INSTANCE_UID)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .trim()
+        .to_owned();
 
     let results = store_scu(
         &destination,
@@ -3843,7 +4484,10 @@ fn scp_on_log_reports_study_uid_and_a_completion_summary_for_a_stored_instance()
 fn scp_on_log_reports_when_an_association_ends_with_no_c_store() {
     let cache_dir = std::env::temp_dir().join(format!(
         "dcmnorm-scp-nostore-test-{}",
-        SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
     ));
     fs::create_dir_all(&cache_dir).unwrap();
 
@@ -3855,13 +4499,19 @@ fn scp_on_log_reports_when_an_association_ends_with_no_c_store() {
         association_complete: std::sync::Mutex::new(None),
     });
 
-    let logger = std::sync::Arc::new(MockLogger { lines: std::sync::Mutex::new(Vec::new()) });
+    let logger = std::sync::Arc::new(MockLogger {
+        lines: std::sync::Mutex::new(Vec::new()),
+    });
 
     let scp = start_scp(
         0,
         cache_dir.clone(),
         handlers,
-        ScpOptions { ae_title: "TEST-SCP".to_owned(), on_log: Some(logger.clone()), ..Default::default() },
+        ScpOptions {
+            ae_title: "TEST-SCP".to_owned(),
+            on_log: Some(logger.clone()),
+            ..Default::default()
+        },
     )
     .unwrap();
     let destination = format!("127.0.0.1:{}", scp.local_port());
@@ -3870,7 +4520,13 @@ fn scp_on_log_reports_when_an_association_ends_with_no_c_store() {
     // nothing stored" shape observed in production.
     let status = echo_scu(
         &destination,
-        EchoScuOptions { calling_ae_title: "TEST-SCU".to_owned(), called_ae_title: None, timeout: None, on_log: None, cancel: None },
+        EchoScuOptions {
+            calling_ae_title: "TEST-SCU".to_owned(),
+            called_ae_title: None,
+            timeout: None,
+            on_log: None,
+            cancel: None,
+        },
     )
     .unwrap();
     assert_eq!(status, 0);
@@ -3883,7 +4539,8 @@ fn scp_on_log_reports_when_an_association_ends_with_no_c_store() {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     let joined = loop {
         let joined = logger.lines.lock().unwrap().join("\n");
-        if joined.contains("ended with no C-STORE received") || std::time::Instant::now() > deadline {
+        if joined.contains("ended with no C-STORE received") || std::time::Instant::now() > deadline
+        {
             break joined;
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
@@ -3906,13 +4563,19 @@ fn scp_on_log_reports_when_an_association_ends_with_no_c_store() {
 fn scp_find_response_with_non_ascii_text_does_not_close_the_connection() {
     let cache_dir = std::env::temp_dir().join(format!(
         "dcmnorm-scp-nonascii-test-{}",
-        SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
     ));
     fs::create_dir_all(&cache_dir).unwrap();
 
     let mut find_match = std::collections::HashMap::new();
     find_match.insert("StudyInstanceUID".to_owned(), "1.2.3.4.5".to_owned());
-    find_match.insert("StudyDescription".to_owned(), "CT Chest \u{2013} followup".to_owned());
+    find_match.insert(
+        "StudyDescription".to_owned(),
+        "CT Chest \u{2013} followup".to_owned(),
+    );
 
     let handlers = std::sync::Arc::new(TestScpHandlers {
         find_query: std::sync::Mutex::new(None),
@@ -3926,7 +4589,10 @@ fn scp_find_response_with_non_ascii_text_does_not_close_the_connection() {
         0,
         cache_dir.clone(),
         handlers.clone(),
-        ScpOptions { ae_title: "TEST-SCP".to_owned(), ..Default::default() },
+        ScpOptions {
+            ae_title: "TEST-SCP".to_owned(),
+            ..Default::default()
+        },
     )
     .unwrap();
     let destination = format!("127.0.0.1:{}", scp.local_port());
@@ -3987,11 +4653,18 @@ fn build_volume_sorts_slices_spatially_and_reformats_the_native_axial_plane() {
     assert_eq!(volume.num_slices, 5);
     assert_eq!(volume.slice_zs.len(), 5);
     for window in volume.slice_zs.windows(2) {
-        assert!(window[1] > window[0], "slice_zs must be spatially sorted ascending: {:?}", volume.slice_zs);
+        assert!(
+            window[1] > window[0],
+            "slice_zs must be spatially sorted ascending: {:?}",
+            volume.slice_zs
+        );
     }
     // Nominal 1.0mm spacing (matching the fixture's own SliceThickness) should round-trip.
     let observed_spacing = (volume.slice_zs[4] - volume.slice_zs[0]) / 4.0;
-    assert!((observed_spacing - 1.0).abs() < 1e-6, "observed spacing {observed_spacing}");
+    assert!(
+        (observed_spacing - 1.0).abs() < 1e-6,
+        "observed spacing {observed_spacing}"
+    );
 
     let params = PlaneParams {
         origin: volume.center(),
@@ -4031,7 +4704,11 @@ fn build_volume_puts_each_slice_s_own_pixels_in_its_spatial_plane_for_any_file_o
             VR::DS,
             PrimitiveValue::from(format!("-151.493508\\-36.6564417\\{z}")),
         ));
-        object.put(DataElement::new(tags::RESCALE_SLOPE, VR::DS, PrimitiveValue::from("1")));
+        object.put(DataElement::new(
+            tags::RESCALE_SLOPE,
+            VR::DS,
+            PrimitiveValue::from("1"),
+        ));
         object.put(DataElement::new(
             tags::RESCALE_INTERCEPT,
             VR::DS,
@@ -4082,7 +4759,6 @@ fn build_volume_rejects_a_non_parallel_orientation_in_the_stack() {
     }
 }
 
-
 #[test]
 fn pack_dicom_frame_texture_rejects_a_color_instance_instead_of_misreading_it_as_grayscale() {
     // us.dcm is a real RGB (SamplesPerPixel=3) fixture - the texture-export path has no notion
@@ -4093,7 +4769,12 @@ fn pack_dicom_frame_texture_rejects_a_color_instance_instead_of_misreading_it_as
 
     let result = pack_dicom_frame_texture(&object, 0, None, None, TextureCompression::None);
     assert!(
-        matches!(result, Err(TextureExportError::Render(RenderError::UnsupportedSamplesPerPixel(3)))),
+        matches!(
+            result,
+            Err(TextureExportError::Render(
+                RenderError::UnsupportedSamplesPerPixel(3)
+            ))
+        ),
         "expected UnsupportedSamplesPerPixel(3), got {result:?}"
     );
 }
@@ -4125,22 +4806,45 @@ fn pack_dicom_frame_stack_texture_carries_each_layers_own_default_window_and_inv
     // window/invert instead of inheriting the first source's.
     let tagged = read_dicom_bytes(&fixture_bytes(fixture_path("dx.dcm"))).unwrap();
     let mut untagged_inverted = tagged.clone();
-    untagged_inverted.put(DataElement::new(tags::WINDOW_CENTER, VR::DS, PrimitiveValue::from("123")));
-    untagged_inverted.put(DataElement::new(tags::WINDOW_WIDTH, VR::DS, PrimitiveValue::from("456")));
-    untagged_inverted.put(DataElement::new(tags::PHOTOMETRIC_INTERPRETATION, VR::CS, PrimitiveValue::from("MONOCHROME1")));
+    untagged_inverted.put(DataElement::new(
+        tags::WINDOW_CENTER,
+        VR::DS,
+        PrimitiveValue::from("123"),
+    ));
+    untagged_inverted.put(DataElement::new(
+        tags::WINDOW_WIDTH,
+        VR::DS,
+        PrimitiveValue::from("456"),
+    ));
+    untagged_inverted.put(DataElement::new(
+        tags::PHOTOMETRIC_INTERPRETATION,
+        VR::CS,
+        PrimitiveValue::from("MONOCHROME1"),
+    ));
     untagged_inverted.remove_element(tags::PRESENTATION_LUT_SHAPE);
     let mut untagged = tagged.clone();
     untagged.remove_element(tags::WINDOW_CENTER);
     untagged.remove_element(tags::WINDOW_WIDTH);
-    let sources = [(&tagged, 0usize), (&untagged_inverted, 0usize), (&untagged, 0usize)];
+    let sources = [
+        (&tagged, 0usize),
+        (&untagged_inverted, 0usize),
+        (&untagged, 0usize),
+    ];
 
     let packed = pack_dicom_frame_stack_texture(&sources, None, TextureCompression::None).unwrap();
     let windows = &packed.meta.layer_default_windows;
     assert_eq!(windows.len(), 3);
     assert_eq!(windows[1], (123.0, 456.0));
     // Untagged layer falls back to its own min/max span, never the first layer's tags.
-    let (stack_center, stack_width) = (packed.meta.default_window_center.unwrap(), packed.meta.default_window_width.unwrap());
-    assert_eq!(windows[0], (stack_center, stack_width), "first layer still speaks for the stack-wide default");
+    let (stack_center, stack_width) = (
+        packed.meta.default_window_center.unwrap(),
+        packed.meta.default_window_width.unwrap(),
+    );
+    assert_eq!(
+        windows[0],
+        (stack_center, stack_width),
+        "first layer still speaks for the stack-wide default"
+    );
     assert!(windows[2].1 >= 1.0);
     assert_eq!(packed.meta.layer_invert.len(), 3);
     assert_ne!(packed.meta.layer_invert[0], packed.meta.layer_invert[1]);
@@ -4162,7 +4866,12 @@ fn pack_dicom_frame_stack_texture_fails_closed_if_any_source_is_a_color_instance
 
     let result = pack_dicom_frame_stack_texture(&sources, None, TextureCompression::None);
     assert!(
-        matches!(result, Err(TextureExportError::Render(RenderError::UnsupportedSamplesPerPixel(3)))),
+        matches!(
+            result,
+            Err(TextureExportError::Render(
+                RenderError::UnsupportedSamplesPerPixel(3)
+            ))
+        ),
         "expected UnsupportedSamplesPerPixel(3), got {result:?}"
     );
 }
@@ -4174,8 +4883,16 @@ fn assert_single_frame_read_matches_full_read(path: &Path, frame_index: usize) {
     let full = read_dicom_file(path).unwrap();
     let single = read_dicom_file_for_frame(path, frame_index)
         .unwrap()
-        .unwrap_or_else(|| panic!("{} frame {frame_index}: expected the single-frame fast path", path.display()));
-    let options = RenderPipelineOptions { frame_index, ..Default::default() };
+        .unwrap_or_else(|| {
+            panic!(
+                "{} frame {frame_index}: expected the single-frame fast path",
+                path.display()
+            )
+        });
+    let options = RenderPipelineOptions {
+        frame_index,
+        ..Default::default()
+    };
     for format in [RenderOutputFormat::Raw, RenderOutputFormat::Png] {
         let expected = render_dicom_frame(&full, format, &options).unwrap();
         let actual = render_dicom_frame(&single, format, &options).unwrap();
@@ -4205,22 +4922,48 @@ fn read_dicom_file_for_frame_decodes_16_bit_ow_frames_in_each_native_byte_order(
     let samples = usize::from(ROWS) * usize::from(COLS);
     // Distinct, frame-dependent 12-bit values, so reading the wrong frame or swapping bytes in
     // the wrong order would show up in the rendered output.
-    let pixels: Vec<u16> = (0..samples * FRAMES).map(|i| ((i * 97 + 13) % 4096) as u16).collect();
+    let pixels: Vec<u16> = (0..samples * FRAMES)
+        .map(|i| ((i * 97 + 13) % 4096) as u16)
+        .collect();
 
-    for ts in [uids::IMPLICIT_VR_LITTLE_ENDIAN, uids::EXPLICIT_VR_LITTLE_ENDIAN, "1.2.840.10008.1.2.2"] {
+    for ts in [
+        uids::IMPLICIT_VR_LITTLE_ENDIAN,
+        uids::EXPLICIT_VR_LITTLE_ENDIAN,
+        "1.2.840.10008.1.2.2",
+    ] {
         let dataset = InMemDicomObject::from_element_iter([
-            DataElement::new(tags::SOP_CLASS_UID, VR::UI, PrimitiveValue::from("1.2.840.10008.5.1.4.1.1.7")),
-            DataElement::new(tags::SOP_INSTANCE_UID, VR::UI, PrimitiveValue::from("1.2.3.4.5.6.7")),
+            DataElement::new(
+                tags::SOP_CLASS_UID,
+                VR::UI,
+                PrimitiveValue::from("1.2.840.10008.5.1.4.1.1.7"),
+            ),
+            DataElement::new(
+                tags::SOP_INSTANCE_UID,
+                VR::UI,
+                PrimitiveValue::from("1.2.3.4.5.6.7"),
+            ),
             DataElement::new(tags::SAMPLES_PER_PIXEL, VR::US, dicom_value!(U16, [1])),
-            DataElement::new(tags::PHOTOMETRIC_INTERPRETATION, VR::CS, PrimitiveValue::from("MONOCHROME2")),
-            DataElement::new(tags::NUMBER_OF_FRAMES, VR::IS, PrimitiveValue::from(FRAMES.to_string())),
+            DataElement::new(
+                tags::PHOTOMETRIC_INTERPRETATION,
+                VR::CS,
+                PrimitiveValue::from("MONOCHROME2"),
+            ),
+            DataElement::new(
+                tags::NUMBER_OF_FRAMES,
+                VR::IS,
+                PrimitiveValue::from(FRAMES.to_string()),
+            ),
             DataElement::new(tags::ROWS, VR::US, dicom_value!(U16, [ROWS])),
             DataElement::new(tags::COLUMNS, VR::US, dicom_value!(U16, [COLS])),
             DataElement::new(tags::BITS_ALLOCATED, VR::US, dicom_value!(U16, [16])),
             DataElement::new(tags::BITS_STORED, VR::US, dicom_value!(U16, [12])),
             DataElement::new(tags::HIGH_BIT, VR::US, dicom_value!(U16, [11])),
             DataElement::new(tags::PIXEL_REPRESENTATION, VR::US, dicom_value!(U16, [0])),
-            DataElement::new(tags::PIXEL_DATA, VR::OW, PrimitiveValue::U16(pixels.clone().into())),
+            DataElement::new(
+                tags::PIXEL_DATA,
+                VR::OW,
+                PrimitiveValue::U16(pixels.clone().into()),
+            ),
         ]);
         let path = temp_file_path("dcmnorm-single-frame-ow");
         write_dataset_as_dicom_file(dataset, &path, ts).unwrap();
@@ -4235,12 +4978,22 @@ fn read_dicom_file_for_frame_decodes_16_bit_ow_frames_in_each_native_byte_order(
 fn read_dicom_file_for_frame_declines_what_it_cannot_read_partially() {
     // Encapsulated (JPEG 2000), dataset-compressed (deflated), and out-of-range frames all fall
     // back to a full read rather than guessing at byte offsets.
-    assert!(read_dicom_file_for_frame(fixture_path("ct.dcm"), 0).unwrap().is_none());
-    assert!(read_dicom_file_for_frame(fixture_path("deflated.dcm"), 0).unwrap().is_none());
-    assert!(read_dicom_file_for_frame(fixture_path("us2.dcm"), 227).unwrap().is_none());
+    assert!(read_dicom_file_for_frame(fixture_path("ct.dcm"), 0)
+        .unwrap()
+        .is_none());
+    assert!(read_dicom_file_for_frame(fixture_path("deflated.dcm"), 0)
+        .unwrap()
+        .is_none());
+    assert!(read_dicom_file_for_frame(fixture_path("us2.dcm"), 227)
+        .unwrap()
+        .is_none());
     // A PixelData declaring more bytes than the file holds must take the full read too, so the
     // truncation error is the full read's, not a silently zero-filled frame.
-    assert!(read_dicom_file_for_frame(fixture_path("mr_truncated.dcm"), 0).map(|object| object.is_none()).unwrap_or(true));
+    assert!(
+        read_dicom_file_for_frame(fixture_path("mr_truncated.dcm"), 0)
+            .map(|object| object.is_none())
+            .unwrap_or(true)
+    );
 }
 
 /// The pre-deferral way to write URI-mode JSON for a file: read it whole, then let the writer
@@ -4265,7 +5018,11 @@ fn json_via_full_read_and_scan(path: &Path, format: DicomJsonFormat) -> String {
 }
 
 fn json_via_deferred_read(path: &Path, format: DicomJsonFormat) -> String {
-    let options = DicomJsonWriteOptions { format, bulk_data_mode: DicomJsonBulkDataMode::Uri, ..Default::default() };
+    let options = DicomJsonWriteOptions {
+        format,
+        bulk_data_mode: DicomJsonBulkDataMode::Uri,
+        ..Default::default()
+    };
     dicom_file_to_json(path, options).unwrap()
 }
 
@@ -4276,7 +5033,12 @@ fn bulk_data_uris(json: &JsonValue, out: &mut Vec<(usize, usize)>) {
             if let Some(JsonValue::String(uri)) = map.get("BulkDataURI") {
                 let query = uri.split_once('?').unwrap().1;
                 let field = |name: &str| {
-                    query.split('&').find_map(|pair| pair.strip_prefix(name)).unwrap().parse::<usize>().unwrap()
+                    query
+                        .split('&')
+                        .find_map(|pair| pair.strip_prefix(name))
+                        .unwrap()
+                        .parse::<usize>()
+                        .unwrap()
                 };
                 out.push((field("offset="), field("length=")));
             }
@@ -4292,21 +5054,33 @@ fn deferred_bulk_data_json_matches_full_read_and_scan_for_every_fixture() {
     let mut deferred_files = 0;
     for entry in fs::read_dir(fixture_path("")).unwrap() {
         let path = entry.unwrap().path();
-        if path.extension().and_then(|ext| ext.to_str()) != Some("dcm") || read_dicom_file(&path).is_err() {
+        if path.extension().and_then(|ext| ext.to_str()) != Some("dcm")
+            || read_dicom_file(&path).is_err()
+        {
             continue;
         }
         if matches!(read_dicom_file_deferring_bulk_data(&path), Ok(Some(_))) {
             deferred_files += 1;
         }
         for format in [DicomJsonFormat::Flat, DicomJsonFormat::Standard] {
-            let Ok(expected) = std::panic::catch_unwind(|| json_via_full_read_and_scan(&path, format)) else {
+            let Ok(expected) =
+                std::panic::catch_unwind(|| json_via_full_read_and_scan(&path, format))
+            else {
                 continue; // not expressible as JSON at all - nothing to compare
             };
             let actual = json_via_deferred_read(&path, format);
-            assert_eq!(expected, actual, "{} ({format:?}): deferred JSON differs", path.display());
+            assert_eq!(
+                expected,
+                actual,
+                "{} ({format:?}): deferred JSON differs",
+                path.display()
+            );
         }
     }
-    assert!(deferred_files > 20, "only {deferred_files} fixtures took the deferred path");
+    assert!(
+        deferred_files > 20,
+        "only {deferred_files} fixtures took the deferred path"
+    );
 }
 
 /// Hand-built Explicit VR LE data set exercising the parser bookkeeping a deferred skip must
@@ -4335,7 +5109,11 @@ fn deferred_bulk_data_json_handles_defined_length_items_and_thresholds() {
         out.extend_from_slice(content);
         out
     }
-    let pattern = |seed: u8, len: usize| (0..len).map(|i| (i as u8).wrapping_mul(31).wrapping_add(seed)).collect::<Vec<u8>>();
+    let pattern = |seed: u8, len: usize| {
+        (0..len)
+            .map(|i| (i as u8).wrapping_mul(31).wrapping_add(seed))
+            .collect::<Vec<u8>>()
+    };
 
     let items: Vec<u8> = (0..3u8)
         .flat_map(|i| {
@@ -4354,45 +5132,80 @@ fn deferred_bulk_data_json_handles_defined_length_items_and_thresholds() {
 
     let path = temp_file_path("dcmnorm-deferred-json");
     let dataset = InMemDicomObject::from_element_iter([
-        DataElement::new(tags::SOP_CLASS_UID, VR::UI, PrimitiveValue::from("1.2.840.10008.5.1.4.1.1.7")),
-        DataElement::new(tags::SOP_INSTANCE_UID, VR::UI, PrimitiveValue::from("1.2.3.4.5.6.8")),
+        DataElement::new(
+            tags::SOP_CLASS_UID,
+            VR::UI,
+            PrimitiveValue::from("1.2.840.10008.5.1.4.1.1.7"),
+        ),
+        DataElement::new(
+            tags::SOP_INSTANCE_UID,
+            VR::UI,
+            PrimitiveValue::from("1.2.3.4.5.6.8"),
+        ),
     ]);
     write_dataset_as_dicom_file(dataset, &path, uids::EXPLICIT_VR_LITTLE_ENDIAN).unwrap();
     let mut bytes = fs::read(&path).unwrap();
     bytes.extend(tail);
     fs::write(&path, &bytes).unwrap();
 
-    let (_, deferred) = read_dicom_file_deferring_bulk_data(&path).unwrap().expect("deferred path");
-    assert!(deferred.value(Tag(0x0029, 0x1020)).is_none(), "32-byte value must stay inline");
+    let (_, deferred) = read_dicom_file_deferring_bulk_data(&path)
+        .unwrap()
+        .expect("deferred path");
+    assert!(
+        deferred.value(Tag(0x0029, 0x1020)).is_none(),
+        "32-byte value must stay inline"
+    );
     assert!(deferred.value(Tag(0x0029, 0x1021)).is_some());
     for index in 0..3 {
-        assert!(deferred.item(Tag(0x0029, 0x1010), index).unwrap().value(Tag(0x0029, 0x1011)).is_some());
+        assert!(deferred
+            .item(Tag(0x0029, 0x1010), index)
+            .unwrap()
+            .value(Tag(0x0029, 0x1011))
+            .is_some());
     }
 
     let full = read_dicom_file(&path).unwrap();
     for format in [DicomJsonFormat::Flat, DicomJsonFormat::Standard] {
         let actual = json_via_deferred_read(&path, format);
-        assert_eq!(json_via_full_read_and_scan(&path, format), actual, "{format:?}");
+        assert_eq!(
+            json_via_full_read_and_scan(&path, format),
+            actual,
+            "{format:?}"
+        );
 
         // and every URI really points at that element's bytes in the file
         let mut uris = Vec::new();
         bulk_data_uris(&serde_json::from_str(&actual).unwrap(), &mut uris);
-        assert_eq!(uris.len(), 6, "{format:?}: 3 nested OB + 2 top-level + PixelData");
-        let mut expected_values: Vec<Vec<u8>> = vec![
-            pattern(8, 34),
-            pattern(9, 64),
-            pattern(10, 300),
-        ];
+        assert_eq!(
+            uris.len(),
+            6,
+            "{format:?}: 3 nested OB + 2 top-level + PixelData"
+        );
+        let mut expected_values: Vec<Vec<u8>> =
+            vec![pattern(8, 34), pattern(9, 64), pattern(10, 300)];
         expected_values.extend((0..3u8).map(|i| pattern(i, 100)));
         for (offset, length) in uris {
             let referenced = &bytes[offset..offset + length];
-            assert!(expected_values.iter().any(|value| value == referenced), "URI {offset}+{length} points at the wrong bytes");
+            assert!(
+                expected_values.iter().any(|value| value == referenced),
+                "URI {offset}+{length} points at the wrong bytes"
+            );
         }
     }
     // the deferred read kept everything after the skipped values, including past PixelData
-    assert_eq!(full.element(Tag(0x0029, 0x0010)).unwrap().to_str().unwrap().trim(), "TESTCREATOR");
+    assert_eq!(
+        full.element(Tag(0x0029, 0x0010))
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .trim(),
+        "TESTCREATOR"
+    );
     let deferred_json = json_via_deferred_read(&path, DicomJsonFormat::Standard);
-    assert!(deferred_json.contains("FFFCFFFC"), "trailing element after PixelData was dropped");
+    assert!(
+        deferred_json.contains("FFFCFFFC"),
+        "trailing element after PixelData was dropped"
+    );
     fs::remove_file(&path).ok();
 }
 
@@ -4402,27 +5215,46 @@ fn writing_a_short_form_vr_value_longer_than_16_bits_fails_instead_of_corrupting
     // than 65535 bytes used to be written with its length silently truncated, producing a file
     // whose remaining elements are misparsed from the middle of that value. It must fail.
     let mut object = read_dicom_file(fixture_path("mr_small.dcm")).unwrap();
-    object.put_str(tags::STUDY_DESCRIPTION, dcmnorm_core::VR::LO, "X".repeat(70_000));
+    object.put_str(
+        tags::STUDY_DESCRIPTION,
+        dcmnorm_core::VR::LO,
+        "X".repeat(70_000),
+    );
     let error = write_dicom_bytes(&mut object)
         .expect_err("a 70000-byte LO cannot be written in Explicit VR Little Endian");
     assert!(
-        error.to_string().contains("16-bit length") || format!("{error:?}").contains("WriteHeaderTooLong"),
+        error.to_string().contains("16-bit length")
+            || format!("{error:?}").contains("WriteHeaderTooLong"),
         "unexpected error: {error} ({error:?})"
     );
 
     // the same value fits in Implicit VR (32-bit lengths), so writing that still succeeds
     let mut object = read_dicom_file(fixture_path("sr.dcm")).unwrap();
-    object.put_str(tags::STUDY_DESCRIPTION, dcmnorm_core::VR::LO, "X".repeat(70_000));
+    object.put_str(
+        tags::STUDY_DESCRIPTION,
+        dcmnorm_core::VR::LO,
+        "X".repeat(70_000),
+    );
     let bytes = write_dicom_bytes(&mut object).unwrap();
     let roundtrip = read_dicom_bytes(&bytes).unwrap();
-    assert_eq!(roundtrip.element(tags::STUDY_DESCRIPTION).unwrap().to_str().unwrap().len(), 70_000);
+    assert_eq!(
+        roundtrip
+            .element(tags::STUDY_DESCRIPTION)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .len(),
+        70_000
+    );
 }
 
 /// Walk the encapsulated Pixel Data of a written Explicit VR Little Endian file, returning its
 /// Basic Offset Table and the actual offset of every fragment item header, measured the way the
 /// table is (from the first byte of the first fragment's item header, PS3.5 A.4).
 fn encapsulated_offset_table_and_fragment_offsets(bytes: &[u8]) -> (Vec<u32>, Vec<u32>) {
-    let header: &[u8] = &[0xE0, 0x7F, 0x10, 0x00, b'O', b'B', 0, 0, 0xFF, 0xFF, 0xFF, 0xFF];
+    let header: &[u8] = &[
+        0xE0, 0x7F, 0x10, 0x00, b'O', b'B', 0, 0, 0xFF, 0xFF, 0xFF, 0xFF,
+    ];
     let start = bytes
         .windows(header.len())
         .rposition(|w| w == header)
@@ -4454,14 +5286,29 @@ fn transcoding_a_multi_frame_object_to_jpeg_baseline_writes_a_correct_basic_offs
 
     let (bot, fragment_offsets) = encapsulated_offset_table_and_fragment_offsets(&bytes);
     assert_eq!(fragment_offsets.len(), 227, "one fragment per frame");
-    assert_eq!(bot, fragment_offsets, "every Basic Offset Table entry must point at its frame's fragment");
+    assert_eq!(
+        bot, fragment_offsets,
+        "every Basic Offset Table entry must point at its frame's fragment"
+    );
 
     // and the result still decodes back to native pixel data, every frame
     let native = transcode_dicom_bytes(&bytes, "1.2.840.10008.1.2.1").unwrap();
     let object = read_dicom_bytes(&native).unwrap();
-    let rows = object.element(tags::ROWS).unwrap().to_int::<usize>().unwrap();
-    let cols = object.element(tags::COLUMNS).unwrap().to_int::<usize>().unwrap();
-    let pixels = object.element(tags::PIXEL_DATA).unwrap().to_bytes().unwrap();
+    let rows = object
+        .element(tags::ROWS)
+        .unwrap()
+        .to_int::<usize>()
+        .unwrap();
+    let cols = object
+        .element(tags::COLUMNS)
+        .unwrap()
+        .to_int::<usize>()
+        .unwrap();
+    let pixels = object
+        .element(tags::PIXEL_DATA)
+        .unwrap()
+        .to_bytes()
+        .unwrap();
     assert_eq!(pixels.len(), 227 * rows * cols);
 }
 
@@ -4471,10 +5318,20 @@ fn transcoding_rgb_to_jpeg_baseline_labels_it_ybr_and_round_trips_the_colors() {
     // subsampled at the default quality), per PS3.5 8.2.1. Decoding must not then apply a second
     // YCbCr->RGB conversion: both decoding back to native and rendering must match the source.
     let source = read_dicom_file(fixture_path("us.dcm")).unwrap();
-    assert_eq!(source.element(tags::PHOTOMETRIC_INTERPRETATION).unwrap().to_str().unwrap(), "RGB");
+    assert_eq!(
+        source
+            .element(tags::PHOTOMETRIC_INTERPRETATION)
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "RGB"
+    );
     let jpeg = transcode_dcmnorm_object(&source, "1.2.840.10008.1.2.4.50").unwrap();
     assert_eq!(
-        jpeg.element(tags::PHOTOMETRIC_INTERPRETATION).unwrap().to_str().unwrap(),
+        jpeg.element(tags::PHOTOMETRIC_INTERPRETATION)
+            .unwrap()
+            .to_str()
+            .unwrap(),
         "YBR_FULL_422"
     );
 
@@ -4482,9 +5339,24 @@ fn transcoding_rgb_to_jpeg_baseline_labels_it_ybr_and_round_trips_the_colors() {
     let jpeg = read_dicom_bytes(write_dicom_bytes(&mut jpeg.clone()).unwrap()).unwrap();
 
     let native = transcode_dcmnorm_object(&jpeg, uids::EXPLICIT_VR_LITTLE_ENDIAN).unwrap();
-    assert_eq!(native.element(tags::PHOTOMETRIC_INTERPRETATION).unwrap().to_str().unwrap(), "RGB");
-    let original = source.element(tags::PIXEL_DATA).unwrap().to_bytes().unwrap();
-    let decoded = native.element(tags::PIXEL_DATA).unwrap().to_bytes().unwrap();
+    assert_eq!(
+        native
+            .element(tags::PHOTOMETRIC_INTERPRETATION)
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "RGB"
+    );
+    let original = source
+        .element(tags::PIXEL_DATA)
+        .unwrap()
+        .to_bytes()
+        .unwrap();
+    let decoded = native
+        .element(tags::PIXEL_DATA)
+        .unwrap()
+        .to_bytes()
+        .unwrap();
     assert_eq!(decoded.len(), original.len());
     let mean_abs_error = original
         .iter()
@@ -4494,10 +5366,18 @@ fn transcoding_rgb_to_jpeg_baseline_labels_it_ybr_and_round_trips_the_colors() {
         / original.len() as f64;
     // lossy at quality 85 with 4:2:0 chroma: a few levels on average. A double color conversion
     // shifts every pixel by tens of levels.
-    assert!(mean_abs_error < 4.0, "decoded samples drifted from the source: mean |error| = {mean_abs_error:.2}");
+    assert!(
+        mean_abs_error < 4.0,
+        "decoded samples drifted from the source: mean |error| = {mean_abs_error:.2}"
+    );
 
     let render = |object: &dcmnorm_object::DefaultDicomObject| {
-        let rendered = render_dicom_frame(object, RenderOutputFormat::Png, &RenderPipelineOptions::default()).unwrap();
+        let rendered = render_dicom_frame(
+            object,
+            RenderOutputFormat::Png,
+            &RenderPipelineOptions::default(),
+        )
+        .unwrap();
         image::load_from_memory(&rendered.bytes).unwrap().to_rgb8()
     };
     let (reference, rendered) = (render(&source), render(&jpeg));
@@ -4509,7 +5389,10 @@ fn transcoding_rgb_to_jpeg_baseline_labels_it_ybr_and_round_trips_the_colors() {
         .map(|(a, b)| (i32::from(*a) - i32::from(*b)).unsigned_abs() as u64)
         .sum::<u64>() as f64
         / reference.as_raw().len() as f64;
-    assert!(render_error < 4.0, "rendered JPEG drifted from the source render: mean |error| = {render_error:.2}");
+    assert!(
+        render_error < 4.0,
+        "rendered JPEG drifted from the source render: mean |error| = {render_error:.2}"
+    );
 }
 
 /// `sr.dcm` (Implicit VR Little Endian) with only its declared transfer syntax rewritten to
@@ -4517,7 +5400,11 @@ fn transcoding_rgb_to_jpeg_baseline_labels_it_ybr_and_round_trips_the_colors() {
 fn implicit_vr_file_declaring_explicit_vr() -> Vec<u8> {
     let mut bytes = std::fs::read(fixture_path("sr.dcm")).unwrap();
     assert_eq!(&bytes[128..132], b"DICM");
-    assert_eq!(&bytes[132..138], b"\x02\x00\x00\x00UL", "expected (0002,0000) first");
+    assert_eq!(
+        &bytes[132..138],
+        b"\x02\x00\x00\x00UL",
+        "expected (0002,0000) first"
+    );
     let group_length = u32::from_le_bytes(bytes[140..144].try_into().unwrap()) as usize;
     let at = (144..144 + group_length)
         .find(|&i| bytes[i..].starts_with(b"\x02\x00\x10\x00UI"))
@@ -4538,7 +5425,9 @@ fn implicit_vr_file_declaring_explicit_vr() -> Vec<u8> {
 /// re-written sequences get undefined lengths.
 fn canonical_dataset_bytes(object: &dcmnorm_object::InMemDicomObject) -> Vec<u8> {
     use dcmnorm_encoding::TransferSyntaxIndex;
-    let ts = dcmnorm_transcode::TransferSyntaxRegistry.get(uids::EXPLICIT_VR_LITTLE_ENDIAN).unwrap();
+    let ts = dcmnorm_transcode::TransferSyntaxRegistry
+        .get(uids::EXPLICIT_VR_LITTLE_ENDIAN)
+        .unwrap();
     let mut bytes = Vec::new();
     object.write_dataset_with_ts(&mut bytes, ts).unwrap();
     bytes
@@ -4550,13 +5439,19 @@ fn reads_a_file_declaring_explicit_vr_that_is_encoded_implicit() {
     // the first data set element, so dcmnorm retries detecting the VR encoding from the data.
     let mismatched = implicit_vr_file_declaring_explicit_vr();
     assert!(
-        dcmnorm_object::OpenFileOptions::new().read_preamble(dcmnorm_object::ReadPreamble::Always).from_reader(mismatched.as_slice()).is_err(),
+        dcmnorm_object::OpenFileOptions::new()
+            .read_preamble(dcmnorm_object::ReadPreamble::Always)
+            .from_reader(mismatched.as_slice())
+            .is_err(),
         "the strict read should reject this file, or the fallback is not what's being tested"
     );
 
     let reference = read_dicom_file(fixture_path("sr.dcm")).unwrap();
     let object = read_dicom_bytes(&mismatched).unwrap();
-    assert_eq!(object.meta().transfer_syntax().trim_end_matches('\0'), uids::EXPLICIT_VR_LITTLE_ENDIAN);
+    assert_eq!(
+        object.meta().transfer_syntax().trim_end_matches('\0'),
+        uids::EXPLICIT_VR_LITTLE_ENDIAN
+    );
     assert_eq!(
         canonical_dataset_bytes(&object),
         canonical_dataset_bytes(&reference),
@@ -4568,13 +5463,22 @@ fn reads_a_file_declaring_explicit_vr_that_is_encoded_implicit() {
     std::fs::write(&path, &mismatched).unwrap();
     let from_path = read_dicom_file(&path);
     let _ = std::fs::remove_file(&path);
-    assert_eq!(canonical_dataset_bytes(&from_path.unwrap()), canonical_dataset_bytes(&reference));
+    assert_eq!(
+        canonical_dataset_bytes(&from_path.unwrap()),
+        canonical_dataset_bytes(&reference)
+    );
 
     // writing it back produces a conformant Explicit VR file that strictly reads the same
     let mut object = object;
     let written = write_dicom_bytes(&mut object).unwrap();
-    let reread = dcmnorm_object::OpenFileOptions::new().read_preamble(dcmnorm_object::ReadPreamble::Always).from_reader(written.as_slice()).unwrap();
-    assert_eq!(canonical_dataset_bytes(&reread), canonical_dataset_bytes(&reference));
+    let reread = dcmnorm_object::OpenFileOptions::new()
+        .read_preamble(dcmnorm_object::ReadPreamble::Always)
+        .from_reader(written.as_slice())
+        .unwrap();
+    assert_eq!(
+        canonical_dataset_bytes(&reread),
+        canonical_dataset_bytes(&reference)
+    );
 }
 
 #[test]
@@ -4584,15 +5488,31 @@ fn flexible_decoding_reads_conformant_files_unchanged() {
     let mut compared = 0;
     for entry in std::fs::read_dir(fixture_path("")).unwrap() {
         let path = entry.unwrap().path();
-        let Ok(strict) = dcmnorm_object::OpenFileOptions::new().open_file(&path) else { continue };
-        let flexible = dcmnorm_object::OpenFileOptions::new().flexible_decoding(true).open_file(&path);
-        let flexible = flexible.unwrap_or_else(|e| panic!("{}: strict read succeeded, flexible failed: {e}", path.display()));
-        assert_eq!(canonical_dataset_bytes(&flexible), canonical_dataset_bytes(&strict), "{}", path.display());
+        let Ok(strict) = dcmnorm_object::OpenFileOptions::new().open_file(&path) else {
+            continue;
+        };
+        let flexible = dcmnorm_object::OpenFileOptions::new()
+            .flexible_decoding(true)
+            .open_file(&path);
+        let flexible = flexible.unwrap_or_else(|e| {
+            panic!(
+                "{}: strict read succeeded, flexible failed: {e}",
+                path.display()
+            )
+        });
+        assert_eq!(
+            canonical_dataset_bytes(&flexible),
+            canonical_dataset_bytes(&strict),
+            "{}",
+            path.display()
+        );
         compared += 1;
     }
-    assert!(compared > 40, "expected to compare most fixtures, compared {compared}");
+    assert!(
+        compared > 40,
+        "expected to compare most fixtures, compared {compared}"
+    );
 }
-
 
 // ---------------------------------------------------------------------------------------------
 // DIMSE - peers that pack several PDVs into one P-DATA-TF PDU (dcm4che / dcm4chee-arc does, up to the max PDU length).
@@ -4600,13 +5520,25 @@ fn flexible_decoding_reads_conformant_files_unchanged() {
 // find/move SCU missed responses, because PDU boundaries were read as message boundaries.
 // ---------------------------------------------------------------------------------------------
 
-fn dimse_pdv(pc_id: u8, value_type: dcmnorm_dimse::pdu::PDataValueType, is_last: bool, data: Vec<u8>) -> dcmnorm_dimse::pdu::PDataValue {
-    dcmnorm_dimse::pdu::PDataValue { presentation_context_id: pc_id, value_type, is_last, data }
+fn dimse_pdv(
+    pc_id: u8,
+    value_type: dcmnorm_dimse::pdu::PDataValueType,
+    is_last: bool,
+    data: Vec<u8>,
+) -> dcmnorm_dimse::pdu::PDataValue {
+    dcmnorm_dimse::pdu::PDataValue {
+        presentation_context_id: pc_id,
+        value_type,
+        is_last,
+        data,
+    }
 }
 
 fn dimse_command_bytes(command: &InMemDicomObject) -> Vec<u8> {
     let mut data = Vec::new();
-    command.write_dataset_with_ts(&mut data, dimse_implicit_vr_le()).unwrap();
+    command
+        .write_dataset_with_ts(&mut data, dimse_implicit_vr_le())
+        .unwrap();
     data
 }
 
@@ -4620,21 +5552,39 @@ fn find_scu_reads_pending_match_and_final_response_packed_into_one_pdu() {
         let message_id = dimse_message_id(&request);
         let response = |status: u16, data_set_type: u16| {
             dimse_command_bytes(&InMemDicomObject::command_from_element_iter([
-                DataElement::new(tags::AFFECTED_SOP_CLASS_UID, VR::UI, dicom_value!(Str, abstract_syntax)),
+                DataElement::new(
+                    tags::AFFECTED_SOP_CLASS_UID,
+                    VR::UI,
+                    dicom_value!(Str, abstract_syntax),
+                ),
                 DataElement::new(tags::COMMAND_FIELD, VR::US, dicom_value!(U16, [0x8020])),
-                DataElement::new(tags::MESSAGE_ID_BEING_RESPONDED_TO, VR::US, dicom_value!(U16, [message_id])),
-                DataElement::new(tags::COMMAND_DATA_SET_TYPE, VR::US, dicom_value!(U16, [data_set_type])),
+                DataElement::new(
+                    tags::MESSAGE_ID_BEING_RESPONDED_TO,
+                    VR::US,
+                    dicom_value!(U16, [message_id]),
+                ),
+                DataElement::new(
+                    tags::COMMAND_DATA_SET_TYPE,
+                    VR::US,
+                    dicom_value!(U16, [data_set_type]),
+                ),
                 DataElement::new(tags::STATUS, VR::US, dicom_value!(U16, [status])),
             ]))
         };
         let ts = {
             use dcmnorm_encoding::TransferSyntaxIndex;
-            dcmnorm_transcode::TransferSyntaxRegistry.get(&association.presentation_contexts()[0].transfer_syntax).unwrap()
+            dcmnorm_transcode::TransferSyntaxRegistry
+                .get(&association.presentation_contexts()[0].transfer_syntax)
+                .unwrap()
         };
         let mut matched = Vec::new();
-        InMemDicomObject::from_element_iter([DataElement::new(tags::STUDY_INSTANCE_UID, VR::UI, dicom_value!(Str, "1.2.3.4.5"))])
-            .write_dataset_with_ts(&mut matched, ts)
-            .unwrap();
+        InMemDicomObject::from_element_iter([DataElement::new(
+            tags::STUDY_INSTANCE_UID,
+            VR::UI,
+            dicom_value!(Str, "1.2.3.4.5"),
+        )])
+        .write_dataset_with_ts(&mut matched, ts)
+        .unwrap();
         association
             .send(&dcmnorm_dimse::pdu::Pdu::PData {
                 data: vec![
@@ -4675,19 +5625,48 @@ fn move_scu_reads_a_failed_sop_instance_uid_list_packed_with_its_response() {
     let (scp_handle, addr) = spawn_mock_scp(abstract_syntax, move |association| {
         let (pc_id, request, _identifier) = dimse_recv_command_with_data(association);
         let message_id = dimse_message_id(&request);
-        let response = |status: u16, data_set_type: u16, completed: u16, failed: u16, remaining: u16| {
-            dimse_command_bytes(&InMemDicomObject::command_from_element_iter([
-                DataElement::new(tags::AFFECTED_SOP_CLASS_UID, VR::UI, dicom_value!(Str, abstract_syntax)),
-                DataElement::new(tags::COMMAND_FIELD, VR::US, dicom_value!(U16, [0x8021])),
-                DataElement::new(tags::MESSAGE_ID_BEING_RESPONDED_TO, VR::US, dicom_value!(U16, [message_id])),
-                DataElement::new(tags::COMMAND_DATA_SET_TYPE, VR::US, dicom_value!(U16, [data_set_type])),
-                DataElement::new(tags::STATUS, VR::US, dicom_value!(U16, [status])),
-                DataElement::new(tags::NUMBER_OF_REMAINING_SUBOPERATIONS, VR::US, dicom_value!(U16, [remaining])),
-                DataElement::new(tags::NUMBER_OF_COMPLETED_SUBOPERATIONS, VR::US, dicom_value!(U16, [completed])),
-                DataElement::new(tags::NUMBER_OF_FAILED_SUBOPERATIONS, VR::US, dicom_value!(U16, [failed])),
-                DataElement::new(tags::NUMBER_OF_WARNING_SUBOPERATIONS, VR::US, dicom_value!(U16, [0])),
-            ]))
-        };
+        let response =
+            |status: u16, data_set_type: u16, completed: u16, failed: u16, remaining: u16| {
+                dimse_command_bytes(&InMemDicomObject::command_from_element_iter([
+                    DataElement::new(
+                        tags::AFFECTED_SOP_CLASS_UID,
+                        VR::UI,
+                        dicom_value!(Str, abstract_syntax),
+                    ),
+                    DataElement::new(tags::COMMAND_FIELD, VR::US, dicom_value!(U16, [0x8021])),
+                    DataElement::new(
+                        tags::MESSAGE_ID_BEING_RESPONDED_TO,
+                        VR::US,
+                        dicom_value!(U16, [message_id]),
+                    ),
+                    DataElement::new(
+                        tags::COMMAND_DATA_SET_TYPE,
+                        VR::US,
+                        dicom_value!(U16, [data_set_type]),
+                    ),
+                    DataElement::new(tags::STATUS, VR::US, dicom_value!(U16, [status])),
+                    DataElement::new(
+                        tags::NUMBER_OF_REMAINING_SUBOPERATIONS,
+                        VR::US,
+                        dicom_value!(U16, [remaining]),
+                    ),
+                    DataElement::new(
+                        tags::NUMBER_OF_COMPLETED_SUBOPERATIONS,
+                        VR::US,
+                        dicom_value!(U16, [completed]),
+                    ),
+                    DataElement::new(
+                        tags::NUMBER_OF_FAILED_SUBOPERATIONS,
+                        VR::US,
+                        dicom_value!(U16, [failed]),
+                    ),
+                    DataElement::new(
+                        tags::NUMBER_OF_WARNING_SUBOPERATIONS,
+                        VR::US,
+                        dicom_value!(U16, [0]),
+                    ),
+                ]))
+            };
         let mut failed_list = Vec::new();
         InMemDicomObject::from_element_iter([DataElement::new(
             tags::FAILED_SOP_INSTANCE_UID_LIST,
@@ -4698,11 +5677,21 @@ fn move_scu_reads_a_failed_sop_instance_uid_list_packed_with_its_response() {
         .unwrap();
         // A pending response alone, then the final response + its identifier together.
         association
-            .send(&dcmnorm_dimse::pdu::Pdu::PData { data: vec![dimse_pdv(pc_id, Command, true, response(0xFF00, 0x0101, 1, 0, 1))] })
+            .send(&dcmnorm_dimse::pdu::Pdu::PData {
+                data: vec![dimse_pdv(
+                    pc_id,
+                    Command,
+                    true,
+                    response(0xFF00, 0x0101, 1, 0, 1),
+                )],
+            })
             .unwrap();
         association
             .send(&dcmnorm_dimse::pdu::Pdu::PData {
-                data: vec![dimse_pdv(pc_id, Command, true, response(0xA702, 0x0001, 1, 1, 0)), dimse_pdv(pc_id, Data, true, failed_list)],
+                data: vec![
+                    dimse_pdv(pc_id, Command, true, response(0xA702, 0x0001, 1, 1, 0)),
+                    dimse_pdv(pc_id, Data, true, failed_list),
+                ],
             })
             .unwrap();
     });
@@ -4726,7 +5715,10 @@ fn move_scu_reads_a_failed_sop_instance_uid_list_packed_with_its_response() {
         },
     )
     .unwrap();
-    assert_eq!((result.status, result.completed, result.failed), (0xA702, 1, 1));
+    assert_eq!(
+        (result.status, result.completed, result.failed),
+        (0xA702, 1, 1)
+    );
     // The mock asserts it then receives A-RELEASE-RQ: nothing of the identifier was left on the wire.
     scp_handle.join().unwrap();
 }
@@ -4738,7 +5730,10 @@ fn scp_stores_a_data_set_whose_first_fragment_shares_the_command_pdu() {
     use dcmnorm_dimse::pdu::PDataValueType::{Command, Data};
     let cache_dir = std::env::temp_dir().join(format!(
         "dcmnorm-scp-packed-test-{}",
-        SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
     ));
     fs::create_dir_all(&cache_dir).unwrap();
     let handlers = std::sync::Arc::new(TestScpHandlers {
@@ -4748,21 +5743,52 @@ fn scp_stores_a_data_set_whose_first_fragment_shares_the_command_pdu() {
         move_result: true,
         association_complete: std::sync::Mutex::new(None),
     });
-    let scp = start_scp(0, cache_dir.clone(), handlers.clone(), ScpOptions { ae_title: "TEST-SCP".to_owned(), ..Default::default() })
-        .unwrap();
+    let scp = start_scp(
+        0,
+        cache_dir.clone(),
+        handlers.clone(),
+        ScpOptions {
+            ae_title: "TEST-SCP".to_owned(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
 
     let object = read_dicom_file(&fixture_path("sr.dcm")).unwrap();
-    let sop_class_uid = object.meta().media_storage_sop_class_uid.trim_end_matches(['\0', ' ']).to_owned();
-    let sop_instance_uid = object.meta().media_storage_sop_instance_uid.trim_end_matches(['\0', ' ']).to_owned();
-    let study_instance_uid = object.element(tags::STUDY_INSTANCE_UID).unwrap().to_str().unwrap().trim().to_owned();
-    let ts_uid = object.meta().transfer_syntax().trim_end_matches('\0').to_owned();
+    let sop_class_uid = object
+        .meta()
+        .media_storage_sop_class_uid
+        .trim_end_matches(['\0', ' '])
+        .to_owned();
+    let sop_instance_uid = object
+        .meta()
+        .media_storage_sop_instance_uid
+        .trim_end_matches(['\0', ' '])
+        .to_owned();
+    let study_instance_uid = object
+        .element(tags::STUDY_INSTANCE_UID)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .trim()
+        .to_owned();
+    let ts_uid = object
+        .meta()
+        .transfer_syntax()
+        .trim_end_matches('\0')
+        .to_owned();
     let ts = {
         use dcmnorm_encoding::TransferSyntaxIndex;
-        dcmnorm_transcode::TransferSyntaxRegistry.get(&ts_uid).unwrap()
+        dcmnorm_transcode::TransferSyntaxRegistry
+            .get(&ts_uid)
+            .unwrap()
     };
     let mut data_set = Vec::new();
     object.write_dataset_with_ts(&mut data_set, ts).unwrap();
-    assert!(data_set.len() > 300, "fixture too small to split into three fragments");
+    assert!(
+        data_set.len() > 300,
+        "fixture too small to split into three fragments"
+    );
 
     let mut association = dcmnorm_dimse::association::client::ClientAssociationOptions::new()
         .calling_ae_title("DCM4CHE-LIKE")
@@ -4772,30 +5798,60 @@ fn scp_stores_a_data_set_whose_first_fragment_shares_the_command_pdu() {
         .unwrap();
     let pc_id = association.presentation_contexts()[0].id;
     let command = dimse_command_bytes(&InMemDicomObject::command_from_element_iter([
-        DataElement::new(tags::AFFECTED_SOP_CLASS_UID, VR::UI, dicom_value!(Str, sop_class_uid.as_str())),
+        DataElement::new(
+            tags::AFFECTED_SOP_CLASS_UID,
+            VR::UI,
+            dicom_value!(Str, sop_class_uid.as_str()),
+        ),
         DataElement::new(tags::COMMAND_FIELD, VR::US, dicom_value!(U16, [0x0001])),
         DataElement::new(tags::MESSAGE_ID, VR::US, dicom_value!(U16, [1])),
         DataElement::new(tags::PRIORITY, VR::US, dicom_value!(U16, [0x0000])),
-        DataElement::new(tags::COMMAND_DATA_SET_TYPE, VR::US, dicom_value!(U16, [0x0000])),
-        DataElement::new(tags::AFFECTED_SOP_INSTANCE_UID, VR::UI, dicom_value!(Str, sop_instance_uid.as_str())),
+        DataElement::new(
+            tags::COMMAND_DATA_SET_TYPE,
+            VR::US,
+            dicom_value!(U16, [0x0000]),
+        ),
+        DataElement::new(
+            tags::AFFECTED_SOP_INSTANCE_UID,
+            VR::UI,
+            dicom_value!(Str, sop_instance_uid.as_str()),
+        ),
     ]));
     let third = data_set.len() / 3;
     association
         .send(&dcmnorm_dimse::pdu::Pdu::PData {
-            data: vec![dimse_pdv(pc_id, Command, true, command), dimse_pdv(pc_id, Data, false, data_set[..third].to_vec())],
+            data: vec![
+                dimse_pdv(pc_id, Command, true, command),
+                dimse_pdv(pc_id, Data, false, data_set[..third].to_vec()),
+            ],
         })
         .unwrap();
     association
-        .send(&dcmnorm_dimse::pdu::Pdu::PData { data: vec![dimse_pdv(pc_id, Data, false, data_set[third..2 * third].to_vec())] })
+        .send(&dcmnorm_dimse::pdu::Pdu::PData {
+            data: vec![dimse_pdv(
+                pc_id,
+                Data,
+                false,
+                data_set[third..2 * third].to_vec(),
+            )],
+        })
         .unwrap();
     association
-        .send(&dcmnorm_dimse::pdu::Pdu::PData { data: vec![dimse_pdv(pc_id, Data, true, data_set[2 * third..].to_vec())] })
+        .send(&dcmnorm_dimse::pdu::Pdu::PData {
+            data: vec![dimse_pdv(pc_id, Data, true, data_set[2 * third..].to_vec())],
+        })
         .unwrap();
 
     let status = match association.receive_command().unwrap() {
         dcmnorm_dimse::Incoming::Command { data, .. } => {
-            let response = InMemDicomObject::read_dataset_with_ts(data.as_slice(), dimse_implicit_vr_le()).unwrap();
-            response.element(tags::STATUS).unwrap().to_int::<u16>().unwrap()
+            let response =
+                InMemDicomObject::read_dataset_with_ts(data.as_slice(), dimse_implicit_vr_le())
+                    .unwrap();
+            response
+                .element(tags::STATUS)
+                .unwrap()
+                .to_int::<u16>()
+                .unwrap()
         }
         other => panic!("expected C-STORE-RSP, got {other:?}"),
     };
@@ -4803,11 +5859,25 @@ fn scp_stores_a_data_set_whose_first_fragment_shares_the_command_pdu() {
     assert_eq!(status, 0x0000);
 
     let stored = wait_for(|| handlers.association_complete.lock().unwrap().clone());
-    let paths = stored.get(&study_instance_uid).expect("the study was stored");
+    let paths = stored
+        .get(&study_instance_uid)
+        .expect("the study was stored");
     assert_eq!(paths.len(), 1);
-    assert!(paths[0].ends_with(&format!("{sop_instance_uid}.dcm")), "unexpected path {}", paths[0]);
+    assert!(
+        paths[0].ends_with(&format!("{sop_instance_uid}.dcm")),
+        "unexpected path {}",
+        paths[0]
+    );
     let written = read_dicom_file(Path::new(&paths[0])).unwrap();
-    assert_eq!(written.element(tags::SOP_INSTANCE_UID).unwrap().to_str().unwrap().trim(), sop_instance_uid);
+    assert_eq!(
+        written
+            .element(tags::SOP_INSTANCE_UID)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .trim(),
+        sop_instance_uid
+    );
     scp.stop();
     fs::remove_dir_all(&cache_dir).ok();
 }
@@ -4826,8 +5896,15 @@ struct SopClassFindHandlers {
 }
 
 impl SopClassFindHandlers {
-    fn new(response: Vec<std::collections::HashMap<String, String>>, gate: Option<std::sync::mpsc::Receiver<()>>) -> Self {
-        Self { calls: std::sync::Mutex::new(Vec::new()), response, gate: std::sync::Mutex::new(gate) }
+    fn new(
+        response: Vec<std::collections::HashMap<String, String>>,
+        gate: Option<std::sync::mpsc::Receiver<()>>,
+    ) -> Self {
+        Self {
+            calls: std::sync::Mutex::new(Vec::new()),
+            response,
+            gate: std::sync::Mutex::new(gate),
+        }
     }
 }
 
@@ -4844,26 +5921,44 @@ impl ScpHandlers for SopClassFindHandlers {
         sop_class_uid: &str,
         filter: &std::collections::HashMap<String, String>,
     ) -> Result<Vec<std::collections::HashMap<String, String>>, String> {
-        self.calls.lock().unwrap().push((sop_class_uid.to_owned(), filter.clone()));
+        self.calls
+            .lock()
+            .unwrap()
+            .push((sop_class_uid.to_owned(), filter.clone()));
         let gate = self.gate.lock().unwrap().take();
         if let Some(gate) = gate {
-            gate.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+            gate.recv_timeout(std::time::Duration::from_secs(10))
+                .unwrap();
         }
         Ok(self.response.clone())
     }
 
-    fn on_move(&self, _study_instance_uid: &str, _move_destination_ae: &str) -> Result<bool, String> {
+    fn on_move(
+        &self,
+        _study_instance_uid: &str,
+        _move_destination_ae: &str,
+    ) -> Result<bool, String> {
         Ok(false)
     }
 
-    fn on_association_complete(&self, _stored_instances_by_study: &std::collections::HashMap<String, Vec<String>>) {}
+    fn on_association_complete(
+        &self,
+        _stored_instances_by_study: &std::collections::HashMap<String, Vec<String>>,
+    ) {
+    }
 }
 
 fn study_match(study_instance_uid: &str) -> std::collections::HashMap<String, String> {
-    std::collections::HashMap::from([("StudyInstanceUID".to_owned(), study_instance_uid.to_owned())])
+    std::collections::HashMap::from([(
+        "StudyInstanceUID".to_owned(),
+        study_instance_uid.to_owned(),
+    )])
 }
 
-fn context_id(association: &dcmnorm_dimse::ClientAssociation<std::net::TcpStream>, abstract_syntax: &str) -> u8 {
+fn context_id(
+    association: &dcmnorm_dimse::ClientAssociation<std::net::TcpStream>,
+    abstract_syntax: &str,
+) -> u8 {
     association
         .presentation_contexts()
         .iter()
@@ -4882,32 +5977,63 @@ fn send_raw_find(
 ) {
     use dcmnorm_dimse::pdu::PDataValueType::{Command, Data};
     let command = dimse_command_bytes(&InMemDicomObject::command_from_element_iter([
-        DataElement::new(tags::AFFECTED_SOP_CLASS_UID, VR::UI, dicom_value!(Str, sop_class_uid)),
+        DataElement::new(
+            tags::AFFECTED_SOP_CLASS_UID,
+            VR::UI,
+            dicom_value!(Str, sop_class_uid),
+        ),
         DataElement::new(tags::COMMAND_FIELD, VR::US, dicom_value!(U16, [0x0020])),
         DataElement::new(tags::MESSAGE_ID, VR::US, dicom_value!(U16, [message_id])),
         DataElement::new(tags::PRIORITY, VR::US, dicom_value!(U16, [0x0000])),
-        DataElement::new(tags::COMMAND_DATA_SET_TYPE, VR::US, dicom_value!(U16, [0x0000])),
+        DataElement::new(
+            tags::COMMAND_DATA_SET_TYPE,
+            VR::US,
+            dicom_value!(U16, [0x0000]),
+        ),
     ]));
     let mut data = Vec::new();
-    identifier.write_dataset_with_ts(&mut data, dimse_implicit_vr_le()).unwrap();
+    identifier
+        .write_dataset_with_ts(&mut data, dimse_implicit_vr_le())
+        .unwrap();
     association
         .send(&dcmnorm_dimse::pdu::Pdu::PData {
-            data: vec![dimse_pdv(pc_id, Command, true, command), dimse_pdv(pc_id, Data, true, data)],
+            data: vec![
+                dimse_pdv(pc_id, Command, true, command),
+                dimse_pdv(pc_id, Data, true, data),
+            ],
         })
         .unwrap();
 }
 
-fn send_raw_cancel(association: &mut dcmnorm_dimse::ClientAssociation<std::net::TcpStream>, pc_id: u8, message_id: u16) {
+fn send_raw_cancel(
+    association: &mut dcmnorm_dimse::ClientAssociation<std::net::TcpStream>,
+    pc_id: u8,
+    message_id: u16,
+) {
     use dcmnorm_dimse::pdu::PDataValueType::Command;
     let command = dimse_command_bytes(&InMemDicomObject::command_from_element_iter([
         DataElement::new(tags::COMMAND_FIELD, VR::US, dicom_value!(U16, [0x0FFF])),
-        DataElement::new(tags::MESSAGE_ID_BEING_RESPONDED_TO, VR::US, dicom_value!(U16, [message_id])),
-        DataElement::new(tags::COMMAND_DATA_SET_TYPE, VR::US, dicom_value!(U16, [0x0101])),
+        DataElement::new(
+            tags::MESSAGE_ID_BEING_RESPONDED_TO,
+            VR::US,
+            dicom_value!(U16, [message_id]),
+        ),
+        DataElement::new(
+            tags::COMMAND_DATA_SET_TYPE,
+            VR::US,
+            dicom_value!(U16, [0x0101]),
+        ),
     ]));
-    association.send(&dcmnorm_dimse::pdu::Pdu::PData { data: vec![dimse_pdv(pc_id, Command, true, command)] }).unwrap();
+    association
+        .send(&dcmnorm_dimse::pdu::Pdu::PData {
+            data: vec![dimse_pdv(pc_id, Command, true, command)],
+        })
+        .unwrap();
 }
 
-fn receive_raw_command(association: &mut dcmnorm_dimse::ClientAssociation<std::net::TcpStream>) -> InMemDicomObject {
+fn receive_raw_command(
+    association: &mut dcmnorm_dimse::ClientAssociation<std::net::TcpStream>,
+) -> InMemDicomObject {
     match association.receive_command().unwrap() {
         dcmnorm_dimse::Incoming::Command { data, .. } => {
             InMemDicomObject::read_dataset_with_ts(data.as_slice(), dimse_implicit_vr_le()).unwrap()
@@ -4923,19 +6049,44 @@ fn receive_raw_find_responses(
     let mut matches = Vec::new();
     loop {
         let response = receive_raw_command(association);
-        assert_eq!(response.element(tags::COMMAND_FIELD).unwrap().to_int::<u16>().unwrap(), 0x8020);
-        let status = response.element(tags::STATUS).unwrap().to_int::<u16>().unwrap();
+        assert_eq!(
+            response
+                .element(tags::COMMAND_FIELD)
+                .unwrap()
+                .to_int::<u16>()
+                .unwrap(),
+            0x8020
+        );
+        let status = response
+            .element(tags::STATUS)
+            .unwrap()
+            .to_int::<u16>()
+            .unwrap();
         if status != 0xFF00 && status != 0xFF01 {
             return (matches, response);
         }
         let data = association.receive_data_set().unwrap();
-        let identifier = InMemDicomObject::read_dataset_with_ts(data.as_slice(), dimse_implicit_vr_le()).unwrap();
-        matches.push(identifier.element(tags::STUDY_INSTANCE_UID).unwrap().to_str().unwrap().trim_end_matches(['\0', ' ']).to_owned());
+        let identifier =
+            InMemDicomObject::read_dataset_with_ts(data.as_slice(), dimse_implicit_vr_le())
+                .unwrap();
+        matches.push(
+            identifier
+                .element(tags::STUDY_INSTANCE_UID)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .trim_end_matches(['\0', ' '])
+                .to_owned(),
+        );
     }
 }
 
 fn response_status(response: &InMemDicomObject) -> u16 {
-    response.element(tags::STATUS).unwrap().to_int::<u16>().unwrap()
+    response
+        .element(tags::STATUS)
+        .unwrap()
+        .to_int::<u16>()
+        .unwrap()
 }
 
 fn mwl_identifier() -> InMemDicomObject {
@@ -4959,26 +6110,52 @@ fn study_identifier(patient_id: &str) -> InMemDicomObject {
 fn scp_answers_a_worklist_find_with_sop_class_not_supported_and_keeps_serving_the_association() {
     let cache_dir = std::env::temp_dir().join(format!(
         "dcmnorm-scp-mwl-test-{}",
-        SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
     ));
     fs::create_dir_all(&cache_dir).unwrap();
-    let handlers = std::sync::Arc::new(SopClassFindHandlers::new(vec![study_match("1.2.3.4.5")], None));
-    let logger = std::sync::Arc::new(MockLogger { lines: std::sync::Mutex::new(Vec::new()) });
+    let handlers = std::sync::Arc::new(SopClassFindHandlers::new(
+        vec![study_match("1.2.3.4.5")],
+        None,
+    ));
+    let logger = std::sync::Arc::new(MockLogger {
+        lines: std::sync::Mutex::new(Vec::new()),
+    });
     let scp = start_scp(
         0,
         cache_dir.clone(),
         handlers.clone(),
-        ScpOptions { ae_title: "TEST-SCP".to_owned(), on_log: Some(logger.clone()), ..Default::default() },
+        ScpOptions {
+            ae_title: "TEST-SCP".to_owned(),
+            on_log: Some(logger.clone()),
+            ..Default::default()
+        },
     )
     .unwrap();
 
     let object = read_dicom_file(&fixture_path("sr.dcm")).unwrap();
-    let storage_sop_class = object.meta().media_storage_sop_class_uid.trim_end_matches(['\0', ' ']).to_owned();
-    let sop_instance_uid = object.meta().media_storage_sop_instance_uid.trim_end_matches(['\0', ' ']).to_owned();
-    let ts_uid = object.meta().transfer_syntax().trim_end_matches('\0').to_owned();
+    let storage_sop_class = object
+        .meta()
+        .media_storage_sop_class_uid
+        .trim_end_matches(['\0', ' '])
+        .to_owned();
+    let sop_instance_uid = object
+        .meta()
+        .media_storage_sop_instance_uid
+        .trim_end_matches(['\0', ' '])
+        .to_owned();
+    let ts_uid = object
+        .meta()
+        .transfer_syntax()
+        .trim_end_matches('\0')
+        .to_owned();
     let ts = {
         use dcmnorm_encoding::TransferSyntaxIndex;
-        dcmnorm_transcode::TransferSyntaxRegistry.get(&ts_uid).unwrap()
+        dcmnorm_transcode::TransferSyntaxRegistry
+            .get(&ts_uid)
+            .unwrap()
     };
     let implicit = uids::IMPLICIT_VR_LITTLE_ENDIAN.to_owned();
     let mwl = uids::MODALITY_WORKLIST_INFORMATION_MODEL_FIND;
@@ -5001,12 +6178,34 @@ fn scp_answers_a_worklist_find_with_sop_class_not_supported_and_keeps_serving_th
     let mwl_pc = context_id(&association, mwl);
     send_raw_find(&mut association, mwl_pc, mwl, 1, &mwl_identifier());
     let (matches, final_response) = receive_raw_find_responses(&mut association);
-    assert!(matches.is_empty(), "an MWL query must not be answered with studies: {matches:?}");
+    assert!(
+        matches.is_empty(),
+        "an MWL query must not be answered with studies: {matches:?}"
+    );
     assert_eq!(response_status(&final_response), 0x0122);
-    assert_eq!(final_response.element(tags::MESSAGE_ID_BEING_RESPONDED_TO).unwrap().to_int::<u16>().unwrap(), 1);
-    let comment = final_response.element(tags::ERROR_COMMENT).unwrap().to_str().unwrap().trim().to_owned();
-    assert!(comment.contains(mwl) && comment.len() <= 64, "unexpected Error Comment {comment:?}");
-    assert!(handlers.calls.lock().unwrap().is_empty(), "the handler must not see a worklist query");
+    assert_eq!(
+        final_response
+            .element(tags::MESSAGE_ID_BEING_RESPONDED_TO)
+            .unwrap()
+            .to_int::<u16>()
+            .unwrap(),
+        1
+    );
+    let comment = final_response
+        .element(tags::ERROR_COMMENT)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .trim()
+        .to_owned();
+    assert!(
+        comment.contains(mwl) && comment.len() <= 64,
+        "unexpected Error Comment {comment:?}"
+    );
+    assert!(
+        handlers.calls.lock().unwrap().is_empty(),
+        "the handler must not see a worklist query"
+    );
 
     // C-STORE on the same association still works.
     use dcmnorm_dimse::pdu::PDataValueType::{Command, Data};
@@ -5014,31 +6213,65 @@ fn scp_answers_a_worklist_find_with_sop_class_not_supported_and_keeps_serving_th
     let mut data_set = Vec::new();
     object.write_dataset_with_ts(&mut data_set, ts).unwrap();
     let store = dimse_command_bytes(&InMemDicomObject::command_from_element_iter([
-        DataElement::new(tags::AFFECTED_SOP_CLASS_UID, VR::UI, dicom_value!(Str, storage_sop_class.as_str())),
+        DataElement::new(
+            tags::AFFECTED_SOP_CLASS_UID,
+            VR::UI,
+            dicom_value!(Str, storage_sop_class.as_str()),
+        ),
         DataElement::new(tags::COMMAND_FIELD, VR::US, dicom_value!(U16, [0x0001])),
         DataElement::new(tags::MESSAGE_ID, VR::US, dicom_value!(U16, [2])),
         DataElement::new(tags::PRIORITY, VR::US, dicom_value!(U16, [0x0000])),
-        DataElement::new(tags::COMMAND_DATA_SET_TYPE, VR::US, dicom_value!(U16, [0x0000])),
-        DataElement::new(tags::AFFECTED_SOP_INSTANCE_UID, VR::UI, dicom_value!(Str, sop_instance_uid.as_str())),
+        DataElement::new(
+            tags::COMMAND_DATA_SET_TYPE,
+            VR::US,
+            dicom_value!(U16, [0x0000]),
+        ),
+        DataElement::new(
+            tags::AFFECTED_SOP_INSTANCE_UID,
+            VR::UI,
+            dicom_value!(Str, sop_instance_uid.as_str()),
+        ),
     ]));
     association
         .send(&dcmnorm_dimse::pdu::Pdu::PData {
-            data: vec![dimse_pdv(store_pc, Command, true, store), dimse_pdv(store_pc, Data, true, data_set)],
+            data: vec![
+                dimse_pdv(store_pc, Command, true, store),
+                dimse_pdv(store_pc, Data, true, data_set),
+            ],
         })
         .unwrap();
     let store_response = receive_raw_command(&mut association);
-    assert_eq!(store_response.element(tags::COMMAND_FIELD).unwrap().to_int::<u16>().unwrap(), 0x8001);
+    assert_eq!(
+        store_response
+            .element(tags::COMMAND_FIELD)
+            .unwrap()
+            .to_int::<u16>()
+            .unwrap(),
+        0x8001
+    );
     assert_eq!(response_status(&store_response), 0x0000);
 
     // Study Root and Patient Root still reach the handler, with their SOP class.
     let study_pc = context_id(&association, study_root);
-    send_raw_find(&mut association, study_pc, study_root, 3, &study_identifier("MRN123"));
+    send_raw_find(
+        &mut association,
+        study_pc,
+        study_root,
+        3,
+        &study_identifier("MRN123"),
+    );
     let (matches, final_response) = receive_raw_find_responses(&mut association);
     assert_eq!(matches, vec!["1.2.3.4.5".to_owned()]);
     assert_eq!(response_status(&final_response), 0x0000);
 
     let patient_pc = context_id(&association, patient_root);
-    send_raw_find(&mut association, patient_pc, patient_root, 4, &study_identifier("MRN456"));
+    send_raw_find(
+        &mut association,
+        patient_pc,
+        patient_root,
+        4,
+        &study_identifier("MRN456"),
+    );
     let (matches, final_response) = receive_raw_find_responses(&mut association);
     assert_eq!(matches.len(), 1);
     assert_eq!(response_status(&final_response), 0x0000);
@@ -5047,24 +6280,44 @@ fn scp_answers_a_worklist_find_with_sop_class_not_supported_and_keeps_serving_th
     let calls = handlers.calls.lock().unwrap().clone();
     assert_eq!(calls.len(), 2);
     assert_eq!(calls[0].0, study_root);
-    assert_eq!(calls[0].1.get("PatientID").map(String::as_str), Some("MRN123"));
+    assert_eq!(
+        calls[0].1.get("PatientID").map(String::as_str),
+        Some("MRN123")
+    );
     assert_eq!(calls[1].0, patient_root);
-    assert_eq!(calls[1].1.get("PatientID").map(String::as_str), Some("MRN456"));
+    assert_eq!(
+        calls[1].1.get("PatientID").map(String::as_str),
+        Some("MRN456")
+    );
 
     let lines = wait_for(|| {
         let lines = logger.lines.lock().unwrap().clone();
-        lines.iter().any(|line| line.contains("released")).then_some(lines)
+        lines
+            .iter()
+            .any(|line| line.contains("released"))
+            .then_some(lines)
     });
     assert!(
-        lines.iter().any(|line| line == &format!("received C-FIND-RQ (message id 1); SOP class {mwl} not supported")),
+        lines.iter().any(|line| line
+            == &format!("received C-FIND-RQ (message id 1); SOP class {mwl} not supported")),
         "{lines:#?}"
     );
-    assert!(lines.iter().any(|line| line == "sending C-FIND-RSP: 0 match(es), final status=0x0122"), "{lines:#?}");
     assert!(
-        lines.iter().any(|line| line == &format!("received C-FIND-RQ (message id 3); query key(s): [PatientID]; SOP class {study_root}")),
+        lines
+            .iter()
+            .any(|line| line == "sending C-FIND-RSP: 0 match(es), final status=0x0122"),
         "{lines:#?}"
     );
-    assert!(!lines.iter().any(|line| line.contains("closed")), "the association must not close: {lines:#?}");
+    assert!(
+        lines.iter().any(|line| line == &format!(
+            "received C-FIND-RQ (message id 3); query key(s): [PatientID]; SOP class {study_root}"
+        )),
+        "{lines:#?}"
+    );
+    assert!(
+        !lines.iter().any(|line| line.contains("closed")),
+        "the association must not close: {lines:#?}"
+    );
 
     scp.stop();
     fs::remove_dir_all(&cache_dir).ok();
@@ -5074,7 +6327,10 @@ fn scp_answers_a_worklist_find_with_sop_class_not_supported_and_keeps_serving_th
 fn scp_find_sop_classes_option_controls_which_find_reaches_the_handler() {
     let cache_dir = std::env::temp_dir().join(format!(
         "dcmnorm-scp-find-classes-test-{}",
-        SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
     ));
     fs::create_dir_all(&cache_dir).unwrap();
     let handlers = std::sync::Arc::new(SopClassFindHandlers::new(vec![study_match("1.2.3")], None));
@@ -5084,7 +6340,10 @@ fn scp_find_sop_classes_option_controls_which_find_reaches_the_handler() {
         0,
         cache_dir.clone(),
         handlers.clone(),
-        ScpOptions { find_sop_classes: vec![study_root.to_owned()], ..Default::default() },
+        ScpOptions {
+            find_sop_classes: vec![study_root.to_owned()],
+            ..Default::default()
+        },
     )
     .unwrap();
     let implicit = uids::IMPLICIT_VR_LITTLE_ENDIAN.to_owned();
@@ -5096,7 +6355,13 @@ fn scp_find_sop_classes_option_controls_which_find_reaches_the_handler() {
         .establish_with(&format!("127.0.0.1:{}", scp.local_port()))
         .unwrap();
     let pc = context_id(&association, patient_root);
-    send_raw_find(&mut association, pc, patient_root, 1, &study_identifier("MRN"));
+    send_raw_find(
+        &mut association,
+        pc,
+        patient_root,
+        1,
+        &study_identifier("MRN"),
+    );
     let (matches, final_response) = receive_raw_find_responses(&mut association);
     association.release().unwrap();
     assert!(matches.is_empty());
@@ -5110,17 +6375,29 @@ fn scp_find_sop_classes_option_controls_which_find_reaches_the_handler() {
 fn scp_c_cancel_during_find_ends_it_with_fe00_and_the_association_stays_usable() {
     let cache_dir = std::env::temp_dir().join(format!(
         "dcmnorm-scp-cancel-test-{}",
-        SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
     ));
     fs::create_dir_all(&cache_dir).unwrap();
     let (release_handler, gate) = std::sync::mpsc::channel();
-    let handlers = std::sync::Arc::new(SopClassFindHandlers::new(vec![study_match("1.1"), study_match("1.2"), study_match("1.3")], Some(gate)));
-    let logger = std::sync::Arc::new(MockLogger { lines: std::sync::Mutex::new(Vec::new()) });
+    let handlers = std::sync::Arc::new(SopClassFindHandlers::new(
+        vec![study_match("1.1"), study_match("1.2"), study_match("1.3")],
+        Some(gate),
+    ));
+    let logger = std::sync::Arc::new(MockLogger {
+        lines: std::sync::Mutex::new(Vec::new()),
+    });
     let scp = start_scp(
         0,
         cache_dir.clone(),
         handlers.clone(),
-        ScpOptions { ae_title: "TEST-SCP".to_owned(), on_log: Some(logger.clone()), ..Default::default() },
+        ScpOptions {
+            ae_title: "TEST-SCP".to_owned(),
+            on_log: Some(logger.clone()),
+            ..Default::default()
+        },
     )
     .unwrap();
     let implicit = uids::IMPLICIT_VR_LITTLE_ENDIAN.to_owned();
@@ -5136,53 +6413,122 @@ fn scp_c_cancel_during_find_ends_it_with_fe00_and_the_association_stays_usable()
     let find_pc = context_id(&association, study_root);
 
     // The handler is still working when the C-CANCEL-RQ arrives: no match may follow, the final status is 0xFE00.
-    send_raw_find(&mut association, find_pc, study_root, 7, &study_identifier(""));
+    send_raw_find(
+        &mut association,
+        find_pc,
+        study_root,
+        7,
+        &study_identifier(""),
+    );
     wait_for(|| (!handlers.calls.lock().unwrap().is_empty()).then_some(()));
     send_raw_cancel(&mut association, find_pc, 7);
     std::thread::sleep(std::time::Duration::from_millis(100));
     release_handler.send(()).unwrap();
     let (matches, final_response) = receive_raw_find_responses(&mut association);
-    assert!(matches.is_empty(), "matches sent after the C-CANCEL-RQ: {matches:?}");
+    assert!(
+        matches.is_empty(),
+        "matches sent after the C-CANCEL-RQ: {matches:?}"
+    );
     assert_eq!(response_status(&final_response), 0xFE00);
-    assert_eq!(final_response.element(tags::MESSAGE_ID_BEING_RESPONDED_TO).unwrap().to_int::<u16>().unwrap(), 7);
+    assert_eq!(
+        final_response
+            .element(tags::MESSAGE_ID_BEING_RESPONDED_TO)
+            .unwrap()
+            .to_int::<u16>()
+            .unwrap(),
+        7
+    );
 
     // A late C-CANCEL-RQ (after the final response) is ignored: the association keeps working.
     send_raw_cancel(&mut association, find_pc, 7);
     let echo_pc = context_id(&association, uids::VERIFICATION);
     dimse_send_client_echo(&mut association, echo_pc, 8);
     let echo_response = receive_raw_command(&mut association);
-    assert_eq!(echo_response.element(tags::COMMAND_FIELD).unwrap().to_int::<u16>().unwrap(), 0x8030);
+    assert_eq!(
+        echo_response
+            .element(tags::COMMAND_FIELD)
+            .unwrap()
+            .to_int::<u16>()
+            .unwrap(),
+        0x8030
+    );
     assert_eq!(response_status(&echo_response), 0x0000);
 
     // And a C-FIND that is not cancelled returns every match.
-    send_raw_find(&mut association, find_pc, study_root, 9, &study_identifier(""));
+    send_raw_find(
+        &mut association,
+        find_pc,
+        study_root,
+        9,
+        &study_identifier(""),
+    );
     let (matches, final_response) = receive_raw_find_responses(&mut association);
-    assert_eq!(matches, vec!["1.1".to_owned(), "1.2".to_owned(), "1.3".to_owned()]);
+    assert_eq!(
+        matches,
+        vec!["1.1".to_owned(), "1.2".to_owned(), "1.3".to_owned()]
+    );
     assert_eq!(response_status(&final_response), 0x0000);
     association.release().unwrap();
 
     let lines = wait_for(|| {
         let lines = logger.lines.lock().unwrap().clone();
-        lines.iter().any(|line| line.contains("released")).then_some(lines)
+        lines
+            .iter()
+            .any(|line| line.contains("released"))
+            .then_some(lines)
     });
-    assert!(lines.iter().any(|line| line == "received C-CANCEL-RQ (message id being responded to 7)"), "{lines:#?}");
-    assert!(lines.iter().any(|line| line == "sending C-FIND-RSP: 0 match(es), final status=0xFE00"), "{lines:#?}");
-    assert!(lines.iter().any(|line| line.contains("with no C-FIND in progress; ignored")), "{lines:#?}");
-    assert!(!lines.iter().any(|line| line.contains("closed")), "the association must not close: {lines:#?}");
+    assert!(
+        lines
+            .iter()
+            .any(|line| line == "received C-CANCEL-RQ (message id being responded to 7)"),
+        "{lines:#?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line == "sending C-FIND-RSP: 0 match(es), final status=0xFE00"),
+        "{lines:#?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("with no C-FIND in progress; ignored")),
+        "{lines:#?}"
+    );
+    assert!(
+        !lines.iter().any(|line| line.contains("closed")),
+        "the association must not close: {lines:#?}"
+    );
 
     scp.stop();
     fs::remove_dir_all(&cache_dir).ok();
 }
 
-fn dimse_send_client_echo(association: &mut dcmnorm_dimse::ClientAssociation<std::net::TcpStream>, pc_id: u8, message_id: u16) {
+fn dimse_send_client_echo(
+    association: &mut dcmnorm_dimse::ClientAssociation<std::net::TcpStream>,
+    pc_id: u8,
+    message_id: u16,
+) {
     use dcmnorm_dimse::pdu::PDataValueType::Command;
     let command = dimse_command_bytes(&InMemDicomObject::command_from_element_iter([
-        DataElement::new(tags::AFFECTED_SOP_CLASS_UID, VR::UI, dicom_value!(Str, uids::VERIFICATION)),
+        DataElement::new(
+            tags::AFFECTED_SOP_CLASS_UID,
+            VR::UI,
+            dicom_value!(Str, uids::VERIFICATION),
+        ),
         DataElement::new(tags::COMMAND_FIELD, VR::US, dicom_value!(U16, [0x0030])),
         DataElement::new(tags::MESSAGE_ID, VR::US, dicom_value!(U16, [message_id])),
-        DataElement::new(tags::COMMAND_DATA_SET_TYPE, VR::US, dicom_value!(U16, [0x0101])),
+        DataElement::new(
+            tags::COMMAND_DATA_SET_TYPE,
+            VR::US,
+            dicom_value!(U16, [0x0101]),
+        ),
     ]));
-    association.send(&dcmnorm_dimse::pdu::Pdu::PData { data: vec![dimse_pdv(pc_id, Command, true, command)] }).unwrap();
+    association
+        .send(&dcmnorm_dimse::pdu::Pdu::PData {
+            data: vec![dimse_pdv(pc_id, Command, true, command)],
+        })
+        .unwrap();
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -5191,12 +6537,21 @@ fn dimse_send_client_echo(association: &mut dcmnorm_dimse::ClientAssociation<std
 
 fn encode_identifier(identifier: &InMemDicomObject) -> Vec<u8> {
     let mut bytes = Vec::new();
-    identifier.write_dataset_with_ts(&mut bytes, dimse_implicit_vr_le()).unwrap();
+    identifier
+        .write_dataset_with_ts(&mut bytes, dimse_implicit_vr_le())
+        .unwrap();
     bytes
 }
 
 fn identifier_strings(identifier: &InMemDicomObject, tag: Tag) -> Vec<String> {
-    identifier.element(tag).unwrap().to_multi_str().unwrap().iter().cloned().collect()
+    identifier
+        .element(tag)
+        .unwrap()
+        .to_multi_str()
+        .unwrap()
+        .iter()
+        .cloned()
+        .collect()
 }
 
 #[test]
@@ -5208,13 +6563,15 @@ fn move_identifier_study_level_is_byte_for_byte_unchanged() {
     legacy.put_str(tags::STUDY_INSTANCE_UID, VR::UI, "1.2.3.4.5");
     let legacy_bytes = encode_identifier(&legacy);
     let expected: &[u8] = &[
-        0x08, 0x00, 0x52, 0x00, 0x06, 0x00, 0x00, 0x00, b'S', b'T', b'U', b'D', b'Y', b' ',
-        0x20, 0x00, 0x0D, 0x00, 0x0A, 0x00, 0x00, 0x00, b'1', b'.', b'2', b'.', b'3', b'.', b'4', b'.', b'5', 0x00,
+        0x08, 0x00, 0x52, 0x00, 0x06, 0x00, 0x00, 0x00, b'S', b'T', b'U', b'D', b'Y', b' ', 0x20,
+        0x00, 0x0D, 0x00, 0x0A, 0x00, 0x00, 0x00, b'1', b'.', b'2', b'.', b'3', b'.', b'4', b'.',
+        b'5', 0x00,
     ];
     assert_eq!(legacy_bytes, expected);
 
     for level in [None, Some(QueryRetrieveLevel::Study)] {
-        let identifier = build_move_identifier("1.2.3.4.5", level.unwrap_or_default(), None, &[]).unwrap();
+        let identifier =
+            build_move_identifier("1.2.3.4.5", level.unwrap_or_default(), None, &[]).unwrap();
         assert_eq!(encode_identifier(&identifier), expected);
     }
     // Series/SOP options are ignored at STUDY level, and the study UID isn't validated there (as before).
@@ -5231,44 +6588,122 @@ fn move_identifier_study_level_is_byte_for_byte_unchanged() {
 
 #[test]
 fn move_identifier_series_level_carries_series_instance_uid() {
-    let identifier = build_move_identifier("1.2.3", QueryRetrieveLevel::Series, Some("1.2.3.4"), &[]).unwrap();
-    let decoded =
-        InMemDicomObject::read_dataset_with_ts(encode_identifier(&identifier).as_slice(), dimse_implicit_vr_le()).unwrap();
-    assert_eq!(decoded.element(tags::QUERY_RETRIEVE_LEVEL).unwrap().to_str().unwrap(), "SERIES");
-    assert_eq!(decoded.element(tags::STUDY_INSTANCE_UID).unwrap().to_str().unwrap(), "1.2.3");
-    assert_eq!(decoded.element(tags::SERIES_INSTANCE_UID).unwrap().to_str().unwrap(), "1.2.3.4");
+    let identifier =
+        build_move_identifier("1.2.3", QueryRetrieveLevel::Series, Some("1.2.3.4"), &[]).unwrap();
+    let decoded = InMemDicomObject::read_dataset_with_ts(
+        encode_identifier(&identifier).as_slice(),
+        dimse_implicit_vr_le(),
+    )
+    .unwrap();
+    assert_eq!(
+        decoded
+            .element(tags::QUERY_RETRIEVE_LEVEL)
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "SERIES"
+    );
+    assert_eq!(
+        decoded
+            .element(tags::STUDY_INSTANCE_UID)
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "1.2.3"
+    );
+    assert_eq!(
+        decoded
+            .element(tags::SERIES_INSTANCE_UID)
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "1.2.3.4"
+    );
     assert!(decoded.element(tags::SOP_INSTANCE_UID).is_err());
     assert_eq!(decoded.iter().count(), 3);
 }
 
 #[test]
 fn move_identifier_image_level_sends_sop_instance_uids_as_one_uid_list() {
-    let sop_instance_uids = vec!["1.2.3.4.1".to_owned(), "1.2.3.4.22".to_owned(), "1.2.3.4.333".to_owned()];
-    let identifier =
-        build_move_identifier("1.2.3", QueryRetrieveLevel::Image, Some("1.2.3.4"), &sop_instance_uids).unwrap();
+    let sop_instance_uids = vec![
+        "1.2.3.4.1".to_owned(),
+        "1.2.3.4.22".to_owned(),
+        "1.2.3.4.333".to_owned(),
+    ];
+    let identifier = build_move_identifier(
+        "1.2.3",
+        QueryRetrieveLevel::Image,
+        Some("1.2.3.4"),
+        &sop_instance_uids,
+    )
+    .unwrap();
     let bytes = encode_identifier(&identifier);
 
     // One (0008,0018) element, values joined by `\`, NUL-padded to even length: 9+1+10+1+11 = 32
     // bytes, already even.
     let mut sop_element = vec![0x08, 0x00, 0x18, 0x00, 32, 0x00, 0x00, 0x00];
     sop_element.extend_from_slice(b"1.2.3.4.1\\1.2.3.4.22\\1.2.3.4.333");
-    assert!(bytes.windows(sop_element.len()).any(|window| window == sop_element.as_slice()));
+    assert!(bytes
+        .windows(sop_element.len())
+        .any(|window| window == sop_element.as_slice()));
 
-    let decoded = InMemDicomObject::read_dataset_with_ts(bytes.as_slice(), dimse_implicit_vr_le()).unwrap();
-    assert_eq!(decoded.element(tags::QUERY_RETRIEVE_LEVEL).unwrap().to_str().unwrap(), "IMAGE");
-    assert_eq!(decoded.element(tags::STUDY_INSTANCE_UID).unwrap().to_str().unwrap(), "1.2.3");
-    assert_eq!(decoded.element(tags::SERIES_INSTANCE_UID).unwrap().to_str().unwrap(), "1.2.3.4");
-    assert_eq!(decoded.element(tags::SOP_INSTANCE_UID).unwrap().vr(), VR::UI);
-    assert_eq!(decoded.element(tags::SOP_INSTANCE_UID).unwrap().value().multiplicity(), 3);
-    assert_eq!(identifier_strings(&decoded, tags::SOP_INSTANCE_UID), sop_instance_uids);
+    let decoded =
+        InMemDicomObject::read_dataset_with_ts(bytes.as_slice(), dimse_implicit_vr_le()).unwrap();
+    assert_eq!(
+        decoded
+            .element(tags::QUERY_RETRIEVE_LEVEL)
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "IMAGE"
+    );
+    assert_eq!(
+        decoded
+            .element(tags::STUDY_INSTANCE_UID)
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "1.2.3"
+    );
+    assert_eq!(
+        decoded
+            .element(tags::SERIES_INSTANCE_UID)
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "1.2.3.4"
+    );
+    assert_eq!(
+        decoded.element(tags::SOP_INSTANCE_UID).unwrap().vr(),
+        VR::UI
+    );
+    assert_eq!(
+        decoded
+            .element(tags::SOP_INSTANCE_UID)
+            .unwrap()
+            .value()
+            .multiplicity(),
+        3
+    );
+    assert_eq!(
+        identifier_strings(&decoded, tags::SOP_INSTANCE_UID),
+        sop_instance_uids
+    );
 
     // An odd total length gets one trailing NUL, not a space.
-    let identifier =
-        build_move_identifier("1.2.3", QueryRetrieveLevel::Image, Some("1.2.3.4"), &["1.2.3.4.5".to_owned()]).unwrap();
+    let identifier = build_move_identifier(
+        "1.2.3",
+        QueryRetrieveLevel::Image,
+        Some("1.2.3.4"),
+        &["1.2.3.4.5".to_owned()],
+    )
+    .unwrap();
     let bytes = encode_identifier(&identifier);
     let mut sop_element = vec![0x08, 0x00, 0x18, 0x00, 10, 0x00, 0x00, 0x00];
     sop_element.extend_from_slice(b"1.2.3.4.5\0");
-    assert!(bytes.windows(sop_element.len()).any(|window| window == sop_element.as_slice()));
+    assert!(bytes
+        .windows(sop_element.len())
+        .any(|window| window == sop_element.as_slice()));
 }
 
 #[test]
@@ -5279,11 +6714,34 @@ fn move_identifier_rejects_incomplete_or_malformed_lower_level_keys() {
         Ok(_) => panic!("expected InvalidMoveIdentifier, got an identifier"),
     };
 
-    assert!(invalid(build_move_identifier("1.2.3", QueryRetrieveLevel::Series, None, &[])).contains("SeriesInstanceUID"));
-    assert!(invalid(build_move_identifier("1.2.3", QueryRetrieveLevel::Series, Some(""), &[])).contains("SeriesInstanceUID"));
-    assert!(invalid(build_move_identifier("1.2.3", QueryRetrieveLevel::Image, None, &["1.2".to_owned()]))
-        .contains("SeriesInstanceUID"));
-    assert!(invalid(build_move_identifier("1.2.3", QueryRetrieveLevel::Image, Some("1.2.3.4"), &[])).contains("SOPInstanceUID"));
+    assert!(invalid(build_move_identifier(
+        "1.2.3",
+        QueryRetrieveLevel::Series,
+        None,
+        &[]
+    ))
+    .contains("SeriesInstanceUID"));
+    assert!(invalid(build_move_identifier(
+        "1.2.3",
+        QueryRetrieveLevel::Series,
+        Some(""),
+        &[]
+    ))
+    .contains("SeriesInstanceUID"));
+    assert!(invalid(build_move_identifier(
+        "1.2.3",
+        QueryRetrieveLevel::Image,
+        None,
+        &["1.2".to_owned()]
+    ))
+    .contains("SeriesInstanceUID"));
+    assert!(invalid(build_move_identifier(
+        "1.2.3",
+        QueryRetrieveLevel::Image,
+        Some("1.2.3.4"),
+        &[]
+    ))
+    .contains("SOPInstanceUID"));
     // A backslash would silently split one UID into two values.
     assert!(invalid(build_move_identifier(
         "1.2.3",
@@ -5292,19 +6750,55 @@ fn move_identifier_rejects_incomplete_or_malformed_lower_level_keys() {
         &["1.2.3.4.5\\1.2.3.4.6".to_owned()],
     ))
     .contains("SOPInstanceUID"));
-    assert!(invalid(build_move_identifier("1.2.3", QueryRetrieveLevel::Image, Some("1.2.3.4"), &["".to_owned()]))
-        .contains("SOPInstanceUID"));
-    assert!(invalid(build_move_identifier("1.2.3", QueryRetrieveLevel::Series, Some("1.2.3.4 "), &[])).contains("SeriesInstanceUID"));
-    assert!(invalid(build_move_identifier("1.2.3", QueryRetrieveLevel::Series, Some(&"1".repeat(65)), &[]))
-        .contains("SeriesInstanceUID"));
-    assert!(invalid(build_move_identifier("x.1", QueryRetrieveLevel::Series, Some("1.2.3.4"), &[])).contains("StudyInstanceUID"));
+    assert!(invalid(build_move_identifier(
+        "1.2.3",
+        QueryRetrieveLevel::Image,
+        Some("1.2.3.4"),
+        &["".to_owned()]
+    ))
+    .contains("SOPInstanceUID"));
+    assert!(invalid(build_move_identifier(
+        "1.2.3",
+        QueryRetrieveLevel::Series,
+        Some("1.2.3.4 "),
+        &[]
+    ))
+    .contains("SeriesInstanceUID"));
+    assert!(invalid(build_move_identifier(
+        "1.2.3",
+        QueryRetrieveLevel::Series,
+        Some(&"1".repeat(65)),
+        &[]
+    ))
+    .contains("SeriesInstanceUID"));
+    assert!(invalid(build_move_identifier(
+        "x.1",
+        QueryRetrieveLevel::Series,
+        Some("1.2.3.4"),
+        &[]
+    ))
+    .contains("StudyInstanceUID"));
     // Lax by design: a leading-zero component (seen in the wild) is still retrievable.
-    assert!(build_move_identifier("1.2.3", QueryRetrieveLevel::Series, Some("1.02.3"), &[]).is_ok());
+    assert!(
+        build_move_identifier("1.2.3", QueryRetrieveLevel::Series, Some("1.02.3"), &[]).is_ok()
+    );
 
-    assert_eq!("series".parse::<QueryRetrieveLevel>().unwrap(), QueryRetrieveLevel::Series);
-    assert_eq!(" IMAGE ".parse::<QueryRetrieveLevel>().unwrap(), QueryRetrieveLevel::Image);
-    assert_eq!("STUDY".parse::<QueryRetrieveLevel>().unwrap(), QueryRetrieveLevel::Study);
-    assert!(matches!("PATIENT".parse::<QueryRetrieveLevel>(), Err(DimseError::InvalidMoveIdentifier(_))));
+    assert_eq!(
+        "series".parse::<QueryRetrieveLevel>().unwrap(),
+        QueryRetrieveLevel::Series
+    );
+    assert_eq!(
+        " IMAGE ".parse::<QueryRetrieveLevel>().unwrap(),
+        QueryRetrieveLevel::Image
+    );
+    assert_eq!(
+        "STUDY".parse::<QueryRetrieveLevel>().unwrap(),
+        QueryRetrieveLevel::Study
+    );
+    assert!(matches!(
+        "PATIENT".parse::<QueryRetrieveLevel>(),
+        Err(DimseError::InvalidMoveIdentifier(_))
+    ));
 }
 
 /// Runs a `move_scu` against a mock SCP that answers with one successful terminal response and
@@ -5320,22 +6814,54 @@ fn move_scu_capturing_identifier(
         let pc = association.presentation_contexts()[0].clone();
         let ts = {
             use dcmnorm_encoding::TransferSyntaxIndex;
-            dcmnorm_transcode::TransferSyntaxRegistry.get(&pc.transfer_syntax).unwrap()
+            dcmnorm_transcode::TransferSyntaxRegistry
+                .get(&pc.transfer_syntax)
+                .unwrap()
         };
         let (pc_id, request, identifier_bytes) = dimse_recv_command_with_data(association);
         let message_id = dimse_message_id(&request);
-        sender.send(InMemDicomObject::read_dataset_with_ts(identifier_bytes.as_slice(), ts).unwrap()).unwrap();
+        sender
+            .send(InMemDicomObject::read_dataset_with_ts(identifier_bytes.as_slice(), ts).unwrap())
+            .unwrap();
 
         let final_response = InMemDicomObject::command_from_element_iter([
-            DataElement::new(tags::AFFECTED_SOP_CLASS_UID, VR::UI, dicom_value!(Str, abstract_syntax)),
+            DataElement::new(
+                tags::AFFECTED_SOP_CLASS_UID,
+                VR::UI,
+                dicom_value!(Str, abstract_syntax),
+            ),
             DataElement::new(tags::COMMAND_FIELD, VR::US, dicom_value!(U16, [0x8021])),
-            DataElement::new(tags::MESSAGE_ID_BEING_RESPONDED_TO, VR::US, dicom_value!(U16, [message_id])),
-            DataElement::new(tags::COMMAND_DATA_SET_TYPE, VR::US, dicom_value!(U16, [0x0101])),
+            DataElement::new(
+                tags::MESSAGE_ID_BEING_RESPONDED_TO,
+                VR::US,
+                dicom_value!(U16, [message_id]),
+            ),
+            DataElement::new(
+                tags::COMMAND_DATA_SET_TYPE,
+                VR::US,
+                dicom_value!(U16, [0x0101]),
+            ),
             DataElement::new(tags::STATUS, VR::US, dicom_value!(U16, [0x0000])),
-            DataElement::new(tags::NUMBER_OF_REMAINING_SUBOPERATIONS, VR::US, dicom_value!(U16, [0])),
-            DataElement::new(tags::NUMBER_OF_COMPLETED_SUBOPERATIONS, VR::US, dicom_value!(U16, [2])),
-            DataElement::new(tags::NUMBER_OF_FAILED_SUBOPERATIONS, VR::US, dicom_value!(U16, [0])),
-            DataElement::new(tags::NUMBER_OF_WARNING_SUBOPERATIONS, VR::US, dicom_value!(U16, [0])),
+            DataElement::new(
+                tags::NUMBER_OF_REMAINING_SUBOPERATIONS,
+                VR::US,
+                dicom_value!(U16, [0]),
+            ),
+            DataElement::new(
+                tags::NUMBER_OF_COMPLETED_SUBOPERATIONS,
+                VR::US,
+                dicom_value!(U16, [2]),
+            ),
+            DataElement::new(
+                tags::NUMBER_OF_FAILED_SUBOPERATIONS,
+                VR::US,
+                dicom_value!(U16, [0]),
+            ),
+            DataElement::new(
+                tags::NUMBER_OF_WARNING_SUBOPERATIONS,
+                VR::US,
+                dicom_value!(U16, [0]),
+            ),
         ]);
         dimse_send_command(association, pc_id, &final_response);
     });
@@ -5355,7 +6881,10 @@ fn move_scu_capturing_identifier(
             cancel: None,
             query_retrieve_level: Some(level),
             series_instance_uid: series_instance_uid.map(str::to_owned),
-            sop_instance_uids: sop_instance_uids.iter().map(|uid| (*uid).to_owned()).collect(),
+            sop_instance_uids: sop_instance_uids
+                .iter()
+                .map(|uid| (*uid).to_owned())
+                .collect(),
         },
     )
     .unwrap();
@@ -5367,10 +6896,32 @@ fn move_scu_capturing_identifier(
 
 #[test]
 fn move_scu_series_level_sends_series_identifier_to_scp() {
-    let identifier = move_scu_capturing_identifier(QueryRetrieveLevel::Series, Some("1.2.3.4.5.6"), &[]);
-    assert_eq!(identifier.element(tags::QUERY_RETRIEVE_LEVEL).unwrap().to_str().unwrap(), "SERIES");
-    assert_eq!(identifier.element(tags::STUDY_INSTANCE_UID).unwrap().to_str().unwrap(), "1.2.3.4.5");
-    assert_eq!(identifier.element(tags::SERIES_INSTANCE_UID).unwrap().to_str().unwrap(), "1.2.3.4.5.6");
+    let identifier =
+        move_scu_capturing_identifier(QueryRetrieveLevel::Series, Some("1.2.3.4.5.6"), &[]);
+    assert_eq!(
+        identifier
+            .element(tags::QUERY_RETRIEVE_LEVEL)
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "SERIES"
+    );
+    assert_eq!(
+        identifier
+            .element(tags::STUDY_INSTANCE_UID)
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "1.2.3.4.5"
+    );
+    assert_eq!(
+        identifier
+            .element(tags::SERIES_INSTANCE_UID)
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "1.2.3.4.5.6"
+    );
     assert!(identifier.element(tags::SOP_INSTANCE_UID).is_err());
 }
 
@@ -5381,9 +6932,30 @@ fn move_scu_image_level_sends_sop_instance_uid_list_to_scp() {
         Some("1.2.3.4.5.6"),
         &["1.2.3.4.5.6.1", "1.2.3.4.5.6.2"],
     );
-    assert_eq!(identifier.element(tags::QUERY_RETRIEVE_LEVEL).unwrap().to_str().unwrap(), "IMAGE");
-    assert_eq!(identifier.element(tags::STUDY_INSTANCE_UID).unwrap().to_str().unwrap(), "1.2.3.4.5");
-    assert_eq!(identifier.element(tags::SERIES_INSTANCE_UID).unwrap().to_str().unwrap(), "1.2.3.4.5.6");
+    assert_eq!(
+        identifier
+            .element(tags::QUERY_RETRIEVE_LEVEL)
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "IMAGE"
+    );
+    assert_eq!(
+        identifier
+            .element(tags::STUDY_INSTANCE_UID)
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "1.2.3.4.5"
+    );
+    assert_eq!(
+        identifier
+            .element(tags::SERIES_INSTANCE_UID)
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "1.2.3.4.5.6"
+    );
     assert_eq!(
         identifier_strings(&identifier, tags::SOP_INSTANCE_UID),
         vec!["1.2.3.4.5.6.1".to_owned(), "1.2.3.4.5.6.2".to_owned()]
@@ -5412,12 +6984,18 @@ fn move_scu_rejects_invalid_level_options_before_connecting() {
         },
     )
     .unwrap_err();
-    assert!(matches!(error, DimseError::InvalidMoveIdentifier(_)), "got {error}");
+    assert!(
+        matches!(error, DimseError::InvalidMoveIdentifier(_)),
+        "got {error}"
+    );
 }
 
 /// The big-endian bytes of `values`, as they must appear in an Explicit VR Big Endian file.
 fn be_u16_bytes(values: &[u16]) -> Vec<u8> {
-    values.iter().flat_map(|value| value.to_be_bytes()).collect()
+    values
+        .iter()
+        .flat_map(|value| value.to_be_bytes())
+        .collect()
 }
 
 const BE_NESTED_SEQUENCE: Tag = Tag(0x0029, 0x1010);
@@ -5430,7 +7008,9 @@ const BE_OB: Tag = Tag(0x0029, 0x1024);
 const BE_OVERLAY_DATA: Tag = Tag(0x6000, 0x3000);
 
 fn be_ramp(seed: u16, count: u16) -> Vec<u16> {
-    (0..count).map(|i| seed.wrapping_add(i.wrapping_mul(257))).collect()
+    (0..count)
+        .map(|i| seed.wrapping_add(i.wrapping_mul(257)))
+        .collect()
 }
 
 /// A small Explicit VR Big Endian file holding every byte-ordered bulk VR, the same tag nested in
@@ -5448,21 +7028,68 @@ fn write_big_endian_bulk_file() -> (PathBuf, Vec<u8>) {
         )])
     };
     let dataset = InMemDicomObject::from_element_iter([
-        DataElement::new(tags::SOP_CLASS_UID, VR::UI, PrimitiveValue::from("1.2.840.10008.5.1.4.1.1.7")),
-        DataElement::new(tags::SOP_INSTANCE_UID, VR::UI, PrimitiveValue::from("1.2.3.4.5.6.9")),
-        DataElement::new(Tag(0x0029, 0x0010), VR::LO, PrimitiveValue::from("TESTCREATOR ")),
+        DataElement::new(
+            tags::SOP_CLASS_UID,
+            VR::UI,
+            PrimitiveValue::from("1.2.840.10008.5.1.4.1.1.7"),
+        ),
+        DataElement::new(
+            tags::SOP_INSTANCE_UID,
+            VR::UI,
+            PrimitiveValue::from("1.2.3.4.5.6.9"),
+        ),
+        DataElement::new(
+            Tag(0x0029, 0x0010),
+            VR::LO,
+            PrimitiveValue::from("TESTCREATOR "),
+        ),
         DataElement::new(
             BE_NESTED_SEQUENCE,
             VR::SQ,
             DicomValue::new_sequence(vec![nested(0x0102), nested(0x0304)], Length::UNDEFINED),
         ),
-        DataElement::new(BE_SMALL_OW, VR::OW, PrimitiveValue::U16(be_ramp(0x0506, 4).into())),
-        DataElement::new(BE_OF, VR::OF, PrimitiveValue::F32(vec![1.5f32, -2.25, 3.125, 4.0, 5.5, 6.75, 7.0, 8.5, 9.25, 10.0].into())),
-        DataElement::new(BE_OD, VR::OD, PrimitiveValue::F64(vec![1.5f64, -2.25, 3.125, 4.0, 5.5].into())),
-        DataElement::new(BE_OL, VR::OL, PrimitiveValue::U32((0..12u32).map(|i| 0x0102_0304 + i).collect::<Vec<_>>().into())),
-        DataElement::new(BE_OB, VR::OB, PrimitiveValue::U8((0..64u8).collect::<Vec<_>>().into())),
-        DataElement::new(BE_OVERLAY_DATA, VR::OW, PrimitiveValue::U16(be_ramp(0x0708, 50).into())),
-        DataElement::new(tags::PIXEL_DATA, VR::OW, PrimitiveValue::U16(be_ramp(0x090A, 200).into())),
+        DataElement::new(
+            BE_SMALL_OW,
+            VR::OW,
+            PrimitiveValue::U16(be_ramp(0x0506, 4).into()),
+        ),
+        DataElement::new(
+            BE_OF,
+            VR::OF,
+            PrimitiveValue::F32(
+                vec![1.5f32, -2.25, 3.125, 4.0, 5.5, 6.75, 7.0, 8.5, 9.25, 10.0].into(),
+            ),
+        ),
+        DataElement::new(
+            BE_OD,
+            VR::OD,
+            PrimitiveValue::F64(vec![1.5f64, -2.25, 3.125, 4.0, 5.5].into()),
+        ),
+        DataElement::new(
+            BE_OL,
+            VR::OL,
+            PrimitiveValue::U32(
+                (0..12u32)
+                    .map(|i| 0x0102_0304 + i)
+                    .collect::<Vec<_>>()
+                    .into(),
+            ),
+        ),
+        DataElement::new(
+            BE_OB,
+            VR::OB,
+            PrimitiveValue::U8((0..64u8).collect::<Vec<_>>().into()),
+        ),
+        DataElement::new(
+            BE_OVERLAY_DATA,
+            VR::OW,
+            PrimitiveValue::U16(be_ramp(0x0708, 50).into()),
+        ),
+        DataElement::new(
+            tags::PIXEL_DATA,
+            VR::OW,
+            PrimitiveValue::U16(be_ramp(0x090A, 200).into()),
+        ),
     ]);
     let path = temp_file_path("dcmnorm-big-endian-bulk");
     write_dataset_as_dicom_file(dataset, &path, EXPLICIT_VR_BIG_ENDIAN_UID).unwrap();
@@ -5477,9 +7104,17 @@ fn big_endian_bulk_values_become_uris_at_their_file_bytes() {
     let mut expected_values = vec![
         be_u16_bytes(&be_ramp(0x0102, 40)),
         be_u16_bytes(&be_ramp(0x0304, 40)),
-        [1.5f32, -2.25, 3.125, 4.0, 5.5, 6.75, 7.0, 8.5, 9.25, 10.0].iter().flat_map(|v| v.to_be_bytes()).collect(),
-        [1.5f64, -2.25, 3.125, 4.0, 5.5].iter().flat_map(|v| v.to_be_bytes()).collect(),
-        (0..12u32).flat_map(|i| (0x0102_0304 + i).to_be_bytes()).collect(),
+        [1.5f32, -2.25, 3.125, 4.0, 5.5, 6.75, 7.0, 8.5, 9.25, 10.0]
+            .iter()
+            .flat_map(|v| v.to_be_bytes())
+            .collect(),
+        [1.5f64, -2.25, 3.125, 4.0, 5.5]
+            .iter()
+            .flat_map(|v| v.to_be_bytes())
+            .collect(),
+        (0..12u32)
+            .flat_map(|i| (0x0102_0304 + i).to_be_bytes())
+            .collect(),
         (0..64u8).collect(),
         be_u16_bytes(&be_ramp(0x0708, 50)),
         be_u16_bytes(&be_ramp(0x090A, 200)),
@@ -5487,43 +7122,106 @@ fn big_endian_bulk_values_become_uris_at_their_file_bytes() {
     expected_values.sort();
 
     for (format, pixel_key, overlay_key, small_key) in [
-        (DicomJsonFormat::Flat, "PixelData", "OverlayData", "00291020"),
-        (DicomJsonFormat::Standard, "7FE00010", "60003000", "00291020"),
+        (
+            DicomJsonFormat::Flat,
+            "PixelData",
+            "OverlayData",
+            "00291020",
+        ),
+        (
+            DicomJsonFormat::Standard,
+            "7FE00010",
+            "60003000",
+            "00291020",
+        ),
     ] {
         let json = json_via_deferred_read(&path, format);
-        assert_eq!(json_via_full_read_and_scan(&path, format), json, "{format:?}: the scan must agree with the parser");
+        assert_eq!(
+            json_via_full_read_and_scan(&path, format),
+            json,
+            "{format:?}: the scan must agree with the parser"
+        );
 
         let value: JsonValue = serde_json::from_str(&json).unwrap();
-        assert!(value[pixel_key]["BulkDataURI"].is_string(), "{format:?}: PixelData must be a URI");
-        assert!(value[overlay_key]["BulkDataURI"].is_string(), "{format:?}: OverlayData must be a URI");
-        assert!(value[small_key]["InlineBinary"].is_string(), "{format:?}: small OW stays inline");
+        assert!(
+            value[pixel_key]["BulkDataURI"].is_string(),
+            "{format:?}: PixelData must be a URI"
+        );
+        assert!(
+            value[overlay_key]["BulkDataURI"].is_string(),
+            "{format:?}: OverlayData must be a URI"
+        );
+        assert!(
+            value[small_key]["InlineBinary"].is_string(),
+            "{format:?}: small OW stays inline"
+        );
 
         let mut uris = Vec::new();
         bulk_data_uris(&value, &mut uris);
-        let mut referenced: Vec<Vec<u8>> = uris.iter().map(|&(offset, length)| bytes[offset..offset + length].to_vec()).collect();
+        let mut referenced: Vec<Vec<u8>> = uris
+            .iter()
+            .map(|&(offset, length)| bytes[offset..offset + length].to_vec())
+            .collect();
         referenced.sort();
-        assert_eq!(expected_values, referenced, "{format:?}: URIs must reference each value's big-endian file bytes");
+        assert_eq!(
+            expected_values, referenced,
+            "{format:?}: URIs must reference each value's big-endian file bytes"
+        );
     }
     fs::remove_file(&path).ok();
 }
 
 /// Compares decoded values, which is what a double swap would change.
-fn assert_big_endian_round_trip_values(original: &dcmnorm_object::DefaultDicomObject, roundtrip: &dcmnorm_object::DefaultDicomObject) {
-    assert_eq!(roundtrip.meta().transfer_syntax(), EXPLICIT_VR_BIG_ENDIAN_UID);
-    for tag in [tags::PIXEL_DATA, BE_OVERLAY_DATA, BE_SMALL_OW, BE_OF, BE_OD, BE_OL, BE_OB] {
+fn assert_big_endian_round_trip_values(
+    original: &dcmnorm_object::DefaultDicomObject,
+    roundtrip: &dcmnorm_object::DefaultDicomObject,
+) {
+    assert_eq!(
+        roundtrip.meta().transfer_syntax(),
+        EXPLICIT_VR_BIG_ENDIAN_UID
+    );
+    for tag in [
+        tags::PIXEL_DATA,
+        BE_OVERLAY_DATA,
+        BE_SMALL_OW,
+        BE_OF,
+        BE_OD,
+        BE_OL,
+        BE_OB,
+    ] {
         assert_eq!(
             original.element(tag).unwrap().to_bytes().unwrap(),
             roundtrip.element(tag).unwrap().to_bytes().unwrap(),
             "{tag} changed",
         );
     }
-    assert_eq!(roundtrip.element(tags::PIXEL_DATA).unwrap().to_multi_int::<u16>().unwrap(), be_ramp(0x090A, 200));
+    assert_eq!(
+        roundtrip
+            .element(tags::PIXEL_DATA)
+            .unwrap()
+            .to_multi_int::<u16>()
+            .unwrap(),
+        be_ramp(0x090A, 200)
+    );
     let nested = |object: &dcmnorm_object::DefaultDicomObject| -> Vec<Vec<u16>> {
-        object.element(BE_NESTED_SEQUENCE).unwrap().items().unwrap().iter()
-            .map(|item| item.element(BE_NESTED_OW).unwrap().to_multi_int::<u16>().unwrap())
+        object
+            .element(BE_NESTED_SEQUENCE)
+            .unwrap()
+            .items()
+            .unwrap()
+            .iter()
+            .map(|item| {
+                item.element(BE_NESTED_OW)
+                    .unwrap()
+                    .to_multi_int::<u16>()
+                    .unwrap()
+            })
             .collect()
     };
-    assert_eq!(nested(roundtrip), vec![be_ramp(0x0102, 40), be_ramp(0x0304, 40)]);
+    assert_eq!(
+        nested(roundtrip),
+        vec![be_ramp(0x0102, 40), be_ramp(0x0304, 40)]
+    );
     assert_eq!(nested(original), nested(roundtrip));
 }
 
@@ -5535,7 +7233,10 @@ fn big_endian_json_round_trips_without_swapping_values() {
     for format in [DicomJsonFormat::Flat, DicomJsonFormat::Standard] {
         // BulkDataURIs resolved against the source, next to InlineBinary for the small value...
         let with_uris = json_via_deferred_read(&path, format);
-        let options = DicomJsonReadOptions { format, bulk_data_source: Some(&bytes) };
+        let options = DicomJsonReadOptions {
+            format,
+            bulk_data_source: Some(&bytes),
+        };
         let mut roundtrip = read_dicom_json_with_options(&with_uris, options).unwrap();
         assert_big_endian_round_trip_values(&original, &roundtrip);
 
@@ -5543,15 +7244,29 @@ fn big_endian_json_round_trips_without_swapping_values() {
         let written = write_dicom_bytes(&mut roundtrip).unwrap();
         assert_big_endian_round_trip_values(&original, &read_dicom_bytes(&written).unwrap());
         let pixels = be_u16_bytes(&be_ramp(0x090A, 200));
-        assert!(written.windows(pixels.len()).any(|window| window == pixels), "{format:?}: written PixelData isn't big-endian");
+        assert!(
+            written.windows(pixels.len()).any(|window| window == pixels),
+            "{format:?}: written PixelData isn't big-endian"
+        );
 
         // everything inline
         let inline = dicom_file_to_json(
             &path,
-            DicomJsonWriteOptions { format, bulk_data_mode: DicomJsonBulkDataMode::InlineBinary, ..Default::default() },
+            DicomJsonWriteOptions {
+                format,
+                bulk_data_mode: DicomJsonBulkDataMode::InlineBinary,
+                ..Default::default()
+            },
         )
         .unwrap();
-        let roundtrip = read_dicom_json_with_options(&inline, DicomJsonReadOptions { format, bulk_data_source: None }).unwrap();
+        let roundtrip = read_dicom_json_with_options(
+            &inline,
+            DicomJsonReadOptions {
+                format,
+                bulk_data_source: None,
+            },
+        )
+        .unwrap();
         assert_big_endian_round_trip_values(&original, &roundtrip);
     }
     fs::remove_file(&path).ok();
@@ -5571,8 +7286,16 @@ fn transcoded_big_endian_fixture_round_trips_through_bulk_data_uris() {
     assert!(value["7FE00010"]["BulkDataURI"].is_string());
     let roundtrip = read_dicom_json_full_with_source(&json, &bytes).unwrap();
     assert_eq!(
-        original.element(tags::PIXEL_DATA).unwrap().to_multi_int::<u16>().unwrap(),
-        roundtrip.element(tags::PIXEL_DATA).unwrap().to_multi_int::<u16>().unwrap(),
+        original
+            .element(tags::PIXEL_DATA)
+            .unwrap()
+            .to_multi_int::<u16>()
+            .unwrap(),
+        roundtrip
+            .element(tags::PIXEL_DATA)
+            .unwrap()
+            .to_multi_int::<u16>()
+            .unwrap(),
     );
     fs::remove_file(&path).ok();
 }
@@ -5580,8 +7303,15 @@ fn transcoded_big_endian_fixture_round_trips_through_bulk_data_uris() {
 /// Whether any attribute, at any depth of standard JSON, has `member`.
 fn standard_json_has_member(value: &JsonValue, member: &str) -> bool {
     match value {
-        JsonValue::Object(map) => map.contains_key(member) || map.values().any(|child| standard_json_has_member(child, member)),
-        JsonValue::Array(items) => items.iter().any(|child| standard_json_has_member(child, member)),
+        JsonValue::Object(map) => {
+            map.contains_key(member)
+                || map
+                    .values()
+                    .any(|child| standard_json_has_member(child, member))
+        }
+        JsonValue::Array(items) => items
+            .iter()
+            .any(|child| standard_json_has_member(child, member)),
         _ => false,
     }
 }
@@ -5589,19 +7319,44 @@ fn standard_json_has_member(value: &JsonValue, member: &str) -> bool {
 #[test]
 fn omit_keyword_vm_leaves_only_ps3_18_members_at_every_level() {
     let (path, bytes) = write_big_endian_bulk_file();
-    let standard = DicomJsonWriteOptions { format: DicomJsonFormat::Standard, bulk_data_mode: DicomJsonBulkDataMode::Uri, ..Default::default() };
+    let standard = DicomJsonWriteOptions {
+        format: DicomJsonFormat::Standard,
+        bulk_data_mode: DicomJsonBulkDataMode::Uri,
+        ..Default::default()
+    };
 
     let default_json = dicom_file_to_json(&path, standard).unwrap();
     let default_value: JsonValue = serde_json::from_str(&default_json).unwrap();
-    assert_eq!(default_value["7FE00010"]["Keyword"], "PixelData", "the default output keeps Keyword");
-    assert_eq!(default_value["7FE00010"]["VM"], 1, "the default output keeps VM");
+    assert_eq!(
+        default_value["7FE00010"]["Keyword"], "PixelData",
+        "the default output keeps Keyword"
+    );
+    assert_eq!(
+        default_value["7FE00010"]["VM"], 1,
+        "the default output keeps VM"
+    );
 
-    let bare_json = dicom_file_to_json(&path, DicomJsonWriteOptions { omit_keyword_vm: true, ..standard }).unwrap();
+    let bare_json = dicom_file_to_json(
+        &path,
+        DicomJsonWriteOptions {
+            omit_keyword_vm: true,
+            ..standard
+        },
+    )
+    .unwrap();
     let bare: JsonValue = serde_json::from_str(&bare_json).unwrap();
     assert!(!standard_json_has_member(&bare, "Keyword"), "{bare_json}");
     assert!(!standard_json_has_member(&bare, "VM"), "{bare_json}");
-    assert_eq!(bare["00080018"].as_object().unwrap().len(), 2, "vr and Value only");
-    assert_eq!(bare["00291010"]["Value"].as_array().unwrap().len(), 2, "sequence items are still there");
+    assert_eq!(
+        bare["00080018"].as_object().unwrap().len(),
+        2,
+        "vr and Value only"
+    );
+    assert_eq!(
+        bare["00291010"]["Value"].as_array().unwrap().len(),
+        2,
+        "sequence items are still there"
+    );
     assert!(bare["00291010"]["Value"][1]["00291011"]["BulkDataURI"].is_string());
 
     // nothing else differs, and it still reads back as the same data set
@@ -5613,13 +7368,26 @@ fn omit_keyword_vm_leaves_only_ps3_18_members_at_every_level() {
     }
     assert_eq!(stripped, bare);
     let original = read_dicom_file(&path).unwrap();
-    assert_big_endian_round_trip_values(&original, &read_dicom_json_full_with_source(&bare_json, &bytes).unwrap());
+    assert_big_endian_round_trip_values(
+        &original,
+        &read_dicom_json_full_with_source(&bare_json, &bytes).unwrap(),
+    );
 
     // the option only concerns standard JSON
-    let flat = DicomJsonWriteOptions { format: DicomJsonFormat::Flat, ..standard };
+    let flat = DicomJsonWriteOptions {
+        format: DicomJsonFormat::Flat,
+        ..standard
+    };
     assert_eq!(
         dicom_file_to_json(&path, flat).unwrap(),
-        dicom_file_to_json(&path, DicomJsonWriteOptions { omit_keyword_vm: true, ..flat }).unwrap(),
+        dicom_file_to_json(
+            &path,
+            DicomJsonWriteOptions {
+                omit_keyword_vm: true,
+                ..flat
+            }
+        )
+        .unwrap(),
     );
     fs::remove_file(&path).ok();
 }
@@ -5656,7 +7424,10 @@ fn issue_standard_json(bytes: &[u8]) -> JsonValue {
 fn issue_standard_json_round_trip(json: &JsonValue) -> dcmnorm_object::DefaultDicomObject {
     read_dicom_json_with_options(
         &json.to_string(),
-        DicomJsonReadOptions { format: DicomJsonFormat::Standard, ..Default::default() },
+        DicomJsonReadOptions {
+            format: DicomJsonFormat::Standard,
+            ..Default::default()
+        },
     )
     .unwrap()
 }
@@ -5665,11 +7436,19 @@ fn issue_standard_json_round_trip(json: &JsonValue) -> dcmnorm_object::DefaultDi
 #[test]
 fn issue_23_standard_json_writes_at_values_as_hex() {
     let json = issue_standard_json(&issue_fixture("at_values.dcm"));
-    assert_eq!(json["00280009"], serde_json::json!({"vr": "AT", "Value": ["00181063", "00181065"]}));
+    assert_eq!(
+        json["00280009"],
+        serde_json::json!({"vr": "AT", "Value": ["00181063", "00181065"]})
+    );
 
     let object = issue_standard_json_round_trip(&json);
     assert_eq!(
-        object.element(tags::FRAME_INCREMENT_POINTER).unwrap().value().primitive().unwrap(),
+        object
+            .element(tags::FRAME_INCREMENT_POINTER)
+            .unwrap()
+            .value()
+            .primitive()
+            .unwrap(),
         &PrimitiveValue::Tags([Tag(0x0018, 0x1063), Tag(0x0018, 0x1065)].as_ref().into())
     );
 }
@@ -5691,14 +7470,39 @@ fn issue_24_iso_2022_person_names_decode_to_unicode() {
         );
 
         let mut object = read_dicom_bytes(&bytes).unwrap();
-        assert_eq!(object.element(tags::PATIENT_NAME).unwrap().to_str().unwrap(), text);
+        assert_eq!(
+            object
+                .element(tags::PATIENT_NAME)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            text
+        );
         let written = write_dicom_bytes(&mut object).unwrap();
         let reread = read_dicom_bytes(&written).unwrap();
-        assert_eq!(reread.element(tags::PATIENT_NAME).unwrap().to_str().unwrap(), text, "{name}");
+        assert_eq!(
+            reread
+                .element(tags::PATIENT_NAME)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            text,
+            "{name}"
+        );
         // the encoded bytes are the ones pydicom wrote
-        let needle: &[u8] = if name.contains("87") { b"\x1b$B;n83\x1b(B^\x1b$BJ8;z\x1b(B" } else { b"\x1b$)C\xc5\xd7\xbd\xba\xc6\xae^\x1b$)C\xb9\xae\xc0\xda" };
-        assert!(bytes.windows(needle.len()).any(|w| w == needle), "{name}: fixture bytes");
-        assert!(written.windows(needle.len()).any(|w| w == needle), "{name}: written bytes");
+        let needle: &[u8] = if name.contains("87") {
+            b"\x1b$B;n83\x1b(B^\x1b$BJ8;z\x1b(B"
+        } else {
+            b"\x1b$)C\xc5\xd7\xbd\xba\xc6\xae^\x1b$)C\xb9\xae\xc0\xda"
+        };
+        assert!(
+            bytes.windows(needle.len()).any(|w| w == needle),
+            "{name}: fixture bytes"
+        );
+        assert!(
+            written.windows(needle.len()).any(|w| w == needle),
+            "{name}: written bytes"
+        );
     }
 }
 
@@ -5706,7 +7510,10 @@ fn issue_24_iso_2022_person_names_decode_to_unicode() {
 #[test]
 fn issue_25_odd_group_private_creator_is_lo_in_implicit_vr() {
     let json = issue_standard_json(&issue_fixture("private_creator_50f1_implicit.dcm"));
-    assert_eq!(json["50F10010"], serde_json::json!({"vr": "LO", "Value": ["SYNTHETIC"]}));
+    assert_eq!(
+        json["50F10010"],
+        serde_json::json!({"vr": "LO", "Value": ["SYNTHETIC"]})
+    );
 }
 
 /// pohcee/dcmnorm#26: an undefined-length UN in Explicit VR holds an Implicit VR sequence.
@@ -5717,10 +7524,31 @@ fn issue_26_undefined_length_un_reads_as_implicit_vr_sequence() {
     let sequence = object.element(Tag(0x0011, 0x1010)).unwrap();
     let items = sequence.items().expect("a sequence");
     assert_eq!(items.len(), 1);
-    assert_eq!(items[0].element(tags::SERIES_DESCRIPTION).unwrap().to_str().unwrap(), "TEST");
+    assert_eq!(
+        items[0]
+            .element(tags::SERIES_DESCRIPTION)
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "TEST"
+    );
     // the elements after it are read again as Explicit VR
-    assert_eq!(object.element(tags::STUDY_INSTANCE_UID).unwrap().to_str().unwrap(), "2.25.91002");
-    assert_eq!(object.element(tags::SERIES_INSTANCE_UID).unwrap().to_str().unwrap(), "2.25.91003");
+    assert_eq!(
+        object
+            .element(tags::STUDY_INSTANCE_UID)
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "2.25.91002"
+    );
+    assert_eq!(
+        object
+            .element(tags::SERIES_INSTANCE_UID)
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "2.25.91003"
+    );
     issue_standard_json(&bytes);
 }
 
@@ -5740,15 +7568,38 @@ fn issue_27_explicit_unsigned_voi_lut_descriptor_is_kept() {
 fn issue_28_standard_json_empty_sequence_and_null_components() {
     let json = issue_standard_json(&issue_fixture("empty_values.dcm"));
     assert_eq!(json["00081111"], serde_json::json!({"vr": "SQ"}));
-    assert_eq!(json["00111010"], serde_json::json!({"vr": "LO", "Value": ["one", null, "three"]}));
+    assert_eq!(
+        json["00111010"],
+        serde_json::json!({"vr": "LO", "Value": ["one", null, "three"]})
+    );
 
     let object = issue_standard_json_round_trip(&json);
-    assert_eq!(object.element(Tag(0x0011, 0x1010)).unwrap().to_multi_str().unwrap().as_ref(), ["one", "", "three"]);
-    assert_eq!(object.element(Tag(0x0008, 0x1111)).unwrap().items().unwrap().len(), 0);
+    assert_eq!(
+        object
+            .element(Tag(0x0011, 0x1010))
+            .unwrap()
+            .to_multi_str()
+            .unwrap()
+            .as_ref(),
+        ["one", "", "three"]
+    );
+    assert_eq!(
+        object
+            .element(Tag(0x0008, 0x1111))
+            .unwrap()
+            .items()
+            .unwrap()
+            .len(),
+        0
+    );
 
     // a PN empty component is null too, and a sequence with one empty item is [{}]
     let mut object = object;
-    object.put(DataElement::new(tags::PATIENT_NAME, VR::PN, PrimitiveValue::Strs(["A^B".to_owned(), String::new()].as_ref().into())));
+    object.put(DataElement::new(
+        tags::PATIENT_NAME,
+        VR::PN,
+        PrimitiveValue::Strs(["A^B".to_owned(), String::new()].as_ref().into()),
+    ));
     object.put(DataElement::new(
         tags::REFERENCED_SERIES_SEQUENCE,
         VR::SQ,
@@ -5756,24 +7607,67 @@ fn issue_28_standard_json_empty_sequence_and_null_components() {
     ));
     let text = write_dicom_json_with_options(
         &object,
-        DicomJsonWriteOptions { format: DicomJsonFormat::Standard, key_style: DicomJsonKeyStyle::Hex, omit_keyword_vm: true, ..Default::default() },
+        DicomJsonWriteOptions {
+            format: DicomJsonFormat::Standard,
+            key_style: DicomJsonKeyStyle::Hex,
+            omit_keyword_vm: true,
+            ..Default::default()
+        },
     )
     .unwrap();
     let json: JsonValue = serde_json::from_str(&text).unwrap();
-    assert_eq!(json["00100010"]["Value"], serde_json::json!([{"Alphabetic": "A^B"}, null]));
-    assert_eq!(json["00081115"], serde_json::json!({"vr": "SQ", "Value": [{}]}));
+    assert_eq!(
+        json["00100010"]["Value"],
+        serde_json::json!([{"Alphabetic": "A^B"}, null])
+    );
+    assert_eq!(
+        json["00081115"],
+        serde_json::json!({"vr": "SQ", "Value": [{}]})
+    );
 }
 
 /// pohcee/dcmnorm#29: decoding a 10-bit JPEG 2000 codestream declared as BitsStored 8 gives a
 /// native object whose BitsStored/HighBit describe the decoded samples.
 #[test]
 fn issue_29_jpeg2000_decode_corrects_bits_stored_to_codestream_precision() {
-    let output = transcode_dicom_bytes(issue_fixture("j2k_codestream_precision_above_bits_stored.dcm"), uids::EXPLICIT_VR_LITTLE_ENDIAN).unwrap();
+    let output = transcode_dicom_bytes(
+        issue_fixture("j2k_codestream_precision_above_bits_stored.dcm"),
+        uids::EXPLICIT_VR_LITTLE_ENDIAN,
+    )
+    .unwrap();
     let object = read_dicom_bytes(&output).unwrap();
-    assert_eq!(object.element(tags::BITS_STORED).unwrap().to_int::<u16>().unwrap(), 10);
-    assert_eq!(object.element(tags::HIGH_BIT).unwrap().to_int::<u16>().unwrap(), 9);
-    assert_eq!(object.element(tags::BITS_ALLOCATED).unwrap().to_int::<u16>().unwrap(), 16);
-    let words: Vec<u16> = object.element(tags::PIXEL_DATA).unwrap().to_bytes().unwrap().chunks_exact(2).map(|w| u16::from_le_bytes([w[0], w[1]])).collect();
+    assert_eq!(
+        object
+            .element(tags::BITS_STORED)
+            .unwrap()
+            .to_int::<u16>()
+            .unwrap(),
+        10
+    );
+    assert_eq!(
+        object
+            .element(tags::HIGH_BIT)
+            .unwrap()
+            .to_int::<u16>()
+            .unwrap(),
+        9
+    );
+    assert_eq!(
+        object
+            .element(tags::BITS_ALLOCATED)
+            .unwrap()
+            .to_int::<u16>()
+            .unwrap(),
+        16
+    );
+    let words: Vec<u16> = object
+        .element(tags::PIXEL_DATA)
+        .unwrap()
+        .to_bytes()
+        .unwrap()
+        .chunks_exact(2)
+        .map(|w| u16::from_le_bytes([w[0], w[1]]))
+        .collect();
     assert_eq!(words, [0, 1, 256, 644]);
 }
 
@@ -5788,13 +7682,50 @@ fn jp2_wrapped_ybr_rct_fixture_with_marker_like_icc_bytes_renders_and_decodes() 
     let expected: [u8; 12] = [255, 0, 0, 0, 255, 0, 0, 0, 255, 17, 128, 250];
     let bytes = issue_fixture("jp2_ybr_rct_icc_marker_bytes.dcm");
     let object = read_dicom_bytes(&bytes).unwrap();
-    let rendered = render_dicom_frame(&object, RenderOutputFormat::Png, &RenderPipelineOptions::default()).unwrap();
-    assert_eq!(image::load_from_memory(&rendered.bytes).unwrap().to_rgb8().as_raw().as_slice(), expected);
+    let rendered = render_dicom_frame(
+        &object,
+        RenderOutputFormat::Png,
+        &RenderPipelineOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        image::load_from_memory(&rendered.bytes)
+            .unwrap()
+            .to_rgb8()
+            .as_raw()
+            .as_slice(),
+        expected
+    );
 
-    let native = read_dicom_bytes(&transcode_dicom_bytes(bytes, uids::EXPLICIT_VR_LITTLE_ENDIAN).unwrap()).unwrap();
-    assert_eq!(native.element(tags::PHOTOMETRIC_INTERPRETATION).unwrap().to_str().unwrap().trim(), "RGB");
-    assert_eq!(native.element(tags::BITS_STORED).unwrap().to_int::<u16>().unwrap(), 8);
-    assert_eq!(native.element(tags::PIXEL_DATA).unwrap().to_bytes().unwrap().as_ref(), expected);
+    let native =
+        read_dicom_bytes(&transcode_dicom_bytes(bytes, uids::EXPLICIT_VR_LITTLE_ENDIAN).unwrap())
+            .unwrap();
+    assert_eq!(
+        native
+            .element(tags::PHOTOMETRIC_INTERPRETATION)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .trim(),
+        "RGB"
+    );
+    assert_eq!(
+        native
+            .element(tags::BITS_STORED)
+            .unwrap()
+            .to_int::<u16>()
+            .unwrap(),
+        8
+    );
+    assert_eq!(
+        native
+            .element(tags::PIXEL_DATA)
+            .unwrap()
+            .to_bytes()
+            .unwrap()
+            .as_ref(),
+        expected
+    );
 }
 
 /// A JP2 box: LBox, TBox, payload.
@@ -5844,19 +7775,52 @@ fn jp2_wrapped_jpeg2000_fragment_with_icc_profile_decodes_and_renders() {
         let (_, fragments) = issue_fragments(&encoded);
         let wrapped = issue_jp2_with_marker_like_icc(&fragments[0], 3);
         let mut object = read_dicom_bytes(&encoded).unwrap();
-        object.put(DataElement::new(tags::PIXEL_DATA, VR::OB, PixelFragmentSequence::new(Vec::new(), vec![wrapped])));
+        object.put(DataElement::new(
+            tags::PIXEL_DATA,
+            VR::OB,
+            PixelFragmentSequence::new(Vec::new(), vec![wrapped]),
+        ));
         let bytes = write_dicom_bytes(&mut object).unwrap();
 
         let native = transcode_dicom_bytes(bytes.clone(), uids::EXPLICIT_VR_LITTLE_ENDIAN)
             .unwrap_or_else(|error| panic!("{target}: {error}"));
         let native = read_dicom_bytes(&native).unwrap();
-        assert_eq!(native.element(tags::BITS_STORED).unwrap().to_int::<u16>().unwrap(), 8, "{target}");
-        assert_eq!(native.element(tags::SAMPLES_PER_PIXEL).unwrap().to_int::<u16>().unwrap(), 3, "{target}");
-        assert_eq!(native.element(tags::PIXEL_DATA).unwrap().to_bytes().unwrap().as_ref(), expected, "{target}");
+        assert_eq!(
+            native
+                .element(tags::BITS_STORED)
+                .unwrap()
+                .to_int::<u16>()
+                .unwrap(),
+            8,
+            "{target}"
+        );
+        assert_eq!(
+            native
+                .element(tags::SAMPLES_PER_PIXEL)
+                .unwrap()
+                .to_int::<u16>()
+                .unwrap(),
+            3,
+            "{target}"
+        );
+        assert_eq!(
+            native
+                .element(tags::PIXEL_DATA)
+                .unwrap()
+                .to_bytes()
+                .unwrap()
+                .as_ref(),
+            expected,
+            "{target}"
+        );
 
         let object = read_dicom_bytes(&bytes).unwrap();
-        let rendered = render_dicom_frame(&object, RenderOutputFormat::Png, &RenderPipelineOptions::default())
-            .unwrap_or_else(|error| panic!("{target}: {error}"));
+        let rendered = render_dicom_frame(
+            &object,
+            RenderOutputFormat::Png,
+            &RenderPipelineOptions::default(),
+        )
+        .unwrap_or_else(|error| panic!("{target}: {error}"));
         let image = image::load_from_memory(&rendered.bytes).unwrap().to_rgb8();
         assert_eq!(image.as_raw().as_slice(), expected, "{target}");
     }
@@ -5869,7 +7833,10 @@ fn issue_fragments(bytes: &[u8]) -> (Vec<u32>, Vec<Vec<u8>>) {
     let dcmnorm_core::value::Value::PixelSequence(sequence) = element.value() else {
         panic!("expected encapsulated pixel data");
     };
-    (sequence.offset_table().to_vec(), sequence.fragments().iter().map(|f| f.to_vec()).collect())
+    (
+        sequence.offset_table().to_vec(),
+        sequence.fragments().iter().map(|f| f.to_vec()).collect(),
+    )
 }
 
 /// Decodes a JPEG 2000 family codestream with OpenJPEG (independent of the OpenHTJ2K encoder)
@@ -5877,7 +7844,9 @@ fn issue_fragments(bytes: &[u8]) -> (Vec<u32>, Vec<Vec<u8>>) {
 fn issue_decode_interleaved(codestream: &[u8]) -> Vec<i32> {
     let image = dcmnorm_jpeg2000::openjpeg::decode(codestream).unwrap();
     let pixels = image.components[0].data.len();
-    (0..pixels).flat_map(|i| image.components.iter().map(move |c| c.data[i])).collect()
+    (0..pixels)
+        .flat_map(|i| image.components.iter().map(move |c| c.data[i]))
+        .collect()
 }
 
 /// pohcee/dcmnorm#30: planar RGB is encoded to HTJ2K and classic JPEG 2000 with every sample at
@@ -5887,15 +7856,35 @@ fn issue_30_planar_rgb_encodes_to_jpeg2000_with_samples_in_place() {
     for target in ["1.2.840.10008.1.2.4.201", "1.2.840.10008.1.2.4.90"] {
         let output = transcode_dicom_bytes(issue_fixture("rgb_planar_1x2.dcm"), target).unwrap();
         let object = read_dicom_bytes(&output).unwrap();
-        assert_eq!(object.element(tags::PLANAR_CONFIGURATION).unwrap().to_int::<u16>().unwrap(), 0, "{target}");
+        assert_eq!(
+            object
+                .element(tags::PLANAR_CONFIGURATION)
+                .unwrap()
+                .to_int::<u16>()
+                .unwrap(),
+            0,
+            "{target}"
+        );
         let (_, fragments) = issue_fragments(&output);
         assert_eq!(fragments.len(), 1);
-        assert_eq!(issue_decode_interleaved(&fragments[0]), [1, 2, 255, 4, 5, 254], "{target}");
+        assert_eq!(
+            issue_decode_interleaved(&fragments[0]),
+            [1, 2, 255, 4, 5, 254],
+            "{target}"
+        );
 
         // and back to native: the interleaved samples of the source image
         let native = transcode_dicom_bytes(&output, uids::EXPLICIT_VR_LITTLE_ENDIAN).unwrap();
         let native = read_dicom_bytes(&native).unwrap();
-        assert_eq!(native.element(tags::PIXEL_DATA).unwrap().to_bytes().unwrap().as_ref(), [1, 2, 255, 4, 5, 254]);
+        assert_eq!(
+            native
+                .element(tags::PIXEL_DATA)
+                .unwrap()
+                .to_bytes()
+                .unwrap()
+                .as_ref(),
+            [1, 2, 255, 4, 5, 254]
+        );
     }
 }
 
@@ -5903,13 +7892,24 @@ fn issue_30_planar_rgb_encodes_to_jpeg2000_with_samples_in_place() {
 #[test]
 fn issue_31_multiframe_jpeg2000_encode_writes_complete_basic_offset_table() {
     for target in ["1.2.840.10008.1.2.4.201", "1.2.840.10008.1.2.4.90"] {
-        let output = transcode_dicom_bytes(issue_fixture("rgb_interleaved_1x2_2frames.dcm"), target).unwrap();
+        let output =
+            transcode_dicom_bytes(issue_fixture("rgb_interleaved_1x2_2frames.dcm"), target)
+                .unwrap();
         let (offsets, fragments) = issue_fragments(&output);
         assert_eq!(fragments.len(), 2, "{target}");
-        assert!(fragments.iter().all(|f| f.len() % 2 == 0), "{target}: even fragments");
+        assert!(
+            fragments.iter().all(|f| f.len() % 2 == 0),
+            "{target}: even fragments"
+        );
         assert_eq!(offsets, [0, 8 + fragments[0].len() as u32], "{target}");
-        assert_eq!(issue_decode_interleaved(&fragments[0]), [1, 2, 255, 4, 5, 254]);
-        assert_eq!(issue_decode_interleaved(&fragments[1]), [0, 1, 254, 3, 4, 253]);
+        assert_eq!(
+            issue_decode_interleaved(&fragments[0]),
+            [1, 2, 255, 4, 5, 254]
+        );
+        assert_eq!(
+            issue_decode_interleaved(&fragments[1]),
+            [0, 1, 254, 3, 4, 253]
+        );
     }
 }
 
@@ -5928,16 +7928,36 @@ fn issue_31_basic_offset_table_is_complete_or_empty() {
 /// JFIF/Adobe marker is RGB (Photometric Interpretation), not YCbCr; the Adobe control agrees.
 #[test]
 fn issue_32_jpeg_baseline_rgb_without_color_marker_is_not_ycbcr_converted() {
-    for name in ["jpeg_rgb_adobe_transform0.dcm", "jpeg_rgb_no_color_marker.dcm"] {
-        let output = transcode_dicom_bytes(issue_fixture(name), uids::EXPLICIT_VR_LITTLE_ENDIAN).unwrap();
+    for name in [
+        "jpeg_rgb_adobe_transform0.dcm",
+        "jpeg_rgb_no_color_marker.dcm",
+    ] {
+        let output =
+            transcode_dicom_bytes(issue_fixture(name), uids::EXPLICIT_VR_LITTLE_ENDIAN).unwrap();
         let object = read_dicom_bytes(&output).unwrap();
-        assert_eq!(object.element(tags::PHOTOMETRIC_INTERPRETATION).unwrap().to_str().unwrap(), "RGB");
-        let pixels = object.element(tags::PIXEL_DATA).unwrap().to_bytes().unwrap().to_vec();
+        assert_eq!(
+            object
+                .element(tags::PHOTOMETRIC_INTERPRETATION)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "RGB"
+        );
+        let pixels = object
+            .element(tags::PIXEL_DATA)
+            .unwrap()
+            .to_bytes()
+            .unwrap()
+            .to_vec();
         assert_eq!(pixels.len(), 8 * 8 * 3);
         for (i, pixel) in pixels.chunks_exact(3).enumerate() {
             for (channel, expected) in [200i32, 50, 10].into_iter().enumerate() {
                 let delta = (i32::from(pixel[channel]) - expected).abs();
-                assert!(delta <= 1, "{name}: pixel {i} channel {channel} is {}, expected {expected}", pixel[channel]);
+                assert!(
+                    delta <= 1,
+                    "{name}: pixel {i} channel {channel} is {}, expected {expected}",
+                    pixel[channel]
+                );
             }
         }
     }
@@ -5954,12 +7974,18 @@ fn issue_3_jpeg_xl_lossless_encode_round_trips() {
         let source = issue_fixture(name);
         let encoded = transcode_dicom_bytes(&source, JXL_LOSSLESS).unwrap();
         let object = read_dicom_bytes(&encoded).unwrap();
-        assert_eq!(object.meta().transfer_syntax().trim_end_matches('\0'), JXL_LOSSLESS);
+        assert_eq!(
+            object.meta().transfer_syntax().trim_end_matches('\0'),
+            JXL_LOSSLESS
+        );
         let (offsets, fragments) = issue_fragments(&encoded);
         let frames = if name.contains("2frames") { 2 } else { 1 };
         assert_eq!(fragments.len(), frames, "{name}");
         assert_eq!(offsets.len(), frames, "{name}: complete Basic Offset Table");
-        assert!(fragments.iter().all(|f| f.starts_with(&[0xFF, 0x0A])), "{name}: JPEG XL codestreams");
+        assert!(
+            fragments.iter().all(|f| f.starts_with(&[0xFF, 0x0A])),
+            "{name}: JPEG XL codestreams"
+        );
 
         let decoded = transcode_dicom_bytes(&encoded, uids::EXPLICIT_VR_LITTLE_ENDIAN).unwrap();
         let decoded = read_dicom_bytes(&decoded).unwrap();
@@ -5968,18 +7994,44 @@ fn issue_3_jpeg_xl_lossless_encode_round_trips() {
             // planar in, interleaved out
             vec![255, 0, 0, 0, 255, 0, 0, 0, 255, 17, 128, 250]
         } else {
-            original.element(tags::PIXEL_DATA).unwrap().to_bytes().unwrap().to_vec()
+            original
+                .element(tags::PIXEL_DATA)
+                .unwrap()
+                .to_bytes()
+                .unwrap()
+                .to_vec()
         };
-        assert_eq!(decoded.element(tags::PIXEL_DATA).unwrap().to_bytes().unwrap().as_ref(), expected.as_slice(), "{name}");
+        assert_eq!(
+            decoded
+                .element(tags::PIXEL_DATA)
+                .unwrap()
+                .to_bytes()
+                .unwrap()
+                .as_ref(),
+            expected.as_slice(),
+            "{name}"
+        );
         if name.starts_with("rgb") {
-            assert_eq!(decoded.element(tags::PLANAR_CONFIGURATION).unwrap().to_int::<u16>().unwrap(), 0);
+            assert_eq!(
+                decoded
+                    .element(tags::PLANAR_CONFIGURATION)
+                    .unwrap()
+                    .to_int::<u16>()
+                    .unwrap(),
+                0
+            );
         }
     }
 
     // unsupported inputs fail explicitly instead of producing changed samples
-    let one_row = transcode_dicom_bytes(issue_fixture("rgb_planar_1x2.dcm"), JXL_LOSSLESS).unwrap_err();
+    let one_row =
+        transcode_dicom_bytes(issue_fixture("rgb_planar_1x2.dcm"), JXL_LOSSLESS).unwrap_err();
     assert!(one_row.to_string().contains("2x2"), "{one_row}");
-    let signed = transcode_dicom_bytes(issue_fixture("voi_lut_unsigned_after_rescale.dcm"), JXL_LOSSLESS).unwrap_err();
+    let signed = transcode_dicom_bytes(
+        issue_fixture("voi_lut_unsigned_after_rescale.dcm"),
+        JXL_LOSSLESS,
+    )
+    .unwrap_err();
     assert!(signed.to_string().contains("unsigned"), "{signed}");
 }
 
@@ -5989,7 +8041,11 @@ fn issue_3_jpeg_xl_lossless_encode_round_trips() {
 #[test]
 fn flat_and_standard_json_trim_padded_number_strings_alike() {
     let mut object = read_dicom_bytes(issue_fixture("at_values.dcm")).unwrap();
-    object.put(DataElement::new(tags::SERIES_NUMBER, VR::IS, PrimitiveValue::from(" 107".to_owned())));
+    object.put(DataElement::new(
+        tags::SERIES_NUMBER,
+        VR::IS,
+        PrimitiveValue::from(" 107".to_owned()),
+    ));
     object.put(DataElement::new(
         tags::WINDOW_CENTER,
         VR::DS,
@@ -6002,12 +8058,20 @@ fn flat_and_standard_json_trim_padded_number_strings_alike() {
 
     let standard = write_dicom_json_with_options(
         &object,
-        DicomJsonWriteOptions { format: DicomJsonFormat::Standard, key_style: DicomJsonKeyStyle::Hex, omit_keyword_vm: true, ..Default::default() },
+        DicomJsonWriteOptions {
+            format: DicomJsonFormat::Standard,
+            key_style: DicomJsonKeyStyle::Hex,
+            omit_keyword_vm: true,
+            ..Default::default()
+        },
     )
     .unwrap();
     let standard: JsonValue = serde_json::from_str(&standard).unwrap();
     assert_eq!(standard["00200011"]["Value"], serde_json::json!(["107"]));
-    assert_eq!(standard["00281050"]["Value"], serde_json::json!(["1.5", "2"]));
+    assert_eq!(
+        standard["00281050"]["Value"],
+        serde_json::json!(["1.5", "2"])
+    );
 }
 
 /// An RLE frame (PS3.5 G.5) built by hand: the 64-byte header, then each segment exactly as
