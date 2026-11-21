@@ -12,7 +12,7 @@
 //! the queued PDVs and the fragments assembled so far are all kept.
 
 use std::collections::VecDeque;
-use std::io::{ErrorKind, Read};
+use std::io::{ErrorKind, Read, Write};
 
 use crate::error::{Error, Result};
 use crate::pdu::{self, PDataValue, PDataValueType, Pdu, PDU_HEADER_SIZE};
@@ -91,6 +91,69 @@ impl Receiver {
         match self.assemble(stream, max_pdu_length, PDataValueType::Data)? {
             Assembled::Message { data, .. } => Ok(data),
             Assembled::Other(pdu) => Err(Error::UnexpectedPdu(Box::new(pdu))),
+        }
+    }
+
+    /// Streams the data set following the command just received directly into `sink`, writing one
+    /// PDV at a time without accumulating the entire dataset in memory. Preserves any trailing
+    /// PDVs packed into the final P-DATA-TF PDU (e.g. the next DIMSE command) in `self.pending`.
+    pub(crate) fn receive_data_set_to<R: Read, W: Write>(
+        &mut self,
+        stream: &mut R,
+        max_pdu_length: u32,
+        expected_pc_id: Option<u8>,
+        sink: &mut W,
+    ) -> Result<u64> {
+        let mut total = 0u64;
+        loop {
+            if let Some(pdv) = self.pending.pop_front() {
+                if pdv.value_type != PDataValueType::Data {
+                    return Err(Error::UnexpectedPdv {
+                        expected: PDataValueType::Data,
+                        got: pdv.value_type,
+                    });
+                }
+                if let Some(expected) = expected_pc_id {
+                    if pdv.presentation_context_id != expected {
+                        return Err(Error::UnexpectedPresentationContext {
+                            expected,
+                            got: pdv.presentation_context_id,
+                        });
+                    }
+                }
+                if !pdv.data.is_empty() {
+                    sink.write_all(&pdv.data).map_err(Error::Io)?;
+                    total += pdv.data.len() as u64;
+                }
+                if pdv.is_last {
+                    return Ok(total);
+                }
+                continue;
+            }
+            match self.read_pdu(stream, max_pdu_length)? {
+                Pdu::PData { data } => self.pending.extend(data),
+                other => return Err(Error::UnexpectedPdu(Box::new(other))),
+            }
+        }
+    }
+
+    /// Returns a streaming [`std::io::Read`] over the Data PDVs of the data set following the
+    /// command just received. Yields EOF once the PDV with `is_last == true` is exhausted,
+    /// leaving any subsequent PDVs in `self.pending`.
+    pub(crate) fn data_set_reader<'a, R: Read>(
+        &'a mut self,
+        stream: &'a mut R,
+        max_pdu_length: u32,
+        expected_pc_id: Option<u8>,
+    ) -> PDataReader<'a, R> {
+        PDataReader {
+            receiver: self,
+            stream,
+            max_pdu_length,
+            expected_pc_id,
+            current: Vec::new(),
+            pos: 0,
+            done: false,
         }
     }
 
@@ -181,6 +244,96 @@ impl Receiver {
                 Err(e) => return Err(Error::Io(e)),
             }
         }
+    }
+}
+
+/// Streaming [`std::io::Read`] over one DIMSE data set's incoming P-DATA-TF Data PDVs.
+///
+/// Buffers at most one PDV (bounded by `max_pdu_length`) at a time and yields EOF as soon as the
+/// final PDV (`is_last == true`) has been consumed, leaving any trailing PDVs from the same PDU
+/// untouched in the association's receive queue.
+pub struct PDataReader<'a, R> {
+    receiver: &'a mut Receiver,
+    stream: &'a mut R,
+    max_pdu_length: u32,
+    expected_pc_id: Option<u8>,
+    current: Vec<u8>,
+    pos: usize,
+    done: bool,
+}
+
+impl<R: Read> PDataReader<'_, R> {
+    fn fetch_next_pdv(&mut self) -> Result<bool> {
+        loop {
+            if self.done {
+                return Ok(false);
+            }
+            if let Some(pdv) = self.receiver.pending.pop_front() {
+                if pdv.value_type != PDataValueType::Data {
+                    return Err(Error::UnexpectedPdv {
+                        expected: PDataValueType::Data,
+                        got: pdv.value_type,
+                    });
+                }
+                if let Some(expected) = self.expected_pc_id {
+                    if pdv.presentation_context_id != expected {
+                        return Err(Error::UnexpectedPresentationContext {
+                            expected,
+                            got: pdv.presentation_context_id,
+                        });
+                    }
+                }
+                self.current = pdv.data;
+                self.pos = 0;
+                self.done = pdv.is_last;
+                if !self.current.is_empty() {
+                    return Ok(true);
+                }
+                continue;
+            }
+            match self.receiver.read_pdu(self.stream, self.max_pdu_length)? {
+                Pdu::PData { data } => self.receiver.pending.extend(data),
+                other => return Err(Error::UnexpectedPdu(Box::new(other))),
+            }
+        }
+    }
+
+    /// Consume and discard all remaining bytes of this data set through its `is_last == true`
+    /// PDV, so the association remains aligned for subsequent messages even after a mid-stream
+    /// processing error.
+    pub fn drain_to_end(&mut self) -> Result<u64> {
+        let mut drained = (self.current.len() - self.pos) as u64;
+        self.current.clear();
+        self.pos = 0;
+        while !self.done {
+            if self.fetch_next_pdv()? {
+                drained += self.current.len() as u64;
+                self.current.clear();
+                self.pos = 0;
+            }
+        }
+        Ok(drained)
+    }
+}
+
+impl<R: Read> Read for PDataReader<'_, R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        if self.pos >= self.current.len() {
+            match self.fetch_next_pdv() {
+                Ok(true) => {}
+                Ok(false) => return Ok(0),
+                Err(Error::Io(io_err)) => return Err(io_err),
+                Err(other) => return Err(std::io::Error::other(other.to_string())),
+            }
+        }
+        let avail = self.current.len() - self.pos;
+        let n = avail.min(buf.len());
+        buf[..n].copy_from_slice(&self.current[self.pos..self.pos + n]);
+        self.pos += n;
+        Ok(n)
     }
 }
 
@@ -403,5 +556,107 @@ mod tests {
             r.receive_pdu(&mut Cursor::new(vec![0x04, 0x00, 0x00]), MAX),
             Err(Error::Io(_))
         ));
+    }
+
+    #[test]
+    fn pdata_reader_streams_dataset_and_preserves_packed_next_command() {
+        let mut wire = pdu_bytes(&Pdu::PData {
+            data: vec![pdv(Command, true, b"cmd1"), pdv(Data, false, b"hello-")],
+        });
+        wire.extend(pdu_bytes(&Pdu::PData {
+            data: vec![pdv(Data, true, b"world"), pdv(Command, true, b"cmd2")],
+        }));
+        let mut stream = Cursor::new(wire);
+        let mut r = Receiver::default();
+        match r.receive_command(&mut stream, MAX).unwrap() {
+            Incoming::Command { data, .. } => assert_eq!(data, b"cmd1"),
+            other => panic!("expected cmd1, got {other:?}"),
+        }
+        let mut out = Vec::new();
+        {
+            let mut reader = r.data_set_reader(&mut stream, MAX, Some(1));
+            reader.read_to_end(&mut out).unwrap();
+        }
+        assert_eq!(out, b"hello-world");
+        match r.receive_command(&mut stream, MAX).unwrap() {
+            Incoming::Command { data, .. } => assert_eq!(data, b"cmd2"),
+            other => panic!("expected cmd2, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pdata_reader_drain_to_end_keeps_association_aligned() {
+        let mut wire = pdu_bytes(&Pdu::PData {
+            data: vec![pdv(Command, true, b"cmd1"), pdv(Data, false, b"prefix-")],
+        });
+        wire.extend(pdu_bytes(&Pdu::PData {
+            data: vec![pdv(Data, false, b"middle-")],
+        }));
+        wire.extend(pdu_bytes(&Pdu::PData {
+            data: vec![pdv(Data, true, b"suffix"), pdv(Command, true, b"cmd2")],
+        }));
+        let mut stream = Cursor::new(wire);
+        let mut r = Receiver::default();
+        r.receive_command(&mut stream, MAX).unwrap();
+        {
+            let mut reader = r.data_set_reader(&mut stream, MAX, Some(1));
+            let mut head = [0u8; 4];
+            reader.read_exact(&mut head).unwrap();
+            assert_eq!(&head, b"pref");
+            let drained = reader.drain_to_end().unwrap();
+            assert_eq!(drained, 16); // "ix-middle-suffix"
+        }
+        match r.receive_command(&mut stream, MAX).unwrap() {
+            Incoming::Command { data, .. } => assert_eq!(data, b"cmd2"),
+            other => panic!("expected cmd2, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn receive_data_set_to_streams_exact_bytes_and_keeps_next_command() {
+        let mut wire = pdu_bytes(&Pdu::PData {
+            data: vec![pdv(Command, true, b"cmd1"), pdv(Data, false, b"abc")],
+        });
+        wire.extend(pdu_bytes(&Pdu::PData {
+            data: vec![pdv(Data, true, b"def"), pdv(Command, true, b"cmd2")],
+        }));
+        let mut stream = Cursor::new(wire);
+        let mut r = Receiver::default();
+        r.receive_command(&mut stream, MAX).unwrap();
+        let mut sink = Vec::new();
+        let written = r
+            .receive_data_set_to(&mut stream, MAX, Some(1), &mut sink)
+            .unwrap();
+        assert_eq!(written, 6);
+        assert_eq!(sink, b"abcdef");
+        match r.receive_command(&mut stream, MAX).unwrap() {
+            Incoming::Command { data, .. } => assert_eq!(data, b"cmd2"),
+            other => panic!("expected cmd2, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pdata_reader_rejects_mismatched_presentation_context_id() {
+        let wire = pdu_bytes(&Pdu::PData {
+            data: vec![
+                pdv(Command, true, b"cmd1"),
+                PDataValue {
+                    presentation_context_id: 3,
+                    value_type: Data,
+                    is_last: true,
+                    data: b"wrong-pc".to_vec(),
+                },
+            ],
+        });
+        let mut stream = Cursor::new(wire);
+        let mut r = Receiver::default();
+        r.receive_command(&mut stream, MAX).unwrap();
+        let mut reader = r.data_set_reader(&mut stream, MAX, Some(1));
+        let mut out = Vec::new();
+        let err = reader.read_to_end(&mut out).unwrap_err();
+        assert!(
+            err.to_string().contains("presentation context ID"),
+            "unexpected error: {err}"
+        );
     }
 }

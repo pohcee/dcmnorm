@@ -414,7 +414,13 @@ impl OpenFileOptions {
             let (object, pixel_data) =
                 crate::mem::build_dataset_deferring_pixel_data(&mut reader, base_offset)?;
             if pixel_data.max_end() > file_len {
-                return Ok(None);
+                return Err(ReadError::Io {
+                    source: std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "deferred PixelData extends past end of file",
+                    ),
+                    context: "validating PixelData bounds",
+                });
             }
             (meta, object, pixel_data)
         };

@@ -121,6 +121,7 @@ impl ClientAssociationOptions {
             TcpStream::connect(&addrs[..]).map_err(Error::Connect)?
         };
 
+        let _ = stream.set_nodelay(true);
         stream
             .set_read_timeout(self.read_timeout)
             .map_err(Error::Io)?;
@@ -360,5 +361,30 @@ mod tests {
         let opts = ClientAssociationOptions::new();
         assert_eq!(opts.read_timeout, Some(DEFAULT_IO_TIMEOUT));
         assert_eq!(opts.write_timeout, Some(DEFAULT_IO_TIMEOUT));
+    }
+
+    #[test]
+    fn tcp_nodelay_is_enabled_on_established_associations() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_thread = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut assoc = crate::server::ServerAssociationOptions::new()
+                .promiscuous(true)
+                .establish(stream)
+                .unwrap();
+            assert!(assoc.inner_stream().nodelay().unwrap());
+            let pdu = assoc.receive().unwrap();
+            assert_eq!(pdu, Pdu::ReleaseRQ);
+            assoc.send(&Pdu::ReleaseRP).unwrap();
+        });
+
+        let mut client = ClientAssociationOptions::new()
+            .with_presentation_context("1.2.840.10008.1.1", vec!["1.2.840.10008.1.2".to_owned()])
+            .establish_with(&addr.to_string())
+            .unwrap();
+        assert!(client.inner_stream().nodelay().unwrap());
+        client.release().unwrap();
+        server_thread.join().unwrap();
     }
 }
