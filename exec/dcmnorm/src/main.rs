@@ -14,14 +14,14 @@ use dcmnorm::dicom_io::{
     read_dicom_file_deferring_bulk_data, read_dicom_file_for_frame, read_dicom_json_with_options,
     redact_dicom_pixels_to_transfer_syntax, reformat_plane, reformat_plane_values,
     remove_attribute_path, render_all_dicom_frames, render_dicom_frame, rotate_basis,
-    set_attribute, set_attribute_path, transcode_dcmnorm_object_owned, write_dicom_file,
-    write_dicom_json_with_options, write_dicom_video, write_dicomdir, write_nifti, write_nrrd,
-    write_reformatted_dicom_slice, BoundingBox, BoxLength, ConsistencyReport,
-    DicomJsonBulkDataMode, DicomJsonFormat, DicomJsonKeyStyle, DicomJsonReadOptions,
-    DicomJsonWriteOptions, DicomdirOptions, HistogramOptions, Interpolation, PackedTexture,
-    PlaneParams, RenderOutputFormat, RenderPipelineOptions, Severity, SlabProjection,
-    SliceGeometry, TextureCompression, Volume, VolumeGeometry, JPEG2000_CODEC_ENV_FLAG,
-    JPEG2000_DEBUG_ENV_FLAG,
+    set_attribute, set_attribute_path, transcode_dcmnorm_object_owned, transcode_dicom_file,
+    write_dicom_file, write_dicom_json_with_options, write_dicom_video, write_dicomdir,
+    write_nifti, write_nrrd, write_reformatted_dicom_slice, BoundingBox, BoxLength,
+    ConsistencyReport, DicomJsonBulkDataMode, DicomJsonFormat, DicomJsonKeyStyle,
+    DicomJsonReadOptions, DicomJsonWriteOptions, DicomdirOptions, HistogramOptions, Interpolation,
+    PackedTexture, PlaneParams, RenderOutputFormat, RenderPipelineOptions, Severity,
+    SlabProjection, SliceGeometry, TextureCompression, Volume, VolumeGeometry,
+    JPEG2000_CODEC_ENV_FLAG, JPEG2000_DEBUG_ENV_FLAG,
 };
 use dcmnorm::perf;
 use dcmnorm::remove_private_tags_inplace;
@@ -1555,6 +1555,19 @@ fn process_one(cli: &Cli, input_path: &Path) -> Result<(), Box<dyn std::error::E
     }
 
     if let Ok(direction @ (Direction::DicomToDicom | Direction::DicomToRender)) = prefix_direction {
+        // Pure DICOM -> DICOM transcode (no tag edits or pixel redaction): stream directly from
+        // `input_path` to `output_path` via `transcode_dicom_file`, so large multi-frame files
+        // (such as breast tomosynthesis) transcode frame-by-frame without loading PixelData in full.
+        if direction == Direction::DicomToDicom
+            && cli.transfer_syntax.is_some()
+            && cli.set.is_empty()
+            && cli.remove.is_empty()
+            && !cli.remove_private_tags
+            && cli.redact_box.is_empty()
+        {
+            return run_dicom_to_dicom_streaming(cli, input_path);
+        }
+
         // Rendering one frame of a native multi-frame object only needs that frame's bytes (see
         // read_dicom_file_for_frame), the way dcmtk's dcmj2pnm reads it. Anything the shortcut
         // doesn't cover - or any error from it - falls back to the full read below.
@@ -1920,12 +1933,10 @@ fn run_dicom_to_dicom(
     run_dicom_to_dicom_with_object(cli, input_path, object)
 }
 
-fn run_dicom_to_dicom_with_object(
-    cli: &Cli,
-    input_path: &Path,
-    mut object: dcmnorm_object::DefaultDicomObject,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let _scope = perf::scope("cli.run_dicom_to_dicom");
+fn validate_dicom_to_dicom_cli<'a>(
+    cli: &'a Cli,
+    input_path: &'a Path,
+) -> Result<&'a Path, Box<dyn std::error::Error>> {
     validate_non_dicom_to_dicom_render_flags(cli)?;
 
     if cli.overwrite && cli.output.is_some() {
@@ -1954,8 +1965,6 @@ fn run_dicom_to_dicom_with_object(
         )
         .into());
     }
-
-    let target_transfer_syntax = cli.transfer_syntax.as_deref();
 
     if cli.keys != KeyFormat::Name {
         return Err(io::Error::new(
@@ -1996,6 +2005,40 @@ fn run_dicom_to_dicom_with_object(
         )
         .into());
     }
+
+    Ok(output_path)
+}
+
+fn run_dicom_to_dicom_streaming(
+    cli: &Cli,
+    input_path: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let _scope = perf::scope("cli.run_dicom_to_dicom_streaming");
+    let output_path = validate_dicom_to_dicom_cli(cli, input_path)?;
+    let target_transfer_syntax = cli
+        .transfer_syntax
+        .as_deref()
+        .expect("streaming transcode requires --transfer-syntax");
+    verbose_log(
+        cli,
+        format!(
+            "Streaming transcode of {} to transfer syntax {}",
+            input_path.display(),
+            target_transfer_syntax
+        ),
+    );
+    transcode_dicom_file(input_path, output_path, target_transfer_syntax)?;
+    Ok(())
+}
+
+fn run_dicom_to_dicom_with_object(
+    cli: &Cli,
+    input_path: &Path,
+    mut object: dcmnorm_object::DefaultDicomObject,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let _scope = perf::scope("cli.run_dicom_to_dicom");
+    let output_path = validate_dicom_to_dicom_cli(cli, input_path)?;
+    let target_transfer_syntax = cli.transfer_syntax.as_deref();
 
     apply_attribute_overrides(cli, &mut object)?;
     if cli.remove_private_tags {

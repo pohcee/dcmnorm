@@ -265,6 +265,54 @@ impl InMemDicomObject {
         }
         Ok(())
     }
+
+    /// Write this object as a bare data set, splitting top-level elements around `(7FE0,0010)`
+    /// and invoking `write_pixel_data` at the exact tag-order position of `PixelData` (skipping
+    /// any `PixelData` stored in `self`).
+    pub(crate) fn write_dataset_with_ts_and_pixel_data<'w, W, E, F>(
+        &self,
+        to: W,
+        ts: &TransferSyntax,
+        write_pixel_data: F,
+    ) -> Result<(), E>
+    where
+        W: Write + 'w,
+        E: From<WriteError>,
+        F: FnOnce(
+            &mut DataSetWriter<
+                Box<dyn Write + 'w>,
+                dcmnorm_encoding::transfer_syntax::DynEncoder<'w, Box<dyn Write + 'w>>,
+            >,
+        ) -> Result<(), E>,
+    {
+        const PIXEL_DATA: Tag = Tag(0x7FE0, 0x0010);
+        let to: Box<dyn Write + 'w> = match ts.codec() {
+            Codec::Dataset(Some(adapter)) => adapter.adapt_writer(Box::new(to)),
+            _ => Box::new(to),
+        };
+        let mut writer =
+            DataSetWriter::with_ts(to, ts).map_err(|source| WriteError::Dataset { source })?;
+        let mut write_pixel_data = Some(write_pixel_data);
+        for element in &self.elements {
+            let tag = element.tag();
+            if tag == PIXEL_DATA {
+                continue;
+            }
+            if tag > PIXEL_DATA {
+                if let Some(write_pixels) = write_pixel_data.take() {
+                    write_pixels(&mut writer)?;
+                }
+            }
+            write_element_tokens(&mut writer, element)?;
+        }
+        if let Some(write_pixels) = write_pixel_data.take() {
+            write_pixels(&mut writer)?;
+        }
+        writer
+            .flush()
+            .map_err(|source| WriteError::Dataset { source })?;
+        Ok(())
+    }
 }
 
 fn vr_for_action_value(value: &PrimitiveValue) -> VR {
@@ -796,6 +844,132 @@ pub(crate) fn build_dataset_deferring<R: Read + std::io::Seek>(
 
     elements.sort_by_key(|e| e.tag());
     Ok((InMemDicomObject { elements }, deferred))
+}
+
+/// Absolute file offset and byte length of one encapsulated pixel data fragment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FragmentLocation {
+    pub offset: u64,
+    pub length: u32,
+}
+
+/// Location of top-level `(7FE0,0010) PixelData` left on disk by
+/// [`crate::OpenFileOptions::open_file_deferring_pixel_data`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeferredPixelData {
+    Absent,
+    Native {
+        vr: VR,
+        offset: u64,
+        length: u32,
+    },
+    Encapsulated {
+        offset_table: Vec<u32>,
+        fragments: Vec<FragmentLocation>,
+        end_offset: u64,
+    },
+}
+
+impl DeferredPixelData {
+    /// Furthest byte offset referenced in the source file (used to detect truncated files).
+    pub fn max_end(&self) -> u64 {
+        match self {
+            Self::Absent => 0,
+            Self::Native { offset, length, .. } => offset.saturating_add(u64::from(*length)),
+            Self::Encapsulated {
+                fragments,
+                end_offset,
+                ..
+            } => fragments
+                .iter()
+                .map(|f| f.offset.saturating_add(u64::from(f.length)))
+                .max()
+                .unwrap_or(0)
+                .max(*end_offset),
+        }
+    }
+}
+
+/// Read an entire data set while skipping ONLY top-level `(7FE0,0010) PixelData` (native or
+/// encapsulated). Nested elements (such as `PixelData` inside `IconImageSequence`) and trailing
+/// elements after `PixelData` are read normally.
+pub(crate) fn build_dataset_deferring_pixel_data<R: Read + std::io::Seek>(
+    reader: &mut DataSetReader<dcmnorm_parser::stateful::decode::DynStatefulDecoder<R>>,
+    base_offset: u64,
+) -> Result<(InMemDicomObject, DeferredPixelData), ReadError> {
+    const PIXEL_DATA: Tag = Tag(0x7FE0, 0x0010);
+    let mut elements = Vec::new();
+    let mut pixel_data = DeferredPixelData::Absent;
+
+    while let Some(token) = reader.next() {
+        match token? {
+            DataToken::ElementHeader(header)
+                if header.tag == PIXEL_DATA && header.len.is_defined() =>
+            {
+                let skipped = reader.skip_value()?;
+                let Ok(length) = u32::try_from(skipped.length) else {
+                    return Err(ReadError::UnexpectedToken {
+                        context: "native PixelData length exceeds u32::MAX",
+                    });
+                };
+                pixel_data = DeferredPixelData::Native {
+                    vr: header.vr,
+                    offset: base_offset + skipped.position,
+                    length,
+                };
+            }
+
+            DataToken::ElementHeader(header) => {
+                let value = expect_primitive_value(reader)?;
+                elements.push(DataElement::new(header.tag, header.vr, value));
+            }
+
+            DataToken::SequenceStart { tag, len } => {
+                let mut items: C<InMemDicomObject> = C::new();
+                loop {
+                    match next_required(reader)? {
+                        DataToken::ItemStart { .. } => {
+                            items.push(build_dataset(reader, true)?);
+                        }
+                        DataToken::SequenceEnd => break,
+                        _ => {
+                            return Err(ReadError::UnexpectedToken {
+                                context: "expected ItemStart or SequenceEnd in sequence",
+                            })
+                        }
+                    }
+                }
+                let value = Value::Sequence(DataSetSequence::new(items, len));
+                elements.push(DataElement::new(tag, VR::SQ, value));
+            }
+
+            DataToken::PixelSequenceStart => {
+                let skipped = reader.skip_pixel_sequence_indexed()?;
+                let fragments = skipped
+                    .fragments
+                    .into_iter()
+                    .map(|frag| FragmentLocation {
+                        offset: base_offset + frag.position,
+                        length: frag.length,
+                    })
+                    .collect();
+                pixel_data = DeferredPixelData::Encapsulated {
+                    offset_table: skipped.offset_table,
+                    fragments,
+                    end_offset: base_offset + skipped.end_position,
+                };
+            }
+
+            _ => {
+                return Err(ReadError::UnexpectedToken {
+                    context: "unexpected token at data set top level",
+                })
+            }
+        }
+    }
+
+    elements.sort_by_key(|e| e.tag());
+    Ok((InMemDicomObject { elements }, pixel_data))
 }
 
 /// Read the token sequence following a `PixelSequenceStart` token (already consumed by the

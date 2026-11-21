@@ -37,13 +37,14 @@ pub mod jpeg_ls_impl {
                 .map(|frame_index| encapsulated_frame_fragment_range(object, frame_index))
                 .collect();
             if let Some(ranges) = ranges {
+                let total = ranges.len();
                 let mut decoded = Vec::new();
-                for range in ranges {
-                    decoded.extend_from_slice(&decode_codestream(
-                        &frame_codestream(fragments, range),
-                        rows,
-                        cols,
-                    )?);
+                for (index, range) in ranges.into_iter().enumerate() {
+                    let frame = decode_codestream(&frame_codestream(fragments, range), rows, cols)?;
+                    if index == 0 && total > 1 {
+                        let _ = decoded.try_reserve(frame.len().saturating_mul(total));
+                    }
+                    decoded.extend_from_slice(&frame);
                 }
                 return Ok(decoded);
             }
@@ -51,9 +52,14 @@ pub mod jpeg_ls_impl {
 
         // One fragment per frame. charls decodes samples into native (little-endian) byte
         // order, matching what every other codec here hands to `replace_with_native_pixel_data`.
+        let total = fragments.len();
         let mut decoded = Vec::new();
-        for fragment in fragments {
-            decoded.extend_from_slice(&decode_codestream(fragment, rows, cols)?);
+        for (index, fragment) in fragments.iter().enumerate() {
+            let frame = decode_codestream(fragment, rows, cols)?;
+            if index == 0 && total > 1 {
+                let _ = decoded.try_reserve(frame.len().saturating_mul(total));
+            }
+            decoded.extend_from_slice(&frame);
         }
 
         Ok(decoded)
@@ -128,7 +134,7 @@ pub mod jpeg_ls_impl {
     /// attributes, and either way is worth a clear error instead of the confusing shape
     /// mismatch that would otherwise surface downstream. charls decodes samples into native
     /// (little-endian) byte order.
-    fn decode_codestream(codestream: &[u8], rows: u32, cols: u32) -> Result<Vec<u8>, String> {
+    pub fn decode_codestream(codestream: &[u8], rows: u32, cols: u32) -> Result<Vec<u8>, String> {
         if codestream.is_empty() {
             return Err("empty JPEG-LS fragment".to_owned());
         }
@@ -148,6 +154,40 @@ pub mod jpeg_ls_impl {
             .map_err(|e| format!("JPEG-LS decode failed: {e}"))
     }
 
+    pub fn encode_jpeg_ls_frame(
+        frame_bytes: &[u8],
+        rows: u16,
+        cols: u16,
+        samples_per_pixel: u16,
+        bits_stored: u16,
+        planar_configuration: u16,
+        lossless: bool,
+    ) -> Result<Vec<u8>, String> {
+        let frame_info = charls::FrameInfo {
+            width: u32::from(cols),
+            height: u32::from(rows),
+            bits_per_sample: i32::from(bits_stored),
+            component_count: i32::from(samples_per_pixel),
+        };
+        let near = if lossless { 0 } else { NEAR_LOSSLESS_STEP };
+
+        let mut encoder = charls::CharLS::default();
+        if samples_per_pixel > 1 {
+            let interleave_mode = if planar_configuration == 0 {
+                charls::InterleaveMode::Sample
+            } else {
+                charls::InterleaveMode::None
+            };
+            encoder
+                .set_interleave_mode(interleave_mode)
+                .map_err(|e| format!("failed to set JPEG-LS interleave mode: {e}"))?;
+        }
+
+        encoder
+            .encode(frame_info, near, frame_bytes)
+            .map_err(|e| format!("{e}"))
+    }
+
     /// Encode raw native pixel data to JPEG-LS, one fragment per frame - the mirror image of
     /// `decode_jpeg_ls_pixel_data` above, and matching the "one fragment per frame" convention
     /// its own doc comment explains.
@@ -159,8 +199,7 @@ pub mod jpeg_ls_impl {
             .element(tags::PIXEL_DATA)
             .map_err(|e| format!("missing PixelData: {e}"))?
             .to_bytes()
-            .map_err(|e| format!("failed to access pixel data: {e}"))?
-            .to_vec();
+            .map_err(|e| format!("failed to access pixel data: {e}"))?;
 
         let rows = object
             .get(tags::ROWS)
@@ -217,34 +256,20 @@ pub mod jpeg_ls_impl {
             ));
         }
 
-        let frame_info = charls::FrameInfo {
-            width: u32::from(cols),
-            height: u32::from(rows),
-            bits_per_sample: i32::from(bits_stored),
-            component_count: i32::from(samples_per_pixel),
-        };
-        let near = if lossless { 0 } else { NEAR_LOSSLESS_STEP };
-
         let mut fragments = Vec::with_capacity(number_of_frames);
         for frame_index in 0..number_of_frames {
             let start = frame_index * frame_len;
             let frame_bytes = &pixel_data[start..start + frame_len];
-
-            let mut encoder = charls::CharLS::default();
-            if samples_per_pixel > 1 {
-                let interleave_mode = if planar_configuration == 0 {
-                    charls::InterleaveMode::Sample
-                } else {
-                    charls::InterleaveMode::None
-                };
-                encoder
-                    .set_interleave_mode(interleave_mode)
-                    .map_err(|e| format!("failed to set JPEG-LS interleave mode: {e}"))?;
-            }
-
-            let encoded = encoder
-                .encode(frame_info.clone(), near, frame_bytes)
-                .map_err(|e| format!("JPEG-LS encode failed for frame {frame_index}: {e}"))?;
+            let encoded = encode_jpeg_ls_frame(
+                frame_bytes,
+                rows,
+                cols,
+                samples_per_pixel,
+                bits_stored,
+                planar_configuration,
+                lossless,
+            )
+            .map_err(|e| format!("JPEG-LS encode failed for frame {frame_index}: {e}"))?;
             fragments.push(encoded);
         }
 
@@ -267,6 +292,27 @@ pub mod jpeg_ls_impl {
         Err("JPEG-LS codec support requires 'jpeg-ls-codec' feature to be enabled".to_owned())
     }
 
+    pub fn decode_codestream(
+        _codestream: &[u8],
+        _rows: u32,
+        _cols: u32,
+    ) -> Result<Vec<u8>, String> {
+        Err("JPEG-LS codec support requires 'jpeg-ls-codec' feature to be enabled".to_owned())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn encode_jpeg_ls_frame(
+        _frame_bytes: &[u8],
+        _rows: u16,
+        _cols: u16,
+        _samples_per_pixel: u16,
+        _bits_stored: u16,
+        _planar_configuration: u16,
+        _lossless: bool,
+    ) -> Result<Vec<u8>, String> {
+        Err("JPEG-LS codec support requires 'jpeg-ls-codec' feature to be enabled".to_owned())
+    }
+
     pub fn encode_jpeg_ls_pixel_data(
         _object: &DefaultDicomObject,
         _lossless: bool,
@@ -276,7 +322,8 @@ pub mod jpeg_ls_impl {
 }
 
 pub use jpeg_ls_impl::{
-    decode_jpeg_ls_frame, decode_jpeg_ls_pixel_data, encode_jpeg_ls_pixel_data,
+    decode_codestream as decode_jpeg_ls_codestream, decode_jpeg_ls_frame,
+    decode_jpeg_ls_pixel_data, encode_jpeg_ls_frame, encode_jpeg_ls_pixel_data,
 };
 
 #[cfg(test)]

@@ -52,7 +52,9 @@ const EXCEPTION_CLASS: &str = "com/pohcee/dcmnorm/DcmnormException";
 
 mod dataset;
 use dataset::throw_api_error;
-use dcmnorm::dicom_io::{catch_api_panic, transcode_source, ApiError, ApiErrorKind, DicomSource};
+use dcmnorm::dicom_io::{
+    catch_api_panic, transcode_source_to_path, ApiError, ApiErrorKind, DicomSource,
+};
 
 // -------------------------------------------------------------------------------------------
 // Shared plumbing: panic guarding, exception throwing, JSON option parsing
@@ -666,12 +668,11 @@ pub extern "system" fn Java_com_pohcee_dcmnorm_Dcmnorm_nativeTranscode<'local>(
     };
 
     let result = catch_api_panic(|| {
-        let mut object = transcode_source(
+        transcode_source_to_path(
             DicomSource::Path(&PathBuf::from(file_path)),
+            &PathBuf::from(output_path),
             &transfer_syntax_uid,
-        )?;
-        write_dicom_file(&mut object, PathBuf::from(output_path))
-            .map_err(|error| ApiError::from(error).with_target_ts(Some(&transfer_syntax_uid)))
+        )
     });
 
     if let Err(error) = result {

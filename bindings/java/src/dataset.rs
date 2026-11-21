@@ -27,9 +27,9 @@ use serde::Deserialize;
 use dcmnorm::dicom_io::{
     catch_api_panic, decode_document, dictionary_vr, document_to_dicom_json, encode_document,
     keyword_for_tag, list_transfer_syntax_support, read_dataset_document, render_source_frame,
-    source_to_dicom_json, tag_for_keyword, transcode_source, write_dicom_bytes, write_dicom_file,
-    write_document, write_document_to_path, ApiError, ApiErrorKind, BulkDataUriBuilder,
-    BulkDataUriRequest, BulkSource, DatasetReadOptions, DicomJsonBulkDataMode,
+    source_to_dicom_json, tag_for_keyword, transcode_source, transcode_source_to_path,
+    write_dicom_bytes, write_document, write_document_to_path, ApiError, ApiErrorKind,
+    BulkDataUriBuilder, BulkDataUriRequest, BulkSource, DatasetReadOptions, DicomJsonBulkDataMode,
     DicomJsonExportOptions, DicomSource, RenderPipelineOptions, WriteDocumentOptions,
 };
 
@@ -456,13 +456,14 @@ pub extern "system" fn Java_com_pohcee_dcmnorm_Dcmnorm_nativeTranscodeSource<'lo
         Err(error) => return throw_api_error(&mut env, &error),
     };
     let result = catch_api_panic(|| {
+        if let Some(path) = output_path {
+            transcode_source_to_path(source.source(), &PathBuf::from(path), &uid)?;
+            return Ok(None);
+        }
         let mut object = transcode_source(source.source(), &uid)?;
         let encode =
             |error: dcmnorm::dicom_io::WriteError| ApiError::from(error).with_target_ts(Some(&uid));
-        if let Some(path) = output_path {
-            write_dicom_file(&mut object, PathBuf::from(path)).map_err(encode)?;
-            Ok(None)
-        } else if let Some(mut output) = output {
+        if let Some(mut output) = output {
             object.write_all(&mut output).map_err(encode)?;
             output
                 .flush()

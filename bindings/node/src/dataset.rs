@@ -18,10 +18,10 @@ use napi_derive::napi;
 use dcmnorm::dicom_io::{
     catch_api_panic, decode_document, dictionary_vr, document_to_dicom_json, encode_document,
     keyword_for_tag, list_transfer_syntax_support, read_dataset_document, render_source_frame,
-    source_to_dicom_json, tag_for_keyword, transcode_source, write_dicom_bytes, write_dicom_file,
-    write_document, write_document_to_path, ApiError, BulkDataUriBuilder, BulkDataUriRequest,
-    BulkSource, DatasetReadOptions, DicomJsonBulkDataMode, DicomJsonExportOptions, DicomSource,
-    RenderPipelineOptions, WriteDocumentOptions,
+    source_to_dicom_json, tag_for_keyword, transcode_source, transcode_source_to_path,
+    write_dicom_bytes, write_document, write_document_to_path, ApiError, BulkDataUriBuilder,
+    BulkDataUriRequest, BulkSource, DatasetReadOptions, DicomJsonBulkDataMode,
+    DicomJsonExportOptions, DicomSource, RenderPipelineOptions, WriteDocumentOptions,
 };
 
 #[napi(object)]
@@ -351,17 +351,17 @@ pub fn dataset_transcode(
     transfer_syntax_uid: String,
 ) -> AsyncTask<DatasetTask> {
     let source = SourceArg::new(path, bytes);
-    task(move || {
-        let mut object = transcode_source(source.source()?, &transfer_syntax_uid)?;
-        let encode = |error| ApiError::from(error).with_target_ts(Some(&transfer_syntax_uid));
-        match output_path {
-            Some(path) => {
-                write_dicom_file(&mut object, PathBuf::from(path)).map_err(encode)?;
-                Ok(Payload::None)
-            }
-            None => Ok(Payload::Data(
+    task(move || match output_path {
+        Some(path) => {
+            transcode_source_to_path(source.source()?, &PathBuf::from(path), &transfer_syntax_uid)?;
+            Ok(Payload::None)
+        }
+        None => {
+            let mut object = transcode_source(source.source()?, &transfer_syntax_uid)?;
+            let encode = |error| ApiError::from(error).with_target_ts(Some(&transfer_syntax_uid));
+            Ok(Payload::Data(
                 write_dicom_bytes(&mut object).map_err(encode)?,
-            )),
+            ))
         }
     })
 }

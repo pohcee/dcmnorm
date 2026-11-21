@@ -26,6 +26,7 @@ mod spatial_registration;
 #[cfg(test)]
 mod spatial_registration_tests;
 mod standard_json;
+mod streaming_transcode;
 #[cfg(test)]
 mod test_support;
 #[cfg(test)]
@@ -42,8 +43,8 @@ pub use consistency::{check_dicom_logic, ConsistencyFinding, ConsistencyReport, 
 pub use dataset_api::{
     dictionary_vr, document_to_dicom_json, document_to_file_object, keyword_for_tag,
     read_dataset_document, render_source_frame, source_to_dicom_json, tag_for_keyword,
-    transcode_source, write_document, write_document_to_path, DatasetReadOptions,
-    DicomJsonExportOptions, DicomSource, WriteDocumentOptions,
+    transcode_source, transcode_source_to_path, write_document, write_document_to_path,
+    DatasetReadOptions, DicomJsonExportOptions, DicomSource, WriteDocumentOptions,
 };
 pub use dataset_tree::{
     decode_document, encode_document, BulkDataRef, BulkSource, DatasetDocument, DatasetTree,

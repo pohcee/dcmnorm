@@ -163,10 +163,10 @@ impl PixelDataReader for JpegAdapter {
 
         let bytes_per_sample = bits_allocated / 8;
 
-        // `stride` it the total number of bytes for each sample plane
+        // `stride` is the total number of bytes for each sample plane
         let stride: usize = bytes_per_sample as usize * cols as usize * rows as usize;
+        let expected_len = samples_per_pixel as usize * stride;
         let base_offset = dst.len();
-        dst.resize(base_offset + (samples_per_pixel as usize * stride), 0);
 
         // Common case first, checked without ever fetching the full `raw_pixel_data()` (which
         // clones every fragment): a 1:1 frame-to-fragment mapping only needs the one fragment
@@ -222,7 +222,6 @@ impl PixelDataReader for JpegAdapter {
         };
 
         let mut cursor = Cursor::new(&*frame_data);
-        let dst_offset = base_offset;
 
         let mut decoder = Decoder::new(&mut cursor);
         set_default_color_transform(&mut decoder, src);
@@ -231,8 +230,19 @@ impl PixelDataReader for JpegAdapter {
             .map_err(|e| Box::new(e) as Box<_>)
             .whatever_context("JPEG decoder failure")?;
 
-        let decoded_len = decoded.len();
-        dst[dst_offset..(dst_offset + decoded_len)].copy_from_slice(&decoded);
+        if decoded.len() != expected_len {
+            whatever!(
+                "JPEG decoded length mismatch: expected {expected_len} bytes, got {}",
+                decoded.len()
+            );
+        }
+
+        if base_offset == 0 {
+            *dst = decoded;
+        } else {
+            dst.resize(base_offset + expected_len, 0);
+            dst[base_offset..(base_offset + expected_len)].copy_from_slice(&decoded);
+        }
 
         Ok(())
     }

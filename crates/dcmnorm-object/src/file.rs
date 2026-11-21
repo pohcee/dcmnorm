@@ -115,6 +115,43 @@ impl DefaultDicomObject {
             })?;
         self.object.write_dataset_with_ts(&mut to, ts)
     }
+
+    /// Write this object as a full Part 10 stream, delegating `(7FE0,0010) PixelData` to
+    /// `write_pixel_data` at its exact tag-order position. The second argument passed to the
+    /// closure is the byte offset within `to` where the data set starts (right after the Part 10
+    /// preamble + File Meta Information).
+    pub fn write_all_with_pixel_data<W, E, F>(
+        &self,
+        mut to: W,
+        write_pixel_data: F,
+    ) -> Result<(), E>
+    where
+        W: Write,
+        E: From<WriteError>,
+        F: for<'w> FnOnce(
+            &mut dcmnorm_parser::dataset::DataSetWriter<
+                Box<dyn Write + 'w>,
+                dcmnorm_encoding::transfer_syntax::DynEncoder<'w, Box<dyn Write + 'w>>,
+            >,
+            u64,
+        ) -> Result<(), E>,
+    {
+        let mut meta_sink = CountingWriter {
+            inner: &mut to,
+            count: 0,
+        };
+        self.meta.write_to(&mut meta_sink)?;
+        let dataset_start = meta_sink.count;
+        let ts = TransferSyntaxRegistry
+            .get(crate::meta::io_util::trim_uid(&self.meta.transfer_syntax))
+            .ok_or_else(|| WriteError::UnsupportedTransferSyntax {
+                uid: self.meta.transfer_syntax.clone(),
+            })?;
+        self.object
+            .write_dataset_with_ts_and_pixel_data(&mut to, ts, |writer| {
+                write_pixel_data(writer, dataset_start)
+            })
+    }
 }
 
 /// Whether to require/skip the 128-byte preamble when opening a file.
@@ -327,6 +364,64 @@ impl OpenFileOptions {
         Ok(Some((FileDicomObject { meta, object }, deferred)))
     }
 
+    /// Read `path` in full except for top-level `(7FE0,0010) PixelData`, which is left on disk
+    /// and described by [`crate::DeferredPixelData`] (native offset/length, or encapsulated
+    /// Basic Offset Table plus per-fragment offsets/lengths). Every other element - including
+    /// nested `IconImageSequence` pixels and trailing elements after `PixelData` - is loaded
+    /// normally.
+    ///
+    /// Returns `Ok(None)` when the file cannot be read this way (dataset-compressed / deflated
+    /// transfer syntax, or a deferred range running past EOF) so the caller can fall back to a
+    /// full read.
+    pub fn open_file_deferring_pixel_data(
+        self,
+        path: impl AsRef<Path>,
+    ) -> Result<Option<(DefaultDicomObject, crate::mem::DeferredPixelData, File)>, ReadError> {
+        use std::io::Seek;
+
+        let mut file = File::open(path.as_ref()).map_err(|source| ReadError::Io {
+            source,
+            context: "opening file",
+        })?;
+        let file_len = file
+            .metadata()
+            .map_err(|source| ReadError::Io {
+                source,
+                context: "reading file metadata",
+            })?
+            .len();
+        let (mut meta, object, pixel_data) = {
+            let mut source = BufReader::new(&mut file);
+            let meta = self.read_meta(&mut source)?;
+            let ts =
+                meta.transfer_syntax_ts()
+                    .ok_or_else(|| ReadError::UnsupportedTransferSyntax {
+                        uid: meta.transfer_syntax.clone(),
+                    })?;
+            if matches!(
+                ts.codec(),
+                dcmnorm_encoding::transfer_syntax::Codec::Dataset(_)
+            ) {
+                return Ok(None);
+            }
+            let base_offset = source.stream_position().map_err(|source| ReadError::Io {
+                source,
+                context: "locating data set",
+            })?;
+
+            let mut reader = dcmnorm_parser::dataset::DataSetReader::new_with_ts(source, ts)
+                .map_err(|source| ReadError::Dataset { source })?;
+            let (object, pixel_data) =
+                crate::mem::build_dataset_deferring_pixel_data(&mut reader, base_offset)?;
+            if pixel_data.max_end() > file_len {
+                return Ok(None);
+            }
+            (meta, object, pixel_data)
+        };
+        backfill_media_storage_uids(&mut meta, &object);
+        Ok(Some((FileDicomObject { meta, object }, pixel_data, file)))
+    }
+
     fn read_meta(&self, mut source: impl Read) -> Result<FileMetaTable, ReadError> {
         Ok(match self.read_preamble {
             // Peek-and-detect: falls back to treating `source` as meta-less if the preamble or
@@ -384,6 +479,23 @@ impl<R: Read> Read for CountingReader<R> {
         let read = self.inner.read(buf)?;
         self.count += read as u64;
         Ok(read)
+    }
+}
+
+struct CountingWriter<W> {
+    inner: W,
+    count: u64,
+}
+
+impl<W: Write> Write for CountingWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let written = self.inner.write(buf)?;
+        self.count += written as u64;
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
     }
 }
 

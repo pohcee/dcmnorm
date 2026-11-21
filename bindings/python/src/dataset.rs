@@ -22,9 +22,9 @@ use pyo3::types::{PyBytes, PyDict, PyList};
 use ::dcmnorm::dicom_io::{
     catch_api_panic, decode_document, dictionary_vr, document_to_dicom_json, encode_document,
     keyword_for_tag, list_transfer_syntax_support, read_dataset_document, render_source_frame,
-    source_to_dicom_json, tag_for_keyword, transcode_source, write_dicom_bytes, write_dicom_file,
-    write_document, write_document_to_path, ApiError, ApiErrorKind, BulkDataUriBuilder,
-    BulkDataUriRequest, BulkSource, DatasetReadOptions, DicomJsonBulkDataMode,
+    source_to_dicom_json, tag_for_keyword, transcode_source, transcode_source_to_path,
+    write_dicom_bytes, write_document, write_document_to_path, ApiError, ApiErrorKind,
+    BulkDataUriBuilder, BulkDataUriRequest, BulkSource, DatasetReadOptions, DicomJsonBulkDataMode,
     DicomJsonExportOptions, DicomSource, RenderFrameOutput, RenderPipelineOptions,
     WriteDocumentOptions,
 };
@@ -446,14 +446,15 @@ fn dataset_transcode<'py>(
     output_path: Option<PathBuf>,
     transfer_syntax_uid: String,
 ) -> PyResult<Option<Bound<'py, PyBytes>>> {
-    let bytes = with_source(py, source_from(source)?, |source| {
-        let mut object = transcode_source(source, &transfer_syntax_uid)?;
-        let encode = |error| ApiError::from(error).with_target_ts(Some(&transfer_syntax_uid));
-        match &output_path {
-            Some(path) => write_dicom_file(&mut object, path)
-                .map(|_| None)
-                .map_err(encode),
-            None => write_dicom_bytes(&mut object).map(Some).map_err(encode),
+    let bytes = with_source(py, source_from(source)?, |source| match &output_path {
+        Some(path) => {
+            transcode_source_to_path(source, path, &transfer_syntax_uid)?;
+            Ok(None)
+        }
+        None => {
+            let mut object = transcode_source(source, &transfer_syntax_uid)?;
+            let encode = |error| ApiError::from(error).with_target_ts(Some(&transfer_syntax_uid));
+            write_dicom_bytes(&mut object).map(Some).map_err(encode)
         }
     })?;
     Ok(bytes.map(|bytes| PyBytes::new(py, &bytes)))
