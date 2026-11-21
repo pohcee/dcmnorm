@@ -161,6 +161,11 @@ struct StorescpArgs {
     #[arg(long = "idle-timeout", default_value_t = DEFAULT_SCP_IDLE_TIMEOUT_SECS)]
     idle_timeout: u64,
 
+    /// Optional target transfer syntax UID for on-the-fly streaming transcoding of received images
+    /// directly to disk (e.g. 1.2.840.10008.1.2.4.201 for HTJ2K Lossless)
+    #[arg(long = "transfer-syntax", value_name = "UID")]
+    transfer_syntax: Option<String>,
+
     /// Log association negotiation, presentation contexts, and each DIMSE command/response to stderr
     #[arg(long, short = 'v', action = ArgAction::SetTrue)]
     verbose: bool,
@@ -468,6 +473,7 @@ fn run_storescp(args: StorescpArgs) -> Result<(), Box<dyn std::error::Error>> {
         max_pdu_length: args.max_pdu,
         idle_timeout: Duration::from_secs(args.idle_timeout),
         on_log: logger_arc(args.verbose),
+        storage_transfer_syntax: args.transfer_syntax.clone(),
         ..Default::default()
     };
 

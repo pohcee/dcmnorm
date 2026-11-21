@@ -11,9 +11,11 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::fs::{File, OpenOptions};
+use std::io::{BufWriter, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -24,12 +26,15 @@ use dcmnorm_dimse::{
     pdu::{PDataValue, PDataValueType, Pdu, PresentationContextResultReason},
     Incoming, ServerAssociation,
 };
+use dcmnorm_encoding::transfer_syntax::Codec;
 use dcmnorm_encoding::TransferSyntax;
-use dcmnorm_object::FileMetaTableBuilder;
-use dcmnorm_object::InMemDicomObject;
+use dcmnorm_object::{FileMetaTableBuilder, InMemDicomObject, OpenFileOptions, ReadPreamble};
 
 use super::dimse::{implicit_vr_le, log_event, transfer_syntax, DimseLogger};
-use super::io::write_dicom_file;
+use super::io::normalize_transfer_syntax_uid;
+use super::streaming_transcode::receive_and_transcode_stream_to_file;
+
+static SCP_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Business logic an embedding application supplies for the DIMSE operations that need it - the
 /// SCP itself only owns protocol/association mechanics and (for C-STORE) writing the received
@@ -93,6 +98,13 @@ pub struct ScpOptions {
     /// calling the handler: the association itself still accepts every abstract syntax, so a modality that proposes
     /// MWL alongside Storage can still C-STORE. Default: Study Root and Patient Root Query/Retrieve FIND.
     pub find_sop_classes: Vec<String>,
+    /// Optional target transfer syntax UID for on-the-fly streaming transcode while receiving
+    /// C-STORE instances to disk (for example `1.2.840.10008.1.2.4.201` to store incoming
+    /// uncompressed or JPEG Lossless images directly as HTJ2K without writing the raw file first).
+    /// Non-image SOP classes (SR, RTSTRUCT, ...) or instances ineligible for the target codec are
+    /// stored verbatim in their negotiated transfer syntax. `None` (default) stores every instance
+    /// verbatim as received.
+    pub storage_transfer_syntax: Option<String>,
 }
 
 impl Default for ScpOptions {
@@ -108,6 +120,7 @@ impl Default for ScpOptions {
                 uids::STUDY_ROOT_QUERY_RETRIEVE_INFORMATION_MODEL_FIND.to_owned(),
                 uids::PATIENT_ROOT_QUERY_RETRIEVE_INFORMATION_MODEL_FIND.to_owned(),
             ],
+            storage_transfer_syntax: None,
         }
     }
 }
@@ -182,6 +195,11 @@ pub fn start_scp(
     handlers: Arc<dyn ScpHandlers>,
     options: ScpOptions,
 ) -> Result<DicomScp, ScpError> {
+    if let Some(ref ts_uid) = options.storage_transfer_syntax {
+        super::streaming_transcode::validate_storage_transfer_syntax(ts_uid).map_err(|msg| {
+            ScpError::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, msg))
+        })?;
+    }
     let listener = TcpListener::bind(("0.0.0.0", port))?;
     let local_addr = listener.local_addr()?;
     let stop_flag = Arc::new(AtomicBool::new(false));
@@ -348,6 +366,7 @@ fn handle_association(
                         pc_id,
                         &command,
                         negotiated_ts,
+                        options.storage_transfer_syntax.as_deref(),
                         cache_path,
                         &mut stored_instances_by_study,
                         logger,
@@ -538,11 +557,13 @@ fn handle_echo(
     send_command(association, pc_id, &response)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_store(
     association: &mut ServerAssociation<TcpStream>,
     pc_id: u8,
     command: &InMemDicomObject,
-    negotiated_ts: &TransferSyntax,
+    negotiated_ts: &'static TransferSyntax,
+    storage_transfer_syntax: Option<&str>,
     cache_path: &Path,
     stored_instances_by_study: &mut HashMap<String, Vec<String>>,
     logger: Option<&dyn DimseLogger>,
@@ -557,10 +578,11 @@ fn handle_store(
         format!("received C-STORE-RQ: SOP instance {affected_sop_instance_uid}")
     });
 
-    let dataset_bytes = receive_data(association, logger)?;
-    let status = match store_received_dataset(
-        &dataset_bytes,
+    let status = match receive_and_store_dataset(
+        association,
+        pc_id,
         negotiated_ts,
+        storage_transfer_syntax,
         &affected_sop_class_uid,
         &affected_sop_instance_uid,
         cache_path,
@@ -568,11 +590,13 @@ fn handle_store(
         logger,
     ) {
         Ok(status) => status,
-        // Previously silently discarded via `.unwrap_or(0xC000)` - this is the actual answer to
-        // "why did this instance fail" (a bad transfer syntax, a file write/permission error, a
-        // missing/malformed StudyInstanceUID, etc.), not just the generic 0xC000 status sent back
-        // to the peer.
-        Err(error) => {
+        Err(StoreReceiveError::Transport(message)) => {
+            log_event(logger, || {
+                format!("failed to receive data set PDU(s): {message}")
+            });
+            return Err(());
+        }
+        Err(StoreReceiveError::Processing(error)) => {
             log_event(logger, || {
                 format!("failed to store C-STORE dataset for SOP instance {affected_sop_instance_uid}: {error}")
             });
@@ -613,37 +637,292 @@ fn handle_store(
     send_command(association, pc_id, &response)
 }
 
-fn store_received_dataset(
-    dataset_bytes: &[u8],
-    negotiated_ts: &TransferSyntax,
+enum StoreReceiveError {
+    /// Wire/PDU error — the association cannot continue cleanly.
+    Transport(String),
+    /// Dataset parse, encode, or filesystem error after the wire message was completely drained.
+    Processing(String),
+}
+
+struct ScpTempFile {
+    path: PathBuf,
+    file: Option<File>,
+    persisted: bool,
+}
+
+impl ScpTempFile {
+    fn create_in(dir: &Path) -> Result<Self, std::io::Error> {
+        std::fs::create_dir_all(dir)?;
+        let pid = std::process::id();
+        for _ in 0..64 {
+            let seq = SCP_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let candidate = dir.join(format!(".dcmnorm-scp-{pid}-{seq}.tmp"));
+            let mut opts = OpenOptions::new();
+            opts.read(true).write(true).create_new(true);
+            match opts.open(&candidate) {
+                Ok(file) => {
+                    return Ok(Self {
+                        path: candidate,
+                        file: Some(file),
+                        persisted: false,
+                    });
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "could not allocate unique SCP temp file",
+        ))
+    }
+
+    fn file(&self) -> &File {
+        self.file.as_ref().expect("temp file open")
+    }
+
+    fn file_mut(&mut self) -> &mut File {
+        self.file.as_mut().expect("temp file open")
+    }
+
+    fn persist(mut self, target: &Path) -> Result<(), std::io::Error> {
+        let temp_path = self.path.clone();
+        self.persisted = true;
+        drop(self.file.take());
+
+        // Preserve existing destination permissions on overwrite (matching TempOutputFile::persist),
+        // while avoiding granting group access if a setgid directory assigned a different GID.
+        #[cfg(unix)]
+        if let (Ok(existing_meta), Ok(temp_meta)) =
+            (std::fs::metadata(target), std::fs::metadata(&temp_path))
+        {
+            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+            let mut mode = existing_meta.permissions().mode() & 0o777;
+            if temp_meta.gid() != existing_meta.gid() {
+                mode &= !0o070;
+            }
+            let _ = std::fs::set_permissions(&temp_path, std::fs::Permissions::from_mode(mode));
+        }
+
+        if let Err(err) = super::streaming_transcode::replace_file_atomically(&temp_path, target) {
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(err);
+        }
+        Ok(())
+    }
+}
+
+impl Drop for ScpTempFile {
+    fn drop(&mut self) {
+        if !self.persisted {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+fn validate_scp_path_component<'a>(
+    value: &'a str,
+    label: &str,
+    allow_empty: bool,
+) -> Result<&'a str, String> {
+    if value.is_empty() {
+        if allow_empty {
+            return Ok(value);
+        }
+        return Err(format!("empty {label} in received C-STORE dataset"));
+    }
+    if value == "."
+        || value == ".."
+        || value.contains("..")
+        || !value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+    {
+        return Err(format!("unsafe {label} for filesystem path: {value:?}"));
+    }
+    Ok(value)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn receive_and_store_dataset(
+    association: &mut ServerAssociation<TcpStream>,
+    pc_id: u8,
+    negotiated_ts: &'static TransferSyntax,
+    storage_transfer_syntax: Option<&str>,
     affected_sop_class_uid: &str,
     affected_sop_instance_uid: &str,
     cache_path: &Path,
     stored_instances_by_study: &mut HashMap<String, Vec<String>>,
     logger: Option<&dyn DimseLogger>,
-) -> Result<u16, Box<dyn std::error::Error>> {
-    let dataset = InMemDicomObject::read_dataset_with_ts(dataset_bytes, negotiated_ts)?;
-    let study_instance_uid = element_str(&dataset, tags::STUDY_INSTANCE_UID).unwrap_or_default();
-    let modality = element_str(&dataset, tags::MODALITY).unwrap_or_else(|| "UN".to_owned());
-    // Logged as soon as the dataset is parsed (not at C-STORE-RQ command time, above in
-    // handle_store - the StudyInstanceUID lives in the dataset itself, not the command set, so
-    // it isn't known until here) - lets an association's accept/negotiate/release lines (logged
-    // regardless of whether any C-STORE ever actually arrived) be correlated with which
-    // study/instance a given association actually carried.
-    log_event(logger, || {
-        format!("received C-STORE-RQ dataset: study {study_instance_uid}, SOP instance {affected_sop_instance_uid}")
+) -> Result<u16, StoreReceiveError> {
+    let mut temp = match ScpTempFile::create_in(cache_path) {
+        Ok(temp) => temp,
+        Err(err) => {
+            // Drain the incoming dataset so the association stays aligned for C-STORE-RSP 0xC000.
+            let mut reader = association.receive_data_set_reader(pc_id);
+            reader
+                .drain_to_end()
+                .map_err(|e| StoreReceiveError::Transport(e.to_string()))?;
+            return Err(StoreReceiveError::Processing(format!(
+                "creating temp file in {}: {err}",
+                cache_path.display()
+            )));
+        }
+    };
+
+    let want_on_the_fly_transcode = storage_transfer_syntax.filter(|uid| {
+        let target = normalize_transfer_syntax_uid(uid);
+        !target.is_empty()
+            && target != normalize_transfer_syntax_uid(negotiated_ts.uid())
+            && !matches!(negotiated_ts.codec(), Codec::Dataset(_))
     });
 
-    let meta = FileMetaTableBuilder::new()
-        .transfer_syntax(negotiated_ts.uid())
-        .media_storage_sop_class_uid(affected_sop_class_uid)
-        .media_storage_sop_instance_uid(affected_sop_instance_uid);
-    let mut file_object = dataset.with_meta(meta)?;
+    let (study_instance_uid, modality) = if let Some(target_uid) = want_on_the_fly_transcode {
+        let temp_path = temp.path.clone();
+        let mut pdata = association.receive_data_set_reader(pc_id);
+        match receive_and_transcode_stream_to_file(
+            &mut pdata,
+            negotiated_ts,
+            target_uid,
+            affected_sop_class_uid,
+            affected_sop_instance_uid,
+            temp.file_mut(),
+            &temp_path,
+        ) {
+            Ok(pair) => {
+                // Ensure any remaining unread bytes (e.g. trailing empty final PDV) are drained.
+                pdata
+                    .drain_to_end()
+                    .map_err(|e| StoreReceiveError::Transport(e.to_string()))?;
+                pair
+            }
+            Err(err) => {
+                if let Some(wire_err) = pdata.wire_error() {
+                    return Err(StoreReceiveError::Transport(wire_err.to_owned()));
+                }
+                pdata
+                    .drain_to_end()
+                    .map_err(|e| StoreReceiveError::Transport(e.to_string()))?;
+                return Err(StoreReceiveError::Processing(err));
+            }
+        }
+    } else {
+        // Default passthrough streaming: write the ~200-byte Part 10 File Meta header directly,
+        // stream incoming Data PDVs straight to disk via PDataReader (distinguishing wire errors
+        // from disk-write errors so a disk failure drains the PDVs and returns 0xC000 instead of
+        // dropping the association), then validate full element/PixelData structure in O(1) RAM
+        // before publishing.
+        let meta = FileMetaTableBuilder::new()
+            .transfer_syntax(negotiated_ts.uid())
+            .media_storage_sop_class_uid(affected_sop_class_uid)
+            .media_storage_sop_instance_uid(affected_sop_instance_uid)
+            .build()
+            .map_err(|e| StoreReceiveError::Processing(format!("building file meta table: {e}")))?;
+        {
+            let mut pdata = association.receive_data_set_reader(pc_id);
+            let mut writer = BufWriter::new(temp.file());
+            if let Err(err) = meta.write_to(&mut writer) {
+                pdata
+                    .drain_to_end()
+                    .map_err(|e| StoreReceiveError::Transport(e.to_string()))?;
+                return Err(StoreReceiveError::Processing(format!(
+                    "writing Part 10 header: {err}"
+                )));
+            }
+            let mut buf = [0u8; 64 * 1024];
+            loop {
+                let n = std::io::Read::read(&mut pdata, &mut buf)
+                    .map_err(|e| StoreReceiveError::Transport(e.to_string()))?;
+                if n == 0 {
+                    break;
+                }
+                if let Err(err) = writer.write_all(&buf[..n]) {
+                    pdata
+                        .drain_to_end()
+                        .map_err(|e| StoreReceiveError::Transport(e.to_string()))?;
+                    return Err(StoreReceiveError::Processing(format!(
+                        "writing received dataset to disk: {err}"
+                    )));
+                }
+            }
+            if let Err(err) = writer.flush() {
+                return Err(StoreReceiveError::Processing(format!(
+                    "flushing received dataset: {err}"
+                )));
+            }
+        }
+
+        // Validate element headers, native PixelData length, and encapsulated sequence delimiter
+        // (FFFE,E0DD) using O(1)-RAM seeking instead of loading PixelData into memory.
+        let validated_obj = match OpenFileOptions::new()
+            .read_preamble(ReadPreamble::Always)
+            .open_file_deferring_pixel_data(&temp.path)
+        {
+            Ok(Some((obj, _, _))) => obj,
+            Ok(None) => {
+                // Dataset-level codec (e.g. Deflated Explicit VR LE): validate via full parse.
+                super::io::read_dicom_file(&temp.path).map_err(|e| {
+                    StoreReceiveError::Processing(format!("validating deflated dataset: {e}"))
+                })?
+            }
+            Err(e) => {
+                return Err(StoreReceiveError::Processing(format!(
+                    "validating received dataset: {e}"
+                )));
+            }
+        };
+        // Reject datasets whose embedded SOP Class or SOP Instance UID disagrees with the
+        // C-STORE-RQ command so a mismatched payload cannot overwrite another stored instance.
+        if let Some(ds_sop_class) = element_str(&validated_obj, tags::SOP_CLASS_UID) {
+            if ds_sop_class.trim_end_matches(['\0', ' '])
+                != affected_sop_class_uid.trim_end_matches(['\0', ' '])
+            {
+                return Err(StoreReceiveError::Processing(format!(
+                    "dataset SOPClassUID ({ds_sop_class}) does not match C-STORE-RQ AffectedSOPClassUID ({affected_sop_class_uid})"
+                )));
+            }
+        }
+        if let Some(ds_sop_instance) = element_str(&validated_obj, tags::SOP_INSTANCE_UID) {
+            if ds_sop_instance.trim_end_matches(['\0', ' '])
+                != affected_sop_instance_uid.trim_end_matches(['\0', ' '])
+            {
+                return Err(StoreReceiveError::Processing(format!(
+                    "dataset SOPInstanceUID ({ds_sop_instance}) does not match C-STORE-RQ AffectedSOPInstanceUID ({affected_sop_instance_uid})"
+                )));
+            }
+        }
+        let study_uid = element_str(&validated_obj, tags::STUDY_INSTANCE_UID).unwrap_or_default();
+        let modality =
+            element_str(&validated_obj, tags::MODALITY).unwrap_or_else(|| "UN".to_owned());
+        (study_uid, modality)
+    };
+
+    log_event(logger, || {
+        format!(
+            "received C-STORE-RQ dataset: study {study_instance_uid}, SOP instance {affected_sop_instance_uid}"
+        )
+    });
+
+    validate_scp_path_component(&study_instance_uid, "StudyInstanceUID", true)
+        .map_err(StoreReceiveError::Processing)?;
+    validate_scp_path_component(affected_sop_instance_uid, "AffectedSOPInstanceUID", false)
+        .map_err(StoreReceiveError::Processing)?;
+    validate_scp_path_component(&modality, "Modality", false)
+        .map_err(StoreReceiveError::Processing)?;
 
     let study_dir = cache_path.join(format!("S_{study_instance_uid}"));
-    std::fs::create_dir_all(&study_dir)?;
     let file_path = study_dir.join(format!("{modality}_{affected_sop_instance_uid}.dcm"));
-    write_dicom_file(&mut file_object, &file_path)?;
+    if study_dir.parent() != Some(cache_path) || file_path.parent() != Some(study_dir.as_path()) {
+        return Err(StoreReceiveError::Processing(
+            "resolved storage path escapes cache directory".to_owned(),
+        ));
+    }
+
+    std::fs::create_dir_all(&study_dir)
+        .map_err(|e| StoreReceiveError::Processing(format!("creating study directory: {e}")))?;
+    temp.persist(&file_path).map_err(|e| {
+        StoreReceiveError::Processing(format!("persisting received DICOM file: {e}"))
+    })?;
 
     stored_instances_by_study
         .entry(study_instance_uid)

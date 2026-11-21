@@ -114,6 +114,7 @@ impl ServerAssociationOptions {
 
     /// Negotiate an association over an already-accepted TCP connection.
     pub fn establish(self, stream: TcpStream) -> Result<ServerAssociation<TcpStream>> {
+        let _ = stream.set_nodelay(true);
         stream
             .set_read_timeout(self.read_timeout)
             .map_err(Error::Io)?;
@@ -308,6 +309,39 @@ impl<S: std::io::Read + std::io::Write> ServerAssociation<S> {
     pub fn receive_data_set(&mut self) -> Result<Vec<u8>> {
         self.receiver
             .receive_data_set(&mut self.stream, self.acceptor_max_pdu_length)
+    }
+
+    /// Streams the data set following the command just received directly into `sink`, writing one
+    /// PDV at a time without accumulating the entire dataset in memory. Rejects Data PDVs whose
+    /// presentation context ID does not match `expected_pc_id`.
+    ///
+    /// Unlike [`Self::receive_data_set`], this method is **not** safely retryable after a read
+    /// timeout or other I/O error because earlier PDVs have already been written to `sink`. On
+    /// any error, discard `sink` and terminate the association.
+    pub fn receive_data_set_to<W: std::io::Write>(
+        &mut self,
+        expected_pc_id: u8,
+        sink: &mut W,
+    ) -> Result<u64> {
+        self.receiver.receive_data_set_to(
+            &mut self.stream,
+            self.acceptor_max_pdu_length,
+            Some(expected_pc_id),
+            sink,
+        )
+    }
+
+    /// Returns a streaming [`std::io::Read`] over the data set following the command just received.
+    /// Rejects Data PDVs whose presentation context ID does not match `expected_pc_id`.
+    pub fn receive_data_set_reader(
+        &mut self,
+        expected_pc_id: u8,
+    ) -> crate::message::PDataReader<'_, S> {
+        self.receiver.data_set_reader(
+            &mut self.stream,
+            self.acceptor_max_pdu_length,
+            Some(expected_pc_id),
+        )
     }
 
     pub fn send_pdata(&mut self, presentation_context_id: u8) -> crate::pdata::PDataWriter<&mut S> {

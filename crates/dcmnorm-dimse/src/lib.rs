@@ -22,7 +22,7 @@ mod server;
 
 pub use client::{ClientAssociation, ClientAssociationOptions};
 pub use error::{Error, Result};
-pub use message::Incoming;
+pub use message::{Incoming, PDataReader};
 pub use pdata::PDataWriter;
 pub use server::{ServerAssociation, ServerAssociationOptions};
 
