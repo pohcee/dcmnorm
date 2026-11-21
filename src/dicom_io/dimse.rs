@@ -35,11 +35,12 @@ use dcmnorm_dimse::{
     ClientAssociation, Incoming,
 };
 use dcmnorm_encoding::{TransferSyntax, TransferSyntaxIndex};
-use dcmnorm_object::InMemDicomObject;
+use dcmnorm_object::{FileMetaTable, InMemDicomObject, OpenFileOptions, ReadPreamble};
 use dcmnorm_transcode::TransferSyntaxRegistry;
 
-use super::io::{can_encode_transfer_syntax, read_dicom_file, transcode_dcmnorm_object};
+use super::io::{can_encode_transfer_syntax, read_dicom_file, transcode_dcmnorm_object_owned};
 use super::json::write_dataset_as_dicom_json_with_options;
+use super::streaming_transcode::prepare_streaming_dataset_for_dimse;
 use super::types::{
     DicomJsonError, DicomJsonFormat, DicomJsonKeyStyle, DicomJsonWriteOptions, ReadError,
     TranscodeError, WriteError,
@@ -392,7 +393,7 @@ fn send_command_with_data(
         })?;
         let mut writer = assoc.send_pdata(pc_id);
         std::io::Write::write_all(&mut writer, &data)?;
-        drop(writer);
+        writer.finish()?;
     }
     Ok(())
 }
@@ -740,26 +741,66 @@ struct StoreFile {
     sop_class_uid: String,
     sop_instance_uid: String,
     transfer_syntax_uid: String,
+    /// True only when the file parsed strictly as Part 10 under its declared transfer syntax.
+    /// Files recovered via `read_dicom_file`'s flexible decoder (e.g. Implicit VR dataset
+    /// mislabeled Explicit VR in Group 0002, or meta-less files) must be serialized in the
+    /// negotiated transfer syntax rather than raw-copied off disk.
+    raw_part10_passthrough_ok: bool,
+}
+
+fn store_file_from_object(
+    path: &Path,
+    object: &dcmnorm_object::DefaultDicomObject,
+    raw_part10_passthrough_ok: bool,
+) -> StoreFile {
+    let meta = object.meta();
+    let dataset_uid = |tag| {
+        object
+            .element(tag)
+            .ok()
+            .and_then(|e| e.to_str().ok())
+            .map(|s| s.trim_end_matches(['\0', ' ']).to_owned())
+            .filter(|s| !s.is_empty())
+    };
+    let sop_class_uid = dataset_uid(tags::SOP_CLASS_UID).unwrap_or_else(|| {
+        meta.media_storage_sop_class_uid
+            .trim_end_matches(['\0', ' '])
+            .to_owned()
+    });
+    let sop_instance_uid = dataset_uid(tags::SOP_INSTANCE_UID).unwrap_or_else(|| {
+        meta.media_storage_sop_instance_uid
+            .trim_end_matches(['\0', ' '])
+            .to_owned()
+    });
+    let transfer_syntax_uid = meta
+        .transfer_syntax
+        .trim_end_matches(['\0', ' '])
+        .to_owned();
+    StoreFile {
+        path: path.to_owned(),
+        sop_class_uid,
+        sop_instance_uid,
+        transfer_syntax_uid,
+        raw_part10_passthrough_ok,
+    }
 }
 
 fn probe_store_file(path: &Path) -> Result<StoreFile, DimseError> {
+    // Fast path for Part 10 files: read preamble + File Meta Information + dataset elements only
+    // up to (0008,0018) (~400 bytes, never touching PixelData). Per DICOM PS3.7, C-STORE-RQ
+    // AffectedSOPClassUID/AffectedSOPInstanceUID must come from dataset (0008,0016)/(0008,0018),
+    // falling back to Group 0002 MediaStorageSOP*UID only when absent - real clinical/anonymized
+    // Part 10 files frequently carry stale Group 0002 MediaStorageSOP*UID values.
+    if let Ok(object) = OpenFileOptions::new()
+        .read_preamble(ReadPreamble::Always)
+        .read_until(dcmnorm_core::Tag(0x0008, 0x0019))
+        .open_file(path)
+    {
+        return Ok(store_file_from_object(path, &object, true));
+    }
+
     let object = read_dicom_file(path)?;
-    let meta = object.meta();
-    Ok(StoreFile {
-        path: path.to_owned(),
-        sop_class_uid: meta
-            .media_storage_sop_class_uid
-            .trim_end_matches(['\0', ' '])
-            .to_owned(),
-        sop_instance_uid: meta
-            .media_storage_sop_instance_uid
-            .trim_end_matches(['\0', ' '])
-            .to_owned(),
-        transfer_syntax_uid: meta
-            .transfer_syntax
-            .trim_end_matches(['\0', ' '])
-            .to_owned(),
-    })
+    Ok(store_file_from_object(path, &object, false))
 }
 
 /// Sends each of `files` via C-STORE to `destination` ("host:port"). Presentation contexts are
@@ -912,6 +953,29 @@ fn select_store_presentation_context<'a>(
     }
 }
 
+fn verify_store_object_matches_probed(
+    object: &dcmnorm_object::DefaultDicomObject,
+    expected: &StoreFile,
+) -> Result<(), DimseError> {
+    let actual = store_file_from_object(&expected.path, object, expected.raw_part10_passthrough_ok);
+    if actual.sop_class_uid != expected.sop_class_uid
+        || actual.sop_instance_uid != expected.sop_instance_uid
+        || actual.transfer_syntax_uid != expected.transfer_syntax_uid
+    {
+        return Err(DimseError::Io(std::io::Error::other(format!(
+            "file {} changed after probing before C-STORE send (expected SOP class/instance/TS {}/{}/{}, found {}/{}/{})",
+            expected.path.display(),
+            expected.sop_class_uid,
+            expected.sop_instance_uid,
+            expected.transfer_syntax_uid,
+            actual.sop_class_uid,
+            actual.sop_instance_uid,
+            actual.transfer_syntax_uid,
+        ))));
+    }
+    Ok(())
+}
+
 fn send_and_receive_store(
     assoc: &mut ClientAssociation<TcpStream>,
     file: &StoreFile,
@@ -921,17 +985,9 @@ fn send_and_receive_store(
     cancel: Option<&CancelSignal>,
     logger: Option<&dyn DimseLogger>,
 ) -> Result<u16, DimseError> {
+    use std::io::{Read, Seek, SeekFrom};
+
     let (pc, target_ts) = select_store_presentation_context(file, negotiated)?;
-
-    let object = read_dicom_file(&file.path)?;
-    let object = if target_ts.uid() == file.transfer_syntax_uid {
-        object
-    } else {
-        transcode_dcmnorm_object(&object, target_ts.uid())?
-    };
-
-    let mut object_data = Vec::with_capacity(2048);
-    object.write_dataset_with_ts(&mut object_data, target_ts)?;
 
     let command = InMemDicomObject::command_from_element_iter([
         DataElement::new(
@@ -963,7 +1019,95 @@ fn send_and_receive_store(
         )
     });
 
-    send_command_with_data(assoc, pc.id, &command, object_data)?;
+    if target_ts.uid() == file.transfer_syntax_uid && file.raw_part10_passthrough_ok {
+        // Exact transfer syntax match on a strict Part 10 file: open once, re-verify SOP UIDs
+        // and transfer syntax on this open descriptor before sending C-STORE-RQ, then stream the
+        // raw dataset bytes straight from this same handle to PDataWriter without loading PixelData.
+        let mut raw_file = std::fs::File::open(&file.path)?;
+        let header_obj = OpenFileOptions::new()
+            .read_preamble(ReadPreamble::Always)
+            .read_until(dcmnorm_core::Tag(0x0008, 0x0019))
+            .from_reader(std::io::BufReader::new(&mut raw_file));
+        let Ok(header_obj) = header_obj else {
+            return Err(DimseError::Io(std::io::Error::other(format!(
+                "file {} changed after probing before C-STORE send",
+                file.path.display()
+            ))));
+        };
+        verify_store_object_matches_probed(&header_obj, file)?;
+
+        raw_file.seek(SeekFrom::Start(0))?;
+        let file_len = raw_file.metadata()?.len();
+        let mut buf_reader = std::io::BufReader::new(raw_file);
+        let Some(_meta) = FileMetaTable::read_from(&mut buf_reader)? else {
+            return Err(DimseError::Io(std::io::Error::other(format!(
+                "file {} lost Part 10 File Meta Information before C-STORE send",
+                file.path.display()
+            ))));
+        };
+        let dataset_offset = buf_reader.stream_position()?;
+        let dataset_len = file_len.saturating_sub(dataset_offset);
+        let mut raw_file = buf_reader.into_inner();
+        raw_file.seek(SeekFrom::Start(dataset_offset))?;
+
+        // Cap the combined single-PDU fast path at 64 KiB so a peer advertising unlimited
+        // max PDU (0 -> u32::MAX) or a file growing concurrently never buffers a huge dataset.
+        let single_pdu_limit = assoc
+            .acceptor_max_pdu_length()
+            .min(65_536)
+            .saturating_sub(256) as u64;
+        if dataset_len < single_pdu_limit {
+            let mut data = Vec::with_capacity(dataset_len as usize);
+            raw_file
+                .by_ref()
+                .take(single_pdu_limit)
+                .read_to_end(&mut data)?;
+            if (data.len() as u64) < single_pdu_limit {
+                send_command_with_data(assoc, pc.id, &command, data)?;
+            } else {
+                send_command(assoc, pc.id, &command)?;
+                let mut writer = assoc.send_pdata(pc.id);
+                std::io::Write::write_all(&mut writer, &data)?;
+                std::io::copy(&mut raw_file, &mut writer)?;
+                writer.finish()?;
+            }
+        } else {
+            send_command(assoc, pc.id, &command)?;
+            let mut writer = assoc.send_pdata(pc.id);
+            std::io::copy(&mut raw_file, &mut writer)?;
+            writer.finish()?;
+        }
+    } else if target_ts.uid() == file.transfer_syntax_uid {
+        // File required flexible recovery (e.g. Implicit-VR dataset mislabeled Explicit VR in
+        // Group 0002, or meta-less dump): serialize it cleanly in the negotiated transfer syntax.
+        let object = read_dicom_file(&file.path)?;
+        verify_store_object_matches_probed(&object, file)?;
+        send_command(assoc, pc.id, &command)?;
+        let mut writer = assoc.send_pdata(pc.id);
+        object.write_dataset_with_ts(&mut writer, target_ts)?;
+        writer.finish()?;
+    } else if let Some(prepared) = prepare_streaming_dataset_for_dimse(&file.path, target_ts.uid())?
+    {
+        // Streaming fallback transcode (e.g. compressed file -> Explicit/Implicit VR LE):
+        // validates identity on the open handle before sending C-STORE-RQ, then streams decoded
+        // frames directly into PDataWriter with bounded memory and no temp file.
+        verify_store_object_matches_probed(prepared.object(), file)?;
+        send_command(assoc, pc.id, &command)?;
+        let mut writer = assoc.send_pdata(pc.id);
+        prepared.write_to(&mut writer)?;
+        writer.finish()?;
+    } else {
+        // Non-streamable fallback (e.g. deflated/MPEG/meta-less): transcode owned (no extra
+        // deep clone) and stream the serialized dataset directly into PDataWriter instead of
+        // allocating a full-dataset Vec<u8> copy.
+        let object = read_dicom_file(&file.path)?;
+        verify_store_object_matches_probed(&object, file)?;
+        let object = transcode_dcmnorm_object_owned(object, target_ts.uid())?;
+        send_command(assoc, pc.id, &command)?;
+        let mut writer = assoc.send_pdata(pc.id);
+        object.write_dataset_with_ts(&mut writer, target_ts)?;
+        writer.finish()?;
+    }
 
     let response = poll_bounded(assoc, deadline, None, cancel, receive_command)?;
     let status = command_status(&response)?;

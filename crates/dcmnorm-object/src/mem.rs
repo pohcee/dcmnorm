@@ -233,13 +233,53 @@ impl InMemDicomObject {
         ts: &TransferSyntax,
         options: DataSetReaderOptions,
     ) -> Result<Self, ReadError> {
+        Self::read_dataset_with_ts_cs_options(
+            source,
+            ts,
+            dcmnorm_encoding::text::SpecificCharacterSet::default(),
+            options,
+        )
+    }
+
+    /// Like [`Self::read_dataset_with_ts`], seeded with an initial [`SpecificCharacterSet`]
+    /// (e.g. when resuming a stream to read trailing elements after `PixelData`).
+    pub fn read_dataset_with_ts_cs<'r, R: Read + 'r>(
+        source: R,
+        ts: &TransferSyntax,
+        cs: dcmnorm_encoding::text::SpecificCharacterSet,
+    ) -> Result<Self, ReadError> {
+        Self::read_dataset_with_ts_cs_options(source, ts, cs, DataSetReaderOptions::default())
+    }
+
+    fn read_dataset_with_ts_cs_options<'r, R: Read + 'r>(
+        source: R,
+        ts: &TransferSyntax,
+        cs: dcmnorm_encoding::text::SpecificCharacterSet,
+        options: DataSetReaderOptions,
+    ) -> Result<Self, ReadError> {
         let source: Box<dyn Read + 'r> = match ts.codec() {
             Codec::Dataset(Some(adapter)) => adapter.adapt_reader(Box::new(source)),
             _ => Box::new(source),
         };
-        let mut reader = DataSetReader::new_with_ts_options(source, ts, options)
+        let mut reader = DataSetReader::new_with_ts_cs_options(source, ts, cs, options)
             .map_err(|source| ReadError::Dataset { source })?;
         build_dataset(&mut reader, false)
+    }
+
+    /// Returns the [`SpecificCharacterSet`] declared by `(0008,0005)` in this object, or the
+    /// default character set if absent or unrecognized.
+    pub fn specific_character_set(&self) -> dcmnorm_encoding::text::SpecificCharacterSet {
+        const SPECIFIC_CHARACTER_SET: Tag = Tag(0x0008, 0x0005);
+        match self.get(SPECIFIC_CHARACTER_SET).map(|e| e.value()) {
+            Some(Value::Primitive(PrimitiveValue::Strs(parts))) => {
+                dcmnorm_encoding::text::SpecificCharacterSet::from_codes(parts).unwrap_or_default()
+            }
+            Some(Value::Primitive(PrimitiveValue::Str(s))) => {
+                dcmnorm_encoding::text::SpecificCharacterSet::from_codes(&[s.as_str()])
+                    .unwrap_or_default()
+            }
+            _ => dcmnorm_encoding::text::SpecificCharacterSet::default(),
+        }
     }
 
     #[doc(hidden)]
@@ -269,7 +309,7 @@ impl InMemDicomObject {
     /// Write this object as a bare data set, splitting top-level elements around `(7FE0,0010)`
     /// and invoking `write_pixel_data` at the exact tag-order position of `PixelData` (skipping
     /// any `PixelData` stored in `self`).
-    pub(crate) fn write_dataset_with_ts_and_pixel_data<'w, W, E, F>(
+    pub fn write_dataset_with_ts_and_pixel_data<'w, W, E, F>(
         &self,
         to: W,
         ts: &TransferSyntax,
@@ -312,6 +352,90 @@ impl InMemDicomObject {
             .flush()
             .map_err(|source| WriteError::Dataset { source })?;
         Ok(())
+    }
+
+    /// Write all elements in this object into an already-constructed `DataSetWriter` (e.g.
+    /// trailing elements after streaming `PixelData` in a single-pass wire receiver).
+    pub fn write_elements_to_writer<'w, W: Write>(
+        &self,
+        writer: &mut DataSetWriter<W, dcmnorm_encoding::transfer_syntax::DynEncoder<'w, W>>,
+    ) -> Result<(), WriteError> {
+        for element in &self.elements {
+            write_element_tokens(writer, element)?;
+        }
+        Ok(())
+    }
+
+    /// Read a bare data set from a forward-only stream up to (not including) top-level
+    /// `(7FE0,0010) PixelData`'s value, returning all elements read so far and where the stream
+    /// stopped. Because `DataSetReader` performs no read-ahead past the element header in hand,
+    /// `source` is left positioned at byte 0 of `PixelData`'s value (or at the Basic Offset Table
+    /// item header for encapsulated pixel data).
+    ///
+    /// Does not apply dataset-level codecs (deflate) — callers must check `ts.codec()` first.
+    pub fn read_dataset_until_pixel_data<R: Read>(
+        source: R,
+        ts: &TransferSyntax,
+    ) -> Result<(Self, PixelDataStreamStop), ReadError> {
+        const PIXEL_DATA: Tag = Tag(0x7FE0, 0x0010);
+        let mut reader = DataSetReader::new_with_ts(source, ts)
+            .map_err(|source| ReadError::Dataset { source })?;
+        let mut elements = Vec::new();
+        let mut stop = PixelDataStreamStop::Absent;
+
+        while let Some(token) = reader.next() {
+            match token? {
+                DataToken::ElementHeader(header) if header.tag == PIXEL_DATA => {
+                    let Some(length) = header.len.get() else {
+                        return Err(ReadError::UnexpectedToken {
+                            context: "undefined-length non-encapsulated PixelData",
+                        });
+                    };
+                    stop = PixelDataStreamStop::Native {
+                        vr: header.vr,
+                        length,
+                    };
+                    break;
+                }
+                DataToken::ElementHeader(header) => {
+                    let value = expect_primitive_value(&mut reader)?;
+                    elements.push(DataElement::new(header.tag, header.vr, value));
+                }
+                DataToken::SequenceStart { tag, len } => {
+                    let mut items: C<InMemDicomObject> = C::new();
+                    loop {
+                        match next_required(&mut reader)? {
+                            DataToken::ItemStart { .. } => {
+                                items.push(build_dataset(&mut reader, true)?);
+                            }
+                            DataToken::SequenceEnd => break,
+                            _ => {
+                                return Err(ReadError::UnexpectedToken {
+                                    context: "expected ItemStart or SequenceEnd in sequence",
+                                })
+                            }
+                        }
+                    }
+                    elements.push(DataElement::new(
+                        tag,
+                        VR::SQ,
+                        Value::Sequence(DataSetSequence::new(items, len)),
+                    ));
+                }
+                DataToken::PixelSequenceStart => {
+                    stop = PixelDataStreamStop::Encapsulated;
+                    break;
+                }
+                _ => {
+                    return Err(ReadError::UnexpectedToken {
+                        context: "unexpected token at data set top level",
+                    })
+                }
+            }
+        }
+
+        elements.sort_by_key(|e| e.tag());
+        Ok((InMemDicomObject { elements }, stop))
     }
 }
 
@@ -470,14 +594,20 @@ pub(crate) fn read_dataset_until<'r>(
         let token = token?;
         match token {
             DataToken::ElementHeader(header) => {
-                let value = expect_primitive_value(&mut reader)?;
                 let tag = header.tag;
+                if tag > stop_tag {
+                    break;
+                }
+                let value = expect_primitive_value(&mut reader)?;
                 elements.push(DataElement::new(tag, header.vr, value));
                 if tag >= stop_tag {
                     break;
                 }
             }
             DataToken::SequenceStart { tag, len } => {
+                if tag > stop_tag {
+                    break;
+                }
                 let mut items: C<InMemDicomObject> = C::new();
                 loop {
                     match next_required(&mut reader)? {
@@ -502,10 +632,9 @@ pub(crate) fn read_dataset_until<'r>(
                 }
             }
             DataToken::PixelSequenceStart => {
-                // Pixel data is always the last element in a data set (highest possible tag,
-                // 7FE0,0010) - reaching it means we're already past any plausible stop tag, so
-                // there's no early-stop benefit in trying to partially consume it. Read it in
-                // full via the shared sequence-building logic and then stop.
+                if Tag(0x7FE0, 0x0010) > stop_tag {
+                    break;
+                }
                 let value = read_pixel_sequence(&mut reader)?;
                 elements.push(DataElement::new(Tag(0x7FE0, 0x0010), VR::OB, value));
                 break;
@@ -844,6 +973,17 @@ pub(crate) fn build_dataset_deferring<R: Read + std::io::Seek>(
 
     elements.sort_by_key(|e| e.tag());
     Ok((InMemDicomObject { elements }, deferred))
+}
+
+/// Where [`InMemDicomObject::read_dataset_until_pixel_data`] stopped in a forward-only stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PixelDataStreamStop {
+    /// End of stream reached with no top-level `(7FE0,0010) PixelData`.
+    Absent,
+    /// Stopped right after a defined-length native `(7FE0,0010)` element header.
+    Native { vr: VR, length: u32 },
+    /// Stopped right after an encapsulated `(7FE0,0010)` undefined-length header.
+    Encapsulated,
 }
 
 /// Absolute file offset and byte length of one encapsulated pixel data fragment.
@@ -1449,5 +1589,51 @@ mod tests {
             }
             other => panic!("expected a pixel sequence, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn read_until_stops_before_reading_pixel_data_after_stop_tag() {
+        use dcmnorm_encoding::transfer_syntax::TransferSyntaxIndex;
+
+        // Build a sparse dataset: (0008,0018) SOPInstanceUID immediately followed by a
+        // (7FE0,0010) PixelData header declaring 100 MiB of payload, with ZERO payload bytes
+        // present. `read_until(Tag(0x0008, 0x0019))` must stop at the header without trying to
+        // read or allocate the 100 MiB PixelData value.
+        let ts = dcmnorm_transcode::TransferSyntaxRegistry
+            .get(dcmnorm_dictionary::uids::EXPLICIT_VR_LITTLE_ENDIAN)
+            .unwrap();
+        let mut raw = Vec::new();
+        let mut head = InMemDicomObject::new_empty();
+        head.put(DataElement::new(
+            dcmnorm_dictionary::tags::SOP_INSTANCE_UID,
+            VR::UI,
+            PrimitiveValue::from("1.2.3.4.5".to_owned()),
+        ));
+        head.write_dataset_with_ts(&mut raw, ts).unwrap();
+        // Append Explicit VR LE header for (7FE0,0010) OB with declared length = 100 MiB, no bytes.
+        raw.extend_from_slice(&0x7FE0u16.to_le_bytes());
+        raw.extend_from_slice(&0x0010u16.to_le_bytes());
+        raw.extend_from_slice(b"OB");
+        raw.extend_from_slice(&0u16.to_le_bytes());
+        raw.extend_from_slice(&(100u32 * 1024 * 1024).to_le_bytes());
+
+        let parsed = read_dataset_until(
+            std::io::Cursor::new(raw),
+            ts,
+            Tag(0x0008, 0x0019),
+            DataSetReaderOptions::default(),
+        )
+        .expect("read_until must stop at PixelData header without reading its value");
+        assert_eq!(
+            parsed
+                .element(dcmnorm_dictionary::tags::SOP_INSTANCE_UID)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "1.2.3.4.5"
+        );
+        assert!(parsed
+            .element(dcmnorm_dictionary::tags::PIXEL_DATA)
+            .is_err());
     }
 }
