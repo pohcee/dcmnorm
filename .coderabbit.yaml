@@ -8,9 +8,15 @@ reviews:
   review_status: true
   collapse_walkthrough: true
   poem: false
+  in_progress_fortune: false
+  sequence_diagrams: false
+  # Two maintainers; nobody should wait on a suggested reviewer.
+  suggested_reviewers: false
   auto_review:
     enabled: true
     drafts: false
+    # Keep reviewing long PRs instead of pausing after 5 reviewed commits.
+    auto_pause_after_reviewed_commits: 0
     base_branches:
       - main
 
@@ -55,8 +61,9 @@ reviews:
         across the FFI boundary, and that type declarations match the implementation.
 
   tools:
+    # clippy runs in CI (.github/workflows/lint.yml, pinned toolchain); not repeated here.
     clippy:
-      enabled: true
+      enabled: false
     shellcheck:
       enabled: true
     markdownlint:
