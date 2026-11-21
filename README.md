@@ -75,7 +75,7 @@ dcmnorm scan.dcm frame.png                                         # render a fr
 dcmnorm scan.dcm out.dcm --transfer-syntax 1.2.840.10008.1.2.1     # transcode to Explicit VR LE
 dcmnorm cine.dcm cine.mp4                                          # multi-frame → MP4
 dcmnorm --mpr coronal series/*.dcm coronal.png                     # multiplanar reformat
-dcmnorm register current/ prior/ --reg prior-to-current.dcm         # rigid registration → DICOM REG
+dcmnorm --register current/ prior/ prior-to-current.dcm           # rigid registration → DICOM REG
 dcmtalk echoscu somepacs.example.com:11112                         # verify a PACS connection
 ```
 
