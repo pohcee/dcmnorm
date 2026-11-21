@@ -2678,13 +2678,17 @@ fn store_scu_streams_data_for_large_files() {
     let source = fixture_path("dx.dcm");
     let object = read_dicom_file(&source).unwrap();
     let sop_class_uid = object
-        .meta()
-        .media_storage_sop_class_uid
+        .element(tags::SOP_CLASS_UID)
+        .unwrap()
+        .to_str()
+        .unwrap()
         .trim_end_matches(['\0', ' '])
         .to_owned();
     let sop_instance_uid = object
-        .meta()
-        .media_storage_sop_instance_uid
+        .element(tags::SOP_INSTANCE_UID)
+        .unwrap()
+        .to_str()
+        .unwrap()
         .trim_end_matches(['\0', ' '])
         .to_owned();
 
@@ -2772,18 +2776,24 @@ fn store_scu_avoids_transcoding_into_a_decode_only_transfer_syntax_shared_by_sop
     let object_a = read_dicom_file(&path_a).unwrap();
     let object_b = read_dicom_file(&path_b).unwrap();
     let sop_class_uid = object_a
-        .meta()
-        .media_storage_sop_class_uid
+        .element(tags::SOP_CLASS_UID)
+        .unwrap()
+        .to_str()
+        .unwrap()
         .trim_end_matches(['\0', ' '])
         .to_owned();
     let sop_instance_a = object_a
-        .meta()
-        .media_storage_sop_instance_uid
+        .element(tags::SOP_INSTANCE_UID)
+        .unwrap()
+        .to_str()
+        .unwrap()
         .trim_end_matches(['\0', ' '])
         .to_owned();
     let sop_instance_b = object_b
-        .meta()
-        .media_storage_sop_instance_uid
+        .element(tags::SOP_INSTANCE_UID)
+        .unwrap()
+        .to_str()
+        .unwrap()
         .trim_end_matches(['\0', ' '])
         .to_owned();
     assert_eq!(
@@ -2887,13 +2897,17 @@ fn store_scu_transcodes_into_fallback_context_when_peer_rejects_native_transfer_
     let source = fixture_path("dx2.dcm");
     let object = read_dicom_file(&source).unwrap();
     let sop_class_uid = object
-        .meta()
-        .media_storage_sop_class_uid
+        .element(tags::SOP_CLASS_UID)
+        .unwrap()
+        .to_str()
+        .unwrap()
         .trim_end_matches(['\0', ' '])
         .to_owned();
     let sop_instance_uid = object
-        .meta()
-        .media_storage_sop_instance_uid
+        .element(tags::SOP_INSTANCE_UID)
+        .unwrap()
+        .to_str()
+        .unwrap()
         .trim_end_matches(['\0', ' '])
         .to_owned();
     assert_eq!(
@@ -8288,4 +8302,1979 @@ fn rle_with_a_segment_count_mismatch_fails_to_transcode() {
     let frame = hand_built_rle_frame(&[&[0x01, 1, 2], &[0x01, 3, 4]]);
     let input = synthetic_rle_dicom(1, 2, 8, 1, None, vec![frame]);
     assert!(transcode_dicom_bytes(input, uids::EXPLICIT_VR_LITTLE_ENDIAN).is_err());
+}
+
+fn synthetic_multiframe_u16_dimse_object(
+    sop_instance_uid: &str,
+    study_instance_uid: &str,
+    vr: VR,
+    rows: u16,
+    cols: u16,
+    frames: usize,
+) -> (dcmnorm_object::DefaultDicomObject, Vec<u8>) {
+    let mut raw_le = Vec::with_capacity(usize::from(rows) * usize::from(cols) * frames * 2);
+    let mut raw_words = Vec::with_capacity(usize::from(rows) * usize::from(cols) * frames);
+    for f in 0..frames {
+        for r in 0..usize::from(rows) {
+            for c in 0..usize::from(cols) {
+                let sample = ((f * 173 + r * 19 + c * 7) & 0x03FF) as u16;
+                raw_words.push(sample);
+                raw_le.extend_from_slice(&sample.to_le_bytes());
+            }
+        }
+    }
+    let meta = dcmnorm_object::FileMetaTableBuilder::new()
+        .transfer_syntax(uids::EXPLICIT_VR_LITTLE_ENDIAN)
+        .media_storage_sop_class_uid(uids::DIGITAL_MAMMOGRAPHY_X_RAY_IMAGE_STORAGE_FOR_PRESENTATION)
+        .media_storage_sop_instance_uid(sop_instance_uid);
+    let mut obj = InMemDicomObject::new_empty().with_meta(meta).unwrap();
+    for elem in [
+        DataElement::new(
+            tags::SOP_CLASS_UID,
+            VR::UI,
+            PrimitiveValue::from(
+                uids::DIGITAL_MAMMOGRAPHY_X_RAY_IMAGE_STORAGE_FOR_PRESENTATION.to_owned(),
+            ),
+        ),
+        DataElement::new(
+            tags::SOP_INSTANCE_UID,
+            VR::UI,
+            PrimitiveValue::from(sop_instance_uid.to_owned()),
+        ),
+        DataElement::new(
+            tags::STUDY_INSTANCE_UID,
+            VR::UI,
+            PrimitiveValue::from(study_instance_uid.to_owned()),
+        ),
+        DataElement::new(
+            tags::SERIES_INSTANCE_UID,
+            VR::UI,
+            PrimitiveValue::from(format!("{study_instance_uid}.1")),
+        ),
+        DataElement::new(
+            tags::MODALITY,
+            VR::CS,
+            PrimitiveValue::from("MG".to_owned()),
+        ),
+        DataElement::new(tags::ROWS, VR::US, PrimitiveValue::from(rows)),
+        DataElement::new(tags::COLUMNS, VR::US, PrimitiveValue::from(cols)),
+        DataElement::new(tags::SAMPLES_PER_PIXEL, VR::US, PrimitiveValue::from(1u16)),
+        DataElement::new(tags::BITS_ALLOCATED, VR::US, PrimitiveValue::from(16u16)),
+        DataElement::new(tags::BITS_STORED, VR::US, PrimitiveValue::from(10u16)),
+        DataElement::new(tags::HIGH_BIT, VR::US, PrimitiveValue::from(9u16)),
+        DataElement::new(
+            tags::PIXEL_REPRESENTATION,
+            VR::US,
+            PrimitiveValue::from(0u16),
+        ),
+        DataElement::new(
+            tags::PHOTOMETRIC_INTERPRETATION,
+            VR::CS,
+            PrimitiveValue::from("MONOCHROME2".to_owned()),
+        ),
+        DataElement::new(
+            tags::NUMBER_OF_FRAMES,
+            VR::IS,
+            PrimitiveValue::from(frames.to_string()),
+        ),
+    ] {
+        obj.put(elem);
+    }
+    // Nested IconImageSequence with its own PixelData to verify top-level streaming boundary.
+    let mut icon = InMemDicomObject::new_empty();
+    icon.put(DataElement::new(
+        tags::ROWS,
+        VR::US,
+        PrimitiveValue::from(2u16),
+    ));
+    icon.put(DataElement::new(
+        tags::COLUMNS,
+        VR::US,
+        PrimitiveValue::from(2u16),
+    ));
+    icon.put(DataElement::new(
+        tags::PIXEL_DATA,
+        VR::OB,
+        PrimitiveValue::from(vec![11u8, 22, 33, 44]),
+    ));
+    obj.put(DataElement::new(
+        Tag(0x0088, 0x0200),
+        VR::SQ,
+        dcmnorm_core::value::Value::Sequence(dcmnorm_core::value::DataSetSequence::from(vec![
+            icon,
+        ])),
+    ));
+    // Trailing element after PixelData.
+    obj.put(DataElement::new(
+        Tag(0xFFFC, 0xFFFC),
+        VR::OB,
+        PrimitiveValue::from(vec![0xDEu8, 0xAD, 0xBE, 0xEF]),
+    ));
+    let pixel_val = if vr == VR::OB {
+        PrimitiveValue::from(raw_le.clone())
+    } else {
+        PrimitiveValue::U16(raw_words.into())
+    };
+    obj.put(DataElement::new(tags::PIXEL_DATA, vr, pixel_val));
+    (obj, raw_le)
+}
+
+fn empty_test_scp_handlers() -> std::sync::Arc<TestScpHandlers> {
+    std::sync::Arc::new(TestScpHandlers {
+        find_query: std::sync::Mutex::new(None),
+        find_response: Vec::new(),
+        move_calls: std::sync::Mutex::new(Vec::new()),
+        move_result: true,
+        association_complete: std::sync::Mutex::new(None),
+    })
+}
+
+fn unique_dimse_temp_dir(label: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "dcmnorm-{label}-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+#[test]
+fn store_scu_and_scp_stream_multiframe_native_passthrough() {
+    let dir = unique_dimse_temp_dir("stream-passthrough");
+    let cache_dir = dir.join("cache");
+    fs::create_dir_all(&cache_dir).unwrap();
+
+    let study_uid = "1.2.826.0.1.3680043.8.498.10001";
+    let (mut ob_obj, ob_pixels) = synthetic_multiframe_u16_dimse_object(
+        "1.2.826.0.1.3680043.8.498.10001.1",
+        study_uid,
+        VR::OB,
+        128,
+        128,
+        4,
+    );
+    let (mut ow_obj, ow_pixels) = synthetic_multiframe_u16_dimse_object(
+        "1.2.826.0.1.3680043.8.498.10001.2",
+        study_uid,
+        VR::OW,
+        128,
+        128,
+        4,
+    );
+
+    let ob_path = dir.join("in_ob.dcm");
+    let ow_path = dir.join("in_ow.dcm");
+    write_dicom_file(&mut ob_obj, &ob_path).unwrap();
+    write_dicom_file(&mut ow_obj, &ow_path).unwrap();
+
+    let scp = start_scp(
+        0,
+        cache_dir.clone(),
+        empty_test_scp_handlers(),
+        ScpOptions {
+            ae_title: "STREAM-SCP".to_owned(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let dest = format!("127.0.0.1:{}", scp.local_port());
+
+    let results = store_scu(
+        &dest,
+        &[ob_path, ow_path],
+        StoreScuOptions {
+            calling_ae_title: "STREAM-SCU".to_owned(),
+            called_ae_title: Some("STREAM-SCP".to_owned()),
+            max_pdu_length: 16384,
+            never_transcode: true,
+            timeout: None,
+            on_log: None,
+            cancel: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(results.len(), 2);
+    assert!(results.iter().all(|r| r.status == 0));
+
+    for (sop_uid, expected_pixels) in [
+        ("1.2.826.0.1.3680043.8.498.10001.1", &ob_pixels),
+        ("1.2.826.0.1.3680043.8.498.10001.2", &ow_pixels),
+    ] {
+        let stored_path = cache_dir
+            .join(format!("S_{study_uid}"))
+            .join(format!("MG_{sop_uid}.dcm"));
+        let stored = read_dicom_file(&stored_path).unwrap();
+        assert_eq!(
+            stored.meta().transfer_syntax().trim_end_matches('\0'),
+            uids::EXPLICIT_VR_LITTLE_ENDIAN
+        );
+        assert_eq!(
+            stored
+                .element(tags::PIXEL_DATA)
+                .unwrap()
+                .to_bytes()
+                .unwrap()
+                .as_ref(),
+            expected_pixels.as_slice()
+        );
+        assert_eq!(
+            stored
+                .element(Tag(0xFFFC, 0xFFFC))
+                .unwrap()
+                .to_bytes()
+                .unwrap()
+                .as_ref(),
+            &[0xDE, 0xAD, 0xBE, 0xEF]
+        );
+        assert!(stored.element(Tag(0x0088, 0x0200)).is_ok());
+    }
+
+    scp.stop();
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn store_scu_streams_multiframe_encapsulated_fallback_transcode() {
+    use dcmnorm_encoding::TransferSyntaxIndex;
+    use dcmnorm_transcode::TransferSyntaxRegistry;
+
+    let dir = unique_dimse_temp_dir("stream-scu-fallback");
+    let study_uid = "1.2.826.0.1.3680043.8.498.10002";
+    let sop_uid = "1.2.826.0.1.3680043.8.498.10002.1";
+    let (mut native_obj, expected_pixels) =
+        synthetic_multiframe_u16_dimse_object(sop_uid, study_uid, VR::OW, 128, 128, 4);
+    let raw_path = dir.join("raw.dcm");
+    let htj2k_path = dir.join("htj2k.dcm");
+    write_dicom_file(&mut native_obj, &raw_path).unwrap();
+    crate::dicom_io::transcode_dicom_file(&raw_path, &htj2k_path, "1.2.840.10008.1.2.4.201")
+        .unwrap();
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let sop_class = uids::DIGITAL_MAMMOGRAPHY_X_RAY_IMAGE_STORAGE_FOR_PRESENTATION.to_owned();
+    let expected_pixels_clone = expected_pixels.clone();
+
+    let scp_handle = std::thread::spawn(move || {
+        let scp = dcmnorm_dimse::association::server::ServerAssociationOptions::new()
+            .ae_title("NATIVE-ONLY-SCP")
+            .with_abstract_syntax(sop_class.clone())
+            .with_transfer_syntax(uids::EXPLICIT_VR_LITTLE_ENDIAN);
+        let (stream, _) = listener.accept().unwrap();
+        let mut association = scp.establish(stream).unwrap();
+
+        let (pc_id, request, dataset_bytes) = dimse_recv_command_with_data(&mut association);
+        let ts = TransferSyntaxRegistry
+            .get(uids::EXPLICIT_VR_LITTLE_ENDIAN)
+            .unwrap();
+        let parsed = InMemDicomObject::read_dataset_with_ts(dataset_bytes.as_slice(), ts).unwrap();
+        assert_eq!(
+            parsed
+                .element(tags::PIXEL_DATA)
+                .unwrap()
+                .to_bytes()
+                .unwrap()
+                .as_ref(),
+            expected_pixels_clone.as_slice(),
+        );
+        assert_eq!(
+            parsed
+                .element(Tag(0xFFFC, 0xFFFC))
+                .unwrap()
+                .to_bytes()
+                .unwrap()
+                .as_ref(),
+            &[0xDE, 0xAD, 0xBE, 0xEF],
+        );
+
+        let message_id = dimse_message_id(&request);
+        let response = InMemDicomObject::command_from_element_iter([
+            DataElement::new(
+                tags::AFFECTED_SOP_CLASS_UID,
+                VR::UI,
+                dicom_value!(Str, sop_class),
+            ),
+            DataElement::new(tags::COMMAND_FIELD, VR::US, dicom_value!(U16, [0x8001])),
+            DataElement::new(
+                tags::MESSAGE_ID_BEING_RESPONDED_TO,
+                VR::US,
+                dicom_value!(U16, [message_id]),
+            ),
+            DataElement::new(
+                tags::COMMAND_DATA_SET_TYPE,
+                VR::US,
+                dicom_value!(U16, [0x0101]),
+            ),
+            DataElement::new(tags::STATUS, VR::US, dicom_value!(U16, [0x0000])),
+        ]);
+        dimse_send_command(&mut association, pc_id, &response);
+        let pdu = association.receive().unwrap();
+        assert_eq!(pdu, dcmnorm_dimse::pdu::Pdu::ReleaseRQ);
+        association
+            .send(&dcmnorm_dimse::pdu::Pdu::ReleaseRP)
+            .unwrap();
+    });
+
+    let results = store_scu(
+        &addr.to_string(),
+        &[htj2k_path],
+        StoreScuOptions {
+            calling_ae_title: "STREAM-SCU".to_owned(),
+            called_ae_title: Some("NATIVE-ONLY-SCP".to_owned()),
+            max_pdu_length: 16384,
+            never_transcode: false,
+            timeout: None,
+            on_log: None,
+            cancel: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].status, 0);
+    scp_handle.join().unwrap();
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn scp_on_the_fly_transcodes_native_multiframe_to_htj2k() {
+    let dir = unique_dimse_temp_dir("scp-otf-native");
+    let cache_dir = dir.join("cache");
+    fs::create_dir_all(&cache_dir).unwrap();
+
+    let study_uid = "1.2.826.0.1.3680043.8.498.10003";
+    let (mut ob_obj, ob_pixels) = synthetic_multiframe_u16_dimse_object(
+        "1.2.826.0.1.3680043.8.498.10003.1",
+        study_uid,
+        VR::OB,
+        128,
+        128,
+        4,
+    );
+    let (mut ow_obj, ow_pixels) = synthetic_multiframe_u16_dimse_object(
+        "1.2.826.0.1.3680043.8.498.10003.2",
+        study_uid,
+        VR::OW,
+        128,
+        128,
+        4,
+    );
+
+    let ob_path = dir.join("ob.dcm");
+    let ow_path = dir.join("ow.dcm");
+    write_dicom_file(&mut ob_obj, &ob_path).unwrap();
+    write_dicom_file(&mut ow_obj, &ow_path).unwrap();
+
+    let scp = start_scp(
+        0,
+        cache_dir.clone(),
+        empty_test_scp_handlers(),
+        ScpOptions {
+            ae_title: "OTF-SCP".to_owned(),
+            max_pdu_length: 16384,
+            storage_transfer_syntax: Some("1.2.840.10008.1.2.4.201".to_owned()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let dest = format!("127.0.0.1:{}", scp.local_port());
+
+    let results = store_scu(
+        &dest,
+        &[ob_path, ow_path],
+        StoreScuOptions {
+            calling_ae_title: "OTF-SCU".to_owned(),
+            called_ae_title: Some("OTF-SCP".to_owned()),
+            max_pdu_length: 16384,
+            never_transcode: true,
+            timeout: None,
+            on_log: None,
+            cancel: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(results.len(), 2);
+    assert!(results.iter().all(|r| r.status == 0));
+
+    for (sop_uid, expected_pixels) in [
+        ("1.2.826.0.1.3680043.8.498.10003.1", &ob_pixels),
+        ("1.2.826.0.1.3680043.8.498.10003.2", &ow_pixels),
+    ] {
+        let stored_path = cache_dir
+            .join(format!("S_{study_uid}"))
+            .join(format!("MG_{sop_uid}.dcm"));
+        let stored = read_dicom_file(&stored_path).unwrap();
+        assert_eq!(
+            stored.meta().transfer_syntax().trim_end_matches('\0'),
+            "1.2.840.10008.1.2.4.201"
+        );
+        let dcmnorm_core::value::Value::PixelSequence(seq) =
+            stored.element(tags::PIXEL_DATA).unwrap().value()
+        else {
+            panic!("expected encapsulated pixel data");
+        };
+        assert_eq!(seq.fragments().len(), 4);
+        assert_eq!(
+            seq.offset_table().len(),
+            4,
+            "Basic Offset Table should be populated for every frame",
+        );
+        assert_eq!(
+            stored
+                .element(Tag(0xFFFC, 0xFFFC))
+                .unwrap()
+                .to_bytes()
+                .unwrap()
+                .as_ref(),
+            &[0xDE, 0xAD, 0xBE, 0xEF]
+        );
+        assert!(stored.element(Tag(0x0088, 0x0200)).is_ok());
+
+        let decoded = crate::dicom_io::transcode_dcmnorm_object_owned(
+            stored,
+            uids::EXPLICIT_VR_LITTLE_ENDIAN,
+        )
+        .unwrap();
+        assert_eq!(
+            decoded
+                .element(tags::PIXEL_DATA)
+                .unwrap()
+                .to_bytes()
+                .unwrap()
+                .as_ref(),
+            expected_pixels.as_slice(),
+        );
+    }
+
+    scp.stop();
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[cfg(feature = "jpeg-ls-codec")]
+#[test]
+fn scp_on_the_fly_transcodes_encapsulated_multiframe_to_htj2k() {
+    let dir = unique_dimse_temp_dir("scp-otf-encap");
+    let cache_dir = dir.join("cache");
+    fs::create_dir_all(&cache_dir).unwrap();
+
+    let study_uid = "1.2.826.0.1.3680043.8.498.10004";
+    let sop_uid = "1.2.826.0.1.3680043.8.498.10004.1";
+    let (mut native_obj, expected_pixels) =
+        synthetic_multiframe_u16_dimse_object(sop_uid, study_uid, VR::OW, 128, 128, 4);
+    let raw_path = dir.join("raw.dcm");
+    let jpegls_path = dir.join("jpegls.dcm");
+    write_dicom_file(&mut native_obj, &raw_path).unwrap();
+    crate::dicom_io::transcode_dicom_file(&raw_path, &jpegls_path, uids::JPEGLS_LOSSLESS).unwrap();
+
+    let dx2_path = fixture_path("dx2.dcm");
+    let dx2_orig = read_dicom_file(&dx2_path).unwrap();
+    let dx2_sop_uid = dx2_orig
+        .element(tags::SOP_INSTANCE_UID)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .trim_end_matches(['\0', ' '])
+        .to_owned();
+    let dx2_study_uid = dx2_orig
+        .element(tags::STUDY_INSTANCE_UID)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .trim()
+        .to_owned();
+    let dx2_modality = dx2_orig
+        .element(tags::MODALITY)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .trim()
+        .to_owned();
+    let dx2_expected_pixels =
+        crate::dicom_io::transcode_dcmnorm_object_owned(dx2_orig, uids::EXPLICIT_VR_LITTLE_ENDIAN)
+            .unwrap()
+            .element(tags::PIXEL_DATA)
+            .unwrap()
+            .to_bytes()
+            .unwrap()
+            .to_vec();
+
+    let scp = start_scp(
+        0,
+        cache_dir.clone(),
+        empty_test_scp_handlers(),
+        ScpOptions {
+            ae_title: "OTF-SCP".to_owned(),
+            max_pdu_length: 16384,
+            storage_transfer_syntax: Some("1.2.840.10008.1.2.4.201".to_owned()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let dest = format!("127.0.0.1:{}", scp.local_port());
+
+    let results = store_scu(
+        &dest,
+        &[jpegls_path, dx2_path],
+        StoreScuOptions {
+            calling_ae_title: "OTF-SCU".to_owned(),
+            called_ae_title: Some("OTF-SCP".to_owned()),
+            max_pdu_length: 16384,
+            never_transcode: true,
+            timeout: None,
+            on_log: None,
+            cancel: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(results.len(), 2);
+    assert!(results.iter().all(|r| r.status == 0));
+
+    // Check 4-frame JPEG-LS -> HTJ2K
+    let stored_jls = read_dicom_file(
+        cache_dir
+            .join(format!("S_{study_uid}"))
+            .join(format!("MG_{sop_uid}.dcm")),
+    )
+    .unwrap();
+    assert_eq!(
+        stored_jls.meta().transfer_syntax().trim_end_matches('\0'),
+        "1.2.840.10008.1.2.4.201"
+    );
+    let dcmnorm_core::value::Value::PixelSequence(jls_seq) =
+        stored_jls.element(tags::PIXEL_DATA).unwrap().value()
+    else {
+        panic!("expected encapsulated pixel data");
+    };
+    assert_eq!(jls_seq.offset_table().len(), 4);
+    assert_eq!(
+        stored_jls
+            .element(Tag(0xFFFC, 0xFFFC))
+            .unwrap()
+            .to_bytes()
+            .unwrap()
+            .as_ref(),
+        &[0xDE, 0xAD, 0xBE, 0xEF],
+    );
+    let decoded_jls = crate::dicom_io::transcode_dcmnorm_object_owned(
+        stored_jls,
+        uids::EXPLICIT_VR_LITTLE_ENDIAN,
+    )
+    .unwrap();
+    assert_eq!(
+        decoded_jls
+            .element(tags::PIXEL_DATA)
+            .unwrap()
+            .to_bytes()
+            .unwrap()
+            .as_ref(),
+        expected_pixels.as_slice(),
+    );
+
+    // Check real fixture dx2.dcm (Classic J2K .90 -> HTJ2K .201)
+    let stored_dx2 = read_dicom_file(
+        cache_dir
+            .join(format!("S_{dx2_study_uid}"))
+            .join(format!("{dx2_modality}_{dx2_sop_uid}.dcm")),
+    )
+    .unwrap();
+    assert_eq!(
+        stored_dx2.meta().transfer_syntax().trim_end_matches('\0'),
+        "1.2.840.10008.1.2.4.201"
+    );
+    let decoded_dx2 = crate::dicom_io::transcode_dcmnorm_object_owned(
+        stored_dx2,
+        uids::EXPLICIT_VR_LITTLE_ENDIAN,
+    )
+    .unwrap();
+    assert_eq!(
+        decoded_dx2
+            .element(tags::PIXEL_DATA)
+            .unwrap()
+            .to_bytes()
+            .unwrap()
+            .as_ref(),
+        dx2_expected_pixels.as_slice(),
+    );
+
+    scp.stop();
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn scp_on_the_fly_transcode_passes_through_non_image_objects() {
+    let dir = unique_dimse_temp_dir("scp-otf-nonimage");
+    let cache_dir = dir.join("cache");
+    fs::create_dir_all(&cache_dir).unwrap();
+
+    let sr_path = fixture_path("sr.dcm");
+    let sr_orig = read_dicom_file(&sr_path).unwrap();
+    let sr_ts = sr_orig
+        .meta()
+        .transfer_syntax()
+        .trim_end_matches('\0')
+        .to_owned();
+    let sr_sop_uid = sr_orig
+        .meta()
+        .media_storage_sop_instance_uid
+        .trim_end_matches(['\0', ' '])
+        .to_owned();
+    let sr_study_uid = sr_orig
+        .element(tags::STUDY_INSTANCE_UID)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .trim()
+        .to_owned();
+    let sr_modality = sr_orig
+        .element(tags::MODALITY)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .trim()
+        .to_owned();
+
+    let study_uid = "1.2.826.0.1.3680043.8.498.10005";
+    let img_sop_uid = "1.2.826.0.1.3680043.8.498.10005.1";
+    let (mut img_obj, _) =
+        synthetic_multiframe_u16_dimse_object(img_sop_uid, study_uid, VR::OW, 32, 32, 2);
+    let img_path = dir.join("img.dcm");
+    write_dicom_file(&mut img_obj, &img_path).unwrap();
+
+    let scp = start_scp(
+        0,
+        cache_dir.clone(),
+        empty_test_scp_handlers(),
+        ScpOptions {
+            ae_title: "OTF-SCP".to_owned(),
+            max_pdu_length: 16384,
+            storage_transfer_syntax: Some("1.2.840.10008.1.2.4.201".to_owned()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let dest = format!("127.0.0.1:{}", scp.local_port());
+
+    let results = store_scu(
+        &dest,
+        &[sr_path, img_path],
+        StoreScuOptions {
+            calling_ae_title: "OTF-SCU".to_owned(),
+            called_ae_title: Some("OTF-SCP".to_owned()),
+            max_pdu_length: 16384,
+            never_transcode: true,
+            timeout: None,
+            on_log: None,
+            cancel: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(results.len(), 2);
+    assert!(results.iter().all(|r| r.status == 0));
+
+    let stored_sr = read_dicom_file(
+        cache_dir
+            .join(format!("S_{sr_study_uid}"))
+            .join(format!("{sr_modality}_{sr_sop_uid}.dcm")),
+    )
+    .unwrap();
+    assert_eq!(
+        stored_sr.meta().transfer_syntax().trim_end_matches('\0'),
+        sr_ts
+    );
+
+    let stored_img = read_dicom_file(
+        cache_dir
+            .join(format!("S_{study_uid}"))
+            .join(format!("MG_{img_sop_uid}.dcm")),
+    )
+    .unwrap();
+    assert_eq!(
+        stored_img.meta().transfer_syntax().trim_end_matches('\0'),
+        "1.2.840.10008.1.2.4.201"
+    );
+
+    scp.stop();
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn scp_on_the_fly_transcode_drains_corrupt_dataset_and_keeps_association_alive() {
+    use dcmnorm_encoding::TransferSyntaxIndex;
+    use dcmnorm_transcode::TransferSyntaxRegistry;
+
+    let dir = unique_dimse_temp_dir("scp-otf-drain");
+    let cache_dir = dir.join("cache");
+    fs::create_dir_all(&cache_dir).unwrap();
+
+    let scp = start_scp(
+        0,
+        cache_dir.clone(),
+        empty_test_scp_handlers(),
+        ScpOptions {
+            ae_title: "OTF-SCP".to_owned(),
+            max_pdu_length: 16384,
+            storage_transfer_syntax: Some("1.2.840.10008.1.2.4.201".to_owned()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let dest = format!("127.0.0.1:{}", scp.local_port());
+
+    let sop_class = uids::DIGITAL_MAMMOGRAPHY_X_RAY_IMAGE_STORAGE_FOR_PRESENTATION;
+    let mut assoc = dcmnorm_dimse::association::client::ClientAssociationOptions::new()
+        .calling_ae_title("DRAIN-SCU")
+        .called_ae_title("OTF-SCP")
+        .max_pdu_length(16384)
+        .with_presentation_context(sop_class, vec![uids::EXPLICIT_VR_LITTLE_ENDIAN.to_owned()])
+        .with_presentation_context(sop_class, vec!["1.2.840.10008.1.2.4.90".to_owned()])
+        .establish_with(&dest)
+        .unwrap();
+    let explicit_pc_id = assoc
+        .presentation_contexts()
+        .iter()
+        .find(|pc| pc.transfer_syntax == uids::EXPLICIT_VR_LITTLE_ENDIAN)
+        .unwrap()
+        .id;
+    let j2k_pc_id = assoc
+        .presentation_contexts()
+        .iter()
+        .find(|pc| pc.transfer_syntax == "1.2.840.10008.1.2.4.90")
+        .unwrap()
+        .id;
+
+    // 1) Send a multi-PDU encapsulated dataset whose PixelData item 0 has an invalid item tag
+    //    immediately after the Basic Offset Table, followed by 40 KiB of validly framed DIMSE
+    //    Data PDVs across multiple PDUs. The SCP fails during item parsing on frame 0 before
+    //    reading the trailing PDUs and MUST drain the rest of the dataset before returning 0xC000.
+    let bad_sop = "1.2.826.0.1.3680043.8.498.10006.1";
+    let bad_cmd = InMemDicomObject::command_from_element_iter([
+        DataElement::new(
+            tags::AFFECTED_SOP_CLASS_UID,
+            VR::UI,
+            dicom_value!(Str, sop_class),
+        ),
+        DataElement::new(tags::COMMAND_FIELD, VR::US, dicom_value!(U16, [0x0001])),
+        DataElement::new(tags::MESSAGE_ID, VR::US, dicom_value!(U16, [1])),
+        DataElement::new(tags::PRIORITY, VR::US, dicom_value!(U16, [0])),
+        DataElement::new(
+            tags::COMMAND_DATA_SET_TYPE,
+            VR::US,
+            dicom_value!(U16, [0x0000]),
+        ),
+        DataElement::new(
+            tags::AFFECTED_SOP_INSTANCE_UID,
+            VR::UI,
+            dicom_value!(Str, bad_sop),
+        ),
+    ]);
+    let mut cmd_bytes = Vec::new();
+    bad_cmd
+        .write_dataset_with_ts(
+            &mut cmd_bytes,
+            TransferSyntaxRegistry
+                .get(uids::IMPLICIT_VR_LITTLE_ENDIAN)
+                .unwrap(),
+        )
+        .unwrap();
+    assoc
+        .send(&dcmnorm_dimse::pdu::Pdu::PData {
+            data: vec![dcmnorm_dimse::pdu::PDataValue {
+                presentation_context_id: j2k_pc_id,
+                value_type: dcmnorm_dimse::pdu::PDataValueType::Command,
+                is_last: true,
+                data: cmd_bytes,
+            }],
+        })
+        .unwrap();
+
+    let bad_header = InMemDicomObject::from_element_iter([
+        DataElement::new(
+            tags::SOP_CLASS_UID,
+            VR::UI,
+            PrimitiveValue::from(sop_class.to_owned()),
+        ),
+        DataElement::new(
+            tags::SOP_INSTANCE_UID,
+            VR::UI,
+            PrimitiveValue::from(bad_sop.to_owned()),
+        ),
+        DataElement::new(
+            tags::STUDY_INSTANCE_UID,
+            VR::UI,
+            PrimitiveValue::from("1.2.826.0.1.3680043.8.498.10006".to_owned()),
+        ),
+        DataElement::new(
+            tags::MODALITY,
+            VR::CS,
+            PrimitiveValue::from("MG".to_owned()),
+        ),
+        DataElement::new(tags::ROWS, VR::US, PrimitiveValue::from(16u16)),
+        DataElement::new(tags::COLUMNS, VR::US, PrimitiveValue::from(16u16)),
+        DataElement::new(tags::SAMPLES_PER_PIXEL, VR::US, PrimitiveValue::from(1u16)),
+        DataElement::new(tags::BITS_ALLOCATED, VR::US, PrimitiveValue::from(16u16)),
+        DataElement::new(tags::BITS_STORED, VR::US, PrimitiveValue::from(10u16)),
+        DataElement::new(tags::HIGH_BIT, VR::US, PrimitiveValue::from(9u16)),
+        DataElement::new(
+            tags::PIXEL_REPRESENTATION,
+            VR::US,
+            PrimitiveValue::from(0u16),
+        ),
+        DataElement::new(
+            tags::PHOTOMETRIC_INTERPRETATION,
+            VR::CS,
+            PrimitiveValue::from("MONOCHROME2".to_owned()),
+        ),
+        DataElement::new(
+            tags::NUMBER_OF_FRAMES,
+            VR::IS,
+            PrimitiveValue::from("2".to_owned()),
+        ),
+    ]);
+    let ts_j2k = TransferSyntaxRegistry
+        .get("1.2.840.10008.1.2.4.90")
+        .unwrap();
+    let ts_explicit = TransferSyntaxRegistry
+        .get(uids::EXPLICIT_VR_LITTLE_ENDIAN)
+        .unwrap();
+    let mut bad_bytes = Vec::new();
+    bad_header
+        .write_dataset_with_ts(&mut bad_bytes, ts_j2k)
+        .unwrap();
+    // Append encapsulated PixelData header (7FE0,0010 OB undefined length) + 2-entry BOT +
+    // invalid item header (FFFE,E00D) followed by 40 KiB of unread trailing payload across PDUs.
+    bad_bytes.extend_from_slice(&[
+        0xE0, 0x7F, 0x10, 0x00, b'O', b'B', 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF,
+    ]);
+    bad_bytes.extend_from_slice(&[0xFE, 0xFF, 0x00, 0xE0, 0x08, 0x00, 0x00, 0x00]); // BOT item (8 bytes)
+    bad_bytes.extend_from_slice(&0u32.to_le_bytes());
+    bad_bytes.extend_from_slice(&12u32.to_le_bytes());
+    bad_bytes.extend_from_slice(&[0xFE, 0xFF, 0x0D, 0xE0, 0x00, 0x00, 0x00, 0x00]); // invalid item tag
+    bad_bytes.extend(std::iter::repeat_n(0x5Au8, 40_000));
+    {
+        let mut writer = assoc.send_pdata(j2k_pc_id);
+        std::io::Write::write_all(&mut writer, &bad_bytes).unwrap();
+        writer.finish().unwrap();
+    }
+
+    // Expect C-STORE-RSP with failure status 0xC000.
+    let rsp1_pdu = assoc.receive().unwrap();
+    let rsp1_bytes = match rsp1_pdu {
+        dcmnorm_dimse::pdu::Pdu::PData { data } => {
+            data.into_iter().flat_map(|v| v.data).collect::<Vec<u8>>()
+        }
+        other => panic!("expected C-STORE-RSP PData, got {other:?}"),
+    };
+    let rsp1 = InMemDicomObject::read_dataset_with_ts(
+        rsp1_bytes.as_slice(),
+        TransferSyntaxRegistry
+            .get(uids::IMPLICIT_VR_LITTLE_ENDIAN)
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        rsp1.element(tags::STATUS).unwrap().uint16().unwrap(),
+        0xC000
+    );
+
+    // Ensure no leftover .tmp files in cache_dir.
+    for entry in fs::read_dir(&cache_dir).unwrap() {
+        let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+        assert!(
+            !name.ends_with(".tmp"),
+            "unexpected leftover temp file: {name}"
+        );
+    }
+
+    // 2) Send a valid C-STORE-RQ on the exact same association -> must succeed with 0x0000.
+    let study_uid = "1.2.826.0.1.3680043.8.498.10006";
+    let good_sop = "1.2.826.0.1.3680043.8.498.10006.2";
+    let (good_obj, expected_pixels) =
+        synthetic_multiframe_u16_dimse_object(good_sop, study_uid, VR::OW, 64, 64, 2);
+    let good_cmd = InMemDicomObject::command_from_element_iter([
+        DataElement::new(
+            tags::AFFECTED_SOP_CLASS_UID,
+            VR::UI,
+            dicom_value!(Str, sop_class),
+        ),
+        DataElement::new(tags::COMMAND_FIELD, VR::US, dicom_value!(U16, [0x0001])),
+        DataElement::new(tags::MESSAGE_ID, VR::US, dicom_value!(U16, [2])),
+        DataElement::new(tags::PRIORITY, VR::US, dicom_value!(U16, [0])),
+        DataElement::new(
+            tags::COMMAND_DATA_SET_TYPE,
+            VR::US,
+            dicom_value!(U16, [0x0000]),
+        ),
+        DataElement::new(
+            tags::AFFECTED_SOP_INSTANCE_UID,
+            VR::UI,
+            dicom_value!(Str, good_sop),
+        ),
+    ]);
+    let mut good_cmd_bytes = Vec::new();
+    good_cmd
+        .write_dataset_with_ts(
+            &mut good_cmd_bytes,
+            TransferSyntaxRegistry
+                .get(uids::IMPLICIT_VR_LITTLE_ENDIAN)
+                .unwrap(),
+        )
+        .unwrap();
+    assoc
+        .send(&dcmnorm_dimse::pdu::Pdu::PData {
+            data: vec![dcmnorm_dimse::pdu::PDataValue {
+                presentation_context_id: explicit_pc_id,
+                value_type: dcmnorm_dimse::pdu::PDataValueType::Command,
+                is_last: true,
+                data: good_cmd_bytes,
+            }],
+        })
+        .unwrap();
+    {
+        let mut writer = assoc.send_pdata(explicit_pc_id);
+        good_obj
+            .write_dataset_with_ts(&mut writer, ts_explicit)
+            .unwrap();
+        writer.finish().unwrap();
+    }
+
+    let rsp2_pdu = assoc.receive().unwrap();
+    let rsp2_bytes = match rsp2_pdu {
+        dcmnorm_dimse::pdu::Pdu::PData { data } => {
+            data.into_iter().flat_map(|v| v.data).collect::<Vec<u8>>()
+        }
+        other => panic!("expected second C-STORE-RSP PData, got {other:?}"),
+    };
+    let rsp2 = InMemDicomObject::read_dataset_with_ts(
+        rsp2_bytes.as_slice(),
+        TransferSyntaxRegistry
+            .get(uids::IMPLICIT_VR_LITTLE_ENDIAN)
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        rsp2.element(tags::STATUS).unwrap().uint16().unwrap(),
+        0x0000
+    );
+    assoc.release().unwrap();
+
+    let stored = read_dicom_file(
+        cache_dir
+            .join(format!("S_{study_uid}"))
+            .join(format!("MG_{good_sop}.dcm")),
+    )
+    .unwrap();
+    assert_eq!(
+        stored.meta().transfer_syntax().trim_end_matches('\0'),
+        "1.2.840.10008.1.2.4.201"
+    );
+    let decoded =
+        crate::dicom_io::transcode_dcmnorm_object_owned(stored, uids::EXPLICIT_VR_LITTLE_ENDIAN)
+            .unwrap();
+    assert_eq!(
+        decoded
+            .element(tags::PIXEL_DATA)
+            .unwrap()
+            .to_bytes()
+            .unwrap()
+            .as_ref(),
+        expected_pixels.as_slice(),
+    );
+
+    scp.stop();
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn store_scu_prefers_dataset_sop_uids_over_stale_file_meta_uids() {
+    let dir = unique_dimse_temp_dir("stale-file-meta-uids");
+    let stale_sop_class = uids::SECONDARY_CAPTURE_IMAGE_STORAGE;
+    let stale_sop_instance = "1.2.826.0.1.3680043.8.498.99999.1";
+    let real_sop_class = uids::DIGITAL_MAMMOGRAPHY_X_RAY_IMAGE_STORAGE_FOR_PRESENTATION;
+    let real_sop_instance = "1.2.826.0.1.3680043.8.498.99999.2";
+
+    // Build a Part 10 file whose Group 0002 MediaStorageSOP*UID values are stale and differ from
+    // dataset (0008,0016) SOPClassUID / (0008,0018) SOPInstanceUID.
+    let stale_meta = dcmnorm_object::FileMetaTableBuilder::new()
+        .transfer_syntax(uids::EXPLICIT_VR_LITTLE_ENDIAN)
+        .media_storage_sop_class_uid(stale_sop_class)
+        .media_storage_sop_instance_uid(stale_sop_instance);
+    let obj = InMemDicomObject::from_element_iter([
+        DataElement::new(
+            tags::SOP_CLASS_UID,
+            VR::UI,
+            PrimitiveValue::from(real_sop_class.to_owned()),
+        ),
+        DataElement::new(
+            tags::SOP_INSTANCE_UID,
+            VR::UI,
+            PrimitiveValue::from(real_sop_instance.to_owned()),
+        ),
+        DataElement::new(
+            tags::STUDY_INSTANCE_UID,
+            VR::UI,
+            PrimitiveValue::from("1.2.826.0.1.3680043.8.498.99999".to_owned()),
+        ),
+        DataElement::new(
+            tags::SERIES_INSTANCE_UID,
+            VR::UI,
+            PrimitiveValue::from("1.2.826.0.1.3680043.8.498.99999.0".to_owned()),
+        ),
+        DataElement::new(
+            tags::MODALITY,
+            VR::CS,
+            PrimitiveValue::from("MG".to_owned()),
+        ),
+    ])
+    .with_meta(stale_meta)
+    .unwrap();
+    let path = dir.join("stale_meta.dcm");
+    obj.write_to_file(&path).unwrap();
+
+    // Verify the file on disk genuinely carries the stale Group 0002 values.
+    let mut file = fs::File::open(&path).unwrap();
+    let on_disk_meta = dcmnorm_object::FileMetaTable::read_from(&mut file)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        on_disk_meta
+            .media_storage_sop_class_uid
+            .trim_end_matches(['\0', ' ']),
+        stale_sop_class
+    );
+    assert_eq!(
+        on_disk_meta
+            .media_storage_sop_instance_uid
+            .trim_end_matches(['\0', ' ']),
+        stale_sop_instance
+    );
+
+    // Mock SCP accepts ONLY the authoritative dataset SOPClassUID and asserts the C-STORE-RQ
+    // carries the dataset's AffectedSOPClassUID and AffectedSOPInstanceUID.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let expected_class = real_sop_class.to_owned();
+    let expected_instance = real_sop_instance.to_owned();
+    let scp_handle = std::thread::spawn(move || {
+        let scp = dcmnorm_dimse::association::server::ServerAssociationOptions::new()
+            .ae_title("UID-CHECK-SCP")
+            .with_abstract_syntax(expected_class.clone())
+            .with_transfer_syntax(uids::EXPLICIT_VR_LITTLE_ENDIAN);
+        let (stream, _) = listener.accept().unwrap();
+        let mut association = scp.establish(stream).unwrap();
+
+        let (pc_id, request, dataset_bytes) = dimse_recv_command_with_data(&mut association);
+        assert!(!dataset_bytes.is_empty());
+        assert_eq!(
+            request
+                .element(tags::AFFECTED_SOP_CLASS_UID)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .trim_end_matches(['\0', ' ']),
+            expected_class,
+        );
+        assert_eq!(
+            request
+                .element(tags::AFFECTED_SOP_INSTANCE_UID)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .trim_end_matches(['\0', ' ']),
+            expected_instance,
+        );
+
+        let message_id = dimse_message_id(&request);
+        let response = InMemDicomObject::command_from_element_iter([
+            DataElement::new(
+                tags::AFFECTED_SOP_CLASS_UID,
+                VR::UI,
+                dicom_value!(Str, expected_class),
+            ),
+            DataElement::new(tags::COMMAND_FIELD, VR::US, dicom_value!(U16, [0x8001])),
+            DataElement::new(
+                tags::MESSAGE_ID_BEING_RESPONDED_TO,
+                VR::US,
+                dicom_value!(U16, [message_id]),
+            ),
+            DataElement::new(
+                tags::COMMAND_DATA_SET_TYPE,
+                VR::US,
+                dicom_value!(U16, [0x0101]),
+            ),
+            DataElement::new(tags::STATUS, VR::US, dicom_value!(U16, [0x0000])),
+        ]);
+        dimse_send_command(&mut association, pc_id, &response);
+        let pdu = association.receive().unwrap();
+        assert_eq!(pdu, dcmnorm_dimse::pdu::Pdu::ReleaseRQ);
+        association
+            .send(&dcmnorm_dimse::pdu::Pdu::ReleaseRP)
+            .unwrap();
+    });
+
+    let results = store_scu(
+        &addr.to_string(),
+        &[path],
+        StoreScuOptions {
+            calling_ae_title: "UID-CHECK-SCU".to_owned(),
+            called_ae_title: Some("UID-CHECK-SCP".to_owned()),
+            max_pdu_length: 16384,
+            never_transcode: true,
+            timeout: None,
+            on_log: None,
+            cancel: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].status, 0);
+    assert_eq!(results[0].sop_instance_uid, real_sop_instance);
+
+    scp_handle.join().unwrap();
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn scp_default_passthrough_rejects_truncated_pixel_data_and_preserves_existing_file() {
+    use dcmnorm_encoding::TransferSyntaxIndex;
+    use dcmnorm_transcode::TransferSyntaxRegistry;
+
+    let dir = unique_dimse_temp_dir("scp-truncated");
+    let cache_dir = dir.join("cache");
+    fs::create_dir_all(&cache_dir).unwrap();
+
+    let scp = start_scp(
+        0,
+        cache_dir.clone(),
+        empty_test_scp_handlers(),
+        ScpOptions {
+            ae_title: "TRUNC-SCP".to_owned(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let dest = format!("127.0.0.1:{}", scp.local_port());
+
+    // First store a valid instance under this SOP Instance UID.
+    let study_uid = "1.2.826.0.1.3680043.8.498.20001";
+    let sop_uid = "1.2.826.0.1.3680043.8.498.20001.1";
+    let (mut good_obj, expected_pixels) =
+        synthetic_multiframe_u16_dimse_object(sop_uid, study_uid, VR::OW, 32, 32, 1);
+    let good_path = dir.join("good.dcm");
+    write_dicom_file(&mut good_obj, &good_path).unwrap();
+    let res = store_scu(
+        &dest,
+        &[good_path],
+        StoreScuOptions {
+            calling_ae_title: "TRUNC-SCU".to_owned(),
+            called_ae_title: Some("TRUNC-SCP".to_owned()),
+            max_pdu_length: 16384,
+            never_transcode: true,
+            timeout: None,
+            on_log: None,
+            cancel: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(res[0].status, 0);
+    let stored_path = cache_dir
+        .join(format!("S_{study_uid}"))
+        .join(format!("MG_{sop_uid}.dcm"));
+    let original_bytes = fs::read(&stored_path).unwrap();
+
+    // Now send (a) truncated native PixelData and (b) encapsulated PixelData missing (FFFE,E0DD).
+    let sop_class = uids::DIGITAL_MAMMOGRAPHY_X_RAY_IMAGE_STORAGE_FOR_PRESENTATION;
+    let ts_implicit = TransferSyntaxRegistry
+        .get(uids::IMPLICIT_VR_LITTLE_ENDIAN)
+        .unwrap();
+    let ts_explicit = TransferSyntaxRegistry
+        .get(uids::EXPLICIT_VR_LITTLE_ENDIAN)
+        .unwrap();
+    let mut assoc = dcmnorm_dimse::association::client::ClientAssociationOptions::new()
+        .calling_ae_title("TRUNC-SCU")
+        .called_ae_title("TRUNC-SCP")
+        .max_pdu_length(16384)
+        .with_presentation_context(sop_class, vec![uids::EXPLICIT_VR_LITTLE_ENDIAN.to_owned()])
+        .with_presentation_context(sop_class, vec![uids::JPEGLS_LOSSLESS.to_owned()])
+        .establish_with(&dest)
+        .unwrap();
+    let explicit_pc = assoc
+        .presentation_contexts()
+        .iter()
+        .find(|pc| pc.transfer_syntax == uids::EXPLICIT_VR_LITTLE_ENDIAN)
+        .unwrap()
+        .id;
+    let encap_pc = assoc
+        .presentation_contexts()
+        .iter()
+        .find(|pc| pc.transfer_syntax == uids::JPEGLS_LOSSLESS)
+        .unwrap()
+        .id;
+
+    let mut header_bytes = Vec::new();
+    let head_obj = InMemDicomObject::from_element_iter([
+        DataElement::new(
+            tags::SOP_CLASS_UID,
+            VR::UI,
+            PrimitiveValue::from(sop_class.to_owned()),
+        ),
+        DataElement::new(
+            tags::SOP_INSTANCE_UID,
+            VR::UI,
+            PrimitiveValue::from(sop_uid.to_owned()),
+        ),
+        DataElement::new(
+            tags::STUDY_INSTANCE_UID,
+            VR::UI,
+            PrimitiveValue::from(study_uid.to_owned()),
+        ),
+        DataElement::new(
+            tags::SERIES_INSTANCE_UID,
+            VR::UI,
+            PrimitiveValue::from(format!("{study_uid}.1")),
+        ),
+        DataElement::new(
+            tags::MODALITY,
+            VR::CS,
+            PrimitiveValue::from("MG".to_owned()),
+        ),
+    ]);
+    head_obj
+        .write_dataset_with_ts(&mut header_bytes, ts_explicit)
+        .unwrap();
+
+    // (a) Native PixelData declaring 1024 bytes, sending only 16 bytes.
+    let mut trunc_native = header_bytes.clone();
+    trunc_native.extend_from_slice(&0x7FE0u16.to_le_bytes());
+    trunc_native.extend_from_slice(&0x0010u16.to_le_bytes());
+    trunc_native.extend_from_slice(b"OB");
+    trunc_native.extend_from_slice(&0u16.to_le_bytes());
+    trunc_native.extend_from_slice(&1024u32.to_le_bytes());
+    trunc_native.extend_from_slice(&[0xAA; 16]);
+
+    // (b) Encapsulated PixelData with empty BOT + 1 fragment, missing SequenceDelimiter (FFFE,E0DD).
+    let mut trunc_encap = header_bytes;
+    trunc_encap.extend_from_slice(&0x7FE0u16.to_le_bytes());
+    trunc_encap.extend_from_slice(&0x0010u16.to_le_bytes());
+    trunc_encap.extend_from_slice(b"OB");
+    trunc_encap.extend_from_slice(&0u16.to_le_bytes());
+    trunc_encap.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+    // Empty BOT item
+    trunc_encap.extend_from_slice(&0xFFFEu16.to_le_bytes());
+    trunc_encap.extend_from_slice(&0xE000u16.to_le_bytes());
+    trunc_encap.extend_from_slice(&0u32.to_le_bytes());
+    // One 4-byte fragment, no (FFFE,E0DD)
+    trunc_encap.extend_from_slice(&0xFFFEu16.to_le_bytes());
+    trunc_encap.extend_from_slice(&0xE000u16.to_le_bytes());
+    trunc_encap.extend_from_slice(&4u32.to_le_bytes());
+    trunc_encap.extend_from_slice(&[1, 2, 3, 4]);
+
+    for (msg_id, pc_id, payload) in [
+        (1u16, explicit_pc, trunc_native),
+        (2u16, encap_pc, trunc_encap),
+    ] {
+        let cmd = InMemDicomObject::command_from_element_iter([
+            DataElement::new(
+                tags::AFFECTED_SOP_CLASS_UID,
+                VR::UI,
+                dicom_value!(Str, sop_class),
+            ),
+            DataElement::new(tags::COMMAND_FIELD, VR::US, dicom_value!(U16, [0x0001])),
+            DataElement::new(tags::MESSAGE_ID, VR::US, dicom_value!(U16, [msg_id])),
+            DataElement::new(tags::PRIORITY, VR::US, dicom_value!(U16, [0])),
+            DataElement::new(
+                tags::COMMAND_DATA_SET_TYPE,
+                VR::US,
+                dicom_value!(U16, [0x0000]),
+            ),
+            DataElement::new(
+                tags::AFFECTED_SOP_INSTANCE_UID,
+                VR::UI,
+                dicom_value!(Str, sop_uid),
+            ),
+        ]);
+        let mut cmd_bytes = Vec::new();
+        cmd.write_dataset_with_ts(&mut cmd_bytes, ts_implicit)
+            .unwrap();
+        assoc
+            .send(&dcmnorm_dimse::pdu::Pdu::PData {
+                data: vec![dcmnorm_dimse::pdu::PDataValue {
+                    presentation_context_id: pc_id,
+                    value_type: dcmnorm_dimse::pdu::PDataValueType::Command,
+                    is_last: true,
+                    data: cmd_bytes,
+                }],
+            })
+            .unwrap();
+        {
+            let mut writer = assoc.send_pdata(pc_id);
+            std::io::Write::write_all(&mut writer, &payload).unwrap();
+            writer.finish().unwrap();
+        }
+        let rsp_pdu = assoc.receive().unwrap();
+        let rsp_bytes = match rsp_pdu {
+            dcmnorm_dimse::pdu::Pdu::PData { data } => {
+                data.into_iter().flat_map(|v| v.data).collect::<Vec<u8>>()
+            }
+            other => panic!("expected C-STORE-RSP, got {other:?}"),
+        };
+        let rsp =
+            InMemDicomObject::read_dataset_with_ts(rsp_bytes.as_slice(), ts_implicit).unwrap();
+        assert_eq!(rsp.element(tags::STATUS).unwrap().uint16().unwrap(), 0xC000);
+    }
+    assoc.release().unwrap();
+
+    // Original valid instance on disk must survive untouched.
+    assert_eq!(fs::read(&stored_path).unwrap(), original_bytes);
+    let stored = read_dicom_file(&stored_path).unwrap();
+    assert_eq!(
+        stored
+            .element(tags::PIXEL_DATA)
+            .unwrap()
+            .to_bytes()
+            .unwrap()
+            .as_ref(),
+        expected_pixels.as_slice()
+    );
+
+    scp.stop();
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn scp_rejects_invalid_storage_ts_at_startup_and_blocks_path_traversal() {
+    let dir = unique_dimse_temp_dir("scp-security");
+    let cache_dir = dir.join("cache");
+    fs::create_dir_all(&cache_dir).unwrap();
+
+    // Invalid storage_transfer_syntax must fail immediately at start_scp().
+    assert!(
+        start_scp(
+            0,
+            cache_dir.clone(),
+            empty_test_scp_handlers(),
+            ScpOptions {
+                ae_title: "BAD-TS-SCP".to_owned(),
+                storage_transfer_syntax: Some("1.2.3.4.invalid".to_owned()),
+                ..Default::default()
+            },
+        )
+        .is_err(),
+        "unknown storage_transfer_syntax should fail start_scp"
+    );
+
+    // Path traversal attempt in Modality must be rejected with 0xC000 and write nothing outside cache_dir.
+    let scp = start_scp(
+        0,
+        cache_dir.clone(),
+        empty_test_scp_handlers(),
+        ScpOptions {
+            ae_title: "SEC-SCP".to_owned(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let dest = format!("127.0.0.1:{}", scp.local_port());
+
+    let sop_uid = "1.2.826.0.1.3680043.8.498.20002.1";
+    let (mut evil_obj, _) = synthetic_multiframe_u16_dimse_object(
+        sop_uid,
+        "1.2.826.0.1.3680043.8.498.20002",
+        VR::OB,
+        8,
+        8,
+        1,
+    );
+    evil_obj.put(DataElement::new(
+        tags::MODALITY,
+        VR::CS,
+        PrimitiveValue::from("../../evil".to_owned()),
+    ));
+    let evil_path = dir.join("evil.dcm");
+    write_dicom_file(&mut evil_obj, &evil_path).unwrap();
+
+    let results = store_scu(
+        &dest,
+        &[evil_path],
+        StoreScuOptions {
+            calling_ae_title: "SEC-SCU".to_owned(),
+            called_ae_title: Some("SEC-SCP".to_owned()),
+            max_pdu_length: 16384,
+            never_transcode: true,
+            timeout: None,
+            on_log: None,
+            cancel: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].status, 0xC000);
+    assert!(!dir.join(format!("evil_{sop_uid}.dcm")).exists());
+
+    scp.stop();
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn scp_on_the_fly_preserves_multiframe_empty_bot_and_ineligible_encapsulated_streams() {
+    let dir = unique_dimse_temp_dir("scp-otf-fallback");
+    let cache_dir = dir.join("cache");
+    fs::create_dir_all(&cache_dir).unwrap();
+
+    // 1) Two-frame JPEG Baseline dataset whose first frame is split across two fragments with an
+    //    empty BOT -> SCP with HTJ2K target must preserve the negotiated JPEG Baseline file cleanly.
+    let study_uid = "1.2.826.0.1.3680043.8.498.20003";
+    let sop_uid_split = "1.2.826.0.1.3680043.8.498.20003.1";
+    let rgb_obj = read_dicom_file(fixture_path("rgb_planar.dcm")).unwrap();
+    let jpeg_one =
+        crate::dicom_io::transcode_dcmnorm_object_owned(rgb_obj.clone(), "1.2.840.10008.1.2.4.50")
+            .unwrap();
+    let dcmnorm_core::value::Value::PixelSequence(orig_seq) =
+        jpeg_one.element(tags::PIXEL_DATA).unwrap().value()
+    else {
+        panic!("expected jpeg pixel sequence");
+    };
+    let frag_bytes = orig_seq.fragments()[0].clone();
+    let mid = (frag_bytes.len() / 2) & !1;
+    let mut split_obj = jpeg_one.clone();
+    split_obj.meta_mut().media_storage_sop_instance_uid = sop_uid_split.to_owned();
+    split_obj.put(DataElement::new(
+        tags::SOP_INSTANCE_UID,
+        VR::UI,
+        PrimitiveValue::from(sop_uid_split.to_owned()),
+    ));
+    split_obj.put(DataElement::new(
+        tags::STUDY_INSTANCE_UID,
+        VR::UI,
+        PrimitiveValue::from(study_uid.to_owned()),
+    ));
+    split_obj.put(DataElement::new(
+        tags::MODALITY,
+        VR::CS,
+        PrimitiveValue::from("OT".to_owned()),
+    ));
+    split_obj.put(DataElement::new(
+        tags::NUMBER_OF_FRAMES,
+        VR::IS,
+        PrimitiveValue::from("2".to_owned()),
+    ));
+    split_obj.put(DataElement::new(
+        tags::PIXEL_DATA,
+        VR::OB,
+        dcmnorm_core::value::Value::PixelSequence(dcmnorm_core::value::PixelFragmentSequence::new(
+            Vec::new(), // empty BOT!
+            vec![
+                frag_bytes[..mid].to_vec(),
+                frag_bytes[mid..].to_vec(),
+                frag_bytes.clone(),
+            ],
+        )),
+    ));
+    let split_path = dir.join("split_empty_bot.dcm");
+    write_dicom_file(&mut split_obj, &split_path).unwrap();
+    let expected_input_fragments: Vec<Vec<u8>> = {
+        let written = read_dicom_file(&split_path).unwrap();
+        let dcmnorm_core::value::Value::PixelSequence(seq) =
+            written.element(tags::PIXEL_DATA).unwrap().value()
+        else {
+            panic!("expected pixel sequence");
+        };
+        seq.fragments().iter().map(|f| f.to_vec()).collect()
+    };
+
+    let scp_htj2k = start_scp(
+        0,
+        cache_dir.clone(),
+        empty_test_scp_handlers(),
+        ScpOptions {
+            ae_title: "OTF-HTJ2K".to_owned(),
+            storage_transfer_syntax: Some("1.2.840.10008.1.2.4.201".to_owned()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let res = store_scu(
+        &format!("127.0.0.1:{}", scp_htj2k.local_port()),
+        &[split_path],
+        StoreScuOptions {
+            calling_ae_title: "OTF-SCU".to_owned(),
+            called_ae_title: Some("OTF-HTJ2K".to_owned()),
+            max_pdu_length: 16384,
+            never_transcode: true,
+            timeout: None,
+            on_log: None,
+            cancel: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(res[0].status, 0);
+    let stored_split = read_dicom_file(
+        cache_dir
+            .join(format!("S_{study_uid}"))
+            .join(format!("OT_{sop_uid_split}.dcm")),
+    )
+    .unwrap();
+    assert_eq!(
+        stored_split.meta().transfer_syntax().trim_end_matches('\0'),
+        "1.2.840.10008.1.2.4.50"
+    );
+    let dcmnorm_core::value::Value::PixelSequence(stored_seq) =
+        stored_split.element(tags::PIXEL_DATA).unwrap().value()
+    else {
+        panic!("expected pixel sequence");
+    };
+    assert!(
+        stored_seq.offset_table().is_empty(),
+        "empty Basic Offset Table must be preserved"
+    );
+    assert_eq!(
+        stored_seq.fragments().len(),
+        3,
+        "all 3 fragments must be preserved intact"
+    );
+    for (idx, expected) in expected_input_fragments.iter().enumerate() {
+        assert_eq!(
+            stored_seq.fragments()[idx].as_slice(),
+            expected.as_slice(),
+            "stored fragment {idx} must match transmitted fragment byte-for-byte"
+        );
+    }
+    scp_htj2k.stop();
+
+    let _ = rgb_obj.meta();
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[cfg(feature = "jpeg-xl-codec")]
+#[test]
+fn scp_on_the_fly_falls_back_for_signed_htj2k_to_jxl() {
+    let dir = unique_dimse_temp_dir("scp-otf-signed-jxl");
+    let study_uid = "1.2.826.0.1.3680043.8.498.20003";
+    // Signed 16-bit HTJ2K sent to SCP targeting JPEG XL Lossless (.110, unsigned-only):
+    // must check metadata eligibility before consuming frame 0 and store HTJ2K passthrough cleanly.
+    let sop_uid_signed = "1.2.826.0.1.3680043.8.498.20003.2";
+    let (mut signed_native, _) =
+        synthetic_multiframe_u16_dimse_object(sop_uid_signed, study_uid, VR::OW, 32, 32, 1);
+    signed_native.put(DataElement::new(
+        tags::PIXEL_REPRESENTATION,
+        VR::US,
+        PrimitiveValue::from(1u16),
+    ));
+    let signed_raw_path = dir.join("signed_raw.dcm");
+    let signed_htj2k_path = dir.join("signed_htj2k.dcm");
+    write_dicom_file(&mut signed_native, &signed_raw_path).unwrap();
+    crate::dicom_io::transcode_dicom_file(
+        &signed_raw_path,
+        &signed_htj2k_path,
+        "1.2.840.10008.1.2.4.201",
+    )
+    .unwrap();
+
+    let cache_jxl = dir.join("cache_jxl");
+    fs::create_dir_all(&cache_jxl).unwrap();
+    let scp_jxl = start_scp(
+        0,
+        cache_jxl.clone(),
+        empty_test_scp_handlers(),
+        ScpOptions {
+            ae_title: "OTF-JXL".to_owned(),
+            storage_transfer_syntax: Some("1.2.840.10008.1.2.4.110".to_owned()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let res2 = store_scu(
+        &format!("127.0.0.1:{}", scp_jxl.local_port()),
+        &[signed_htj2k_path],
+        StoreScuOptions {
+            calling_ae_title: "OTF-SCU".to_owned(),
+            called_ae_title: Some("OTF-JXL".to_owned()),
+            max_pdu_length: 16384,
+            never_transcode: true,
+            timeout: None,
+            on_log: None,
+            cancel: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(res2[0].status, 0);
+    let stored_signed = read_dicom_file(
+        cache_jxl
+            .join(format!("S_{study_uid}"))
+            .join(format!("MG_{sop_uid_signed}.dcm")),
+    )
+    .unwrap();
+    assert_eq!(
+        stored_signed
+            .meta()
+            .transfer_syntax()
+            .trim_end_matches('\0'),
+        "1.2.840.10008.1.2.4.201"
+    );
+    scp_jxl.stop();
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn store_scu_reencodes_implicit_in_explicit_recovered_file_and_bounds_unlimited_peer_pdu() {
+    use dcmnorm_encoding::TransferSyntaxIndex;
+    use dcmnorm_transcode::TransferSyntaxRegistry;
+
+    let dir = unique_dimse_temp_dir("scu-implicit-in-explicit");
+    let sop_class = uids::DIGITAL_MAMMOGRAPHY_X_RAY_IMAGE_STORAGE_FOR_PRESENTATION;
+    let sop_uid = "1.2.826.0.1.3680043.8.498.20004.1";
+    let study_uid = "1.2.826.0.1.3680043.8.498.20004";
+    let ts_explicit = TransferSyntaxRegistry
+        .get(uids::EXPLICIT_VR_LITTLE_ENDIAN)
+        .unwrap();
+    let ts_implicit = TransferSyntaxRegistry
+        .get(uids::IMPLICIT_VR_LITTLE_ENDIAN)
+        .unwrap();
+
+    // Build a Part 10 file claiming Explicit VR LE in Group 0002 while encoding its dataset as
+    // Implicit VR LE (exercises read_dicom_file's flexible recovery).
+    let (obj, _) = synthetic_multiframe_u16_dimse_object(sop_uid, study_uid, VR::OB, 16, 16, 1);
+    let mismatched_path = dir.join("implicit_in_explicit.dcm");
+    {
+        let mut f = fs::File::create(&mismatched_path).unwrap();
+        obj.meta().write_to(&mut f).unwrap();
+        obj.write_dataset_with_ts(&mut f, ts_implicit).unwrap();
+    }
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let sop_class_owned = sop_class.to_owned();
+    let scp_handle = std::thread::spawn(move || {
+        let scp = dcmnorm_dimse::association::server::ServerAssociationOptions::new()
+            .ae_title("STRICT-SCP")
+            .with_abstract_syntax(sop_class_owned.clone())
+            .with_transfer_syntax(uids::EXPLICIT_VR_LITTLE_ENDIAN);
+        let (stream, _) = listener.accept().unwrap();
+        let mut assoc = scp.establish(stream).unwrap();
+
+        let (pc_id, request, dataset_bytes) = dimse_recv_command_with_data(&mut assoc);
+        // Must parse strictly as Explicit VR LE (would fail if SCU raw-copied the Implicit bytes!).
+        let parsed = InMemDicomObject::read_dataset_with_ts(dataset_bytes.as_slice(), ts_explicit)
+            .expect("SCU must re-encode recovered implicit-in-explicit file as Explicit VR LE");
+        assert_eq!(
+            parsed
+                .element(tags::SOP_INSTANCE_UID)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .trim(),
+            sop_uid
+        );
+
+        let message_id = dimse_message_id(&request);
+        let response = InMemDicomObject::command_from_element_iter([
+            DataElement::new(
+                tags::AFFECTED_SOP_CLASS_UID,
+                VR::UI,
+                dicom_value!(Str, sop_class_owned),
+            ),
+            DataElement::new(tags::COMMAND_FIELD, VR::US, dicom_value!(U16, [0x8001])),
+            DataElement::new(
+                tags::MESSAGE_ID_BEING_RESPONDED_TO,
+                VR::US,
+                dicom_value!(U16, [message_id]),
+            ),
+            DataElement::new(
+                tags::COMMAND_DATA_SET_TYPE,
+                VR::US,
+                dicom_value!(U16, [0x0101]),
+            ),
+            DataElement::new(tags::STATUS, VR::US, dicom_value!(U16, [0x0000])),
+        ]);
+        dimse_send_command(&mut assoc, pc_id, &response);
+        let pdu = assoc.receive().unwrap();
+        assert_eq!(pdu, dcmnorm_dimse::pdu::Pdu::ReleaseRQ);
+        assoc.send(&dcmnorm_dimse::pdu::Pdu::ReleaseRP).unwrap();
+    });
+
+    let res = store_scu(
+        &addr.to_string(),
+        &[mismatched_path],
+        StoreScuOptions {
+            calling_ae_title: "STRICT-SCU".to_owned(),
+            called_ae_title: Some("STRICT-SCP".to_owned()),
+            max_pdu_length: 16384,
+            never_transcode: true,
+            timeout: None,
+            on_log: None,
+            cancel: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(res[0].status, 0);
+    scp_handle.join().unwrap();
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn scp_rejects_lossy_storage_targets_and_preserves_utf8_trailing_elements() {
+    let dir = unique_dimse_temp_dir("scp-otf-lossy-and-utf8");
+    let cache_dir = dir.join("cache");
+    fs::create_dir_all(&cache_dir).unwrap();
+
+    // Lossy targets (JPEG-LS Near-Lossless .81, Classic J2K Lossy .91) must be rejected at startup.
+    for lossy_uid in ["1.2.840.10008.1.2.4.81", "1.2.840.10008.1.2.4.91"] {
+        let err = start_scp(
+            0,
+            cache_dir.clone(),
+            empty_test_scp_handlers(),
+            ScpOptions {
+                ae_title: "LOSSY-SCP".to_owned(),
+                storage_transfer_syntax: Some(lossy_uid.to_owned()),
+                ..Default::default()
+            },
+        )
+        .err()
+        .expect("lossy storage transfer syntax must be rejected");
+        assert!(
+            !err.to_string().is_empty(),
+            "expected descriptive rejection for {lossy_uid}"
+        );
+    }
+
+    // Trailing text element after (7FE0,0010) encoded under ISO_IR 192 (UTF-8) must survive
+    // SCP on-the-fly transcoding verbatim without reverting to ISO-IR 6.
+    let study_uid = "1.2.826.0.1.3680043.8.498.30001";
+    let sop_uid = "1.2.826.0.1.3680043.8.498.30001.1";
+    let (mut obj, _) = synthetic_multiframe_u16_dimse_object(sop_uid, study_uid, VR::OW, 32, 32, 1);
+    obj.put(DataElement::new(
+        tags::SPECIFIC_CHARACTER_SET,
+        VR::CS,
+        PrimitiveValue::from("ISO_IR 192".to_owned()),
+    ));
+    let utf8_note = "Café — 日本語テスト";
+    obj.put(DataElement::new(
+        Tag(0x8001, 0x1010),
+        VR::LO,
+        PrimitiveValue::from(utf8_note.to_owned()),
+    ));
+    let in_path = dir.join("utf8_trailing.dcm");
+    write_dicom_file(&mut obj, &in_path).unwrap();
+
+    let scp = start_scp(
+        0,
+        cache_dir.clone(),
+        empty_test_scp_handlers(),
+        ScpOptions {
+            ae_title: "UTF8-SCP".to_owned(),
+            storage_transfer_syntax: Some("1.2.840.10008.1.2.4.201".to_owned()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let res = store_scu(
+        &format!("127.0.0.1:{}", scp.local_port()),
+        &[in_path],
+        StoreScuOptions {
+            calling_ae_title: "UTF8-SCU".to_owned(),
+            called_ae_title: Some("UTF8-SCP".to_owned()),
+            max_pdu_length: 16384,
+            never_transcode: true,
+            timeout: None,
+            on_log: None,
+            cancel: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(res[0].status, 0);
+    let stored = read_dicom_file(
+        cache_dir
+            .join(format!("S_{study_uid}"))
+            .join(format!("MG_{sop_uid}.dcm")),
+    )
+    .unwrap();
+    assert_eq!(
+        stored.meta().transfer_syntax().trim_end_matches('\0'),
+        "1.2.840.10008.1.2.4.201"
+    );
+    assert_eq!(
+        stored
+            .element(Tag(0x8001, 0x1010))
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .trim_end(),
+        utf8_note
+    );
+
+    scp.stop();
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[cfg(feature = "jpeg-ls-codec")]
+#[test]
+fn scp_on_the_fly_jpegls_declines_16bit_allocated_8bit_stored() {
+    let dir = unique_dimse_temp_dir("scp-otf-jpegls-16-8");
+    let cache_dir = dir.join("cache");
+    fs::create_dir_all(&cache_dir).unwrap();
+    let study_uid = "1.2.826.0.1.3680043.8.498.20012";
+    let sop_uid = "1.2.826.0.1.3680043.8.498.20012.1";
+    let (mut obj, _) = synthetic_multiframe_u16_dimse_object(sop_uid, study_uid, VR::OW, 16, 16, 1);
+    let expected_pixels: Vec<u16> = (0u16..256).map(|i| (i * 13 + 5) & 0x00ff).collect();
+    obj.put(DataElement::new(
+        tags::BITS_ALLOCATED,
+        VR::US,
+        PrimitiveValue::from(16u16),
+    ));
+    obj.put(DataElement::new(
+        tags::BITS_STORED,
+        VR::US,
+        PrimitiveValue::from(8u16),
+    ));
+    obj.put(DataElement::new(
+        tags::HIGH_BIT,
+        VR::US,
+        PrimitiveValue::from(7u16),
+    ));
+    obj.put(DataElement::new(
+        tags::PIXEL_DATA,
+        VR::OW,
+        PrimitiveValue::U16(expected_pixels.clone().into()),
+    ));
+    let in_path = dir.join("u16_8bit_stored.dcm");
+    write_dicom_file(&mut obj, &in_path).unwrap();
+
+    let scp = start_scp(
+        0,
+        cache_dir.clone(),
+        empty_test_scp_handlers(),
+        ScpOptions {
+            ae_title: "JLS-16-8".to_owned(),
+            storage_transfer_syntax: Some("1.2.840.10008.1.2.4.80".to_owned()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let res = store_scu(
+        &format!("127.0.0.1:{}", scp.local_port()),
+        &[in_path],
+        StoreScuOptions {
+            calling_ae_title: "JLS-SCU".to_owned(),
+            called_ae_title: Some("JLS-16-8".to_owned()),
+            max_pdu_length: 16384,
+            never_transcode: true,
+            timeout: None,
+            on_log: None,
+            cancel: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(res[0].status, 0);
+    let stored = read_dicom_file(
+        cache_dir
+            .join(format!("S_{study_uid}"))
+            .join(format!("MG_{sop_uid}.dcm")),
+    )
+    .unwrap();
+    assert_eq!(
+        stored.meta().transfer_syntax().trim_end_matches('\0'),
+        "1.2.840.10008.1.2.1",
+        "16-bit allocated with <= 8 bits stored must fall back to native passthrough instead of mis-encoding with CharLS"
+    );
+    let stored_bytes = stored
+        .element(tags::PIXEL_DATA)
+        .unwrap()
+        .to_bytes()
+        .unwrap();
+    let stored_pixels: Vec<u16> = stored_bytes
+        .chunks_exact(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .collect();
+    assert_eq!(stored_pixels, expected_pixels);
+
+    scp.stop();
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn store_scu_cancel_terminates_large_streaming_send() {
+    use std::io::Read;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    let dir = unique_dimse_temp_dir("scu-cancel-mid-send");
+    let sop_uid = "1.2.826.0.1.3680043.8.498.20099.1";
+    let study_uid = "1.2.826.0.1.3680043.8.498.20099";
+    // ~4 MiB native dataset so streaming spans >250 16 KiB PDUs and outlasts TCP send buffers.
+    let (mut obj, _) =
+        synthetic_multiframe_u16_dimse_object(sop_uid, study_uid, VR::OW, 512, 512, 8);
+    let in_path = dir.join("large_cancel.dcm");
+    write_dicom_file(&mut obj, &in_path).unwrap();
+
+    let cancel = CancelSignal::new();
+    let cancel_for_server = cancel.clone();
+    let triggered = Arc::new(AtomicBool::new(false));
+    let triggered_for_server = Arc::clone(&triggered);
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server_thread = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let mut assoc = dcmnorm_dimse::association::server::ServerAssociationOptions::new()
+            .ae_title("SLOW-SCP")
+            .max_pdu_length(16384)
+            .with_abstract_syntax(uids::DIGITAL_MAMMOGRAPHY_X_RAY_IMAGE_STORAGE_FOR_PRESENTATION)
+            .with_transfer_syntax(uids::EXPLICIT_VR_LITTLE_ENDIAN)
+            .establish(stream)
+            .unwrap();
+        let dcmnorm_dimse::Incoming::Command {
+            presentation_context_id,
+            ..
+        } = assoc.receive_command().unwrap()
+        else {
+            panic!("expected C-STORE-RQ command");
+        };
+        // Read just the first chunk of the dataset, then fire Abort cancellation while the SCU is
+        // actively streaming through `std::io::copy` / `BoundedSendWriter`.
+        let mut reader = assoc.receive_data_set_reader(presentation_context_id);
+        let mut first_chunk = [0u8; 4096];
+        let _ = reader.read(&mut first_chunk);
+        triggered_for_server.store(true, Ordering::Release);
+        cancel_for_server.request(CancelMode::Abort);
+        // Drain slowly until the SCU aborts and closes the socket.
+        let mut scratch = [0u8; 4096];
+        while let Ok(n) = reader.read(&mut scratch) {
+            if n == 0 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    });
+
+    let start = std::time::Instant::now();
+    let err = store_scu(
+        &format!("127.0.0.1:{port}"),
+        &[in_path],
+        StoreScuOptions {
+            calling_ae_title: "CANCEL-SCU".to_owned(),
+            called_ae_title: Some("SLOW-SCP".to_owned()),
+            max_pdu_length: 16384,
+            never_transcode: true,
+            timeout: Some(std::time::Duration::from_secs(10)),
+            on_log: None,
+            cancel: Some(cancel),
+        },
+    )
+    .expect_err("mid-send cancellation must abort store_scu");
+    assert!(
+        matches!(err, DimseError::Cancelled(CancelMode::Abort)),
+        "expected DimseError::Cancelled(Abort), got {err:?}"
+    );
+    assert!(
+        triggered.load(Ordering::Acquire),
+        "server should have fired cancellation during dataset streaming"
+    );
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(5),
+        "cancellation must terminate promptly instead of looping"
+    );
+
+    let _ = server_thread.join();
+    let _ = fs::remove_dir_all(&dir);
 }

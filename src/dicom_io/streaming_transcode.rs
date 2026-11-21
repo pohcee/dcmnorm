@@ -27,8 +27,9 @@ use dcmnorm_dictionary::{tags, uids};
 use dcmnorm_encoding::adapters::{PixelDataObject, PixelDataReader, RawPixelData};
 use dcmnorm_encoding::transfer_syntax::{Codec, TransferSyntax, TransferSyntaxIndex};
 use dcmnorm_object::{
-    DataSetWriter, DataToken, DefaultDicomObject, DeferredPixelData, FragmentLocation,
-    OpenFileOptions, ReadPreamble, WriteError,
+    DataSetWriter, DataToken, DefaultDicomObject, DeferredPixelData, FileMetaTableBuilder,
+    FragmentLocation, InMemDicomObject, OpenFileOptions, PixelDataStreamStop, ReadPreamble,
+    WriteError,
 };
 use dcmnorm_transcode::TransferSyntaxRegistry;
 use rayon::prelude::*;
@@ -397,6 +398,10 @@ pub(super) fn try_transcode_dicom_file_streaming(
         if padded > u64::from(u32::MAX) {
             return Ok(false);
         }
+    }
+    if matches!(target_mode, TargetMode::JpegLs { .. }) && bits_allocated == 16 && bits_stored <= 8
+    {
+        return Ok(false);
     }
     if matches!(target_mode, TargetMode::JpegXlLossless)
         && jpeg_xl::validate_jpeg_xl_encode_params(
@@ -1845,6 +1850,1895 @@ impl Drop for TempOutputFile {
             let _ = std::fs::remove_file(&self.path);
         }
     }
+}
+
+// =============================================================================================
+// DIMSE C-STORE SCU streaming: transcode a file directly into a forward-only Write sink
+// (PDataWriter) without loading PixelData in full or buffering the serialized dataset.
+// =============================================================================================
+
+/// A validated streaming transcode plan for sending a bare DICOM dataset in a native transfer
+/// syntax (`1.2.840.10008.1.2`, `.1.2.1`, `.1.2.2`) directly into a forward-only `Write` sink
+/// such as `dcmnorm_dimse::PDataWriter`.
+pub(super) struct PreparedNativeDatasetStream {
+    object: DefaultDicomObject,
+    input_file: File,
+    target_ts: &'static TransferSyntax,
+    plan: NativeStreamPlan,
+}
+
+enum NativeStreamPlan {
+    Absent,
+    DirectNative {
+        vr: VR,
+        offset: u64,
+        length: u32,
+        swap_words: bool,
+    },
+    DecodeEncapsulated {
+        source_mode: SourceMode<'static>,
+        decode_meta: FrameDecodeMeta,
+        source_ts: &'static TransferSyntax,
+        nr_frames: usize,
+        frame_len: usize,
+        total_native_bytes: u64,
+        out_vr: VR,
+        swap_out: bool,
+        batch_size: usize,
+    },
+}
+
+/// Prepare to stream `input_path` transcoded into a native (uncompressed) `target_uid` directly
+/// to a forward-only sink (e.g. DIMSE `PDataWriter`).
+///
+/// Validates everything upfront *before* the caller sends the C-STORE-RQ command PDU, returning
+/// `Ok(None)` when streaming does not apply (non-native target, deflated/meta-less/MPEG source,
+/// single-frame Kakadu, or missing offset table) so the caller can fall back cleanly.
+pub(super) fn prepare_streaming_dataset_for_dimse(
+    input_path: &Path,
+    target_uid: &str,
+) -> Result<Option<PreparedNativeDatasetStream>, TranscodeError> {
+    let target_uid = normalize_transfer_syntax_uid(target_uid);
+    let target_ts = TransferSyntaxRegistry
+        .get(target_uid)
+        .ok_or_else(|| TranscodeError::UnknownTransferSyntax(target_uid.to_owned()))?;
+    if is_encapsulated_transfer_syntax(target_ts) || matches!(target_ts.codec(), Codec::Dataset(_))
+    {
+        return Ok(None);
+    }
+
+    if !std::fs::metadata(input_path).is_ok_and(|meta| meta.file_type().is_file()) {
+        return Ok(None);
+    }
+
+    let open_result = OpenFileOptions::new()
+        .read_preamble(ReadPreamble::Always)
+        .open_file_deferring_pixel_data(input_path);
+    let (mut object, deferred_pixel_data, mut input_file) = match open_result {
+        Ok(Some(triple)) => triple,
+        Ok(None) | Err(_) => return Ok(None),
+    };
+
+    let source_uid = normalize_transfer_syntax_uid(object.meta().transfer_syntax()).to_owned();
+    let source_ts = TransferSyntaxRegistry
+        .get(&source_uid)
+        .ok_or_else(|| TranscodeError::UnknownTransferSyntax(source_uid.clone()))?;
+
+    if source_uid != target_uid && has_nested_encapsulated_pixel_data(&object) {
+        return Err(TranscodeError::EncodePixelData {
+            uid: target_uid.to_owned(),
+            name: target_ts.name().to_owned(),
+            message: "cannot transcode dataset containing encapsulated nested PixelData (e.g. IconImageSequence) to a different transfer syntax".to_owned(),
+        });
+    }
+
+    let target_be = target_uid == EXPLICIT_VR_BIG_ENDIAN_UID;
+
+    match deferred_pixel_data {
+        DeferredPixelData::Absent => Ok(Some(PreparedNativeDatasetStream {
+            object,
+            input_file,
+            target_ts,
+            plan: NativeStreamPlan::Absent,
+        })),
+        DeferredPixelData::Native { vr, offset, length } => {
+            let source_be = source_uid == EXPLICIT_VR_BIG_ENDIAN_UID;
+            let swap_words = vr == VR::OW && source_be != target_be;
+            if swap_words && length % 2 != 0 {
+                return Ok(None);
+            }
+            Ok(Some(PreparedNativeDatasetStream {
+                object,
+                input_file,
+                target_ts,
+                plan: NativeStreamPlan::DirectNative {
+                    vr,
+                    offset,
+                    length,
+                    swap_words,
+                },
+            }))
+        }
+        DeferredPixelData::Encapsulated {
+            offset_table,
+            fragments,
+            ..
+        } => {
+            let nr_frames = number_of_frames(&object);
+            if is_mpeg_transfer_syntax(&source_uid) || fragments.is_empty() {
+                return Ok(None);
+            }
+            let Some(frame_ranges) =
+                compute_frame_fragment_ranges(&object, &offset_table, &fragments, nr_frames)
+            else {
+                return Ok(None);
+            };
+            if source_uid == uids::RLE_LOSSLESS && fragments.len() != nr_frames {
+                return Ok(None);
+            }
+            if is_jpeg_ls_transfer_syntax(&source_uid) && nr_frames == 1 && fragments.len() > 1 {
+                return Ok(None);
+            }
+            if is_jpeg_xl_transfer_syntax(&source_uid) && fragments.len() != nr_frames {
+                return Ok(None);
+            }
+
+            let is_j2k = is_jpeg2000_transfer_syntax(&source_uid);
+            let is_htj2k = is_htj2k_transfer_syntax(&source_uid);
+            let j2k_pref = jpeg2000_codec_preference();
+            if is_j2k
+                && !is_htj2k
+                && kakadu_ffi_enabled()
+                && j2k_pref != Jpeg2000CodecPreference::OpenJpeg
+                && (nr_frames == 1 || j2k_pref == Jpeg2000CodecPreference::Kakadu)
+            {
+                return Ok(None);
+            }
+
+            let mut j2k_uses_mct = None;
+            if is_j2k {
+                let first_frag = fragments[frame_ranges[0].start];
+                let probe = read_j2k_header_probe(&mut input_file, first_frag)?;
+                j2k_uses_mct = apply_j2k_probe_corrections(&mut object, &probe, source_ts)?;
+            }
+
+            let decoder = if is_jpeg_ls_transfer_syntax(&source_uid) {
+                if !cfg!(feature = "jpeg-ls-codec") {
+                    return Ok(None);
+                }
+                EncapsulatedDecoder::JpegLs
+            } else if is_jpeg_xl_transfer_syntax(&source_uid) {
+                if !cfg!(feature = "jpeg-xl-codec") {
+                    return Ok(None);
+                }
+                let pixel_rep = object
+                    .get(tags::PIXEL_REPRESENTATION)
+                    .and_then(|e| e.uint16().ok())
+                    .unwrap_or(0);
+                if pixel_rep != 0 {
+                    return Ok(None);
+                }
+                EncapsulatedDecoder::JpegXl
+            } else {
+                let Codec::EncapsulatedPixelData(Some(reader), _) = source_ts.codec() else {
+                    return Ok(None);
+                };
+                EncapsulatedDecoder::Registry(reader.as_ref())
+            };
+
+            let Some(rows) = object.get(tags::ROWS).and_then(|e| e.uint16().ok()) else {
+                return Ok(None);
+            };
+            let Some(cols) = object.get(tags::COLUMNS).and_then(|e| e.uint16().ok()) else {
+                return Ok(None);
+            };
+            let samples_per_pixel = object
+                .get(tags::SAMPLES_PER_PIXEL)
+                .and_then(|e| e.uint16().ok())
+                .unwrap_or(1);
+            let Some(bits_allocated) = object
+                .get(tags::BITS_ALLOCATED)
+                .and_then(|e| e.uint16().ok())
+            else {
+                return Ok(None);
+            };
+            let bits_stored = object
+                .get(tags::BITS_STORED)
+                .and_then(|e| e.uint16().ok())
+                .unwrap_or(bits_allocated);
+            if (bits_allocated != 8 && bits_allocated != 16)
+                || bits_stored == 0
+                || bits_stored > bits_allocated
+            {
+                return Ok(None);
+            }
+            let bytes_per_sample = usize::from(bits_allocated / 8);
+            let Some(frame_len) = usize::from(rows)
+                .checked_mul(usize::from(cols))
+                .and_then(|n| n.checked_mul(usize::from(samples_per_pixel)))
+                .and_then(|n| n.checked_mul(bytes_per_sample))
+            else {
+                return Ok(None);
+            };
+            if frame_len == 0 {
+                return Ok(None);
+            }
+            let Some(total_native_bytes) = (frame_len as u64).checked_mul(nr_frames as u64) else {
+                return Ok(None);
+            };
+            if total_native_bytes + (total_native_bytes % 2) > u64::from(u32::MAX) {
+                return Ok(None);
+            }
+
+            let decode_meta = FrameDecodeMeta {
+                transfer_syntax_uid: source_uid.clone(),
+                rows,
+                cols,
+                samples_per_pixel,
+                bits_allocated,
+                bits_stored,
+                photometric_interpretation: object
+                    .get(tags::PHOTOMETRIC_INTERPRETATION)
+                    .and_then(|e| e.to_str().ok())
+                    .map(|s| s.trim().to_owned()),
+            };
+
+            normalize_decoded_pixel_data_attributes(&mut object, &source_uid, j2k_uses_mct);
+            remove_encapsulation_sidecar_attributes(&mut object);
+
+            let source_mode = SourceMode::Encapsulated {
+                fragments,
+                frame_ranges,
+                decoder,
+            };
+            let target_mode = TargetMode::Native {
+                big_endian: target_be,
+            };
+            let batch_size = choose_batch_size(
+                &source_uid,
+                &source_mode,
+                &target_mode,
+                nr_frames,
+                frame_len,
+            );
+            let out_vr = native_pixel_vr(bits_allocated);
+            let swap_out = target_be && out_vr == VR::OW;
+
+            Ok(Some(PreparedNativeDatasetStream {
+                object,
+                input_file,
+                target_ts,
+                plan: NativeStreamPlan::DecodeEncapsulated {
+                    source_mode,
+                    decode_meta,
+                    source_ts,
+                    nr_frames,
+                    frame_len,
+                    total_native_bytes,
+                    out_vr,
+                    swap_out,
+                    batch_size,
+                },
+            }))
+        }
+    }
+}
+
+impl PreparedNativeDatasetStream {
+    pub(super) fn object(&self) -> &DefaultDicomObject {
+        &self.object
+    }
+
+    /// Stream the transcoded bare DICOM dataset directly into `out`.
+    pub(super) fn write_to<W: Write>(mut self, out: W) -> Result<(), TranscodeError> {
+        let target_ts = self.target_ts;
+        match self.plan {
+            NativeStreamPlan::Absent => {
+                self.object.write_dataset_with_ts(out, target_ts)?;
+                Ok(())
+            }
+            NativeStreamPlan::DirectNative {
+                vr,
+                offset,
+                length,
+                swap_words,
+            } => self.object.write_dataset_with_ts_and_pixel_data(
+                out,
+                target_ts,
+                |ds_writer| -> Result<(), TranscodeError> {
+                    stream_native_bytes(
+                        &mut self.input_file,
+                        offset,
+                        length,
+                        vr,
+                        swap_words,
+                        ds_writer,
+                    )
+                },
+            ),
+            NativeStreamPlan::DecodeEncapsulated {
+                source_mode,
+                decode_meta,
+                source_ts,
+                nr_frames,
+                frame_len,
+                total_native_bytes,
+                out_vr,
+                swap_out,
+                batch_size,
+            } => self.object.write_dataset_with_ts_and_pixel_data(
+                out,
+                target_ts,
+                |ds_writer| -> Result<(), TranscodeError> {
+                    let padded_len = (total_native_bytes + (total_native_bytes % 2)) as u32;
+                    ds_writer
+                        .write_element_header(DataElementHeader::new(
+                            tags::PIXEL_DATA,
+                            out_vr,
+                            Length::defined(padded_len),
+                        ))
+                        .map_err(|source| WriteError::Dataset { source })?;
+
+                    let mut batch_start = 0;
+                    while batch_start < nr_frames {
+                        let batch_end = next_batch_end(
+                            &source_mode,
+                            batch_start,
+                            nr_frames,
+                            batch_size,
+                            frame_len,
+                        );
+                        let inputs = read_frame_batch(
+                            &mut self.input_file,
+                            &source_mode,
+                            batch_start..batch_end,
+                            frame_len,
+                        )?;
+                        let outputs = transform_batch_to_native(
+                            inputs,
+                            &source_mode,
+                            &decode_meta,
+                            source_ts,
+                            frame_len,
+                            swap_out,
+                            batch_start,
+                        )?;
+                        for frame in outputs {
+                            ds_writer
+                                .write_raw_bytes(&frame)
+                                .map_err(|source| WriteError::Dataset { source })?;
+                        }
+                        batch_start = batch_end;
+                    }
+                    if total_native_bytes % 2 == 1 {
+                        ds_writer
+                            .write_raw_bytes(&[0])
+                            .map_err(|source| WriteError::Dataset { source })?;
+                    }
+                    Ok(())
+                },
+            ),
+        }
+    }
+}
+
+fn apply_j2k_probe_corrections(
+    object: &mut DefaultDicomObject,
+    probe: &[u8],
+    source_ts: &TransferSyntax,
+) -> Result<Option<bool>, TranscodeError> {
+    let declared_spp = object
+        .get(tags::SAMPLES_PER_PIXEL)
+        .and_then(|e| e.uint16().ok())
+        .unwrap_or(1);
+    if declared_spp > 1 {
+        if let Some(actual_components) = codestream_component_count(probe) {
+            if actual_components > 0 && actual_components < declared_spp {
+                apply_jpeg2000_component_correction(object, actual_components);
+            }
+        }
+    }
+    if let (Some(precision), Some(bits_allocated)) = (
+        codestream_precision(probe),
+        object
+            .get(tags::BITS_ALLOCATED)
+            .and_then(|e| e.uint16().ok()),
+    ) {
+        let bits_stored = object
+            .get(tags::BITS_STORED)
+            .and_then(|e| e.uint16().ok())
+            .unwrap_or(bits_allocated);
+        if precision > bits_stored {
+            apply_jpeg2000_precision_correction(object, precision).map_err(|message| {
+                TranscodeError::DecodePixelData {
+                    uid: source_ts.uid().to_owned(),
+                    name: source_ts.name().to_owned(),
+                    message,
+                }
+            })?;
+        }
+    }
+    Ok(codestream_uses_mct(probe))
+}
+
+// =============================================================================================
+// DIMSE C-STORE SCP streaming: receive a dataset from a forward-only Read stream (PDataReader)
+// and transcode on the fly directly into a Part 10 File on disk (e.g. uncompressed -> HTJ2K).
+// Non-images or ineligible syntaxes fall back seamlessly to raw wire passthrough into the same
+// Part 10 file with O(PDU) memory and a single sequential disk write.
+// =============================================================================================
+
+const MAX_SCP_BOT_FRAMES: usize = 1_000_000;
+const MAX_SCP_BOT_BYTES: u32 = (MAX_SCP_BOT_FRAMES as u32) * 4;
+const MAX_SCP_TRANSCODE_FRAME_BYTES: usize = 256 * 1024 * 1024;
+const MAX_SCP_ENCODED_FRAME_BYTES: usize = 128 * 1024 * 1024;
+
+fn is_lossy_target_mode(mode: TargetMode) -> bool {
+    matches!(
+        mode,
+        TargetMode::ClassicJpeg2000 { lossless: false } | TargetMode::JpegLs { lossless: false }
+    )
+}
+
+fn write_zero_bytes<W: Write, E: dcmnorm_encoding::encode::EncodeTo<W>>(
+    ds_writer: &mut DataSetWriter<W, E>,
+    mut remaining: usize,
+) -> Result<(), WriteError> {
+    const ZEROS: [u8; 4096] = [0u8; 4096];
+    while remaining > 0 {
+        let chunk = remaining.min(ZEROS.len());
+        ds_writer
+            .write_raw_bytes(&ZEROS[..chunk])
+            .map_err(|source| WriteError::Dataset { source })?;
+        remaining -= chunk;
+    }
+    Ok(())
+}
+
+/// Validates an SCP `storage_transfer_syntax` option up front (at `start_scp` / CLI startup)
+/// so typos, unsupported UIDs, or lossy transfer syntaxes fail immediately instead of on the
+/// first incoming C-STORE.
+pub(crate) fn validate_storage_transfer_syntax(
+    target_transfer_syntax_uid: &str,
+) -> Result<(), String> {
+    let target_uid = normalize_transfer_syntax_uid(target_transfer_syntax_uid);
+    let target_ts = TransferSyntaxRegistry
+        .get(target_uid)
+        .ok_or_else(|| format!("unknown storage transfer syntax UID: {target_uid:?}"))?;
+    if matches!(target_ts.codec(), Codec::Dataset(_)) {
+        return Err(format!(
+            "unsupported storage transfer syntax for on-the-fly SCP transcoding: {} ({})",
+            target_ts.uid(),
+            target_ts.name()
+        ));
+    }
+    let Some(mode) = resolve_target_mode(target_ts) else {
+        return Err(format!(
+            "unsupported storage transfer syntax for on-the-fly SCP transcoding: {} ({})",
+            target_ts.uid(),
+            target_ts.name()
+        ));
+    };
+    if is_lossy_target_mode(mode) {
+        return Err(format!(
+            "lossy storage transfer syntax {} ({}) is not supported for on-the-fly SCP transcoding (would modify pixels without minting a derived SOPInstanceUID)",
+            target_ts.uid(),
+            target_ts.name()
+        ));
+    }
+    Ok(())
+}
+
+/// Receive one C-STORE dataset from `pdata` (a forward-only stream ending at the last Data PDV)
+/// and write a complete Part 10 file to `output_file`, transcoding on the fly to `target_uid`
+/// whenever the incoming object is eligible (otherwise preserving `negotiated_ts` verbatim).
+///
+/// Returns `(study_instance_uid, modality)` extracted from the dataset header.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn receive_and_transcode_stream_to_file<R: Read>(
+    pdata: &mut R,
+    negotiated_ts: &'static TransferSyntax,
+    target_uid: &str,
+    affected_sop_class_uid: &str,
+    affected_sop_instance_uid: &str,
+    output_file: &mut File,
+    output_path: &Path,
+) -> Result<(String, String), String> {
+    let _scope = perf::scope("scp.receive_and_transcode_stream");
+    let source_uid = normalize_transfer_syntax_uid(negotiated_ts.uid()).to_owned();
+    let target_uid = normalize_transfer_syntax_uid(target_uid);
+    let target_ts = TransferSyntaxRegistry
+        .get(target_uid)
+        .ok_or_else(|| format!("unknown storage transfer syntax UID: {target_uid}"))?;
+
+    let (dataset, stop) =
+        InMemDicomObject::read_dataset_until_pixel_data(&mut *pdata, negotiated_ts)
+            .map_err(|e| format!("failed to parse incoming C-STORE dataset header: {e}"))?;
+
+    // Reject datasets whose embedded SOP Class or SOP Instance UID disagrees with the
+    // C-STORE-RQ command so a mismatched payload cannot overwrite another stored instance.
+    if let Some(ds_sop_class) = dataset
+        .get(tags::SOP_CLASS_UID)
+        .and_then(|e| e.to_str().ok())
+        .map(|s| s.trim_end_matches(['\0', ' ']).to_owned())
+        .filter(|s| !s.is_empty())
+    {
+        if ds_sop_class != affected_sop_class_uid.trim_end_matches(['\0', ' ']) {
+            return Err(format!(
+                "dataset SOPClassUID ({ds_sop_class}) does not match C-STORE-RQ AffectedSOPClassUID ({affected_sop_class_uid})"
+            ));
+        }
+    }
+    if let Some(ds_sop_instance) = dataset
+        .get(tags::SOP_INSTANCE_UID)
+        .and_then(|e| e.to_str().ok())
+        .map(|s| s.trim_end_matches(['\0', ' ']).to_owned())
+        .filter(|s| !s.is_empty())
+    {
+        if ds_sop_instance != affected_sop_instance_uid.trim_end_matches(['\0', ' ']) {
+            return Err(format!(
+                "dataset SOPInstanceUID ({ds_sop_instance}) does not match C-STORE-RQ AffectedSOPInstanceUID ({affected_sop_instance_uid})"
+            ));
+        }
+    }
+
+    let study_instance_uid = dataset
+        .get(tags::STUDY_INSTANCE_UID)
+        .and_then(|e| e.to_str().ok())
+        .map(|s| s.trim().to_owned())
+        .unwrap_or_default();
+    let modality = dataset
+        .get(tags::MODALITY)
+        .and_then(|e| e.to_str().ok())
+        .map(|s| s.trim().to_owned())
+        .unwrap_or_else(|| "UN".to_owned());
+
+    let meta = FileMetaTableBuilder::new()
+        .transfer_syntax(negotiated_ts.uid())
+        .media_storage_sop_class_uid(affected_sop_class_uid)
+        .media_storage_sop_instance_uid(affected_sop_instance_uid);
+    let mut object = dataset
+        .with_meta(meta)
+        .map_err(|e| format!("failed to build File Meta Information: {e}"))?;
+
+    let target_mode = (source_uid != target_uid
+        && !matches!(target_ts.codec(), Codec::Dataset(_))
+        && !has_nested_encapsulated_pixel_data(&object))
+    .then(|| resolve_target_mode(target_ts))
+    .flatten()
+    .filter(|&mode| !is_lossy_target_mode(mode));
+
+    match (stop, target_mode) {
+        (PixelDataStreamStop::Native { vr, length }, Some(target_mode)) => {
+            if let Some(plan) =
+                prepare_wire_native_plan(&object, &source_uid, vr, length, target_mode)
+            {
+                stream_wire_native_to_file(
+                    pdata,
+                    &mut object,
+                    negotiated_ts,
+                    target_ts,
+                    plan,
+                    output_file,
+                )?;
+                return Ok((study_instance_uid, modality));
+            }
+            write_wire_passthrough_to_file(
+                pdata,
+                &object,
+                PixelDataStreamStop::Native { vr, length },
+                &[],
+                output_file,
+                output_path,
+            )?;
+            Ok((study_instance_uid, modality))
+        }
+        (PixelDataStreamStop::Encapsulated, Some(target_mode)) => {
+            if is_wire_encapsulated_metadata_eligible(&object, target_mode) {
+                if let Some(decoder) =
+                    resolve_wire_encapsulated_decoder(&object, &source_uid, negotiated_ts)
+                {
+                    stream_wire_encapsulated_to_file(
+                        pdata,
+                        &mut object,
+                        &source_uid,
+                        negotiated_ts,
+                        decoder,
+                        target_ts,
+                        target_mode,
+                        output_file,
+                        output_path,
+                    )?;
+                    return Ok((study_instance_uid, modality));
+                }
+            }
+            write_wire_passthrough_to_file(
+                pdata,
+                &object,
+                PixelDataStreamStop::Encapsulated,
+                &[],
+                output_file,
+                output_path,
+            )?;
+            Ok((study_instance_uid, modality))
+        }
+        (stop, _) => {
+            write_wire_passthrough_to_file(pdata, &object, stop, &[], output_file, output_path)?;
+            Ok((study_instance_uid, modality))
+        }
+    }
+}
+
+struct WireNativePlan {
+    vr: VR,
+    length: u32,
+    source_be: bool,
+    target_mode: TargetMode,
+    nr_frames: usize,
+    frame_len: usize,
+    total_native_bytes: u64,
+    encode_meta: FrameEncodeMeta,
+    batch_size: usize,
+}
+
+fn prepare_wire_native_plan(
+    object: &DefaultDicomObject,
+    source_uid: &str,
+    vr: VR,
+    length: u32,
+    target_mode: TargetMode,
+) -> Option<WireNativePlan> {
+    let source_be = source_uid == EXPLICIT_VR_BIG_ENDIAN_UID;
+    if matches!(target_mode, TargetMode::Native { big_endian } if vr == VR::OW && source_be != big_endian && !length.is_multiple_of(2))
+    {
+        return None;
+    }
+
+    let rows = object.get(tags::ROWS).and_then(|e| e.uint16().ok())?;
+    let cols = object.get(tags::COLUMNS).and_then(|e| e.uint16().ok())?;
+    let samples_per_pixel = object
+        .get(tags::SAMPLES_PER_PIXEL)
+        .and_then(|e| e.uint16().ok())
+        .unwrap_or(1);
+    let bits_allocated = object
+        .get(tags::BITS_ALLOCATED)
+        .and_then(|e| e.uint16().ok())?;
+    let bits_stored = object
+        .get(tags::BITS_STORED)
+        .and_then(|e| e.uint16().ok())
+        .unwrap_or(bits_allocated);
+    let is_signed = object
+        .get(tags::PIXEL_REPRESENTATION)
+        .and_then(|e| e.uint16().ok())
+        .unwrap_or(0)
+        != 0;
+    let nr_frames = number_of_frames(object);
+
+    if (bits_allocated != 8 && bits_allocated != 16)
+        || bits_stored == 0
+        || bits_stored > bits_allocated
+    {
+        return None;
+    }
+    let bytes_per_sample = usize::from(bits_allocated / 8);
+    let frame_len = usize::from(rows)
+        .checked_mul(usize::from(cols))?
+        .checked_mul(usize::from(samples_per_pixel))?
+        .checked_mul(bytes_per_sample)?;
+    if frame_len == 0 {
+        return None;
+    }
+    if !matches!(target_mode, TargetMode::Native { .. })
+        && (frame_len > MAX_SCP_TRANSCODE_FRAME_BYTES || nr_frames > MAX_SCP_BOT_FRAMES)
+    {
+        return None;
+    }
+    let total_native_bytes = (frame_len as u64).checked_mul(nr_frames as u64)?;
+    if u64::from(length) < total_native_bytes {
+        return None;
+    }
+    // Big-endian OW stores 16-bit words continuously across the entire PixelData value; if
+    // individual 8-bit frames have odd byte length, a 16-bit word straddles two frames, so
+    // frame-splitting before byte-swapping would corrupt samples. Fall back to wire passthrough.
+    if source_be && vr == VR::OW && (!frame_len.is_multiple_of(2) || !length.is_multiple_of(2)) {
+        return None;
+    }
+    // CharLS treats bits_per_sample <= 8 as 1 byte/sample; decline streaming JPEG-LS when
+    // native pixels are stored in 16-bit allocated containers with <= 8 stored bits.
+    if matches!(target_mode, TargetMode::JpegLs { .. }) && bits_allocated == 16 && bits_stored <= 8
+    {
+        return None;
+    }
+    if matches!(target_mode, TargetMode::JpegXlLossless)
+        && jpeg_xl::validate_jpeg_xl_encode_params(
+            rows,
+            cols,
+            samples_per_pixel,
+            bits_allocated,
+            bits_stored,
+            is_signed,
+        )
+        .is_err()
+    {
+        return None;
+    }
+
+    let planar_configuration = object
+        .get(tags::PLANAR_CONFIGURATION)
+        .and_then(|e| e.uint16().ok())
+        .unwrap_or(0);
+    let encode_meta = FrameEncodeMeta {
+        rows,
+        cols,
+        samples_per_pixel,
+        bits_allocated,
+        bits_stored,
+        is_signed,
+        planar: is_planar(object, samples_per_pixel),
+        planar_configuration,
+    };
+
+    let target_can_parallel = !matches!(target_mode, TargetMode::Native { .. } | TargetMode::Htj2k);
+    let batch_size = if nr_frames <= 1 || !target_can_parallel {
+        1
+    } else {
+        let max_by_mem = (STREAM_BATCH_MEM_BUDGET / frame_len.max(1)).max(1);
+        let max_by_cpu = rayon::current_num_threads().clamp(1, 8);
+        max_by_mem.min(max_by_cpu).min(nr_frames)
+    };
+
+    Some(WireNativePlan {
+        vr,
+        length,
+        source_be,
+        target_mode,
+        nr_frames,
+        frame_len,
+        total_native_bytes,
+        encode_meta,
+        batch_size,
+    })
+}
+
+fn stream_wire_native_to_file<R: Read>(
+    pdata: &mut R,
+    object: &mut DefaultDicomObject,
+    negotiated_ts: &TransferSyntax,
+    target_ts: &TransferSyntax,
+    plan: WireNativePlan,
+    output_file: &mut File,
+) -> Result<(), String> {
+    if !matches!(plan.target_mode, TargetMode::Native { .. }) {
+        remove_encapsulation_sidecar_attributes(object);
+        if matches!(
+            plan.target_mode,
+            TargetMode::Htj2k | TargetMode::ClassicJpeg2000 { .. } | TargetMode::JpegXlLossless
+        ) {
+            set_planar_configuration_interleaved(object);
+        }
+    }
+    object.meta_mut().set_transfer_syntax(target_ts);
+
+    let mut bot_patch: Option<(u64, Vec<u32>)> = None;
+    {
+        let mut writer = BufWriter::new(&*output_file);
+        object
+            .write_all_with_pixel_data(
+                &mut writer,
+                |ds_writer, dataset_start| -> Result<(), TranscodeError> {
+                    match plan.target_mode {
+                        TargetMode::Native { big_endian } => {
+                            let padded_len = plan.length.saturating_add(plan.length % 2);
+                            ds_writer
+                                .write_element_header(DataElementHeader::new(
+                                    tags::PIXEL_DATA,
+                                    plan.vr,
+                                    Length::defined(padded_len),
+                                ))
+                                .map_err(|source| WriteError::Dataset { source })?;
+                            let swap_words = plan.vr == VR::OW && plan.source_be != big_endian;
+                            let mut remaining = u64::from(plan.length);
+                            let mut chunk = vec![0u8; COPY_CHUNK_SIZE];
+                            while remaining > 0 {
+                                let to_read = (remaining as usize).min(chunk.len());
+                                pdata
+                                    .read_exact(&mut chunk[..to_read])
+                                    .map_err(|source| dcmnorm_object::ReadError::Io {
+                                        source,
+                                        context: "reading incoming native PixelData",
+                                    })?;
+                                if swap_words {
+                                    swap_u16_bytes(&mut chunk[..to_read]);
+                                }
+                                ds_writer
+                                    .write_raw_bytes(&chunk[..to_read])
+                                    .map_err(|source| WriteError::Dataset { source })?;
+                                remaining -= to_read as u64;
+                            }
+                            if plan.length % 2 == 1 {
+                                ds_writer
+                                    .write_raw_bytes(&[0])
+                                    .map_err(|source| WriteError::Dataset { source })?;
+                            }
+                        }
+                        TargetMode::Htj2k
+                        | TargetMode::ClassicJpeg2000 { .. }
+                        | TargetMode::JpegLs { .. }
+                        | TargetMode::JpegXlLossless => {
+                            ds_writer
+                                .write(DataToken::PixelSequenceStart)
+                                .map_err(|source| WriteError::Dataset { source })?;
+                            let bot_byte_len = plan
+                                .nr_frames
+                                .checked_mul(4)
+                                .and_then(|n| u32::try_from(n).ok())
+                                .ok_or_else(|| TranscodeError::EncodePixelData {
+                                    uid: target_ts.uid().to_owned(),
+                                    name: target_ts.name().to_owned(),
+                                    message: "too many frames for Basic Offset Table".to_owned(),
+                                })?;
+                            ds_writer
+                                .write(DataToken::ItemStart {
+                                    len: Length::defined(bot_byte_len),
+                                })
+                                .map_err(|source| WriteError::Dataset { source })?;
+                            let bot_file_offset = dataset_start + ds_writer.bytes_written();
+                            if bot_byte_len > 0 {
+                                write_zero_bytes(ds_writer, bot_byte_len as usize)?;
+                            }
+                            ds_writer
+                                .write(DataToken::ItemEnd)
+                                .map_err(|source| WriteError::Dataset { source })?;
+
+                            let mut offsets = Vec::new();
+                            offsets.try_reserve_exact(plan.nr_frames).map_err(|_| {
+                                TranscodeError::EncodePixelData {
+                                    uid: target_ts.uid().to_owned(),
+                                    name: target_ts.name().to_owned(),
+                                    message: "could not allocate Basic Offset Table buffer"
+                                        .to_owned(),
+                                }
+                            })?;
+                            let mut rel_pos = 0u64;
+                            let mut htj2k_planes: Option<Vec<Vec<i32>>> = None;
+                            let swap_in = plan.source_be && plan.vr == VR::OW;
+                            let mut batch_start = 0;
+                            while batch_start < plan.nr_frames {
+                                let batch_end = (batch_start + plan.batch_size).min(plan.nr_frames);
+                                let mut batch = Vec::with_capacity(batch_end - batch_start);
+                                for _ in batch_start..batch_end {
+                                    let mut buf = Vec::new();
+                                    buf.try_reserve_exact(plan.frame_len).map_err(|_| {
+                                        TranscodeError::DecodePixelData {
+                                            uid: negotiated_ts.uid().to_owned(),
+                                            name: negotiated_ts.name().to_owned(),
+                                            message: format!(
+                                                "could not allocate {} bytes for incoming native frame",
+                                                plan.frame_len
+                                            ),
+                                        }
+                                    })?;
+                                    buf.resize(plan.frame_len, 0);
+                                    pdata.read_exact(&mut buf).map_err(|source| {
+                                        dcmnorm_object::ReadError::Io {
+                                            source,
+                                            context: "reading incoming native frame",
+                                        }
+                                    })?;
+                                    if swap_in {
+                                        swap_u16_bytes(&mut buf);
+                                    }
+                                    batch.push(buf);
+                                }
+                                let fragments: Vec<Vec<u8>> =
+                                    if matches!(plan.target_mode, TargetMode::Htj2k) {
+                                        let planes = match htj2k_planes.as_mut() {
+                                            Some(planes) => planes,
+                                            None => htj2k_planes.insert(allocate_htj2k_planes(
+                                                &plan.encode_meta,
+                                                target_ts,
+                                            )?),
+                                        };
+                                        let mut frags = Vec::with_capacity(batch.len());
+                                        for (i, native) in batch.into_iter().enumerate() {
+                                            let frame_index = batch_start + i;
+                                            let frag = encode_htj2k_frame(
+                                                &native,
+                                                plan.encode_meta.rows,
+                                                plan.encode_meta.cols,
+                                                plan.encode_meta.samples_per_pixel,
+                                                plan.encode_meta.bits_allocated,
+                                                plan.encode_meta.bits_stored,
+                                                plan.encode_meta.is_signed,
+                                                plan.encode_meta.planar,
+                                                planes,
+                                            )
+                                            .map_err(|e| TranscodeError::EncodePixelData {
+                                                uid: target_ts.uid().to_owned(),
+                                                name: target_ts.name().to_owned(),
+                                                message: format!(
+                                                    "HTJ2K encode failed for frame {frame_index}: {e}"
+                                                ),
+                                            })?;
+                                            frags.push(frag);
+                                        }
+                                        frags
+                                    } else if batch.len() == 1 {
+                                        vec![encode_one_frame(
+                                            &batch[0],
+                                            plan.target_mode,
+                                            &plan.encode_meta,
+                                            target_ts,
+                                            batch_start,
+                                        )?]
+                                    } else {
+                                        batch
+                                            .into_par_iter()
+                                            .enumerate()
+                                            .map(|(i, native)| {
+                                                encode_one_frame(
+                                                    &native,
+                                                    plan.target_mode,
+                                                    &plan.encode_meta,
+                                                    target_ts,
+                                                    batch_start + i,
+                                                )
+                                            })
+                                            .collect::<Result<Vec<_>, _>>()?
+                                    };
+
+                                for mut frag in fragments {
+                                    if frag.len() % 2 == 1 {
+                                        frag.push(0);
+                                    }
+                                    let offset = u32::try_from(rel_pos).map_err(|_| {
+                                        TranscodeError::EncodePixelData {
+                                            uid: target_ts.uid().to_owned(),
+                                            name: target_ts.name().to_owned(),
+                                            message:
+                                                "encapsulated output exceeded 4 GiB Basic Offset Table limit"
+                                                    .to_owned(),
+                                        }
+                                    })?;
+                                    offsets.push(offset);
+                                    let frag_len = u32::try_from(frag.len()).map_err(|_| {
+                                        TranscodeError::EncodePixelData {
+                                            uid: target_ts.uid().to_owned(),
+                                            name: target_ts.name().to_owned(),
+                                            message: "encoded frame fragment exceeds u32::MAX bytes"
+                                                .to_owned(),
+                                        }
+                                    })?;
+                                    ds_writer
+                                        .write(DataToken::ItemStart {
+                                            len: Length::defined(frag_len),
+                                        })
+                                        .map_err(|source| WriteError::Dataset { source })?;
+                                    ds_writer
+                                        .write_item_value(&frag)
+                                        .map_err(|source| WriteError::Dataset { source })?;
+                                    ds_writer
+                                        .write(DataToken::ItemEnd)
+                                        .map_err(|source| WriteError::Dataset { source })?;
+                                    rel_pos += 8 + frag.len() as u64;
+                                }
+                                batch_start = batch_end;
+                            }
+
+                            // Drain any odd/trailing padding bytes at the end of native PixelData.
+                            let extra = u64::from(plan.length) - plan.total_native_bytes;
+                            if extra > 0 {
+                                let copied =
+                                    std::io::copy(&mut pdata.take(extra), &mut std::io::sink())
+                                        .map_err(|source| dcmnorm_object::ReadError::Io {
+                                            source,
+                                            context: "draining trailing native PixelData padding",
+                                        })?;
+                                if copied != extra {
+                                    return Err(dcmnorm_object::ReadError::Io {
+                                        source: std::io::Error::new(
+                                            std::io::ErrorKind::UnexpectedEof,
+                                            format!(
+                                                "truncated native PixelData padding: expected {extra} bytes, got {copied}"
+                                            ),
+                                        ),
+                                        context: "draining trailing native PixelData padding",
+                                    }
+                                    .into());
+                                }
+                            }
+
+                            ds_writer
+                                .write(DataToken::SequenceEnd)
+                                .map_err(|source| WriteError::Dataset { source })?;
+                            if bot_byte_len > 0 {
+                                bot_patch = Some((bot_file_offset, offsets));
+                            }
+                        }
+                    }
+
+                    // Read and write any trailing elements after (7FE0,0010) until EOF using the
+                    // header's declared SpecificCharacterSet.
+                    let trailing_cs = object.specific_character_set();
+                    let trailing = InMemDicomObject::read_dataset_with_ts_cs(
+                        &mut *pdata,
+                        negotiated_ts,
+                        trailing_cs,
+                    )?;
+                    trailing.write_elements_to_writer(ds_writer)?;
+                    Ok(())
+                },
+            )
+            .map_err(|e| e.to_string())?;
+        writer
+            .flush()
+            .map_err(|e| format!("flushing output file: {e}"))?;
+    }
+
+    patch_bot(output_file, bot_patch)?;
+    Ok(())
+}
+
+fn resolve_wire_encapsulated_decoder(
+    object: &DefaultDicomObject,
+    source_uid: &str,
+    source_ts: &'static TransferSyntax,
+) -> Option<EncapsulatedDecoder<'static>> {
+    if is_mpeg_transfer_syntax(source_uid) {
+        return None;
+    }
+    if is_jpeg_ls_transfer_syntax(source_uid) {
+        return cfg!(feature = "jpeg-ls-codec").then_some(EncapsulatedDecoder::JpegLs);
+    }
+    if is_jpeg_xl_transfer_syntax(source_uid) {
+        if !cfg!(feature = "jpeg-xl-codec") {
+            return None;
+        }
+        let pixel_rep = object
+            .get(tags::PIXEL_REPRESENTATION)
+            .and_then(|e| e.uint16().ok())
+            .unwrap_or(0);
+        return (pixel_rep == 0).then_some(EncapsulatedDecoder::JpegXl);
+    }
+    let Codec::EncapsulatedPixelData(Some(reader), _) = source_ts.codec() else {
+        return None;
+    };
+    Some(EncapsulatedDecoder::Registry(reader.as_ref()))
+}
+
+/// Sequential reader over an encapsulated PixelData item stream on a non-seekable `Read`.
+struct WireEncapsulatedFrames<'a, R> {
+    reader: &'a mut R,
+    frame_offsets: Option<Vec<u64>>,
+    nr_frames: usize,
+    next_frame: usize,
+    rel_pos: u64,
+    pending_header: Option<(u16, u16, u32)>,
+    finished: bool,
+}
+
+fn is_wire_encapsulated_metadata_eligible(
+    object: &DefaultDicomObject,
+    target_mode: TargetMode,
+) -> bool {
+    let Some(rows) = object.get(tags::ROWS).and_then(|e| e.uint16().ok()) else {
+        return false;
+    };
+    let Some(cols) = object.get(tags::COLUMNS).and_then(|e| e.uint16().ok()) else {
+        return false;
+    };
+    let samples_per_pixel = object
+        .get(tags::SAMPLES_PER_PIXEL)
+        .and_then(|e| e.uint16().ok())
+        .unwrap_or(1);
+    let Some(bits_allocated) = object
+        .get(tags::BITS_ALLOCATED)
+        .and_then(|e| e.uint16().ok())
+    else {
+        return false;
+    };
+    let bits_stored = object
+        .get(tags::BITS_STORED)
+        .and_then(|e| e.uint16().ok())
+        .unwrap_or(bits_allocated);
+    let is_signed = object
+        .get(tags::PIXEL_REPRESENTATION)
+        .and_then(|e| e.uint16().ok())
+        .unwrap_or(0)
+        != 0;
+    if (bits_allocated != 8 && bits_allocated != 16)
+        || bits_stored == 0
+        || bits_stored > bits_allocated
+    {
+        return false;
+    }
+    let Some(frame_len) = usize::from(rows)
+        .checked_mul(usize::from(cols))
+        .and_then(|n| n.checked_mul(usize::from(samples_per_pixel)))
+        .and_then(|n| n.checked_mul(usize::from(bits_allocated / 8)))
+        .filter(|&n| n > 0)
+    else {
+        return false;
+    };
+    let nr_frames = number_of_frames(object);
+    if !matches!(target_mode, TargetMode::Native { .. }) && nr_frames > MAX_SCP_BOT_FRAMES {
+        return false;
+    }
+    let Some(total_native_bytes) = (frame_len as u64).checked_mul(nr_frames as u64) else {
+        return false;
+    };
+    if matches!(target_mode, TargetMode::Native { .. })
+        && total_native_bytes + (total_native_bytes % 2) > u64::from(u32::MAX)
+    {
+        return false;
+    }
+    if matches!(target_mode, TargetMode::JpegLs { .. }) && bits_allocated == 16 && bits_stored <= 8
+    {
+        return false;
+    }
+    if matches!(target_mode, TargetMode::JpegXlLossless)
+        && jpeg_xl::validate_jpeg_xl_encode_params(
+            rows,
+            cols,
+            samples_per_pixel,
+            bits_allocated,
+            bits_stored,
+            is_signed,
+        )
+        .is_err()
+    {
+        return false;
+    }
+    true
+}
+
+enum WireEncapsulatedOpen<'a, R: Read> {
+    Frames(WireEncapsulatedFrames<'a, R>),
+    /// Multi-frame encapsulated stream with an empty BOT and no Extended Offset Table: frame
+    /// boundaries cannot be established safely without buffering the stream (JPEG-family frames
+    /// may span multiple fragments), so fall back to wire passthrough preserving the BOT item
+    /// bytes already read from `pdata`.
+    PassThrough {
+        bot_item_bytes: Vec<u8>,
+    },
+}
+
+impl<'a, R: Read> WireEncapsulatedFrames<'a, R> {
+    fn open(
+        reader: &'a mut R,
+        object: &DefaultDicomObject,
+        nr_frames: usize,
+    ) -> Result<WireEncapsulatedOpen<'a, R>, String> {
+        // First item is always the Basic Offset Table.
+        let mut bot_hdr = [0u8; 8];
+        reader
+            .read_exact(&mut bot_hdr)
+            .map_err(|e| format!("reading Basic Offset Table header: {e}"))?;
+        let g = u16::from_le_bytes([bot_hdr[0], bot_hdr[1]]);
+        let e = u16::from_le_bytes([bot_hdr[2], bot_hdr[3]]);
+        let bot_len = u32::from_le_bytes([bot_hdr[4], bot_hdr[5], bot_hdr[6], bot_hdr[7]]);
+        if (g, e) != (0xFFFE, 0xE000) || bot_len == u32::MAX {
+            return Err(
+                "invalid Basic Offset Table item header in encapsulated PixelData".to_owned(),
+            );
+        }
+        if bot_len % 4 != 0 {
+            return Err(format!("invalid Basic Offset Table length {bot_len}"));
+        }
+
+        let extended_offsets = object
+            .get(tags::EXTENDED_OFFSET_TABLE)
+            .and_then(|element| element.to_bytes().ok())
+            .filter(|bytes| nr_frames.checked_mul(8) == Some(bytes.len()))
+            .map(|bytes| {
+                bytes
+                    .chunks_exact(8)
+                    .map(|chunk| u64::from_le_bytes(chunk.try_into().expect("8-byte chunk")))
+                    .collect::<Vec<u64>>()
+            });
+
+        // Validate declared BOT length against NumberOfFrames and MAX_SCP_BOT_BYTES *before*
+        // buffering any BOT bytes in RAM. Ineligible or oversized tables fall back to streaming
+        // wire passthrough with only the 8-byte header already consumed.
+        let bot_matches_frames = bot_len > 0 && nr_frames.checked_mul(4) == Some(bot_len as usize);
+        if bot_len > MAX_SCP_BOT_BYTES
+            || (nr_frames > 1 && extended_offsets.is_none() && !bot_matches_frames)
+        {
+            return Ok(WireEncapsulatedOpen::PassThrough {
+                bot_item_bytes: bot_hdr.to_vec(),
+            });
+        }
+
+        let mut bot = Vec::new();
+        if bot_len > 0 {
+            let mut raw_bot = Vec::new();
+            raw_bot.try_reserve_exact(bot_len as usize).map_err(|_| {
+                format!("could not allocate {bot_len} bytes for Basic Offset Table")
+            })?;
+            reader
+                .take(u64::from(bot_len))
+                .read_to_end(&mut raw_bot)
+                .map_err(|err| format!("reading Basic Offset Table: {err}"))?;
+            if raw_bot.len() != bot_len as usize {
+                return Err("truncated Basic Offset Table".to_owned());
+            }
+            if extended_offsets.is_none() && bot_matches_frames {
+                bot.try_reserve_exact(raw_bot.len() / 4)
+                    .map_err(|_| "could not allocate Basic Offset Table offsets".to_owned())?;
+                for chunk in raw_bot.chunks_exact(4) {
+                    bot.push(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+                }
+            }
+        }
+
+        let frame_offsets = match extended_offsets {
+            Some(offsets) => Some(offsets),
+            None if bot_matches_frames => Some(bot.into_iter().map(u64::from).collect()),
+            None => None,
+        };
+        if let Some(ref offsets) = frame_offsets {
+            if !offsets.is_empty() && (offsets[0] != 0 || !offsets.windows(2).all(|w| w[1] > w[0]))
+            {
+                return Err(
+                    "invalid encapsulated frame offset table: offsets must start at 0 and strictly increase"
+                        .to_owned(),
+                );
+            }
+        }
+
+        Ok(WireEncapsulatedOpen::Frames(Self {
+            reader,
+            frame_offsets,
+            nr_frames,
+            next_frame: 0,
+            rel_pos: 0,
+            pending_header: None,
+            finished: false,
+        }))
+    }
+
+    fn next_item_header(&mut self) -> Result<(u16, u16, u32), String> {
+        if let Some(hdr) = self.pending_header.take() {
+            return Ok(hdr);
+        }
+        read_item_header_le(self.reader)
+    }
+
+    fn read_next_frame(&mut self) -> Result<Vec<u8>, String> {
+        if self.next_frame >= self.nr_frames {
+            return Err("requested frame past NumberOfFrames".to_owned());
+        }
+        let frame_index = self.next_frame;
+        self.next_frame += 1;
+
+        let next_frame_offset = self
+            .frame_offsets
+            .as_ref()
+            .and_then(|offsets| offsets.get(frame_index + 1).copied());
+        let read_until_delimiter =
+            self.nr_frames == 1 || (self.frame_offsets.is_some() && next_frame_offset.is_none());
+
+        let mut codestream = Vec::new();
+        loop {
+            let (g, e, len) = self.next_item_header()?;
+            if (g, e) == (0xFFFE, 0xE0DD) {
+                if len != 0 {
+                    return Err(format!(
+                        "SequenceDelimiter in encapsulated PixelData has nonzero length {len}"
+                    ));
+                }
+                self.finished = true;
+                if codestream.is_empty() {
+                    return Err(format!(
+                        "unexpected SequenceDelimiter before frame {frame_index}"
+                    ));
+                }
+                break;
+            }
+            if (g, e) != (0xFFFE, 0xE000) || len == u32::MAX {
+                return Err(format!(
+                    "unexpected item header ({g:04X},{e:04X}) len={len} in encapsulated PixelData"
+                ));
+            }
+            let new_len = codestream
+                .len()
+                .checked_add(len as usize)
+                .ok_or_else(|| format!("frame {frame_index} encoded byte length overflow"))?;
+            if new_len > MAX_SCP_ENCODED_FRAME_BYTES {
+                return Err(format!(
+                    "encapsulated frame {frame_index} exceeds maximum encoded byte limit ({MAX_SCP_ENCODED_FRAME_BYTES} bytes)"
+                ));
+            }
+            let start = codestream.len();
+            codestream.try_reserve(len as usize).map_err(|_| {
+                format!("could not allocate {new_len} bytes for encapsulated frame {frame_index}")
+            })?;
+            let read = self
+                .reader
+                .take(u64::from(len))
+                .read_to_end(&mut codestream)
+                .map_err(|err| {
+                    format!("reading encapsulated fragment for frame {frame_index}: {err}")
+                })?;
+            if read != len as usize {
+                return Err(format!(
+                    "truncated encapsulated fragment for frame {frame_index}: expected {len}, got {}",
+                    codestream.len() - start
+                ));
+            }
+            self.rel_pos += 8 + u64::from(len);
+
+            if !read_until_delimiter && next_frame_offset.is_none() {
+                // 1 fragment per frame (no offset table, multi-frame)
+                break;
+            }
+            if let Some(boundary) = next_frame_offset {
+                if self.rel_pos == boundary {
+                    break;
+                }
+                if self.rel_pos > boundary {
+                    return Err(format!(
+                        "frame {} offset {boundary} does not align with an encapsulated item boundary (crossed to {})",
+                        frame_index + 1,
+                        self.rel_pos
+                    ));
+                }
+            }
+        }
+        Ok(codestream)
+    }
+
+    fn finish_sequence(mut self) -> Result<&'a mut R, String> {
+        if self.finished {
+            return Ok(self.reader);
+        }
+        let (g, e, len) = self.next_item_header()?;
+        if (g, e) == (0xFFFE, 0xE0DD) && len == 0 {
+            return Ok(self.reader);
+        }
+        Err(format!(
+            "expected SequenceDelimiter (len=0) at end of encapsulated PixelData, got ({g:04X},{e:04X}) len={len}"
+        ))
+    }
+}
+
+fn read_item_header_le<R: Read>(reader: &mut R) -> Result<(u16, u16, u32), String> {
+    let mut hdr = [0u8; 8];
+    reader
+        .read_exact(&mut hdr)
+        .map_err(|e| format!("reading encapsulated item header: {e}"))?;
+    Ok((
+        u16::from_le_bytes([hdr[0], hdr[1]]),
+        u16::from_le_bytes([hdr[2], hdr[3]]),
+        u32::from_le_bytes([hdr[4], hdr[5], hdr[6], hdr[7]]),
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn stream_wire_encapsulated_to_file<R: Read>(
+    pdata: &mut R,
+    object: &mut DefaultDicomObject,
+    source_uid: &str,
+    source_ts: &'static TransferSyntax,
+    decoder: EncapsulatedDecoder<'static>,
+    target_ts: &'static TransferSyntax,
+    target_mode: TargetMode,
+    output_file: &mut File,
+    output_path: &Path,
+) -> Result<(), String> {
+    let nr_frames = number_of_frames(object);
+    let mut frames_in = match WireEncapsulatedFrames::open(pdata, object, nr_frames)? {
+        WireEncapsulatedOpen::Frames(frames) => frames,
+        WireEncapsulatedOpen::PassThrough { bot_item_bytes } => {
+            return write_wire_passthrough_to_file(
+                pdata,
+                object,
+                PixelDataStreamStop::Encapsulated,
+                &bot_item_bytes,
+                output_file,
+                output_path,
+            );
+        }
+    };
+    let frame0 = frames_in.read_next_frame()?;
+
+    let j2k_uses_mct = if is_jpeg2000_transfer_syntax(source_uid) {
+        apply_j2k_probe_corrections(object, &frame0, source_ts).map_err(|e| e.to_string())?
+    } else {
+        None
+    };
+
+    let rows = object
+        .get(tags::ROWS)
+        .and_then(|e| e.uint16().ok())
+        .ok_or_else(|| "missing Rows attribute".to_owned())?;
+    let cols = object
+        .get(tags::COLUMNS)
+        .and_then(|e| e.uint16().ok())
+        .ok_or_else(|| "missing Columns attribute".to_owned())?;
+    let samples_per_pixel = object
+        .get(tags::SAMPLES_PER_PIXEL)
+        .and_then(|e| e.uint16().ok())
+        .unwrap_or(1);
+    let bits_allocated = object
+        .get(tags::BITS_ALLOCATED)
+        .and_then(|e| e.uint16().ok())
+        .ok_or_else(|| "missing BitsAllocated attribute".to_owned())?;
+    let bits_stored = object
+        .get(tags::BITS_STORED)
+        .and_then(|e| e.uint16().ok())
+        .unwrap_or(bits_allocated);
+    let is_signed = object
+        .get(tags::PIXEL_REPRESENTATION)
+        .and_then(|e| e.uint16().ok())
+        .unwrap_or(0)
+        != 0;
+    if (bits_allocated != 8 && bits_allocated != 16)
+        || bits_stored == 0
+        || bits_stored > bits_allocated
+    {
+        return Err(format!(
+            "unsupported BitsAllocated/BitsStored ({bits_allocated}/{bits_stored}) for streaming transcode"
+        ));
+    }
+    let frame_len = usize::from(rows)
+        .checked_mul(usize::from(cols))
+        .and_then(|n| n.checked_mul(usize::from(samples_per_pixel)))
+        .and_then(|n| n.checked_mul(usize::from(bits_allocated / 8)))
+        .filter(|&n| n > 0)
+        .ok_or_else(|| "invalid frame geometry".to_owned())?;
+    let total_native_bytes = (frame_len as u64)
+        .checked_mul(nr_frames as u64)
+        .ok_or_else(|| "frame byte length overflow".to_owned())?;
+    if matches!(target_mode, TargetMode::Native { .. })
+        && total_native_bytes + (total_native_bytes % 2) > u64::from(u32::MAX)
+    {
+        return Err("decoded native PixelData exceeds 4 GiB defined length".to_owned());
+    }
+    if matches!(target_mode, TargetMode::JpegLs { .. }) && bits_allocated == 16 && bits_stored <= 8
+    {
+        return Err(
+            "JPEG-LS streaming does not support 16-bit allocated pixels with <= 8 bits stored"
+                .to_owned(),
+        );
+    }
+    if matches!(target_mode, TargetMode::JpegXlLossless) {
+        jpeg_xl::validate_jpeg_xl_encode_params(
+            rows,
+            cols,
+            samples_per_pixel,
+            bits_allocated,
+            bits_stored,
+            is_signed,
+        )?;
+    }
+
+    let decode_meta = FrameDecodeMeta {
+        transfer_syntax_uid: source_uid.to_owned(),
+        rows,
+        cols,
+        samples_per_pixel,
+        bits_allocated,
+        bits_stored,
+        photometric_interpretation: object
+            .get(tags::PHOTOMETRIC_INTERPRETATION)
+            .and_then(|e| e.to_str().ok())
+            .map(|s| s.trim().to_owned()),
+    };
+    let encode_meta = FrameEncodeMeta {
+        rows,
+        cols,
+        samples_per_pixel,
+        bits_allocated,
+        bits_stored,
+        is_signed,
+        planar: false,
+        planar_configuration: 0,
+    };
+
+    normalize_decoded_pixel_data_attributes(object, source_uid, j2k_uses_mct);
+    remove_encapsulation_sidecar_attributes(object);
+    if matches!(
+        target_mode,
+        TargetMode::Htj2k | TargetMode::ClassicJpeg2000 { .. } | TargetMode::JpegXlLossless
+    ) {
+        set_planar_configuration_interleaved(object);
+    }
+    object.meta_mut().set_transfer_syntax(target_ts);
+
+    let source_mode = SourceMode::Encapsulated {
+        fragments: Vec::new(),
+        frame_ranges: Vec::new(),
+        decoder,
+    };
+    let batch_size =
+        choose_batch_size(source_uid, &source_mode, &target_mode, nr_frames, frame_len);
+
+    let mut frame0_slot = Some(frame0);
+    let mut bot_patch: Option<(u64, Vec<u32>)> = None;
+    {
+        let mut writer = BufWriter::new(&*output_file);
+        object
+            .write_all_with_pixel_data(
+                &mut writer,
+                |ds_writer, dataset_start| -> Result<(), TranscodeError> {
+                    match target_mode {
+                        TargetMode::Native { big_endian } => {
+                            let out_vr = native_pixel_vr(bits_allocated);
+                            let padded_len = (total_native_bytes + (total_native_bytes % 2)) as u32;
+                            ds_writer
+                                .write_element_header(DataElementHeader::new(
+                                    tags::PIXEL_DATA,
+                                    out_vr,
+                                    Length::defined(padded_len),
+                                ))
+                                .map_err(|source| WriteError::Dataset { source })?;
+                            let swap_out = big_endian && out_vr == VR::OW;
+                            let mut batch_start = 0;
+                            while batch_start < nr_frames {
+                                let max_end = (batch_start + batch_size).min(nr_frames);
+                                let mut inputs = Vec::with_capacity(max_end - batch_start);
+                                let mut batch_mem = 0u64;
+                                for _ in batch_start..max_end {
+                                    let frame = match frame0_slot.take() {
+                                        Some(f) => f,
+                                        None => frames_in.read_next_frame().map_err(|message| {
+                                            TranscodeError::DecodePixelData {
+                                                uid: source_ts.uid().to_owned(),
+                                                name: source_ts.name().to_owned(),
+                                                message,
+                                            }
+                                        })?,
+                                    };
+                                    batch_mem = batch_mem
+                                        .saturating_add(frame.len() as u64)
+                                        .saturating_add(frame_len as u64);
+                                    inputs.push(frame);
+                                    if batch_mem >= STREAM_BATCH_MEM_BUDGET as u64 {
+                                        break;
+                                    }
+                                }
+                                let count = inputs.len();
+                                let outputs = transform_batch_to_native(
+                                    inputs,
+                                    &source_mode,
+                                    &decode_meta,
+                                    source_ts,
+                                    frame_len,
+                                    swap_out,
+                                    batch_start,
+                                )?;
+                                for frame in outputs {
+                                    ds_writer
+                                        .write_raw_bytes(&frame)
+                                        .map_err(|source| WriteError::Dataset { source })?;
+                                }
+                                batch_start += count;
+                            }
+                            if total_native_bytes % 2 == 1 {
+                                ds_writer
+                                    .write_raw_bytes(&[0])
+                                    .map_err(|source| WriteError::Dataset { source })?;
+                            }
+                        }
+                        TargetMode::Htj2k
+                        | TargetMode::ClassicJpeg2000 { .. }
+                        | TargetMode::JpegLs { .. }
+                        | TargetMode::JpegXlLossless => {
+                            ds_writer
+                                .write(DataToken::PixelSequenceStart)
+                                .map_err(|source| WriteError::Dataset { source })?;
+                            let bot_byte_len = nr_frames
+                                .checked_mul(4)
+                                .and_then(|n| u32::try_from(n).ok())
+                                .ok_or_else(|| TranscodeError::EncodePixelData {
+                                    uid: target_ts.uid().to_owned(),
+                                    name: target_ts.name().to_owned(),
+                                    message: "too many frames for Basic Offset Table".to_owned(),
+                                })?;
+                            ds_writer
+                                .write(DataToken::ItemStart {
+                                    len: Length::defined(bot_byte_len),
+                                })
+                                .map_err(|source| WriteError::Dataset { source })?;
+                            let bot_file_offset = dataset_start + ds_writer.bytes_written();
+                            if bot_byte_len > 0 {
+                                write_zero_bytes(ds_writer, bot_byte_len as usize)?;
+                            }
+                            ds_writer
+                                .write(DataToken::ItemEnd)
+                                .map_err(|source| WriteError::Dataset { source })?;
+
+                            let mut offsets = Vec::new();
+                            offsets.try_reserve_exact(nr_frames).map_err(|_| {
+                                TranscodeError::EncodePixelData {
+                                    uid: target_ts.uid().to_owned(),
+                                    name: target_ts.name().to_owned(),
+                                    message: "could not allocate Basic Offset Table buffer"
+                                        .to_owned(),
+                                }
+                            })?;
+                            let mut rel_pos = 0u64;
+                            let mut htj2k_planes: Option<Vec<Vec<i32>>> = None;
+                            let mut write_frag = |mut frag: Vec<u8>| -> Result<(), TranscodeError> {
+                                if frag.len() % 2 == 1 {
+                                    frag.push(0);
+                                }
+                                let offset = u32::try_from(rel_pos).map_err(|_| {
+                                    TranscodeError::EncodePixelData {
+                                        uid: target_ts.uid().to_owned(),
+                                        name: target_ts.name().to_owned(),
+                                        message:
+                                            "encapsulated output exceeded 4 GiB Basic Offset Table limit"
+                                                .to_owned(),
+                                    }
+                                })?;
+                                offsets.push(offset);
+                                let frag_len = u32::try_from(frag.len()).map_err(|_| {
+                                    TranscodeError::EncodePixelData {
+                                        uid: target_ts.uid().to_owned(),
+                                        name: target_ts.name().to_owned(),
+                                        message: "encoded frame fragment exceeds u32::MAX bytes"
+                                            .to_owned(),
+                                    }
+                                })?;
+                                ds_writer
+                                    .write(DataToken::ItemStart {
+                                        len: Length::defined(frag_len),
+                                    })
+                                    .map_err(|source| WriteError::Dataset { source })?;
+                                ds_writer
+                                    .write_item_value(&frag)
+                                    .map_err(|source| WriteError::Dataset { source })?;
+                                ds_writer
+                                    .write(DataToken::ItemEnd)
+                                    .map_err(|source| WriteError::Dataset { source })?;
+                                rel_pos += 8 + frag.len() as u64;
+                                Ok(())
+                            };
+
+                            let mut batch_start = 0;
+                            while batch_start < nr_frames {
+                                let max_end = (batch_start + batch_size).min(nr_frames);
+                                let mut inputs = Vec::with_capacity(max_end - batch_start);
+                                let mut batch_mem = 0u64;
+                                for _ in batch_start..max_end {
+                                    let frame = match frame0_slot.take() {
+                                        Some(f) => f,
+                                        None => frames_in.read_next_frame().map_err(|message| {
+                                            TranscodeError::DecodePixelData {
+                                                uid: source_ts.uid().to_owned(),
+                                                name: source_ts.name().to_owned(),
+                                                message,
+                                            }
+                                        })?,
+                                    };
+                                    batch_mem = batch_mem
+                                        .saturating_add(frame.len() as u64)
+                                        .saturating_add(frame_len as u64);
+                                    inputs.push(frame);
+                                    if batch_mem >= STREAM_BATCH_MEM_BUDGET as u64 {
+                                        break;
+                                    }
+                                }
+                                let count = inputs.len();
+                                if matches!(target_mode, TargetMode::Htj2k) {
+                                    let decoded = decode_batch(
+                                        inputs,
+                                        &source_mode,
+                                        &decode_meta,
+                                        source_ts,
+                                        frame_len,
+                                        batch_start,
+                                    )?;
+                                    let planes = match htj2k_planes.as_mut() {
+                                        Some(planes) => planes,
+                                        None => htj2k_planes.insert(allocate_htj2k_planes(
+                                            &encode_meta,
+                                            target_ts,
+                                        )?),
+                                    };
+                                    for (offset, native) in decoded.into_iter().enumerate() {
+                                        let frame_index = batch_start + offset;
+                                        let frag = encode_htj2k_frame(
+                                            &native,
+                                            encode_meta.rows,
+                                            encode_meta.cols,
+                                            encode_meta.samples_per_pixel,
+                                            encode_meta.bits_allocated,
+                                            encode_meta.bits_stored,
+                                            encode_meta.is_signed,
+                                            encode_meta.planar,
+                                            planes,
+                                        )
+                                        .map_err(|e| TranscodeError::EncodePixelData {
+                                            uid: target_ts.uid().to_owned(),
+                                            name: target_ts.name().to_owned(),
+                                            message: format!(
+                                                "HTJ2K encode failed for frame {frame_index}: {e}"
+                                            ),
+                                        })?;
+                                        drop(native);
+                                        write_frag(frag)?;
+                                    }
+                                } else {
+                                    let fragments = transform_batch_to_encapsulated(
+                                        inputs,
+                                        &source_mode,
+                                        &decode_meta,
+                                        source_ts,
+                                        target_mode,
+                                        &encode_meta,
+                                        target_ts,
+                                        frame_len,
+                                        batch_start,
+                                    )?;
+                                    for frag in fragments {
+                                        write_frag(frag)?;
+                                    }
+                                }
+                                batch_start += count;
+                            }
+
+                            ds_writer
+                                .write(DataToken::SequenceEnd)
+                                .map_err(|source| WriteError::Dataset { source })?;
+                            if bot_byte_len > 0 {
+                                bot_patch = Some((bot_file_offset, offsets));
+                            }
+                        }
+                    }
+
+                    let pdata = frames_in.finish_sequence().map_err(|message| {
+                        TranscodeError::DecodePixelData {
+                            uid: source_ts.uid().to_owned(),
+                            name: source_ts.name().to_owned(),
+                            message,
+                        }
+                    })?;
+                    let trailing_cs = object.specific_character_set();
+                    let trailing =
+                        InMemDicomObject::read_dataset_with_ts_cs(pdata, source_ts, trailing_cs)?;
+                    trailing.write_elements_to_writer(ds_writer)?;
+                    Ok(())
+                },
+            )
+            .map_err(|e| e.to_string())?;
+        writer
+            .flush()
+            .map_err(|e| format!("flushing output file: {e}"))?;
+    }
+
+    patch_bot(output_file, bot_patch)?;
+    Ok(())
+}
+
+fn write_wire_passthrough_to_file<R: Read>(
+    pdata: &mut R,
+    object: &DefaultDicomObject,
+    stop: PixelDataStreamStop,
+    already_read_prefix: &[u8],
+    output_file: &mut File,
+    output_path: &Path,
+) -> Result<(), String> {
+    let needs_structural_validation = !matches!(stop, PixelDataStreamStop::Absent);
+    {
+        let mut writer = BufWriter::new(&*output_file);
+        match stop {
+            PixelDataStreamStop::Absent => {
+                object
+                    .write_all(&mut writer)
+                    .map_err(|e| format!("writing DICOM file: {e}"))?;
+            }
+            PixelDataStreamStop::Native { vr, length } => {
+                object
+                    .write_all_with_pixel_data(
+                        &mut writer,
+                        |ds_writer, _| -> Result<(), WriteError> {
+                            ds_writer
+                                .write_element_header(DataElementHeader::new(
+                                    tags::PIXEL_DATA,
+                                    vr,
+                                    Length::defined(length),
+                                ))
+                                .map_err(|source| WriteError::Dataset { source })?;
+                            let mut buf = vec![0u8; 256 * 1024];
+                            let mut copied = 0u64;
+                            loop {
+                                let n = pdata.read(&mut buf).map_err(|source| WriteError::Io {
+                                    source,
+                                    context: "copying incoming PixelData stream",
+                                })?;
+                                if n == 0 {
+                                    break;
+                                }
+                                ds_writer
+                                    .write_raw_bytes(&buf[..n])
+                                    .map_err(|source| WriteError::Dataset { source })?;
+                                copied += n as u64;
+                            }
+                            if copied < u64::from(length) {
+                                return Err(WriteError::Io {
+                                    source: std::io::Error::new(
+                                        std::io::ErrorKind::UnexpectedEof,
+                                        format!(
+                                            "truncated native PixelData: declared {length} bytes, received {copied}"
+                                        ),
+                                    ),
+                                    context: "validating incoming PixelData length",
+                                });
+                            }
+                            Ok(())
+                        },
+                    )
+                    .map_err(|e| format!("writing passthrough DICOM file: {e}"))?;
+            }
+            PixelDataStreamStop::Encapsulated => {
+                object
+                    .write_all_with_pixel_data(
+                        &mut writer,
+                        |ds_writer, _| -> Result<(), WriteError> {
+                            ds_writer
+                                .write(DataToken::PixelSequenceStart)
+                                .map_err(|source| WriteError::Dataset { source })?;
+                            if !already_read_prefix.is_empty() {
+                                ds_writer
+                                    .write_raw_bytes(already_read_prefix)
+                                    .map_err(|source| WriteError::Dataset { source })?;
+                            }
+                            let mut buf = vec![0u8; 256 * 1024];
+                            loop {
+                                let n = pdata.read(&mut buf).map_err(|source| WriteError::Io {
+                                    source,
+                                    context: "copying incoming encapsulated PixelData stream",
+                                })?;
+                                if n == 0 {
+                                    break;
+                                }
+                                ds_writer
+                                    .write_raw_bytes(&buf[..n])
+                                    .map_err(|source| WriteError::Dataset { source })?;
+                            }
+                            Ok(())
+                        },
+                    )
+                    .map_err(|e| format!("writing passthrough DICOM file: {e}"))?;
+            }
+        }
+        writer
+            .flush()
+            .map_err(|e| format!("flushing output file: {e}"))?;
+    }
+
+    // Validate passthrough structure (native PixelData + trailing elements, or encapsulated item
+    // headers + Sequence Delimitation Item (FFFE,E0DD) + trailing elements) in O(1) RAM before
+    // publishing the file.
+    if needs_structural_validation {
+        OpenFileOptions::new()
+            .read_preamble(ReadPreamble::Always)
+            .open_file_deferring_pixel_data(output_path)
+            .map_err(|e| format!("validating passthrough dataset: {e}"))?;
+    }
+    Ok(())
+}
+
+fn patch_bot(output_file: &mut File, bot_patch: Option<(u64, Vec<u32>)>) -> Result<(), String> {
+    if let Some((bot_offset, offsets)) = bot_patch {
+        let mut bot_bytes = Vec::with_capacity(offsets.len() * 4);
+        for offset in offsets {
+            bot_bytes.extend_from_slice(&offset.to_le_bytes());
+        }
+        output_file
+            .seek(SeekFrom::Start(bot_offset))
+            .map_err(|e| format!("seeking to patch Basic Offset Table: {e}"))?;
+        output_file
+            .write_all(&bot_bytes)
+            .map_err(|e| format!("patching Basic Offset Table: {e}"))?;
+        output_file
+            .flush()
+            .map_err(|e| format!("flushing Basic Offset Table: {e}"))?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

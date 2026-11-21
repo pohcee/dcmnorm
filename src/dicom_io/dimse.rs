@@ -35,11 +35,12 @@ use dcmnorm_dimse::{
     ClientAssociation, Incoming,
 };
 use dcmnorm_encoding::{TransferSyntax, TransferSyntaxIndex};
-use dcmnorm_object::InMemDicomObject;
+use dcmnorm_object::{FileMetaTable, InMemDicomObject, OpenFileOptions, ReadPreamble};
 use dcmnorm_transcode::TransferSyntaxRegistry;
 
-use super::io::{can_encode_transfer_syntax, read_dicom_file, transcode_dcmnorm_object};
+use super::io::{can_encode_transfer_syntax, read_dicom_file, transcode_dcmnorm_object_owned};
 use super::json::write_dataset_as_dicom_json_with_options;
+use super::streaming_transcode::prepare_streaming_dataset_for_dimse;
 use super::types::{
     DicomJsonError, DicomJsonFormat, DicomJsonKeyStyle, DicomJsonWriteOptions, ReadError,
     TranscodeError, WriteError,
@@ -392,7 +393,7 @@ fn send_command_with_data(
         })?;
         let mut writer = assoc.send_pdata(pc_id);
         std::io::Write::write_all(&mut writer, &data)?;
-        drop(writer);
+        writer.finish()?;
     }
     Ok(())
 }
@@ -740,26 +741,66 @@ struct StoreFile {
     sop_class_uid: String,
     sop_instance_uid: String,
     transfer_syntax_uid: String,
+    /// True only when the file parsed strictly as Part 10 under its declared transfer syntax.
+    /// Files recovered via `read_dicom_file`'s flexible decoder (e.g. Implicit VR dataset
+    /// mislabeled Explicit VR in Group 0002, or meta-less files) must be serialized in the
+    /// negotiated transfer syntax rather than raw-copied off disk.
+    raw_part10_passthrough_ok: bool,
+}
+
+fn store_file_from_object(
+    path: &Path,
+    object: &dcmnorm_object::DefaultDicomObject,
+    raw_part10_passthrough_ok: bool,
+) -> StoreFile {
+    let meta = object.meta();
+    let dataset_uid = |tag| {
+        object
+            .element(tag)
+            .ok()
+            .and_then(|e| e.to_str().ok())
+            .map(|s| s.trim_end_matches(['\0', ' ']).to_owned())
+            .filter(|s| !s.is_empty())
+    };
+    let sop_class_uid = dataset_uid(tags::SOP_CLASS_UID).unwrap_or_else(|| {
+        meta.media_storage_sop_class_uid
+            .trim_end_matches(['\0', ' '])
+            .to_owned()
+    });
+    let sop_instance_uid = dataset_uid(tags::SOP_INSTANCE_UID).unwrap_or_else(|| {
+        meta.media_storage_sop_instance_uid
+            .trim_end_matches(['\0', ' '])
+            .to_owned()
+    });
+    let transfer_syntax_uid = meta
+        .transfer_syntax
+        .trim_end_matches(['\0', ' '])
+        .to_owned();
+    StoreFile {
+        path: path.to_owned(),
+        sop_class_uid,
+        sop_instance_uid,
+        transfer_syntax_uid,
+        raw_part10_passthrough_ok,
+    }
 }
 
 fn probe_store_file(path: &Path) -> Result<StoreFile, DimseError> {
+    // Fast path for Part 10 files: read preamble + File Meta Information + dataset elements only
+    // up to (0008,0018) (~400 bytes, never touching PixelData). Per DICOM PS3.7, C-STORE-RQ
+    // AffectedSOPClassUID/AffectedSOPInstanceUID must come from dataset (0008,0016)/(0008,0018),
+    // falling back to Group 0002 MediaStorageSOP*UID only when absent - real clinical/anonymized
+    // Part 10 files frequently carry stale Group 0002 MediaStorageSOP*UID values.
+    if let Ok(object) = OpenFileOptions::new()
+        .read_preamble(ReadPreamble::Always)
+        .read_until(dcmnorm_core::Tag(0x0008, 0x0019))
+        .open_file(path)
+    {
+        return Ok(store_file_from_object(path, &object, true));
+    }
+
     let object = read_dicom_file(path)?;
-    let meta = object.meta();
-    Ok(StoreFile {
-        path: path.to_owned(),
-        sop_class_uid: meta
-            .media_storage_sop_class_uid
-            .trim_end_matches(['\0', ' '])
-            .to_owned(),
-        sop_instance_uid: meta
-            .media_storage_sop_instance_uid
-            .trim_end_matches(['\0', ' '])
-            .to_owned(),
-        transfer_syntax_uid: meta
-            .transfer_syntax
-            .trim_end_matches(['\0', ' '])
-            .to_owned(),
-    })
+    Ok(store_file_from_object(path, &object, false))
 }
 
 /// Sends each of `files` via C-STORE to `destination` ("host:port"). Presentation contexts are
@@ -912,6 +953,91 @@ fn select_store_presentation_context<'a>(
     }
 }
 
+fn check_send_limits(
+    deadline: Option<Instant>,
+    cancel: Option<&CancelSignal>,
+) -> Result<(), DimseError> {
+    if let Some(deadline) = deadline {
+        if Instant::now() >= deadline {
+            return Err(DimseError::AbsoluteTimeout);
+        }
+    }
+    if let Some(cancel) = cancel {
+        if let Some(mode) = cancel.requested() {
+            return Err(DimseError::Cancelled(mode));
+        }
+    }
+    Ok(())
+}
+
+/// Wraps a `Write` sink (such as `PDataWriter`) to check `deadline` and `cancel` between chunks
+/// during large C-STORE dataset sends, allowing the caller to abort the association cleanly
+/// without emitting a final `is_last = true` PDV.
+struct BoundedSendWriter<'a, W> {
+    inner: &'a mut W,
+    deadline: Option<Instant>,
+    cancel: Option<&'a CancelSignal>,
+    interrupted: Option<DimseError>,
+}
+
+impl<'a, W: std::io::Write> BoundedSendWriter<'a, W> {
+    fn new(inner: &'a mut W, deadline: Option<Instant>, cancel: Option<&'a CancelSignal>) -> Self {
+        Self {
+            inner,
+            deadline,
+            cancel,
+            interrupted: None,
+        }
+    }
+
+    fn take_interrupted(&mut self) -> Option<DimseError> {
+        self.interrupted.take()
+    }
+}
+
+impl<W: std::io::Write> std::io::Write for BoundedSendWriter<'_, W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if let Err(err) = check_send_limits(self.deadline, self.cancel) {
+            let msg = err.to_string();
+            self.interrupted = Some(err);
+            return Err(std::io::Error::other(msg));
+        }
+        self.inner.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        if let Err(err) = check_send_limits(self.deadline, self.cancel) {
+            let msg = err.to_string();
+            self.interrupted = Some(err);
+            return Err(std::io::Error::other(msg));
+        }
+        self.inner.flush()
+    }
+}
+
+fn verify_store_object_matches_probed(
+    object: &dcmnorm_object::DefaultDicomObject,
+    expected: &StoreFile,
+) -> Result<(), DimseError> {
+    let actual = store_file_from_object(&expected.path, object, expected.raw_part10_passthrough_ok);
+    if actual.sop_class_uid != expected.sop_class_uid
+        || actual.sop_instance_uid != expected.sop_instance_uid
+        || actual.transfer_syntax_uid != expected.transfer_syntax_uid
+    {
+        return Err(DimseError::Io(std::io::Error::other(format!(
+            "file {} changed after probing before C-STORE send (expected SOP class/instance/TS {}/{}/{}, found {}/{}/{})",
+            expected.path.display(),
+            expected.sop_class_uid,
+            expected.sop_instance_uid,
+            expected.transfer_syntax_uid,
+            actual.sop_class_uid,
+            actual.sop_instance_uid,
+            actual.transfer_syntax_uid,
+        ))));
+    }
+    Ok(())
+}
+
 fn send_and_receive_store(
     assoc: &mut ClientAssociation<TcpStream>,
     file: &StoreFile,
@@ -921,17 +1047,9 @@ fn send_and_receive_store(
     cancel: Option<&CancelSignal>,
     logger: Option<&dyn DimseLogger>,
 ) -> Result<u16, DimseError> {
+    use std::io::{Read, Seek, SeekFrom};
+
     let (pc, target_ts) = select_store_presentation_context(file, negotiated)?;
-
-    let object = read_dicom_file(&file.path)?;
-    let object = if target_ts.uid() == file.transfer_syntax_uid {
-        object
-    } else {
-        transcode_dcmnorm_object(&object, target_ts.uid())?
-    };
-
-    let mut object_data = Vec::with_capacity(2048);
-    object.write_dataset_with_ts(&mut object_data, target_ts)?;
 
     let command = InMemDicomObject::command_from_element_iter([
         DataElement::new(
@@ -963,7 +1081,180 @@ fn send_and_receive_store(
         )
     });
 
-    send_command_with_data(assoc, pc.id, &command, object_data)?;
+    check_send_limits(deadline, cancel)?;
+
+    if target_ts.uid() == file.transfer_syntax_uid && file.raw_part10_passthrough_ok {
+        // Exact transfer syntax match on a strict Part 10 file: open once, structurally validate
+        // the full dataset (skipping PixelData in O(1) RAM) and re-verify SOP UIDs + transfer
+        // syntax on this open descriptor before sending C-STORE-RQ, then stream the raw dataset
+        // bytes straight from this same handle to PDataWriter.
+        let mut raw_file = std::fs::File::open(&file.path)?;
+        let file_len = raw_file.metadata()?.len();
+        let validated = OpenFileOptions::new()
+            .read_preamble(ReadPreamble::Always)
+            .from_reader_deferring(
+                std::io::BufReader::new(&mut raw_file),
+                Some(file_len),
+                &|h| {
+                    h.tag != tags::SOP_CLASS_UID
+                        && h.tag != tags::SOP_INSTANCE_UID
+                        && h.tag != tags::SPECIFIC_CHARACTER_SET
+                },
+                true,
+                false,
+            )
+            .map_err(|e| {
+                DimseError::Io(std::io::Error::other(format!(
+                    "validating {} before C-STORE send: {e}",
+                    file.path.display()
+                )))
+            })?;
+        let Some((validated_obj, _)) = validated else {
+            // Either a dataset-compressed (deflated) file or a deferred element extending past
+            // EOF: re-parse from this same open descriptor so truncated files error out before
+            // C-STORE-RQ and deflated replacements still respect the negotiated transfer syntax.
+            raw_file.seek(SeekFrom::Start(0))?;
+            let object = OpenFileOptions::new()
+                .read_preamble(ReadPreamble::Always)
+                .from_reader(std::io::BufReader::new(&mut raw_file))
+                .map_err(|e| {
+                    DimseError::Io(std::io::Error::other(format!(
+                        "validating {} before C-STORE send: {e}",
+                        file.path.display()
+                    )))
+                })?;
+            verify_store_object_matches_probed(&object, file)?;
+            check_send_limits(deadline, cancel)?;
+            send_command(assoc, pc.id, &command)?;
+            let mut writer = assoc.send_pdata(pc.id);
+            let mut bounded = BoundedSendWriter::new(&mut writer, deadline, cancel);
+            if let Err(err) = object.write_dataset_with_ts(&mut bounded, target_ts) {
+                if let Some(interrupted) = bounded.take_interrupted() {
+                    return Err(interrupted);
+                }
+                return Err(err.into());
+            }
+            writer.finish()?;
+            let response = poll_bounded(assoc, deadline, None, cancel, receive_command)?;
+            let status = command_status(&response)?;
+            log_event(logger, || {
+                format!("received C-STORE-RSP #{message_id}: status=0x{status:04X}")
+            });
+            return Ok(status);
+        };
+        verify_store_object_matches_probed(&validated_obj, file)?;
+
+        raw_file.seek(SeekFrom::Start(0))?;
+        let mut buf_reader = std::io::BufReader::new(raw_file);
+        let Some(_meta) = FileMetaTable::read_from(&mut buf_reader)? else {
+            return Err(DimseError::Io(std::io::Error::other(format!(
+                "file {} lost Part 10 File Meta Information before C-STORE send",
+                file.path.display()
+            ))));
+        };
+        let dataset_offset = buf_reader.stream_position()?;
+        let dataset_len = file_len.saturating_sub(dataset_offset);
+        let mut raw_file = buf_reader.into_inner();
+        raw_file.seek(SeekFrom::Start(dataset_offset))?;
+
+        check_send_limits(deadline, cancel)?;
+        // Cap the combined single-PDU fast path at 64 KiB so a peer advertising unlimited
+        // max PDU (0 -> u32::MAX) or a file growing concurrently never buffers a huge dataset.
+        let single_pdu_limit = assoc
+            .acceptor_max_pdu_length()
+            .min(65_536)
+            .saturating_sub(256) as u64;
+        if dataset_len < single_pdu_limit {
+            let mut data = Vec::with_capacity(dataset_len as usize);
+            raw_file.by_ref().take(dataset_len).read_to_end(&mut data)?;
+            if data.len() as u64 != dataset_len {
+                return Err(DimseError::Io(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    format!(
+                        "file {} shrank before C-STORE send (expected {dataset_len} dataset bytes, read {})",
+                        file.path.display(),
+                        data.len()
+                    ),
+                )));
+            }
+            send_command_with_data(assoc, pc.id, &command, data)?;
+        } else {
+            send_command(assoc, pc.id, &command)?;
+            let mut writer = assoc.send_pdata(pc.id);
+            let mut bounded = BoundedSendWriter::new(&mut writer, deadline, cancel);
+            let copied = match std::io::copy(&mut raw_file.by_ref().take(dataset_len), &mut bounded)
+            {
+                Ok(n) => n,
+                Err(err) => {
+                    if let Some(interrupted) = bounded.take_interrupted() {
+                        return Err(interrupted);
+                    }
+                    return Err(err.into());
+                }
+            };
+            if copied != dataset_len {
+                return Err(DimseError::Io(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    format!(
+                        "file {} shrank during C-STORE send (expected {dataset_len} dataset bytes, sent {copied})",
+                        file.path.display()
+                    ),
+                )));
+            }
+            writer.finish()?;
+        }
+    } else if target_ts.uid() == file.transfer_syntax_uid {
+        // File required flexible recovery (e.g. Implicit-VR dataset mislabeled Explicit VR in
+        // Group 0002, or meta-less dump): serialize it cleanly in the negotiated transfer syntax.
+        let object = read_dicom_file(&file.path)?;
+        verify_store_object_matches_probed(&object, file)?;
+        check_send_limits(deadline, cancel)?;
+        send_command(assoc, pc.id, &command)?;
+        let mut writer = assoc.send_pdata(pc.id);
+        let mut bounded = BoundedSendWriter::new(&mut writer, deadline, cancel);
+        if let Err(err) = object.write_dataset_with_ts(&mut bounded, target_ts) {
+            if let Some(interrupted) = bounded.take_interrupted() {
+                return Err(interrupted);
+            }
+            return Err(err.into());
+        }
+        writer.finish()?;
+    } else if let Some(prepared) = prepare_streaming_dataset_for_dimse(&file.path, target_ts.uid())?
+    {
+        // Streaming fallback transcode (e.g. compressed file -> Explicit/Implicit VR LE):
+        // validates identity on the open handle before sending C-STORE-RQ, then streams decoded
+        // frames directly into PDataWriter with bounded memory and no temp file.
+        verify_store_object_matches_probed(prepared.object(), file)?;
+        check_send_limits(deadline, cancel)?;
+        send_command(assoc, pc.id, &command)?;
+        let mut writer = assoc.send_pdata(pc.id);
+        let mut bounded = BoundedSendWriter::new(&mut writer, deadline, cancel);
+        if let Err(err) = prepared.write_to(&mut bounded) {
+            if let Some(interrupted) = bounded.take_interrupted() {
+                return Err(interrupted);
+            }
+            return Err(err.into());
+        }
+        writer.finish()?;
+    } else {
+        // Non-streamable fallback (e.g. deflated/MPEG/meta-less): transcode owned (no extra
+        // deep clone) and stream the serialized dataset directly into PDataWriter instead of
+        // allocating a full-dataset Vec<u8> copy.
+        let object = read_dicom_file(&file.path)?;
+        verify_store_object_matches_probed(&object, file)?;
+        let object = transcode_dcmnorm_object_owned(object, target_ts.uid())?;
+        check_send_limits(deadline, cancel)?;
+        send_command(assoc, pc.id, &command)?;
+        let mut writer = assoc.send_pdata(pc.id);
+        let mut bounded = BoundedSendWriter::new(&mut writer, deadline, cancel);
+        if let Err(err) = object.write_dataset_with_ts(&mut bounded, target_ts) {
+            if let Some(interrupted) = bounded.take_interrupted() {
+                return Err(interrupted);
+            }
+            return Err(err.into());
+        }
+        writer.finish()?;
+    }
 
     let response = poll_bounded(assoc, deadline, None, cancel, receive_command)?;
     let status = command_status(&response)?;
