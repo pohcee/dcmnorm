@@ -1,0 +1,75 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+language: en-US
+
+reviews:
+  profile: chill
+  request_changes_workflow: false
+  high_level_summary: true
+  review_status: true
+  collapse_walkthrough: true
+  poem: false
+  in_progress_fortune: false
+  sequence_diagrams: false
+  # Two maintainers; nobody should wait on a suggested reviewer.
+  suggested_reviewers: false
+  auto_review:
+    enabled: true
+    drafts: false
+    # Keep reviewing long PRs instead of pausing after 5 reviewed commits.
+    auto_pause_after_reviewed_commits: 0
+    base_branches:
+      - main
+
+  # Generated, vendored and binary fixture files are not reviewed.
+  path_filters:
+    - "!target/**"
+    - "!**/Cargo.lock"
+    - "!**/Cargo.toml.orig"
+    - "!crates/dcmnorm-jpeg2000/vendor/**"
+    - "!crates/dcmnorm-dictionary/src/tags.rs"
+    - "!crates/dcmnorm-dictionary/src/uids.rs"
+    - "!bindings/node/dicom-constants.js"
+    - "!bindings/node/dicom-constants.d.ts"
+    - "!bindings/python/src/dicom_constants.py"
+    - "!bindings/java/src/main/java/com/pohcee/dcmnorm/VR.java"
+    - "!bindings/java/src/main/java/com/pohcee/dcmnorm/Tag.java"
+    - "!bindings/java/src/main/java/com/pohcee/dcmnorm/TransferSyntax.java"
+    - "!bindings/java/src/main/java/com/pohcee/dcmnorm/SOPClassUID.java"
+    - "!test/files/**"
+    - "!docs/images/**"
+
+  path_instructions:
+    - path: "**/*.rs"
+      instructions: >-
+        dcmnorm parses untrusted DICOM input. Flag panics reachable from input (unwrap/expect,
+        indexing, slicing, integer overflow on lengths/offsets), unbounded allocations driven by
+        declared lengths, and unsafe blocks without a justified invariant. Check DICOM correctness:
+        byte order and VR handling per transfer syntax, undefined-length items/sequences, odd-length
+        padding, and character set handling. Prefer streaming over buffering whole files.
+    - path: "crates/dcmnorm-dimse/**"
+      instructions: >-
+        DIMSE/network code: check PDU length limits, association state handling, timeouts, and
+        that malformed or hostile peers cannot cause hangs, panics or unbounded memory use.
+    - path: "crates/dcmnorm-codegen/**"
+      instructions: >-
+        This crate generates the dictionary and binding constant files. Changes here must be
+        followed by regenerated outputs (`cargo run -p dcmnorm-codegen`) in the same PR.
+    - path: "bindings/**"
+      instructions: >-
+        Language bindings over the Rust core. Check that the public API stays consistent across
+        node, python and java, that errors are surfaced as native exceptions rather than panics
+        across the FFI boundary, and that type declarations match the implementation.
+
+  tools:
+    # clippy runs in CI (.github/workflows/lint.yml, pinned toolchain); not repeated here.
+    clippy:
+      enabled: false
+    shellcheck:
+      enabled: true
+    markdownlint:
+      enabled: true
+    gitleaks:
+      enabled: true
+
+chat:
+  auto_reply: true
