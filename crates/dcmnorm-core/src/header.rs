@@ -1599,3 +1599,6 @@ mod tests {
         assert_eq!(e.fragments().map(|f| f.len()), Some(3));
     }
 }
+
+#[allow(dead_code)]
+fn lint_autofix_probe( x:u32 )->u32{ x+1 }
