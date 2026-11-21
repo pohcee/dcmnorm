@@ -34,6 +34,11 @@ pub enum Error {
         expected: crate::pdu::PDataValueType,
         got: crate::pdu::PDataValueType,
     },
+    /// A Data PDV arrived on a different presentation context than the command it belongs to (PS3.8 Annex E).
+    UnexpectedPresentationContext {
+        expected: u8,
+        got: u8,
+    },
     /// Missing at least one presentation context proposal (a `with_presentation_context` call
     /// is required before establishing).
     MissingPresentationContexts,
@@ -62,6 +67,9 @@ impl fmt::Display for Error {
                     f,
                     "unexpected P-DATA fragment: expected {expected:?}, got {got:?}"
                 )
+            }
+            Error::UnexpectedPresentationContext { expected, got } => {
+                write!(f, "unexpected presentation context ID in P-DATA fragment: expected {expected}, got {got}")
             }
             Error::MissingPresentationContexts => {
                 write!(f, "no presentation contexts were proposed")

@@ -15,7 +15,7 @@ pub use file::{
 };
 pub use mem::{
     ApplyOpError, DeferredPixelData, DeferredValueLocation, DeferredValues, FragmentLocation,
-    InMemDicomObject, InMemElement, InMemFragment, MissingElementError,
+    InMemDicomObject, InMemElement, InMemFragment, MissingElementError, PixelDataStreamStop,
 };
 pub use meta::{FileMetaTable, FileMetaTableBuilder};
 
