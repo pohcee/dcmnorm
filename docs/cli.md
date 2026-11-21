@@ -56,9 +56,14 @@ DICOMDIR (a command of its own, see [Write a DICOMDIR](#write-a-dicomdir)):
 
 - `dcmnorm dicomdir <ROOT> [--file-set-id <ID>] [-o <PATH>] [--json]`
 
-Registration (a command of its own, see [Register two volumes](#register-two-volumes)):
+Registration (see [Register two volumes](#register-two-volumes)):
 
-- `dcmnorm register <FIXED> <MOVING> [--metric auto|ncc|mattes-mi] [--translation-only] [--multi] [--time-limit-ms <MS>] [--levels <MM,...>] [--reg <PATH>]`
+- `--register` (the paths are `FIXED MOVING [OUTPUT]`)
+- `--register-metric <auto|ncc|mattes-mi>`
+- `--register-translation-only`
+- `--register-multi`
+- `--register-time-limit-ms <MS>`
+- `--register-levels <MM,...>`
 
 DICOM editing:
 
@@ -837,22 +842,29 @@ Java's `Dcmnorm.writeDicomdir(entries, outputPath, options)` (`DicomdirEntry.fro
 
 ### Register two volumes
 
-`dcmnorm register FIXED MOVING` aligns the MOVING series to the FIXED one with a rigid (6 degrees
-of freedom) registration and prints the result as JSON. Each of FIXED and MOVING is a directory
-holding one series' files, a single Enhanced CT/MR/PET file, or a comma-separated list of files.
+`dcmnorm --register FIXED MOVING [OUTPUT]` aligns the MOVING series to the FIXED one with a rigid
+(6 degrees of freedom) registration. Each of FIXED and MOVING is a directory holding one series'
+files, a single Enhanced CT/MR/PET file, or a comma-separated list of files. Without OUTPUT the
+result is printed as JSON. An OUTPUT ending in `.json` receives that JSON; any other OUTPUT is
+written as a DICOM Spatial Registration object and the JSON still goes to stdout
+(`--output-type json|dicom` overrides the extension).
 
 ```bash
-dcmnorm register current/ prior/                                   # the result as JSON
-dcmnorm register ct/ pet/ --reg pet-to-ct.dcm                      # also write a DICOM REG
-dcmnorm register current/ prior/ --translation-only                # the fast estimate only
-dcmnorm register current/ prior/ --multi                           # several starts, the best kept
+dcmnorm --register current/ prior/                                 # the result as JSON
+dcmnorm --register current/ prior/ result.json                     # the result in a file
+dcmnorm --register ct/ pet/ pet-to-ct.dcm                          # also write a DICOM REG
+dcmnorm --register current/ prior/ --register-translation-only     # the fast estimate only
+dcmnorm --register current/ prior/ --register-multi                # several starts, the best kept
 ```
+
+Before 0.18 this was `dcmnorm register FIXED MOVING [--reg PATH]` with the options unprefixed
+(`--metric`, `--multi`, ...). That form still works and prints a deprecation note.
 
 - `matrix` is a row-major 4x4 that maps a point in the MOVING patient coordinates (LPS mm) to the
   FIXED ones. This is the direction a DICOM Spatial Registration item stores, with the item's
   Frame of Reference the moving one and the REG's own the fixed one.
 - Any pairing of CT, MR and PT works. The metric is NCC when both series have the same modality
-  and Mattes mutual information otherwise (`--metric` overrides it). An MR-MR pair that NCC can't
+  and Mattes mutual information otherwise (`--register-metric` overrides it). An MR-MR pair that NCC can't
   align (a T1 against a T2) is retried with mutual information.
 - Both volumes are resampled onto an 8, 4 and 2 mm pyramid, so anisotropic voxels, different
   voxel sizes and different fields of view are fine. Body masks depend on the modality: a CT mask
@@ -870,15 +882,15 @@ dcmnorm register current/ prior/ --multi                           # several sta
   results score `good`, divergent ones `poor`. A rotation above 30 degrees (`rotationAngleDeg`)
   is always `poor` with `plausible: false`; a current and a prior on a table are not rotated that
   much.
-- `--multi` tries several starts, the translation estimate, the body-mask centroids and the
+- `--register-multi` tries several starts, the translation estimate, the body-mask centroids and the
   scanner coordinates (plus the initial matrix and extra `starts` in the bindings), each through
   the coarse levels, refines the best plausible one, and reports `consistent` (another start
   converged to within 3 mm of it) and every start under `starts`. The working images are built
   once for all of them, so it costs about 1.5 times one start. It recovers from seeds 120-180 mm
   off in S-I, 60 mm off in-plane or upside down, where a single start ends in a wrong minimum.
 - The result is deterministic: the same inputs give the same matrix bit for bit, whatever the
-  thread count. `--time-limit-ms` (default 30000) returns the best result so far when it runs out.
-- `--translation-only` runs just the fast estimate, which also seeds the rigid registration.
+  thread count. `--register-time-limit-ms` (default 30000) returns the best result so far when it runs out.
+- `--register-translation-only` runs just the fast estimate, which also seeds the rigid registration.
   The S-I shift comes from cross-correlating per-height profiles (body area, plus lung and bone
   area for CT and integrated intensity for MR/PT) over the in-plane region both scans cover, so a
   smaller reconstruction field of view doesn't skew them. A shift with a short overlap is
@@ -888,7 +900,7 @@ dcmnorm register current/ prior/ --multi                           # several sta
   overlap, which truncation doesn't bias the way body centroids are biased. `confidence` combines
   the peak, its margin over the next one, whether each profile on its own agrees, and the
   in-plane fit. It is calibrated so that no wrong answer on the benchmark scores 0.3 or more.
-- `--reg PATH` writes the result as a Spatial Registration object
+- A DICOM OUTPUT is written as a Spatial Registration object
   (`1.2.840.10008.5.1.4.1.1.66.1`) in the fixed study. The fixed and moving series and instances
   are referenced, and the patient and study modules are copied from the first fixed file.
   `dcmnorm PATH` prints any REG object as JSON.

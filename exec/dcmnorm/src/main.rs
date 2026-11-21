@@ -554,6 +554,61 @@ struct Cli {
         display_order = 82
     )]
     strict: bool,
+
+    #[arg(
+        long,
+        action = ArgAction::SetTrue,
+        help = "Register two volumes (rigid, 6 degrees of freedom): the paths are FIXED MOVING [OUTPUT]. FIXED and MOVING are each a directory of one series' DICOM files, one Enhanced multi-frame file, or comma-separated files; CT, MR and PT in any combination. Prints the result (the moving -> fixed patient matrix, metric, quality, timing) as JSON. An OUTPUT ending in .json receives that JSON instead; any other OUTPUT is written as a DICOM Spatial Registration object in the fixed study (the JSON still goes to stdout). --output-type json|dicom overrides the extension",
+        help_heading = "Registration",
+        display_order = 90
+    )]
+    register: bool,
+
+    #[arg(
+        long,
+        value_enum,
+        value_name = "auto|ncc|mattes-mi",
+        help = "Similarity metric: NCC for the same modality, Mattes mutual information across modalities (default auto)",
+        help_heading = "Registration",
+        display_order = 91
+    )]
+    register_metric: Option<RegisterMetric>,
+
+    #[arg(
+        long,
+        action = ArgAction::SetTrue,
+        help = "Only the fast translation estimate (S-I profiles + body centroid), no rigid optimization",
+        help_heading = "Registration",
+        display_order = 92
+    )]
+    register_translation_only: bool,
+
+    #[arg(
+        long,
+        action = ArgAction::SetTrue,
+        help = "Try several starts (translation estimate, body centroids, scanner coordinates) and keep the best; reports whether they agree",
+        help_heading = "Registration",
+        display_order = 93
+    )]
+    register_multi: bool,
+
+    #[arg(
+        long,
+        value_name = "MS",
+        help = "Time limit in milliseconds (default 30000)",
+        help_heading = "Registration",
+        display_order = 94
+    )]
+    register_time_limit_ms: Option<f64>,
+
+    #[arg(
+        long,
+        value_name = "MM,MM,...",
+        help = "Pyramid level spacings, coarse to fine (default 8,4,2)",
+        help_heading = "Registration",
+        display_order = 95
+    )]
+    register_levels: Option<String>,
 }
 
 impl Cli {
@@ -604,6 +659,14 @@ enum OutputType {
     Jpeg,
     Mpeg4,
     Texture,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum RegisterMetric {
+    Auto,
+    Ncc,
+    #[value(alias = "mi")]
+    MattesMi,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -662,7 +725,7 @@ const NEGATIVE_ZERO_ANCHOR: i32 = i32::MIN;
 /// make every file named like a subcommand ambiguous). A file literally named `dicomdir` in the
 /// working directory can still be converted as `./dicomdir`.
 #[derive(Parser, Debug)]
-#[command(name = "dcmnorm dicomdir")]
+#[command(name = "dcmnorm dicomdir", bin_name = "dcmnorm dicomdir")]
 #[command(about = "Write a DICOMDIR for a File-set (Media Storage Directory, PS3.3 Annex F)")]
 #[command(
     long_about = "Scans ROOT for DICOM files (anything with the DICM prefix; other files such as README.TXT are skipped), reads each header (pixel data is not loaded) and writes a DICOMDIR with PATIENT > STUDY > SERIES > instance records at ROOT/DICOMDIR. Every DICOM file's path below ROOT is its File ID, so it must follow PS3.10: at most 8 directory levels, each name 1-8 characters of A-Z, 0-9 and _ (no lower case, no extension). Type 1 keys the instances lack (Patient ID, Study ID, Study Date/Time, Modality, Series Number, Instance Number) are synthesized as IHE PDI asks, and listed."
@@ -691,8 +754,10 @@ struct DicomdirCli {
     json: bool,
 }
 
+/// The pre-0.18 `dcmnorm register FIXED MOVING [--reg PATH]` form, kept as a deprecated alias of
+/// `dcmnorm --register FIXED MOVING [OUTPUT]` (same options, `--register-` prefixed there).
 #[derive(Parser, Debug)]
-#[command(name = "dcmnorm register")]
+#[command(name = "dcmnorm register", bin_name = "dcmnorm register")]
 #[command(
     long_about = "Registers the MOVING volume onto the FIXED one (rigid, 6 degrees of freedom) and prints the result as JSON: the moving -> fixed patient matrix (row-major 4x4, the DICOM Spatial Registration convention), the metric, a quality score and timing. FIXED and MOVING are each a directory of one series' DICOM files, one Enhanced multi-frame file, or a list of files separated by commas. CT, MR and PT in any combination: NCC for the same modality, Mattes mutual information across modalities. With --reg, the result is also written as a DICOM Spatial Registration object in the fixed study."
 )]
@@ -708,11 +773,12 @@ struct RegisterCli {
 
     #[arg(
         long,
+        value_enum,
         value_name = "auto|ncc|mattes-mi",
         default_value = "auto",
         help = "Similarity metric"
     )]
-    metric: String,
+    metric: RegisterMetric,
 
     #[arg(
         long,
@@ -766,16 +832,135 @@ fn register_input_files(spec: &str) -> Result<Vec<PathBuf>, Box<dyn std::error::
         .collect())
 }
 
+/// Registration settings shared by `--register` and the deprecated `register` command.
+struct RegisterSettings {
+    metric: RegisterMetric,
+    translation_only: bool,
+    multi: bool,
+    time_limit_ms: f64,
+    levels: Option<String>,
+}
+
 fn run_register_command(
     args: impl IntoIterator<Item = std::ffi::OsString>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let cli = RegisterCli::parse_from(args);
+    eprintln!(
+        "note: `dcmnorm register FIXED MOVING [--reg PATH]` is deprecated; use `dcmnorm --register FIXED MOVING [OUTPUT]` (options --register-metric, --register-multi, ...)"
+    );
+    let settings = RegisterSettings {
+        metric: cli.metric,
+        translation_only: cli.translation_only,
+        multi: cli.multi,
+        time_limit_ms: cli.time_limit_ms,
+        levels: cli.levels.clone(),
+    };
+    let report = run_registration(&cli.fixed, &cli.moving, &settings, cli.reg.as_deref())?;
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(())
+}
+
+/// Whether `--register`'s OUTPUT receives the JSON result (true) or a DICOM Spatial
+/// Registration object (false): `--output-type json|dicom` if given, else a `.json` extension.
+fn register_output_is_json(
+    output: &Path,
+    output_type: Option<OutputType>,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    match output_type {
+        Some(OutputType::Json) => Ok(true),
+        Some(OutputType::Dicom) => Ok(false),
+        Some(other) => Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            format!(
+                "--register writes json or dicom, not --output-type {}",
+                other
+                    .to_possible_value()
+                    .map(|v| v.get_name().to_owned())
+                    .unwrap_or_default()
+            ),
+        )
+        .into()),
+        None => Ok(output
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))),
+    }
+}
+
+fn validate_register_flags(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+    let invalid = |message: &str| -> Result<(), Box<dyn std::error::Error>> {
+        Err(io::Error::new(ErrorKind::InvalidInput, message.to_owned()).into())
+    };
+    if !cli.register {
+        if cli.register_metric.is_some()
+            || cli.register_translation_only
+            || cli.register_multi
+            || cli.register_time_limit_ms.is_some()
+            || cli.register_levels.is_some()
+        {
+            return invalid("--register-metric/--register-translation-only/--register-multi/--register-time-limit-ms/--register-levels require --register");
+        }
+        return Ok(());
+    }
+    if cli.mpr_requested() || cli.histogram || cli.check_dicom || cli.check_dicom_logic {
+        return invalid(
+            "--register can't be combined with --mpr, --histogram, --check-dicom or --check-dicom-logic",
+        );
+    }
+    if cli.stdin_paths {
+        return invalid(
+            "--register takes FIXED MOVING [OUTPUT] as arguments, not -I/--stdin-paths",
+        );
+    }
+    if !(2..=3).contains(&cli.paths.len()) {
+        return invalid(
+            "--register requires FIXED MOVING [OUTPUT], e.g. dcmnorm --register current/ prior/ prior-to-current.dcm",
+        );
+    }
+    Ok(())
+}
+
+fn run_register(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+    let settings = RegisterSettings {
+        metric: cli.register_metric.unwrap_or(RegisterMetric::Auto),
+        translation_only: cli.register_translation_only,
+        multi: cli.register_multi,
+        time_limit_ms: cli.register_time_limit_ms.unwrap_or(30000.0),
+        levels: cli.register_levels.clone(),
+    };
+    let output = cli.paths.get(2);
+    let json_output = match output {
+        Some(path) => register_output_is_json(path, cli.output_type)?,
+        None => false,
+    };
+    let reg_path = output.filter(|_| !json_output).map(PathBuf::as_path);
+    let report = run_registration(
+        &cli.paths[0].to_string_lossy(),
+        &cli.paths[1].to_string_lossy(),
+        &settings,
+        reg_path,
+    )?;
+    let text = serde_json::to_string_pretty(&report)?;
+    match output {
+        Some(path) if json_output => fs::write(path, text + "\n")?,
+        _ => println!("{text}"),
+    }
+    Ok(())
+}
+
+/// Registers MOVING onto FIXED and returns the JSON report; with `reg_path`, also writes the
+/// result there as a DICOM Spatial Registration object.
+fn run_registration(
+    fixed_spec: &str,
+    moving_spec: &str,
+    settings: &RegisterSettings,
+    reg_path: Option<&Path>,
+) -> Result<JsonValue, Box<dyn std::error::Error>> {
     use dcmnorm::dicom_io::{
         build_spatial_registration, estimate_translation, read_spatial_registration,
         register_rigid, MetricChoice, RegistrationOptions, TranslationOptions,
     };
-    let cli = RegisterCli::parse_from(args);
-    let fixed_files = register_input_files(&cli.fixed)?;
-    let moving_files = register_input_files(&cli.moving)?;
+    let fixed_files = register_input_files(fixed_spec)?;
+    let moving_files = register_input_files(moving_spec)?;
     let fixed = build_volume(&fixed_files)?;
     let moving = build_volume(&moving_files)?;
     let geometry = |volume: &Volume| {
@@ -785,7 +970,7 @@ fn run_register_command(
             "irregularSpacing": volume.has_irregular_spacing(),
         })
     };
-    let (matrix, mut report) = if cli.translation_only {
+    let (matrix, mut report) = if settings.translation_only {
         let estimate = estimate_translation(&fixed, &moving, &TranslationOptions::default())?;
         let report = serde_json::json!({
             "matrix": estimate.matrix.to_vec(), "translationMm": estimate.translation_mm.to_vec(),
@@ -796,31 +981,24 @@ fn run_register_command(
         });
         (estimate.matrix, report)
     } else {
-        let metric = match cli.metric.as_str() {
-            "auto" => MetricChoice::Auto,
-            "ncc" => MetricChoice::Ncc,
-            "mattes-mi" | "mi" => MetricChoice::MattesMi,
-            other => {
-                return Err(io::Error::new(
-                    ErrorKind::InvalidInput,
-                    format!("--metric {other}: expected auto, ncc or mattes-mi"),
-                )
-                .into())
-            }
+        let metric = match settings.metric {
+            RegisterMetric::Auto => MetricChoice::Auto,
+            RegisterMetric::Ncc => MetricChoice::Ncc,
+            RegisterMetric::MattesMi => MetricChoice::MattesMi,
         };
         let mut options = RegistrationOptions {
             metric,
             time_limit: Some(std::time::Duration::from_secs_f64(
-                cli.time_limit_ms.max(1.0) / 1000.0,
+                settings.time_limit_ms.max(1.0) / 1000.0,
             )),
-            initialization: if cli.multi {
+            initialization: if settings.multi {
                 dcmnorm::dicom_io::Initialization::Multi
             } else {
                 dcmnorm::dicom_io::Initialization::Translation
             },
             ..Default::default()
         };
-        if let Some(levels) = &cli.levels {
+        if let Some(levels) = &settings.levels {
             options.levels_mm = levels
                 .split(',')
                 .map(|v| v.trim().parse::<f64>())
@@ -828,7 +1006,7 @@ fn run_register_command(
                 .map_err(|_| {
                     io::Error::new(
                         ErrorKind::InvalidInput,
-                        "--levels: expected comma-separated millimetres",
+                        "registration levels: expected comma-separated millimetres",
                     )
                 })?;
         }
@@ -852,7 +1030,7 @@ fn run_register_command(
     report["fixed"] = geometry(&fixed);
     report["moving"] = geometry(&moving);
 
-    if let Some(reg_path) = &cli.reg {
+    if let Some(reg_path) = reg_path {
         let side = |volume: &Volume,
                     files: &[PathBuf],
                     name: &str|
@@ -901,8 +1079,7 @@ fn run_register_command(
         report["spatialRegistration"] = read_spatial_registration(&object)?;
         report["spatialRegistrationPath"] = JsonValue::from(reg_path.display().to_string());
     }
-    println!("{}", serde_json::to_string_pretty(&report)?);
-    Ok(())
+    Ok(report)
 }
 
 fn run_dicomdir_command(
@@ -1045,6 +1222,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     if cli.list_transfer_syntaxes {
         print_transfer_syntax_support()?;
         return Ok(());
+    }
+
+    validate_register_flags(&cli)?;
+    if cli.register {
+        return run_register(&cli);
     }
 
     if cli.check_dicom {
@@ -3867,7 +4049,8 @@ mod tests {
         validate_check_dicom_logic_flags, Cli, DepthSpec, Direction, FileKind, MprOutputKind,
         OutputType, RenderFormat, TextureCompressionArg, VolumeFormat,
     };
-    use clap::{CommandFactory, FromArgMatches};
+    use super::{register_output_is_json, validate_register_flags, RegisterMetric};
+    use clap::{CommandFactory, FromArgMatches, Parser};
     use dcmnorm::dicom_io::{next_tag, read_dicom_file, write_dicom_file};
     use dcmnorm_core::{DataElement, PrimitiveValue, Tag, VR};
     use dcmnorm_dictionary::tags;
@@ -3953,6 +4136,12 @@ mod tests {
             histogram_max: None,
             check_dicom_logic: false,
             strict: false,
+            register: false,
+            register_metric: None,
+            register_translation_only: false,
+            register_multi: false,
+            register_time_limit_ms: None,
+            register_levels: None,
         }
     }
 
@@ -4777,6 +4966,74 @@ mod tests {
                 PathBuf::from("out.png"),
             ]
         );
+    }
+
+    #[test]
+    fn register_flag_parses_fixed_moving_output_and_options() {
+        let cli = Cli::try_parse_from([
+            "dcmnorm",
+            "--register",
+            "current/",
+            "prior/",
+            "reg.dcm",
+            "--register-metric",
+            "mi",
+            "--register-multi",
+            "--register-levels",
+            "8,4",
+        ])
+        .unwrap();
+        assert!(cli.register);
+        assert_eq!(cli.register_metric, Some(RegisterMetric::MattesMi));
+        assert!(cli.register_multi);
+        assert_eq!(cli.register_levels.as_deref(), Some("8,4"));
+        assert_eq!(cli.paths.len(), 3);
+        validate_register_flags(&cli).unwrap();
+    }
+
+    #[test]
+    fn register_flags_are_validated() {
+        let with = |paths: &[&str], f: fn(&mut Cli)| {
+            let mut cli = Cli {
+                paths: paths.iter().map(PathBuf::from).collect(),
+                ..base_cli()
+            };
+            f(&mut cli);
+            validate_register_flags(&cli)
+        };
+        // --register-* without --register
+        assert!(with(&["a", "b"], |c| c.register_multi = true).is_err());
+        assert!(with(&["a", "b"], |c| c.register_levels = Some("8".into())).is_err());
+        // FIXED MOVING [OUTPUT]: 2 or 3 paths
+        assert!(with(&["a"], |c| c.register = true).is_err());
+        assert!(with(&["a", "b", "c", "d"], |c| c.register = true).is_err());
+        assert!(with(&["a", "b"], |c| c.register = true).is_ok());
+        assert!(with(&["a", "b", "out.json"], |c| c.register = true).is_ok());
+        // not with another mode or -I
+        assert!(with(&["a", "b"], |c| {
+            c.register = true;
+            c.mpr = Some("axial".into());
+        })
+        .is_err());
+        assert!(with(&["a", "b"], |c| {
+            c.register = true;
+            c.stdin_paths = true;
+        })
+        .is_err());
+        // no --register at all: nothing to check
+        assert!(with(&["a"], |_| {}).is_ok());
+    }
+
+    #[test]
+    fn register_output_type_comes_from_extension_or_output_type() {
+        let json = |p: &str, t| register_output_is_json(Path::new(p), t).unwrap();
+        assert!(json("result.json", None));
+        assert!(json("RESULT.JSON", None));
+        assert!(!json("reg.dcm", None));
+        assert!(!json("reg", None));
+        assert!(json("reg", Some(OutputType::Json)));
+        assert!(!json("result.json", Some(OutputType::Dicom)));
+        assert!(register_output_is_json(Path::new("x.png"), Some(OutputType::Png)).is_err());
     }
 
     #[test]
