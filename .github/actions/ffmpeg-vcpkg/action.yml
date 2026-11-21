@@ -27,7 +27,7 @@ runs:
       # keys each package by an ABI hash of its port, triplet, compiler and dependencies, so
       # restoring this directory turns a repeat run's install into a copy. Restore and save are
       # separate steps so a good FFmpeg is cached even when a later build step fails.
-      uses: actions/cache/restore@v4
+      uses: actions/cache/restore@v6
       with:
         path: ${{ runner.temp }}\vcpkg-binary-cache
         key: vcpkg-ffmpeg-${{ inputs.vcpkg-commit }}-${{ inputs.triplet }}
@@ -70,7 +70,7 @@ runs:
 
     - name: Save vcpkg binary cache
       if: ${{ !cancelled() }}
-      uses: actions/cache/save@v4
+      uses: actions/cache/save@v6
       with:
         path: ${{ runner.temp }}\vcpkg-binary-cache
         key: vcpkg-ffmpeg-${{ inputs.vcpkg-commit }}-${{ inputs.triplet }}
