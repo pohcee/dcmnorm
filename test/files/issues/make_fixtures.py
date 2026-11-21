@@ -213,8 +213,7 @@ save(ds, "rgb_planar_2x2.dcm")
 # 58: JPEG 2000 Lossless stored as a JP2 file (not a raw codestream) whose colr box carries an
 # ICC profile with marker-like bytes: an FF51 pair with 0x97 40 bytes on (read by a search for
 # the first FF51 as a SIZ with 24-bit samples), and an FF52 pair with a 0 "MCT" byte. The
-# codestream is 8-bit RGB with the reversible color transform (YBR_RCT), as in vendor-made
-# fused RGB secondary captures.
+# codestream is 8-bit RGB with the reversible color transform (YBR_RCT).
 def jp2_box(kind, payload):
     return struct.pack(">I", 8 + len(payload)) + kind + payload
 
