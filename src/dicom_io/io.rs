@@ -328,31 +328,7 @@ pub(crate) fn encapsulated_frame_fragment_range(
 /// the flag can't be determined (falls back to the spec-conformant
 /// assumption that MCT was used).
 pub(super) fn jpeg2000_frame_uses_mct(object: &DefaultDicomObject, frame_index: usize) -> Option<bool> {
-    let fragments = object.element(tags::PIXEL_DATA).ok()?.fragments()?;
-    let number_of_frames = object
-        .get(tags::NUMBER_OF_FRAMES)
-        .and_then(|element| element.to_str().ok())
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .unwrap_or(1);
-
-    let bytes = if fragments.len() == number_of_frames {
-        fragments.get(frame_index)?
-    } else {
-        fragments.first()?
-    };
-
-    codestream_uses_mct(bytes)
-}
-
-/// Scans a raw JPEG 2000 codestream's main header for the COD marker segment
-/// and reads its Multiple Component Transformation flag. Marker layout
-/// (ITU-T T.800): FF52 (2) + Lcod (2) + Scod (1) + progression order (1) +
-/// number of layers (2) + MCT (1) - i.e. the MCT byte sits 8 bytes after the
-/// start of the FF52 marker.
-fn codestream_uses_mct(codestream: &[u8]) -> Option<bool> {
-    let window = &codestream[..codestream.len().min(4096)];
-    let marker_start = window.windows(2).position(|pair| pair == [0xFF, 0x52])?;
-    window.get(marker_start + 8).map(|&byte| byte != 0)
+    dcmnorm_jpeg2000::codestream::uses_mct(jpeg2000_frame_codestream(object, frame_index)?)
 }
 
 /// Determines the true number of components a JPEG 2000 codestream carries
@@ -370,11 +346,11 @@ pub(super) fn jpeg2000_frame_component_count(
     object: &DefaultDicomObject,
     frame_index: usize,
 ) -> Option<u16> {
-    codestream_component_count(jpeg2000_frame_codestream(object, frame_index)?)
+    Some(dcmnorm_jpeg2000::codestream::read_siz(jpeg2000_frame_codestream(object, frame_index)?)?.components())
 }
 
-/// The (first fragment of the) codestream of a frame.
-fn jpeg2000_frame_codestream(object: &DefaultDicomObject, frame_index: usize) -> Option<&[u8]> {
+/// The first fragment of a frame.
+fn jpeg2000_frame_fragment(object: &DefaultDicomObject, frame_index: usize) -> Option<&[u8]> {
     let fragments = object.element(tags::PIXEL_DATA).ok()?.fragments()?;
     let number_of_frames = object
         .get(tags::NUMBER_OF_FRAMES)
@@ -391,26 +367,20 @@ fn jpeg2000_frame_codestream(object: &DefaultDicomObject, frame_index: usize) ->
     Some(bytes.as_slice())
 }
 
-/// Scans a raw JPEG 2000 codestream's main header for the SIZ marker segment
-/// and reads its Csiz (number of components) field. Marker layout (ITU-T
-/// T.800): FF51 (2) + Lsiz (2) + Rsiz (2) + Xsiz/Ysiz/XOsiz/YOsiz/XTsiz/
-/// YTsiz/XTOsiz/YTOsiz (4 bytes each, 32 total) + Csiz (2) - i.e. Csiz sits
-/// 38 bytes after the start of the FF51 marker.
-fn codestream_component_count(codestream: &[u8]) -> Option<u16> {
-    let window = &codestream[..codestream.len().min(4096)];
-    let marker_start = window.windows(2).position(|pair| pair == [0xFF, 0x51])?;
-    let csiz_start = marker_start + 38;
-    let bytes = window.get(csiz_start..csiz_start + 2)?;
-    Some(u16::from_be_bytes([bytes[0], bytes[1]]))
+/// The codestream (from SOC) in a frame's first fragment: the fragment itself, or the `jp2c`
+/// box of a JP2-wrapped one. Its main header is read structurally (SIZ right after SOC, COD by
+/// walking the marker segments), never by searching for marker bytes: in a JP2 fragment an
+/// `FF51` byte pair inside the colr box's ICC profile was read as SIZ, giving nonsense precision
+/// and component counts (e.g. "24-bit samples, more than BitsAllocated 8" on an 8-bit RGB
+/// secondary capture).
+fn jpeg2000_frame_codestream(object: &DefaultDicomObject, frame_index: usize) -> Option<&[u8]> {
+    dcmnorm_jpeg2000::codestream::locate(jpeg2000_frame_fragment(object, frame_index)?).map(|l| l.codestream)
 }
 
-/// The precision (bit depth) of the first component in a raw JPEG 2000 codestream's SIZ marker:
-/// Ssiz follows Csiz, its low 7 bits are the precision minus one (bit 7 is the sign).
-fn codestream_precision(codestream: &[u8]) -> Option<u16> {
-    let window = &codestream[..codestream.len().min(4096)];
-    let marker_start = window.windows(2).position(|pair| pair == [0xFF, 0x51])?;
-    let ssiz = *window.get(marker_start + 40)?;
-    Some(u16::from(ssiz & 0x7F) + 1)
+/// The widest component precision (bit depth) in a frame's SIZ marker segment.
+fn jpeg2000_frame_precision(object: &DefaultDicomObject, frame_index: usize) -> Option<u16> {
+    let siz = dcmnorm_jpeg2000::codestream::read_siz(jpeg2000_frame_codestream(object, frame_index)?)?;
+    Some(u16::from(siz.max_precision()))
 }
 
 /// Returns the codestream's precision when it is greater than the declared BitsStored but still
@@ -419,7 +389,7 @@ fn codestream_precision(codestream: &[u8]) -> Option<u16> {
 /// result keeping BitsStored 8 would be read wrongly (644 as 132). A precision beyond
 /// BitsAllocated has no consistent native form; decoding reports that as an error.
 pub(super) fn jpeg2000_precision_mismatch(object: &DefaultDicomObject, frame_index: usize) -> Option<u16> {
-    let precision = jpeg2000_frame_codestream(object, frame_index).and_then(codestream_precision)?;
+    let precision = jpeg2000_frame_precision(object, frame_index)?;
     let bits_allocated = object.get(tags::BITS_ALLOCATED).and_then(|e| e.uint16().ok())?;
     let bits_stored = object.get(tags::BITS_STORED).and_then(|e| e.uint16().ok()).unwrap_or(bits_allocated);
     (precision > bits_stored).then_some(precision)
@@ -1521,8 +1491,13 @@ fn decode_jpeg2000_with_kakadu(object: &DefaultDicomObject) -> Result<Vec<u8>, S
         codestream.extend_from_slice(fragment);
     }
 
+    // Kakadu's kdu_codestream reads a raw codestream; a JP2-wrapped fragment's is its jp2c box.
+    let codestream = dcmnorm_jpeg2000::codestream::locate(&codestream)
+        .map(|located| located.codestream)
+        .unwrap_or(&codestream);
+
     kakadu::decode_jpeg2000(
-        &codestream,
+        codestream,
         rows,
         cols,
         samples_per_pixel,

@@ -208,3 +208,32 @@ ds.Rows, ds.Columns = 2, 2
 pixels = np.array([[[255, 0, 0], [0, 255, 0]], [[0, 0, 255], [17, 128, 250]]], dtype="u1")
 ds.PixelData = pixels.transpose(2, 0, 1).tobytes()
 save(ds, "rgb_planar_2x2.dcm")
+
+
+# 58: JPEG 2000 Lossless stored as a JP2 file (not a raw codestream) whose colr box carries an
+# ICC profile with marker-like bytes: an FF51 pair with 0x97 40 bytes on (read by a search for
+# the first FF51 as a SIZ with 24-bit samples), and an FF52 pair with a 0 "MCT" byte. The
+# codestream is 8-bit RGB with the reversible color transform (YBR_RCT), as in vendor-made
+# fused RGB secondary captures.
+def jp2_box(kind, payload):
+    return struct.pack(">I", 8 + len(payload)) + kind + payload
+
+
+pixels = np.array([[[255, 0, 0], [0, 255, 0]], [[0, 0, 255], [17, 128, 250]]], dtype="u1")
+codestream = imagecodecs.jpeg2k_encode(pixels, level=0, reversible=True, mct=True, codecformat="j2k", resolutions=1)
+assert codestream[:4] == b"\xff\x4f\xff\x51"
+assert np.array_equal(imagecodecs.jpeg2k_decode(codestream), pixels)
+icc = b"\x11" * 128 + b"\xff\x51" + b"\x22" * 38 + b"\x97" + b"\xff\x52\x00\x0c\x00\x00\x00\x01\x00" + b"\x33" * 64
+jp2 = (
+    jp2_box(b"jP  ", b"\r\n\x87\n")
+    + jp2_box(b"ftyp", b"jp2 \0\0\0\0jp2 ")
+    + jp2_box(b"jp2h", jp2_box(b"ihdr", struct.pack(">IIHBBBB", 2, 2, 3, 7, 7, 0, 0)) + jp2_box(b"colr", b"\x02\0\0" + icc))
+    + jp2_box(b"jp2c", codestream)
+)
+first = jp2.find(b"\xff\x51")
+assert first < jp2.find(b"jp2c") and (jp2[first + 40] & 0x7F) + 1 == 24
+ds = sample(JPEG2000Lossless)
+ds.SamplesPerPixel, ds.PhotometricInterpretation, ds.PlanarConfiguration = 3, "YBR_RCT", 0
+ds.BitsAllocated, ds.BitsStored, ds.HighBit, ds.PixelRepresentation = 8, 8, 7, 0
+encapsulated(ds, [jp2])
+save(ds, "jp2_ybr_rct_icc_marker_bytes.dcm")

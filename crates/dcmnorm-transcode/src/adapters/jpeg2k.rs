@@ -195,9 +195,14 @@ impl PixelDataReader for Htj2kAdapter {
             * layout.cols as usize
             * layout.rows as usize;
         let slot = &mut dst[layout.base_offset..layout.base_offset + frame_len];
+        // OpenHTJ2K reads a raw codestream; a JP2/JPH-wrapped fragment's is its jp2c box
+        // (OpenJPEG, the fallback, reads either form itself).
+        let raw_codestream = dcmnorm_jpeg2000::codestream::locate(&codestream)
+            .map(|located| located.codestream)
+            .unwrap_or(&codestream);
 
         let htj2k_error = match htj2k::decode_into(
-            &codestream,
+            raw_codestream,
             slot,
             layout.bytes_per_sample as u32,
             layout.samples_per_pixel,
@@ -207,7 +212,7 @@ impl PixelDataReader for Htj2kAdapter {
             Ok(()) => return Ok(()),
             // Header and codestream disagree (e.g. a component count the caller didn't correct
             // for): decode to planes and lay out whatever matches, like the classic adapter does.
-            Err(DecodeIntoError::LayoutMismatch { .. }) => match htj2k::decode(&codestream) {
+            Err(DecodeIntoError::LayoutMismatch { .. }) => match htj2k::decode(raw_codestream) {
                 Ok(image) => {
                     write_components(&image, &layout, dst);
                     return Ok(());
