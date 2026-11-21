@@ -17,8 +17,10 @@ reviews:
     drafts: false
     # Keep reviewing long PRs instead of pausing after 5 reviewed commits.
     auto_pause_after_reviewed_commits: 0
+    # Every base branch, so stacked PRs (based on another PR's branch) are reviewed too; the
+    # default branch is always included.
     base_branches:
-      - main
+      - ".*"
 
   # Generated, vendored and binary fixture files are not reviewed.
   path_filters:
