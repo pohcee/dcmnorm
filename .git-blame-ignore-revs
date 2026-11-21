@@ -1,0 +1,5 @@
+# Bulk reformatting commits, skipped by git blame (git config blame.ignoreRevsFile .git-blame-ignore-revs;
+# GitHub uses this file automatically).
+
+# cargo fmt --all
+18929a3d96b186048444635d751f080508d258ae
