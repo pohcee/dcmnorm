@@ -172,6 +172,9 @@ common workflow to its dcm4che idiom.
 Issues and pull requests are welcome! Bug reports with a sample file (de-identified, please) are
 especially helpful. If dcmnorm is useful to you, a ⭐ helps others find it.
 
+Before pushing, run `scripts/lint.sh` (rustfmt + clippy, as CI does; `--fix` applies the fixes).
+`git config core.hooksPath .githooks` runs it for you on commit (rustfmt) and push (clippy).
+
 ## Thanks
 
 This workspace is built on the [DICOM-rs](https://github.com/Enet4/dicom-rs) project's Rust

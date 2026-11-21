@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# rustfmt + clippy before each push, as CI's Lint workflow. Enable: git config core.hooksPath .githooks
+# Fix with scripts/lint.sh --fix. Skip once with git push --no-verify.
+exec "$(git rev-parse --show-toplevel)/scripts/lint.sh"

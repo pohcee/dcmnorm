@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# rustfmt check before each commit (fast). Enable: git config core.hooksPath .githooks
+# Fix with scripts/lint.sh --fix. Skip once with git commit --no-verify.
+if ! "$(git rev-parse --show-toplevel)/scripts/lint.sh" --fmt >/dev/null; then
+  echo "pre-commit: code is not rustfmt-formatted; run scripts/lint.sh --fix (or cargo fmt --all)" >&2
+  exit 1
+fi

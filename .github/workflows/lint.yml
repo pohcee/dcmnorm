@@ -5,11 +5,8 @@ name: Lint
 # The toolchain is pinned so a new Rust release (which adds clippy lints) can't turn an
 # unchanged PR red; bump RUST_LINT_TOOLCHAIN on purpose and fix what the new lints report.
 #
-# When a lint job fails on a pull request from a branch of this repository, the autofix job asks
-# CodeRabbit to fix it (`@coderabbitai fix-ci commit`), once per pull request. CodeRabbit commits
-# the fix to the branch and this workflow runs again on that commit. Fork branches are skipped:
-# CodeRabbit can't push to them. Test failures (release.yml) are not auto-fixed: comment the
-# command yourself after looking at the failure.
+# Run the same checks locally before pushing: scripts/lint.sh (scripts/lint.sh --fix to apply
+# formatting and clippy's automatic fixes); .githooks has pre-commit/pre-push hooks that run them.
 
 on:
   pull_request: {}
@@ -60,30 +57,3 @@ jobs:
           --exclude dcmnorm-node --exclude dcmnorm-python --exclude dcmnorm-java
           -- -D warnings
 
-  autofix:
-    name: Ask CodeRabbit to fix
-    needs: [fmt, clippy]
-    if: >-
-      failure() && github.event_name == 'pull_request' &&
-      github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ubuntu-24.04
-    permissions:
-      pull-requests: write
-    steps:
-      - name: Comment once per pull request
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          PR: ${{ github.event.pull_request.number }}
-        run: |
-          set -euo pipefail
-          marker='<!-- lint-autofix -->'
-          if gh api --paginate "repos/$REPO/issues/$PR/comments" --jq '.[].body' | grep -qF "$marker"; then
-            echo "Already asked CodeRabbit on this pull request; fix the rest by hand or comment again."
-            exit 0
-          fi
-          gh pr comment "$PR" --repo "$REPO" --body "@coderabbitai fix-ci commit
-
-          The Lint workflow (rustfmt / clippy) failed on this pull request. Please fix the reported
-          formatting and clippy findings only, without changing behavior or tests.
-          $marker"
