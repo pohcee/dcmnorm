@@ -190,7 +190,10 @@ impl SpecificCharacterSet {
         match codes {
             [] => None,
             [code] => Self::from_code(code.as_ref()).or_else(|| {
-                code.as_ref().trim().is_empty().then(SpecificCharacterSet::default)
+                code.as_ref()
+                    .trim()
+                    .is_empty()
+                    .then(SpecificCharacterSet::default)
             }),
             codes => crate::iso2022::Iso2022::from_codes(codes)
                 .map(|charset| SpecificCharacterSet(CharsetImpl::Iso2022(charset))),

@@ -1,0 +1,59 @@
+name: Lint
+
+# rustfmt and clippy on every pull request and push to main.
+#
+# The toolchain is pinned so a new Rust release (which adds clippy lints) can't turn an
+# unchanged PR red; bump RUST_LINT_TOOLCHAIN on purpose and fix what the new lints report.
+#
+# Run the same checks locally before pushing: scripts/lint.sh (scripts/lint.sh --fix to apply
+# formatting and clippy's automatic fixes); .githooks has pre-commit/pre-push hooks that run them.
+
+on:
+  pull_request: {}
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_LINT_TOOLCHAIN: "1.98.0"
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_LINT_TOOLCHAIN }}
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake pkg-config
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_LINT_TOOLCHAIN }}
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: clippy
+        # Same crate set as release.yml's Test job: the bindings link FFmpeg built from source.
+        run: >-
+          cargo clippy --release --locked --workspace --all-targets
+          --exclude dcmnorm-node --exclude dcmnorm-python --exclude dcmnorm-java
+          -- -D warnings
+

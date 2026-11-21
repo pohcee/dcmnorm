@@ -10,27 +10,29 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict};
 
 use ::dcmnorm::dicom_io::{
-    dicom_file_to_json,
-    apply_filter_to_object, build_volume as dcm_build_volume, echo_scu as dcm_echo_scu,
-    find_scu as dcm_find_scu, move_scu as dcm_move_scu, parse_attribute_override,
-    parse_filter_requests, parse_tag_key, probe_dicom_file_for_sop_class_uid,
-    read_dicom_file, read_dicom_json_with_options, read_dcmnorm_object_for_filter,
+    apply_filter_to_object, build_volume as dcm_build_volume, dicom_file_to_json,
+    echo_scu as dcm_echo_scu, find_scu as dcm_find_scu, move_scu as dcm_move_scu,
     pack_dicom_frame_stack_texture as dcm_pack_dicom_frame_stack_texture,
-    pack_dicom_frame_texture as dcm_pack_dicom_frame_texture, pack_volume_texture as dcm_pack_volume_texture,
+    pack_dicom_frame_texture as dcm_pack_dicom_frame_texture,
+    pack_volume_texture as dcm_pack_volume_texture, parse_attribute_override,
+    parse_filter_requests, parse_tag_key, probe_dicom_file_for_sop_class_uid,
+    read_dcmnorm_object_for_filter, read_dicom_file, read_dicom_json_with_options,
     reformat_plane as dcm_reformat_plane, remove_attribute, remove_private_tags_inplace,
     render_dicom_frame as dcm_render_dicom_frame, set_attribute, start_scp as dcm_start_scp,
     store_scu as dcm_store_scu, transcode_dicom_file, write_dicom_file,
-    write_dicomdir as dcm_write_dicomdir, DicomdirEntry as DcmDicomdirEntry, DicomdirOptions as DcmDicomdirOptions,
-    write_dicom_json_with_options, write_dicom_video as dcm_write_dicom_video, CancelMode as DcmCancelMode,
-    CancelSignal, DicomJsonBulkDataMode, DicomJsonFormat, DicomJsonKeyStyle, DicomJsonReadOptions,
-    DicomJsonWriteOptions, DicomScp, DimseLogger, EchoScuOptions as DcmEchoScuOptions,
+    write_dicom_json_with_options, write_dicom_video as dcm_write_dicom_video,
+    write_dicomdir as dcm_write_dicomdir, CancelMode as DcmCancelMode, CancelSignal,
+    DicomJsonBulkDataMode, DicomJsonFormat, DicomJsonKeyStyle, DicomJsonReadOptions,
+    DicomJsonWriteOptions, DicomScp, DicomdirEntry as DcmDicomdirEntry,
+    DicomdirOptions as DcmDicomdirOptions, DimseLogger, EchoScuOptions as DcmEchoScuOptions,
     FindScuOptions as DcmFindScuOptions, Interpolation as DcmInterpolation,
-    MoveScuOptions as DcmMoveScuOptions, QueryRetrieveLevel as DcmQueryRetrieveLevel, OverlaySummary as DcmOverlaySummary,
-    PlaneParams as DcmPlaneParams, RenderOutputFormat as DcmRenderOutputFormat,
-    RenderPipelineOptions as DcmRenderPipelineOptions, ScpHandlers as DcmScpHandlers,
-    ScpOptions as DcmScpOptions, SlabProjection as DcmSlabProjection,
-    StoreScuOptions as DcmStoreScuOptions, TextureCompression as DcmTextureCompression,
-    TextureMeta as DcmTextureMeta, Volume as DcmVolume,
+    MoveScuOptions as DcmMoveScuOptions, OverlaySummary as DcmOverlaySummary,
+    PlaneParams as DcmPlaneParams, QueryRetrieveLevel as DcmQueryRetrieveLevel,
+    RenderOutputFormat as DcmRenderOutputFormat, RenderPipelineOptions as DcmRenderPipelineOptions,
+    ScpHandlers as DcmScpHandlers, ScpOptions as DcmScpOptions,
+    SlabProjection as DcmSlabProjection, StoreScuOptions as DcmStoreScuOptions,
+    TextureCompression as DcmTextureCompression, TextureMeta as DcmTextureMeta,
+    Volume as DcmVolume,
 };
 
 create_exception!(dcmnorm, DcmnormError, PyException);
@@ -55,7 +57,9 @@ fn guarded<T>(f: impl FnOnce() -> PyResult<T>) -> PyResult<T> {
                 .map(|s| s.to_string())
                 .or_else(|| payload.downcast_ref::<String>().cloned())
                 .unwrap_or_else(|| "dcmnorm panicked while processing this file".to_string());
-            Err(DcmnormError::new_err(format!("dcmnorm internal error: {message}")))
+            Err(DcmnormError::new_err(format!(
+                "dcmnorm internal error: {message}"
+            )))
         }
     }
 }
@@ -94,7 +98,9 @@ fn parse_bulk_data_mode(value: Option<&str>) -> PyResult<DicomJsonBulkDataMode> 
     }
 }
 
-fn parse_render_output_format(value: Option<&str>) -> PyResult<(DcmRenderOutputFormat, &'static str)> {
+fn parse_render_output_format(
+    value: Option<&str>,
+) -> PyResult<(DcmRenderOutputFormat, &'static str)> {
     match value {
         None | Some("jpeg") | Some("jpg") => Ok((DcmRenderOutputFormat::Jpeg, "image/jpeg")),
         Some("png") => Ok((DcmRenderOutputFormat::Png, "image/png")),
@@ -115,8 +121,9 @@ fn parse_render_color(value: &str) -> PyResult<[u8; 3]> {
             )));
         }
         let channel = |range: std::ops::Range<usize>| {
-            u8::from_str_radix(&hex[range], 16)
-                .map_err(|_| DcmnormError::new_err(format!("invalid color '{value}'; not a valid hex color")))
+            u8::from_str_radix(&hex[range], 16).map_err(|_| {
+                DcmnormError::new_err(format!("invalid color '{value}'; not a valid hex color"))
+            })
         };
         return Ok([channel(0..2)?, channel(2..4)?, channel(4..6)?]);
     }
@@ -130,7 +137,9 @@ fn parse_render_color(value: &str) -> PyResult<[u8; 3]> {
     let mut channels = [0u8; 3];
     for (index, part) in parts.iter().enumerate() {
         channels[index] = part.trim().parse::<u8>().map_err(|_| {
-            DcmnormError::new_err(format!("invalid color '{value}'; expected R,G,B (0-255 each) or #RRGGBB"))
+            DcmnormError::new_err(format!(
+                "invalid color '{value}'; expected R,G,B (0-255 each) or #RRGGBB"
+            ))
         })?;
     }
     Ok(channels)
@@ -141,8 +150,15 @@ fn overlay_pipeline_fields(
     overlay_index: Option<u32>,
     overlay_color: Option<&str>,
 ) -> PyResult<(bool, Option<usize>, [u8; 3])> {
-    let color = overlay_color.map(parse_render_color).transpose()?.unwrap_or([0, 255, 0]);
-    Ok((show_overlays.unwrap_or(true), overlay_index.map(|value| value as usize), color))
+    let color = overlay_color
+        .map(parse_render_color)
+        .transpose()?
+        .unwrap_or([0, 255, 0]);
+    Ok((
+        show_overlays.unwrap_or(true),
+        overlay_index.map(|value| value as usize),
+        color,
+    ))
 }
 
 fn parse_interpolation(value: Option<&str>) -> PyResult<DcmInterpolation> {
@@ -178,7 +194,9 @@ fn parse_texture_compression(value: Option<&str>) -> PyResult<DcmTextureCompress
 
 fn parse_vec3(values: Vec<f64>, field_name: &'static str) -> PyResult<[f64; 3]> {
     if values.len() != 3 {
-        return Err(DcmnormError::new_err(format!("{field_name} must have exactly 3 values (x, y, z)")));
+        return Err(DcmnormError::new_err(format!(
+            "{field_name} must have exactly 3 values (x, y, z)"
+        )));
     }
     Ok([values[0], values[1], values[2]])
 }
@@ -238,7 +256,13 @@ fn read_json(
             let path = PathBuf::from(file_path);
             dicom_file_to_json(
                 &path,
-                DicomJsonWriteOptions { format, key_style, bulk_data_mode, omit_keyword_vm, ..Default::default() },
+                DicomJsonWriteOptions {
+                    format,
+                    key_style,
+                    bulk_data_mode,
+                    omit_keyword_vm,
+                    ..Default::default()
+                },
             )
             .map_err(to_py_err)
         })
@@ -270,7 +294,10 @@ fn write_json(
 
             let mut object = read_dicom_json_with_options(
                 &json,
-                DicomJsonReadOptions { format, bulk_data_source: bulk_data_source.as_deref() },
+                DicomJsonReadOptions {
+                    format,
+                    bulk_data_source: bulk_data_source.as_deref(),
+                },
             )
             .map_err(to_py_err)?;
 
@@ -324,11 +351,20 @@ fn edit_tags(
 /// Transcodes a DICOM file to the given transfer syntax UID. Mirrors `dcmnorm --transfer-syntax
 /// UID in.dcm out.dcm`.
 #[pyfunction]
-fn transcode(py: Python<'_>, file_path: String, output_path: String, transfer_syntax_uid: String) -> PyResult<()> {
+fn transcode(
+    py: Python<'_>,
+    file_path: String,
+    output_path: String,
+    transfer_syntax_uid: String,
+) -> PyResult<()> {
     py.allow_threads(|| {
         guarded(|| {
-            transcode_dicom_file(&PathBuf::from(file_path), &PathBuf::from(output_path), &transfer_syntax_uid)
-                .map_err(to_py_err)
+            transcode_dicom_file(
+                &PathBuf::from(file_path),
+                &PathBuf::from(output_path),
+                &transfer_syntax_uid,
+            )
+            .map_err(to_py_err)
         })
     })
 }
@@ -337,10 +373,12 @@ fn transcode(py: Python<'_>, file_path: String, output_path: String, transfer_sy
 #[pyfunction]
 fn check_dicom(py: Python<'_>, file_path: String) -> bool {
     py.allow_threads(|| {
-        panic::catch_unwind(AssertUnwindSafe(|| probe_dicom_file_for_sop_class_uid(&PathBuf::from(file_path))))
-            .ok()
-            .and_then(|result| result.ok())
-            .unwrap_or(false)
+        panic::catch_unwind(AssertUnwindSafe(|| {
+            probe_dicom_file_for_sop_class_uid(&PathBuf::from(file_path))
+        }))
+        .ok()
+        .and_then(|result| result.ok())
+        .unwrap_or(false)
     })
 }
 
@@ -380,7 +418,13 @@ impl DicomdirEntry {
         path: Option<String>,
         transfer_syntax_uid: Option<String>,
     ) -> Self {
-        DicomdirEntry { file_id, json, format, path, transfer_syntax_uid }
+        DicomdirEntry {
+            file_id,
+            json,
+            format,
+            path,
+            transfer_syntax_uid,
+        }
     }
 
     fn __repr__(&self) -> String {
@@ -402,7 +446,9 @@ impl<'py> FromPyObject<'py> for DicomdirEntryArg {
             return Ok(DicomdirEntryArg(entry.borrow().clone()));
         }
         let dict = value.downcast::<PyDict>().map_err(|_| {
-            pyo3::exceptions::PyTypeError::new_err("DICOMDIR entries must be DicomdirEntry objects or dicts")
+            pyo3::exceptions::PyTypeError::new_err(
+                "DICOMDIR entries must be DicomdirEntry objects or dicts",
+            )
         })?;
         const KEYS: [&str; 5] = ["file_id", "json", "format", "path", "transfer_syntax_uid"];
         for key in dict.keys() {
@@ -445,7 +491,10 @@ struct DicomdirRecordCount {
 #[pymethods]
 impl DicomdirRecordCount {
     fn __repr__(&self) -> String {
-        format!("DicomdirRecordCount(record_type={:?}, count={})", self.record_type, self.count)
+        format!(
+            "DicomdirRecordCount(record_type={:?}, count={})",
+            self.record_type, self.count
+        )
     }
 }
 
@@ -501,7 +550,10 @@ impl WriteDicomdirResult {
         format!(
             "WriteDicomdirResult(records={}, record_types={:?}, synthesized={}, warnings={})",
             self.records,
-            self.record_types.iter().map(|c| (c.record_type.as_str(), c.count)).collect::<Vec<_>>(),
+            self.record_types
+                .iter()
+                .map(|c| (c.record_type.as_str(), c.count))
+                .collect::<Vec<_>>(),
             self.synthesized.len(),
             self.warnings.len()
         )
@@ -530,20 +582,31 @@ fn write_dicomdir(
         .iter()
         .map(|entry| parse_json_format(entry.format.as_deref()))
         .collect::<PyResult<Vec<_>>>()?;
-    let options = DcmDicomdirOptions { file_set_id: file_set_id.unwrap_or_default(), sop_instance_uid };
+    let options = DcmDicomdirOptions {
+        file_set_id: file_set_id.unwrap_or_default(),
+        sop_instance_uid,
+    };
     let report = py.allow_threads(|| {
         guarded(|| {
             let mut built = Vec::with_capacity(entries.len());
             for (entry, format) in entries.iter().zip(formats) {
                 let file_id = entry.file_id.clone();
                 let one = match (&entry.json, &entry.path) {
-                    (Some(json), None) => {
-                        DcmDicomdirEntry::from_json(file_id, json, format, entry.transfer_syntax_uid.as_deref())
-                            .map_err(to_py_err)?
-                    }
+                    (Some(json), None) => DcmDicomdirEntry::from_json(
+                        file_id,
+                        json,
+                        format,
+                        entry.transfer_syntax_uid.as_deref(),
+                    )
+                    .map_err(to_py_err)?,
                     (None, Some(path)) => {
-                        let mut one = DcmDicomdirEntry::from_file(file_id, path).map_err(to_py_err)?;
-                        if let Some(ts) = entry.transfer_syntax_uid.as_deref().filter(|ts| !ts.is_empty()) {
+                        let mut one =
+                            DcmDicomdirEntry::from_file(file_id, path).map_err(to_py_err)?;
+                        if let Some(ts) = entry
+                            .transfer_syntax_uid
+                            .as_deref()
+                            .filter(|ts| !ts.is_empty())
+                        {
                             one.transfer_syntax_uid = ts.to_owned();
                         }
                         one
@@ -565,7 +628,10 @@ fn write_dicomdir(
         record_types: report
             .record_types
             .into_iter()
-            .map(|(record_type, count)| DicomdirRecordCount { record_type, count: count as u32 })
+            .map(|(record_type, count)| DicomdirRecordCount {
+                record_type,
+                count: count as u32,
+            })
             .collect(),
         synthesized: report
             .synthesized
@@ -630,7 +696,10 @@ struct ScuCallState<T> {
 
 impl<T: Clone + Send + 'static> ScuCallState<T> {
     fn spawn(work: impl FnOnce() -> std::result::Result<T, String> + Send + 'static) -> Arc<Self> {
-        let state = Arc::new(Self { result: Mutex::new(None), condvar: Condvar::new() });
+        let state = Arc::new(Self {
+            result: Mutex::new(None),
+            condvar: Condvar::new(),
+        });
         let state_thread = state.clone();
         std::thread::spawn(move || {
             let outcome = panic::catch_unwind(AssertUnwindSafe(work)).unwrap_or_else(|payload| {
@@ -668,7 +737,8 @@ fn wait_scu<T: Clone + Send + 'static>(
         signal.request(mode);
     }
     let state = state.clone();
-    py.allow_threads(|| state.block_until_done()).map_err(DcmnormError::new_err)
+    py.allow_threads(|| state.block_until_done())
+        .map_err(DcmnormError::new_err)
 }
 
 #[pyclass]
@@ -687,7 +757,11 @@ impl EchoScuHandle {
     /// Requests a graceful A-RELEASE and returns once the association has genuinely closed - real
     /// acknowledgement, not a fire-and-forget signal. Idempotent.
     fn release(&self, py: Python<'_>) -> PyResult<u16> {
-        wait_scu(py, &self.state, Some((&self.cancel, DcmCancelMode::Release)))
+        wait_scu(
+            py,
+            &self.state,
+            Some((&self.cancel, DcmCancelMode::Release)),
+        )
     }
 
     /// Requests an immediate A-ABORT (no wait on the peer at all) and returns once the
@@ -749,7 +823,13 @@ fn start_echo_scu(
     let state = ScuCallState::spawn(move || {
         dcm_echo_scu(
             &destination,
-            DcmEchoScuOptions { calling_ae_title, called_ae_title, timeout, on_log: logger, cancel: Some(cancel_for_call) },
+            DcmEchoScuOptions {
+                calling_ae_title,
+                called_ae_title,
+                timeout,
+                on_log: logger,
+                cancel: Some(cancel_for_call),
+            },
         )
         .map_err(|error| error.to_string())
     });
@@ -780,7 +860,11 @@ impl StoreScuHandle {
     /// Requests a graceful A-RELEASE and returns once the association has genuinely closed - real
     /// acknowledgement, not a fire-and-forget signal. Idempotent.
     fn release(&self, py: Python<'_>) -> PyResult<Vec<StoreScuResult>> {
-        wait_scu(py, &self.state, Some((&self.cancel, DcmCancelMode::Release)))
+        wait_scu(
+            py,
+            &self.state,
+            Some((&self.cancel, DcmCancelMode::Release)),
+        )
     }
 
     /// Requests an immediate A-ABORT (no wait on the peer at all) and returns once the
@@ -793,7 +877,10 @@ impl StoreScuHandle {
 fn map_store_results(results: Vec<::dcmnorm::dicom_io::StoreScuResult>) -> Vec<StoreScuResult> {
     results
         .into_iter()
-        .map(|result| StoreScuResult { sop_instance_uid: result.sop_instance_uid, status: result.status })
+        .map(|result| StoreScuResult {
+            sop_instance_uid: result.sop_instance_uid,
+            status: result.status,
+        })
         .collect()
 }
 
@@ -901,7 +988,11 @@ impl FindScuHandle {
     /// Requests a graceful A-RELEASE and returns once the association has genuinely closed - real
     /// acknowledgement, not a fire-and-forget signal. Idempotent.
     fn release(&self, py: Python<'_>) -> PyResult<Vec<String>> {
-        wait_scu(py, &self.state, Some((&self.cancel, DcmCancelMode::Release)))
+        wait_scu(
+            py,
+            &self.state,
+            Some((&self.cancel, DcmCancelMode::Release)),
+        )
     }
 
     /// Requests an immediate A-ABORT (no wait on the peer at all) and returns once the
@@ -976,7 +1067,14 @@ fn start_find_scu(
         dcm_find_scu(
             &destination,
             &query,
-            DcmFindScuOptions { calling_ae_title, called_ae_title, max_pdu_length, timeout, on_log: logger, cancel: Some(cancel_for_call) },
+            DcmFindScuOptions {
+                calling_ae_title,
+                called_ae_title,
+                max_pdu_length,
+                timeout,
+                on_log: logger,
+                cancel: Some(cancel_for_call),
+            },
         )
         .map_err(|error| error.to_string())
     });
@@ -1016,7 +1114,11 @@ impl MoveScuHandle {
     /// acknowledgement, not a fire-and-forget signal that might land seconds later (or never, if
     /// missed). Idempotent: a second call just observes the same outcome.
     fn release(&self, py: Python<'_>) -> PyResult<MoveScuResult> {
-        wait_scu(py, &self.state, Some((&self.cancel, DcmCancelMode::Release)))
+        wait_scu(
+            py,
+            &self.state,
+            Some((&self.cancel, DcmCancelMode::Release)),
+        )
     }
 
     /// Requests an immediate A-ABORT (no wait on the peer at all) and returns once the
@@ -1074,7 +1176,11 @@ fn move_scu(
 
     let state = ScuCallState::spawn(move || {
         let query_retrieve_level = query_retrieve_level
-            .map(|level| level.parse::<DcmQueryRetrieveLevel>().map_err(|error| error.to_string()))
+            .map(|level| {
+                level
+                    .parse::<DcmQueryRetrieveLevel>()
+                    .map_err(|error| error.to_string())
+            })
             .transpose()?;
         dcm_move_scu(
             &destination,
@@ -1125,7 +1231,10 @@ fn unique_temp_path(extension: &str) -> PathBuf {
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     let sequence = COUNTER.fetch_add(1, Ordering::Relaxed);
-    std::env::temp_dir().join(format!("dcmnorm-python-{}-{nanos}-{sequence}.{extension}", std::process::id()))
+    std::env::temp_dir().join(format!(
+        "dcmnorm-python-{}-{nanos}-{sequence}.{extension}",
+        std::process::id()
+    ))
 }
 
 #[pyclass(get_all)]
@@ -1222,7 +1331,11 @@ fn render_frame(
         width: rendered.width as u32,
         height: rendered.height as u32,
         data: PyBytes::new(py, &rendered.bytes).unbind(),
-        overlays: rendered.overlays.into_iter().map(OverlaySummary::from).collect(),
+        overlays: rendered
+            .overlays
+            .into_iter()
+            .map(OverlaySummary::from)
+            .collect(),
         selected_overlay_index: rendered.selected_overlay_index.map(|value| value as u32),
     })
 }
@@ -1250,22 +1363,31 @@ fn render_movie(
     let bytes = py.allow_threads(|| {
         guarded(|| {
             let object = read_dicom_file(&PathBuf::from(&file_path)).map_err(to_py_err)?;
-            let pipeline_options =
-                DcmRenderPipelineOptions { window_center, window_width, output_width, output_height, ..Default::default() };
+            let pipeline_options = DcmRenderPipelineOptions {
+                window_center,
+                window_width,
+                output_width,
+                output_height,
+                ..Default::default()
+            };
             let fps = fps.unwrap_or(24.0);
 
             // write_dicom_video needs a real (seekable) output file for ffmpeg's muxer - render
             // to a private temp file, then read it back, same trade-off the Node bindings and
             // the CLI itself make.
             let temp_path = unique_temp_path("mp4");
-            let result = dcm_write_dicom_video(&object, &temp_path, &pipeline_options, fps).map_err(to_py_err);
+            let result = dcm_write_dicom_video(&object, &temp_path, &pipeline_options, fps)
+                .map_err(to_py_err);
             let bytes = result.and_then(|_| std::fs::read(&temp_path).map_err(to_py_err));
             let _ = std::fs::remove_file(&temp_path);
             bytes
         })
     })?;
 
-    Ok(RenderedMovie { mime_type: "video/mp4".to_owned(), data: PyBytes::new(py, &bytes).unbind() })
+    Ok(RenderedMovie {
+        mime_type: "video/mp4".to_owned(),
+        data: PyBytes::new(py, &bytes).unbind(),
+    })
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1289,7 +1411,9 @@ fn render_movie(
 fn build_volume(py: Python<'_>, file_paths: Vec<String>) -> PyResult<DicomVolumeHandle> {
     let paths: Vec<PathBuf> = file_paths.into_iter().map(PathBuf::from).collect();
     py.allow_threads(|| guarded(|| dcm_build_volume(&paths).map_err(to_py_err)))
-        .map(|volume| DicomVolumeHandle { volume: Arc::new(volume) })
+        .map(|volume| DicomVolumeHandle {
+            volume: Arc::new(volume),
+        })
 }
 
 #[pyclass]
@@ -1385,7 +1509,9 @@ impl DicomVolumeHandle {
         let volume = self.volume.clone();
 
         let rendered = py.allow_threads(|| {
-            guarded(|| dcm_reformat_plane(&volume, &params, render_format, jpeg_quality).map_err(to_py_err))
+            guarded(|| {
+                dcm_reformat_plane(&volume, &params, render_format, jpeg_quality).map_err(to_py_err)
+            })
         })?;
 
         Ok(RenderedFrame {
@@ -1420,7 +1546,10 @@ impl DicomVolumeHandle {
         let volume = self.volume.clone();
 
         let packed = py.allow_threads(|| {
-            guarded(|| dcm_pack_volume_texture(&volume, target_max_dim, default_window, compression).map_err(to_py_err))
+            guarded(|| {
+                dcm_pack_volume_texture(&volume, target_max_dim, default_window, compression)
+                    .map_err(to_py_err)
+            })
         })?;
 
         Ok(texture_export_result(py, &packed.meta, packed.payload))
@@ -1486,7 +1615,11 @@ struct TextureExportResult {
     data: Py<PyBytes>,
 }
 
-fn texture_export_result(py: Python<'_>, meta: &DcmTextureMeta, payload: Vec<u8>) -> TextureExportResult {
+fn texture_export_result(
+    py: Python<'_>,
+    meta: &DcmTextureMeta,
+    payload: Vec<u8>,
+) -> TextureExportResult {
     let (content_kind, sample_format, compression) = (
         match meta.content_kind {
             ::dcmnorm::dicom_io::ContentKind::Volume => "volume",
@@ -1523,8 +1656,16 @@ fn texture_export_result(py: Python<'_>, meta: &DcmTextureMeta, payload: Vec<u8>
         default_window_center: meta.default_window_center,
         default_window_width: meta.default_window_width,
         invert: meta.invert,
-        layer_window_centers: meta.layer_default_windows.iter().map(|(center, _)| *center).collect(),
-        layer_window_widths: meta.layer_default_windows.iter().map(|(_, width)| *width).collect(),
+        layer_window_centers: meta
+            .layer_default_windows
+            .iter()
+            .map(|(center, _)| *center)
+            .collect(),
+        layer_window_widths: meta
+            .layer_default_windows
+            .iter()
+            .map(|(_, width)| *width)
+            .collect(),
         layer_invert: meta.layer_invert.clone(),
         native_width: meta.native_dims.0,
         native_height: meta.native_dims.1,
@@ -1561,8 +1702,14 @@ fn export_frame_texture(
     let packed = py.allow_threads(|| {
         guarded(|| {
             let object = read_dicom_file(&PathBuf::from(&file_path)).map_err(to_py_err)?;
-            dcm_pack_dicom_frame_texture(&object, frame_index.unwrap_or(0) as usize, target_max_dim, default_window, compression)
-                .map_err(to_py_err)
+            dcm_pack_dicom_frame_texture(
+                &object,
+                frame_index.unwrap_or(0) as usize,
+                target_max_dim,
+                default_window,
+                compression,
+            )
+            .map_err(to_py_err)
         })
     })?;
 
@@ -1584,7 +1731,10 @@ impl FrameStackSource {
     #[new]
     #[pyo3(signature = (file_path, frame_indices=None))]
     fn new(file_path: String, frame_indices: Option<Vec<u32>>) -> Self {
-        FrameStackSource { file_path, frame_indices }
+        FrameStackSource {
+            file_path,
+            frame_indices,
+        }
     }
 }
 
@@ -1629,7 +1779,8 @@ fn export_frame_stack_texture(
                 }
             }
 
-            dcm_pack_dicom_frame_stack_texture(&frame_refs, default_window, compression).map_err(to_py_err)
+            dcm_pack_dicom_frame_stack_texture(&frame_refs, default_window, compression)
+                .map_err(to_py_err)
         })
     })?;
 
@@ -1654,26 +1805,42 @@ struct PyScpHandlers {
 }
 
 impl DcmScpHandlers for PyScpHandlers {
-    fn on_find(&self, filter: &HashMap<String, String>) -> std::result::Result<Vec<HashMap<String, String>>, String> {
+    fn on_find(
+        &self,
+        filter: &HashMap<String, String>,
+    ) -> std::result::Result<Vec<HashMap<String, String>>, String> {
         Python::with_gil(|py| {
-            let result = self.on_find.call1(py, (filter.clone(),)).map_err(|error| error.to_string())?;
-            result.extract::<Vec<HashMap<String, String>>>(py).map_err(|error| error.to_string())
+            let result = self
+                .on_find
+                .call1(py, (filter.clone(),))
+                .map_err(|error| error.to_string())?;
+            result
+                .extract::<Vec<HashMap<String, String>>>(py)
+                .map_err(|error| error.to_string())
         })
     }
 
-    fn on_move(&self, study_instance_uid: &str, move_destination_ae: &str) -> std::result::Result<bool, String> {
+    fn on_move(
+        &self,
+        study_instance_uid: &str,
+        move_destination_ae: &str,
+    ) -> std::result::Result<bool, String> {
         Python::with_gil(|py| {
             let result = self
                 .on_move
                 .call1(py, (study_instance_uid, move_destination_ae))
                 .map_err(|error| error.to_string())?;
-            result.extract::<bool>(py).map_err(|error| error.to_string())
+            result
+                .extract::<bool>(py)
+                .map_err(|error| error.to_string())
         })
     }
 
     fn on_association_complete(&self, stored_instances_by_study: &HashMap<String, Vec<String>>) {
         Python::with_gil(|py| {
-            let _ = self.on_association_complete.call1(py, (stored_instances_by_study.clone(),));
+            let _ = self
+                .on_association_complete
+                .call1(py, (stored_instances_by_study.clone(),));
         });
     }
 }
@@ -1745,7 +1912,11 @@ fn start_dicom_server(
     idle_timeout_ms: Option<u32>,
     on_log: Option<Py<PyAny>>,
 ) -> PyResult<DicomServerHandle> {
-    let handlers: Arc<dyn DcmScpHandlers> = Arc::new(PyScpHandlers { on_find, on_move, on_association_complete });
+    let handlers: Arc<dyn DcmScpHandlers> = Arc::new(PyScpHandlers {
+        on_find,
+        on_move,
+        on_association_complete,
+    });
     let options = DcmScpOptions {
         ae_title,
         // 256 KiB, matching ScpOptions::default() - see that struct's doc comment for why this
@@ -1761,7 +1932,10 @@ fn start_dicom_server(
         .map_err(to_py_err)?;
     let local_port = scp.local_port();
 
-    Ok(DicomServerHandle { inner: Mutex::new(Some(scp)), local_port })
+    Ok(DicomServerHandle {
+        inner: Mutex::new(Some(scp)),
+        local_port,
+    })
 }
 
 #[pymodule]

@@ -19,14 +19,14 @@
 //! calls `charls` directly, bypassing this registry entirely.
 //!
 //! [OpenJPEG]: https://github.com/uclouvain/openjpeg
+#[cfg(feature = "deflate")]
+pub mod deflated;
 #[cfg(feature = "jpeg")]
 pub mod jpeg;
 #[cfg(feature = "jpeg2000")]
 pub mod jpeg2k;
 #[cfg(feature = "rle")]
 pub mod rle_lossless;
-#[cfg(feature = "deflate")]
-pub mod deflated;
 
 pub mod uncompressed;
 

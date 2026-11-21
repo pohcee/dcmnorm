@@ -7,7 +7,7 @@
 use std::borrow::Cow;
 
 use dcmnorm_core::header::Tag;
-use dcmnorm_core::ops::{AttributeAction, AttributeOp, AttributeSelectorStep, ApplyOp};
+use dcmnorm_core::ops::{ApplyOp, AttributeAction, AttributeOp, AttributeSelectorStep};
 use dcmnorm_encoding::adapters::{PixelDataObject, RawPixelData};
 
 use crate::file::{DefaultDicomObject, FileDicomObject};
@@ -76,19 +76,20 @@ impl PixelDataObject for FileDicomObject<InMemDicomObject> {
 
     fn fragment(&self, fragment: usize) -> Option<Cow<'_, [u8]>> {
         match self.object.get(PIXEL_DATA)?.value() {
-            dcmnorm_core::value::Value::PixelSequence(seq) => {
-                seq.fragments().get(fragment).map(|f| Cow::Borrowed(f.as_slice()))
-            }
-            dcmnorm_core::value::Value::Primitive(pv) if fragment == 0 => {
-                Some(pv.to_bytes())
-            }
+            dcmnorm_core::value::Value::PixelSequence(seq) => seq
+                .fragments()
+                .get(fragment)
+                .map(|f| Cow::Borrowed(f.as_slice())),
+            dcmnorm_core::value::Value::Primitive(pv) if fragment == 0 => Some(pv.to_bytes()),
             _ => None,
         }
     }
 
     fn offset_table(&self) -> Option<Cow<'_, [u32]>> {
         match self.object.get(PIXEL_DATA)?.value() {
-            dcmnorm_core::value::Value::PixelSequence(seq) => Some(Cow::Borrowed(seq.offset_table())),
+            dcmnorm_core::value::Value::PixelSequence(seq) => {
+                Some(Cow::Borrowed(seq.offset_table()))
+            }
             _ => None,
         }
     }

@@ -335,10 +335,11 @@ pub trait PixelDataWriter {
                     // value length *as written*: an odd-length fragment is padded to even length
                     // when serialized (PS3.5 §7.1), so count that padding byte too.
                     let written_len = frame_data.len() + (frame_data.len() & 1);
-                    let new_frame_offset = <u32 as std::convert::TryFrom<usize>>::try_from(written_len)
-                        .ok()
-                        .and_then(|delta| delta.checked_add(8))
-                        .and_then(|delta| frame_offset.checked_add(delta));
+                    let new_frame_offset =
+                        <u32 as std::convert::TryFrom<usize>>::try_from(written_len)
+                            .ok()
+                            .and_then(|delta| delta.checked_add(8))
+                            .and_then(|delta| frame_offset.checked_add(delta));
                     if let Some(v) = new_frame_offset {
                         // update the offset for the next frame and continue normally
                         frame_offset = v;
@@ -485,18 +486,42 @@ mod tests {
     struct Frames(u32);
 
     impl PixelDataObject for Frames {
-        fn transfer_syntax_uid(&self) -> &str { "1.2.840.10008.1.2.1" }
-        fn rows(&self) -> Option<u16> { Some(1) }
-        fn cols(&self) -> Option<u16> { Some(1) }
-        fn samples_per_pixel(&self) -> Option<u16> { Some(1) }
-        fn bits_allocated(&self) -> Option<u16> { Some(8) }
-        fn bits_stored(&self) -> Option<u16> { Some(8) }
-        fn photometric_interpretation(&self) -> Option<&str> { Some("MONOCHROME2") }
-        fn number_of_frames(&self) -> Option<u32> { Some(self.0) }
-        fn number_of_fragments(&self) -> Option<u32> { Some(1) }
-        fn fragment(&self, _fragment: usize) -> Option<Cow<'_, [u8]>> { None }
-        fn offset_table(&self) -> Option<Cow<'_, [u32]>> { None }
-        fn raw_pixel_data(&self) -> Option<RawPixelData> { None }
+        fn transfer_syntax_uid(&self) -> &str {
+            "1.2.840.10008.1.2.1"
+        }
+        fn rows(&self) -> Option<u16> {
+            Some(1)
+        }
+        fn cols(&self) -> Option<u16> {
+            Some(1)
+        }
+        fn samples_per_pixel(&self) -> Option<u16> {
+            Some(1)
+        }
+        fn bits_allocated(&self) -> Option<u16> {
+            Some(8)
+        }
+        fn bits_stored(&self) -> Option<u16> {
+            Some(8)
+        }
+        fn photometric_interpretation(&self) -> Option<&str> {
+            Some("MONOCHROME2")
+        }
+        fn number_of_frames(&self) -> Option<u32> {
+            Some(self.0)
+        }
+        fn number_of_fragments(&self) -> Option<u32> {
+            Some(1)
+        }
+        fn fragment(&self, _fragment: usize) -> Option<Cow<'_, [u8]>> {
+            None
+        }
+        fn offset_table(&self) -> Option<Cow<'_, [u32]>> {
+            None
+        }
+        fn raw_pixel_data(&self) -> Option<RawPixelData> {
+            None
+        }
     }
 
     /// Writes frame `i` as a fragment of `lengths[i]` bytes.
@@ -526,15 +551,23 @@ mod tests {
         let mut fragments = Vec::new();
         let mut offset_table = Vec::new();
         writer
-            .encode(&Frames(4), EncodeOptions::default(), &mut fragments, &mut offset_table)
+            .encode(
+                &Frames(4),
+                EncodeOptions::default(),
+                &mut fragments,
+                &mut offset_table,
+            )
             .unwrap();
 
-        assert_eq!(fragments.iter().map(Vec::len).collect::<Vec<_>>(), vec![6865, 314, 1000, 7]);
+        assert_eq!(
+            fragments.iter().map(Vec::len).collect::<Vec<_>>(),
+            vec![6865, 314, 1000, 7]
+        );
         assert_eq!(
             offset_table,
             vec![
                 0,
-                6866 + 8,                      // 6865 padded to 6866
+                6866 + 8, // 6865 padded to 6866
                 6866 + 8 + 314 + 8,
                 6866 + 8 + 314 + 8 + 1000 + 8, // the last fragment's own length is never needed
             ]
@@ -546,7 +579,12 @@ mod tests {
         let mut fragments = Vec::new();
         let mut offset_table = Vec::new();
         FixedLengths(vec![101])
-            .encode(&Frames(1), EncodeOptions::default(), &mut fragments, &mut offset_table)
+            .encode(
+                &Frames(1),
+                EncodeOptions::default(),
+                &mut fragments,
+                &mut offset_table,
+            )
             .unwrap();
         assert_eq!(offset_table, vec![0]);
         assert_eq!(fragments.len(), 1);

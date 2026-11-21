@@ -24,7 +24,14 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const CORE_DIRS: &[&str] = &["codestream", "coding", "transform", "interface", "jph"];
-const INCLUDE_DIRS: &[&str] = &["common", "codestream", "coding", "transform", "interface", "jph"];
+const INCLUDE_DIRS: &[&str] = &[
+    "common",
+    "codestream",
+    "coding",
+    "transform",
+    "interface",
+    "jph",
+];
 
 fn main() {
     println!("cargo::rustc-check-cfg=cfg(dcmnorm_htj2k_v3)");
@@ -72,7 +79,11 @@ fn core_sources(core: &Path, bridge: &Path) -> Vec<PathBuf> {
             .filter_map(|entry| entry.ok().map(|entry| entry.path()))
             .filter(|path| {
                 path.extension().is_some_and(|ext| ext == "cpp")
-                    && !path.file_name().unwrap().to_string_lossy().ends_with("_wasm.cpp")
+                    && !path
+                        .file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .ends_with("_wasm.cpp")
             })
             .collect();
         files.sort();
@@ -151,7 +162,9 @@ fn build_isolated_variants(core: &Path, sources: &[PathBuf], out_dir: &Path) -> 
             .status()
             .map_err(|e| format!("running {} -r: {e}", compiler.path().display()))?;
         if !status.success() {
-            return Err(format!("partial link of the {variant} variant failed ({status})"));
+            return Err(format!(
+                "partial link of the {variant} variant failed ({status})"
+            ));
         }
 
         // Only the bridge's variant-named entry points stay global. --localize-hidden alone isn't
@@ -159,9 +172,15 @@ fn build_isolated_variants(core: &Path, sources: &[PathBuf], out_dir: &Path) -> 
         // instantiations like std::vector<...>::_M_realloc_insert stay global weak symbols in
         // both variants even under -fvisibility=hidden.
         let keep = out_dir.join(format!("htj2k_{variant}.keep"));
-        let entry_points = ["decode", "decode_into", "free_image", "encode", "free_buffer"]
-            .map(|name| format!("dcmnorm_htj2k_{variant}_{name}\n"))
-            .concat();
+        let entry_points = [
+            "decode",
+            "decode_into",
+            "free_image",
+            "encode",
+            "free_buffer",
+        ]
+        .map(|name| format!("dcmnorm_htj2k_{variant}_{name}\n"))
+        .concat();
         fs::write(&keep, entry_points).map_err(|e| format!("writing {}: {e}", keep.display()))?;
         let status = Command::new(&objcopy)
             .arg(format!("--keep-global-symbols={}", keep.display()))
@@ -169,7 +188,9 @@ fn build_isolated_variants(core: &Path, sources: &[PathBuf], out_dir: &Path) -> 
             .status()
             .map_err(|e| format!("running {objcopy}: {e}"))?;
         if !status.success() {
-            return Err(format!("{objcopy} --keep-global-symbols failed for the {variant} variant ({status})"));
+            return Err(format!(
+                "{objcopy} --keep-global-symbols failed for the {variant} variant ({status})"
+            ));
         }
         variant_objects.push(combined);
     }

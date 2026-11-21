@@ -21,7 +21,10 @@ use flate2::Compression;
 pub enum VolumeExportError {
     Io(io::Error),
     /// `samples.len()` didn't match `dims.0 * dims.1 * dims.2`.
-    SampleCountMismatch { expected: usize, found: usize },
+    SampleCountMismatch {
+        expected: usize,
+        found: usize,
+    },
     InvalidDimensions,
 }
 
@@ -126,7 +129,10 @@ pub fn write_nifti(
     }
     let expected = cols as usize * rows as usize * slices as usize;
     if samples.len() != expected {
-        return Err(VolumeExportError::SampleCountMismatch { expected, found: samples.len() });
+        return Err(VolumeExportError::SampleCountMismatch {
+            expected,
+            found: samples.len(),
+        });
     }
 
     let mut header = [0u8; NIFTI_HEADER_SIZE];
@@ -207,14 +213,22 @@ pub fn write_nifti(
 /// a blank line and the raw little-endian `f32` payload. No LPS/RAS conversion needed - NRRD
 /// names its coordinate space directly (`space: left-posterior-superior`), so origins/directions
 /// are written exactly as given.
-pub fn write_nrrd(samples: &[f32], dims: (u32, u32, u32), geometry: &VolumeGeometry, path: &Path) -> Result<(), VolumeExportError> {
+pub fn write_nrrd(
+    samples: &[f32],
+    dims: (u32, u32, u32),
+    geometry: &VolumeGeometry,
+    path: &Path,
+) -> Result<(), VolumeExportError> {
     let (cols, rows, slices) = dims;
     if cols == 0 || rows == 0 || slices == 0 {
         return Err(VolumeExportError::InvalidDimensions);
     }
     let expected = cols as usize * rows as usize * slices as usize;
     if samples.len() != expected {
-        return Err(VolumeExportError::SampleCountMismatch { expected, found: samples.len() });
+        return Err(VolumeExportError::SampleCountMismatch {
+            expected,
+            found: samples.len(),
+        });
     }
 
     let row_scaled = scale3(geometry.row_dir, geometry.col_spacing_mm);
@@ -231,9 +245,15 @@ pub fn write_nrrd(samples: &[f32], dims: (u32, u32, u32), geometry: &VolumeGeome
     header.push_str(&format!("sizes: {cols} {rows} {slices}\n"));
     header.push_str(&format!(
         "space directions: ({:.9},{:.9},{:.9}) ({:.9},{:.9},{:.9}) ({:.9},{:.9},{:.9})\n",
-        row_scaled[0], row_scaled[1], row_scaled[2],
-        col_scaled[0], col_scaled[1], col_scaled[2],
-        normal_scaled[0], normal_scaled[1], normal_scaled[2],
+        row_scaled[0],
+        row_scaled[1],
+        row_scaled[2],
+        col_scaled[0],
+        col_scaled[1],
+        col_scaled[2],
+        normal_scaled[0],
+        normal_scaled[1],
+        normal_scaled[2],
     ));
     header.push_str(&format!(
         "space origin: ({:.9},{:.9},{:.9})\n",
@@ -274,7 +294,10 @@ mod tests {
 
     fn temp_path(name: &str) -> std::path::PathBuf {
         let mut path = std::env::temp_dir();
-        path.push(format!("dcmnorm-volume-export-test-{name}-{}", std::process::id()));
+        path.push(format!(
+            "dcmnorm-volume-export-test-{name}-{}",
+            std::process::id()
+        ));
         path
     }
 
@@ -290,8 +313,15 @@ mod tests {
     #[test]
     fn write_nifti_rejects_a_sample_count_mismatch() {
         let path = temp_path("mismatch.nii");
-        let error = write_nifti(&[0.0; 3], (2, 2, 1), &axis_aligned_geometry(), &path, false).unwrap_err();
-        assert!(matches!(error, VolumeExportError::SampleCountMismatch { expected: 4, found: 3 }));
+        let error =
+            write_nifti(&[0.0; 3], (2, 2, 1), &axis_aligned_geometry(), &path, false).unwrap_err();
+        assert!(matches!(
+            error,
+            VolumeExportError::SampleCountMismatch {
+                expected: 4,
+                found: 3
+            }
+        ));
     }
 
     #[test]
@@ -304,9 +334,12 @@ mod tests {
         fs::remove_file(&path).ok();
         assert_eq!(bytes.len(), NIFTI_HEADER_SIZE + 4 + samples.len() * 4);
 
-        let read_i32 = |offset: usize| i32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
-        let read_i16 = |offset: usize| i16::from_le_bytes(bytes[offset..offset + 2].try_into().unwrap());
-        let read_f32 = |offset: usize| f32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
+        let read_i32 =
+            |offset: usize| i32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
+        let read_i16 =
+            |offset: usize| i16::from_le_bytes(bytes[offset..offset + 2].try_into().unwrap());
+        let read_f32 =
+            |offset: usize| f32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
 
         assert_eq!(read_i32(0), NIFTI_HEADER_SIZE as i32);
         assert_eq!(read_i16(40), 3);
@@ -341,8 +374,22 @@ mod tests {
         let plain_path = temp_path("plain.nii");
         let gz_path = temp_path("gz.nii.gz");
         let samples = vec![2.5f32; 2 * 2 * 2];
-        write_nifti(&samples, (2, 2, 2), &axis_aligned_geometry(), &plain_path, false).unwrap();
-        write_nifti(&samples, (2, 2, 2), &axis_aligned_geometry(), &gz_path, true).unwrap();
+        write_nifti(
+            &samples,
+            (2, 2, 2),
+            &axis_aligned_geometry(),
+            &plain_path,
+            false,
+        )
+        .unwrap();
+        write_nifti(
+            &samples,
+            (2, 2, 2),
+            &axis_aligned_geometry(),
+            &gz_path,
+            true,
+        )
+        .unwrap();
 
         let plain_bytes = fs::read(&plain_path).unwrap();
         let gz_bytes = fs::read(&gz_path).unwrap();
@@ -364,7 +411,11 @@ mod tests {
         let bytes = fs::read(&path).unwrap();
         fs::remove_file(&path).ok();
 
-        let header_end = bytes.windows(2).position(|w| w == b"\n\n").map(|i| i + 2).unwrap();
+        let header_end = bytes
+            .windows(2)
+            .position(|w| w == b"\n\n")
+            .map(|i| i + 2)
+            .unwrap();
         let header_text = std::str::from_utf8(&bytes[..header_end]).unwrap();
         assert!(header_text.starts_with("NRRD0004\n"));
         assert!(header_text.contains("type: float\n"));

@@ -271,17 +271,17 @@ where
                 match end_of_sequence.cmp(&bytes_read) {
                     Ordering::Equal => {
                         // end of delimiter, as indicated by the element's length
-                        let token;
-                        match sd.typ {
+
+                        let token = match sd.typ {
                             SeqTokenType::Sequence => {
                                 self.in_sequence = false;
-                                token = LazyDataToken::SequenceEnd;
+                                LazyDataToken::SequenceEnd
                             }
                             SeqTokenType::Item => {
                                 self.in_sequence = true;
-                                token = LazyDataToken::ItemEnd;
+                                LazyDataToken::ItemEnd
                             }
-                        }
+                        };
                         self.pop_seq_token();
                         return Ok(Some(token));
                     }
@@ -1422,7 +1422,7 @@ mod tests {
             // -- 32 --
         ];
 
-        let ground_truth = vec![
+        let ground_truth = [
             DataToken::SequenceStart {
                 tag: Tag(0x0018, 0x6011),
                 len: Length::UNDEFINED,
@@ -1440,7 +1440,7 @@ mod tests {
         let parser = StatefulDecoder::new(
             &mut cursor,
             ExplicitVRLittleEndianDecoder::default(),
-            LittleEndianBasicDecoder::default(),
+            LittleEndianBasicDecoder,
             SpecificCharacterSet::default(),
         );
         let mut dset_reader = LazyDataSetReader::new(parser);
@@ -1515,7 +1515,7 @@ mod tests {
             0x00, // padding
         ];
 
-        let ground_truth = vec![
+        let ground_truth = [
             DataToken::ElementHeader(DataElementHeader {
                 tag: Tag(0x0008, 0x0016),
                 vr: VR::UI,

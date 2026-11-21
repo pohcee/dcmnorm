@@ -24,10 +24,16 @@ pub enum Error {
     /// A PDU was received that isn't valid at this point in the association state machine.
     UnexpectedPdu(Box<Pdu>),
     /// Local protocol version doesn't match the peer's.
-    ProtocolVersionMismatch { expected: u16, got: u16 },
+    ProtocolVersionMismatch {
+        expected: u16,
+        got: u16,
+    },
     /// A command fragment arrived where a data set fragment was expected, or the reverse (PS3.8 9.3.5: a message is its
     /// command, then its data set).
-    UnexpectedPdv { expected: crate::pdu::PDataValueType, got: crate::pdu::PDataValueType },
+    UnexpectedPdv {
+        expected: crate::pdu::PDataValueType,
+        got: crate::pdu::PDataValueType,
+    },
     /// Missing at least one presentation context proposal (a `with_presentation_context` call
     /// is required before establishing).
     MissingPresentationContexts,
@@ -46,10 +52,16 @@ impl fmt::Display for Error {
             Error::Rejected(rj) => write!(f, "association rejected: {rj}"),
             Error::UnexpectedPdu(pdu) => write!(f, "unexpected PDU: {pdu:?}"),
             Error::ProtocolVersionMismatch { expected, got } => {
-                write!(f, "protocol version mismatch: expected {expected}, got {got}")
+                write!(
+                    f,
+                    "protocol version mismatch: expected {expected}, got {got}"
+                )
             }
             Error::UnexpectedPdv { expected, got } => {
-                write!(f, "unexpected P-DATA fragment: expected {expected:?}, got {got:?}")
+                write!(
+                    f,
+                    "unexpected P-DATA fragment: expected {expected:?}, got {got:?}"
+                )
             }
             Error::MissingPresentationContexts => {
                 write!(f, "no presentation contexts were proposed")

@@ -46,11 +46,17 @@ pub struct ConsistencyReport {
 
 impl ConsistencyReport {
     pub fn error_count(&self) -> usize {
-        self.findings.iter().filter(|finding| finding.severity == Severity::Error).count()
+        self.findings
+            .iter()
+            .filter(|finding| finding.severity == Severity::Error)
+            .count()
     }
 
     pub fn warning_count(&self) -> usize {
-        self.findings.iter().filter(|finding| finding.severity == Severity::Warning).count()
+        self.findings
+            .iter()
+            .filter(|finding| finding.severity == Severity::Warning)
+            .count()
     }
 
     pub fn has_errors(&self) -> bool {
@@ -77,7 +83,12 @@ fn push(
     message: String,
     tags: Vec<Tag>,
 ) {
-    findings.push(ConsistencyFinding { severity, rule_id, message, tags });
+    findings.push(ConsistencyFinding {
+        severity,
+        rule_id,
+        message,
+        tags,
+    });
 }
 
 // ---- shared tag-reading helpers -------------------------------------------------------------
@@ -103,7 +114,10 @@ fn u16_value(object: &DefaultDicomObject, tag: Tag) -> Option<u16> {
 
 fn multi_f64(object: &DefaultDicomObject, tag: Tag) -> Option<Vec<f64>> {
     let raw = text(object, tag)?;
-    let values: Vec<f64> = raw.split('\\').filter_map(|part| part.trim().parse().ok()).collect();
+    let values: Vec<f64> = raw
+        .split('\\')
+        .filter_map(|part| part.trim().parse().ok())
+        .collect();
     if values.is_empty() {
         None
     } else {
@@ -190,8 +204,12 @@ fn check_uid_sanity(object: &DefaultDicomObject, findings: &mut Vec<ConsistencyF
         }
     }
 
-    let meta_sop_class = meta.media_storage_sop_class_uid().trim_end_matches(['\0', ' ']);
-    if let (Some(dataset_sop_class), false) = (text(object, tags::SOP_CLASS_UID), meta_sop_class.is_empty()) {
+    let meta_sop_class = meta
+        .media_storage_sop_class_uid()
+        .trim_end_matches(['\0', ' ']);
+    if let (Some(dataset_sop_class), false) =
+        (text(object, tags::SOP_CLASS_UID), meta_sop_class.is_empty())
+    {
         if dataset_sop_class != meta_sop_class {
             push(
                 findings,
@@ -206,10 +224,13 @@ fn check_uid_sanity(object: &DefaultDicomObject, findings: &mut Vec<ConsistencyF
         }
     }
 
-    let meta_sop_instance = meta.media_storage_sop_instance_uid().trim_end_matches(['\0', ' ']);
-    if let (Some(dataset_sop_instance), false) =
-        (text(object, tags::SOP_INSTANCE_UID), meta_sop_instance.is_empty())
-    {
+    let meta_sop_instance = meta
+        .media_storage_sop_instance_uid()
+        .trim_end_matches(['\0', ' ']);
+    if let (Some(dataset_sop_instance), false) = (
+        text(object, tags::SOP_INSTANCE_UID),
+        meta_sop_instance.is_empty(),
+    ) {
         if dataset_sop_instance != meta_sop_instance {
             push(
                 findings,
@@ -270,7 +291,8 @@ fn encapsulated_fragment_looks_valid(transfer_syntax_uid: &str, fragment: &[u8])
     if is_jpeg2000_transfer_syntax(transfer_syntax_uid) {
         const JP2_SIGNATURE_BOX: [u8; 8] = [0x00, 0x00, 0x00, 0x0C, 0x6A, 0x50, 0x20, 0x20];
         let raw_codestream = fragment.len() >= 2 && fragment[0] == 0xFF && fragment[1] == 0x4F;
-        let jp2_wrapped = fragment.len() >= JP2_SIGNATURE_BOX.len() && fragment[..8] == JP2_SIGNATURE_BOX;
+        let jp2_wrapped =
+            fragment.len() >= JP2_SIGNATURE_BOX.len() && fragment[..8] == JP2_SIGNATURE_BOX;
         return Some(raw_codestream || jp2_wrapped);
     }
     if is_jpeg_or_jpegls_transfer_syntax(transfer_syntax_uid) {
@@ -283,7 +305,8 @@ fn encapsulated_fragment_looks_valid(transfer_syntax_uid: &str, fragment: &[u8])
         if fragment.len() < 4 {
             return Some(false);
         }
-        let segment_count = u32::from_le_bytes([fragment[0], fragment[1], fragment[2], fragment[3]]);
+        let segment_count =
+            u32::from_le_bytes([fragment[0], fragment[1], fragment[2], fragment[3]]);
         return Some((1..=15).contains(&segment_count));
     }
     None
@@ -301,7 +324,10 @@ fn check_pixel_structure(object: &DefaultDicomObject, findings: &mut Vec<Consist
         (tags::COLUMNS, "Columns"),
         (tags::SAMPLES_PER_PIXEL, "SamplesPerPixel"),
         (tags::BITS_ALLOCATED, "BitsAllocated"),
-        (tags::PHOTOMETRIC_INTERPRETATION, "PhotometricInterpretation"),
+        (
+            tags::PHOTOMETRIC_INTERPRETATION,
+            "PhotometricInterpretation",
+        ),
     ];
     let mut missing_required = false;
     for (tag, name) in required {
@@ -311,7 +337,10 @@ fn check_pixel_structure(object: &DefaultDicomObject, findings: &mut Vec<Consist
                 findings,
                 Severity::Error,
                 "pixel/required-attribute-missing",
-                format!("PixelData {} is present but {name} {tag} is missing", tags::PIXEL_DATA),
+                format!(
+                    "PixelData {} is present but {name} {tag} is missing",
+                    tags::PIXEL_DATA
+                ),
                 vec![tags::PIXEL_DATA, tag],
             );
         }
@@ -327,7 +356,9 @@ fn check_pixel_structure(object: &DefaultDicomObject, findings: &mut Vec<Consist
     let cols = u16_value(object, tags::COLUMNS).unwrap();
     let samples_per_pixel = u16_value(object, tags::SAMPLES_PER_PIXEL).unwrap();
     let bits_allocated = u16_value(object, tags::BITS_ALLOCATED).unwrap();
-    let photometric_interpretation = text(object, tags::PHOTOMETRIC_INTERPRETATION).unwrap().to_ascii_uppercase();
+    let photometric_interpretation = text(object, tags::PHOTOMETRIC_INTERPRETATION)
+        .unwrap()
+        .to_ascii_uppercase();
     let number_of_frames = text(object, tags::NUMBER_OF_FRAMES)
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(1)
@@ -338,7 +369,10 @@ fn check_pixel_structure(object: &DefaultDicomObject, findings: &mut Vec<Consist
             findings,
             Severity::Error,
             "pixel/bits-allocated-invalid",
-            format!("BitsAllocated {} is {bits_allocated}, but PS3.5 only allows 1, 8, 16, or 32", tags::BITS_ALLOCATED),
+            format!(
+                "BitsAllocated {} is {bits_allocated}, but PS3.5 only allows 1, 8, 16, or 32",
+                tags::BITS_ALLOCATED
+            ),
             vec![tags::BITS_ALLOCATED],
         );
     }
@@ -375,9 +409,8 @@ fn check_pixel_structure(object: &DefaultDicomObject, findings: &mut Vec<Consist
 
     let expected_samples = match photometric_interpretation.as_str() {
         "MONOCHROME1" | "MONOCHROME2" | "PALETTE COLOR" => Some(1u16),
-        "RGB" | "YBR_FULL" | "YBR_FULL_422" | "YBR_PARTIAL_422" | "YBR_PARTIAL_420" | "YBR_RCT" | "YBR_ICT" => {
-            Some(3u16)
-        }
+        "RGB" | "YBR_FULL" | "YBR_FULL_422" | "YBR_PARTIAL_422" | "YBR_PARTIAL_420" | "YBR_RCT"
+        | "YBR_ICT" => Some(3u16),
         _ => None,
     };
     if let Some(expected_samples) = expected_samples {
@@ -414,9 +447,18 @@ fn check_pixel_structure(object: &DefaultDicomObject, findings: &mut Vec<Consist
 
     if photometric_interpretation == "PALETTE COLOR" {
         let lut_tags = [
-            (tags::RED_PALETTE_COLOR_LOOKUP_TABLE_DATA, "RedPaletteColorLookupTableData"),
-            (tags::GREEN_PALETTE_COLOR_LOOKUP_TABLE_DATA, "GreenPaletteColorLookupTableData"),
-            (tags::BLUE_PALETTE_COLOR_LOOKUP_TABLE_DATA, "BluePaletteColorLookupTableData"),
+            (
+                tags::RED_PALETTE_COLOR_LOOKUP_TABLE_DATA,
+                "RedPaletteColorLookupTableData",
+            ),
+            (
+                tags::GREEN_PALETTE_COLOR_LOOKUP_TABLE_DATA,
+                "GreenPaletteColorLookupTableData",
+            ),
+            (
+                tags::BLUE_PALETTE_COLOR_LOOKUP_TABLE_DATA,
+                "BluePaletteColorLookupTableData",
+            ),
         ];
         for (tag, name) in lut_tags {
             if object.get(tag).is_none() {
@@ -424,7 +466,9 @@ fn check_pixel_structure(object: &DefaultDicomObject, findings: &mut Vec<Consist
                     findings,
                     Severity::Error,
                     "pixel/palette-color-missing-lut",
-                    format!("PhotometricInterpretation is PALETTE COLOR but {name} {tag} is missing"),
+                    format!(
+                        "PhotometricInterpretation is PALETTE COLOR but {name} {tag} is missing"
+                    ),
                     vec![tags::PHOTOMETRIC_INTERPRETATION, tag],
                 );
             }
@@ -449,7 +493,9 @@ fn check_pixel_structure(object: &DefaultDicomObject, findings: &mut Vec<Consist
 
             let transfer_syntax_uid = object.meta().transfer_syntax();
             if let Some(first_fragment) = fragments.iter().find(|fragment| !fragment.is_empty()) {
-                if let Some(false) = encapsulated_fragment_looks_valid(transfer_syntax_uid, first_fragment) {
+                if let Some(false) =
+                    encapsulated_fragment_looks_valid(transfer_syntax_uid, first_fragment)
+                {
                     push(
                         findings,
                         Severity::Error,
@@ -471,7 +517,9 @@ fn check_pixel_structure(object: &DefaultDicomObject, findings: &mut Vec<Consist
             // a mismatch here means the file was hand-edited or generated wrong, not a rare
             // legitimate corner case.
             if let Ok(actual_bytes) = pixel_data.to_bytes() {
-                let expected_bits = rows as u64 * cols as u64 * number_of_frames as u64
+                let expected_bits = rows as u64
+                    * cols as u64
+                    * number_of_frames as u64
                     * samples_per_pixel as u64
                     * bits_allocated as u64;
                 let expected_bytes = expected_bits.div_ceil(8);
@@ -545,7 +593,10 @@ fn check_geometry(object: &DefaultDicomObject, findings: &mut Vec<ConsistencyFin
         }
     }
 
-    for (tag, name) in [(tags::PIXEL_SPACING, "PixelSpacing"), (tags::SLICE_THICKNESS, "SliceThickness")] {
+    for (tag, name) in [
+        (tags::PIXEL_SPACING, "PixelSpacing"),
+        (tags::SLICE_THICKNESS, "SliceThickness"),
+    ] {
         if let Some(values) = multi_f64(object, tag) {
             if values.iter().any(|value| *value <= 0.0) {
                 push(
@@ -563,7 +614,9 @@ fn check_geometry(object: &DefaultDicomObject, findings: &mut Vec<ConsistencyFin
 // ---- modality-specific (phase 2) -----------------------------------------------------------
 
 fn check_modality(object: &DefaultDicomObject, findings: &mut Vec<ConsistencyFinding>) {
-    if object.get(tags::PIXEL_DATA).is_some() && text(object, tags::MODALITY).as_deref() == Some("CT") {
+    if object.get(tags::PIXEL_DATA).is_some()
+        && text(object, tags::MODALITY).as_deref() == Some("CT")
+    {
         let has_slope = object.get(tags::RESCALE_SLOPE).is_some();
         let has_intercept = object.get(tags::RESCALE_INTERCEPT).is_some();
         if !has_slope || !has_intercept {
@@ -579,9 +632,10 @@ fn check_modality(object: &DefaultDicomObject, findings: &mut Vec<ConsistencyFin
         }
     }
 
-    if let (Some(center_vm), Some(width_vm)) =
-        (value_multiplicity(object, tags::WINDOW_CENTER), value_multiplicity(object, tags::WINDOW_WIDTH))
-    {
+    if let (Some(center_vm), Some(width_vm)) = (
+        value_multiplicity(object, tags::WINDOW_CENTER),
+        value_multiplicity(object, tags::WINDOW_WIDTH),
+    ) {
         if center_vm != width_vm {
             push(
                 findings,
@@ -597,7 +651,9 @@ fn check_modality(object: &DefaultDicomObject, findings: &mut Vec<ConsistencyFin
             );
         }
 
-        if let Some(explanation_vm) = value_multiplicity(object, tags::WINDOW_CENTER_WIDTH_EXPLANATION) {
+        if let Some(explanation_vm) =
+            value_multiplicity(object, tags::WINDOW_CENTER_WIDTH_EXPLANATION)
+        {
             if explanation_vm != center_vm {
                 push(
                     findings,
@@ -627,10 +683,15 @@ mod tests {
     use std::path::PathBuf;
 
     fn fixture_path(name: &str) -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test/files").join(name)
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("test/files")
+            .join(name)
     }
 
-    fn object_with(elements: Vec<DataElement<InMemDicomObject>>, transfer_syntax_uid: &str) -> DefaultDicomObject {
+    fn object_with(
+        elements: Vec<DataElement<InMemDicomObject>>,
+        transfer_syntax_uid: &str,
+    ) -> DefaultDicomObject {
         InMemDicomObject::from_element_iter(elements)
             .with_meta(
                 FileMetaTableBuilder::new()
@@ -666,12 +727,19 @@ mod tests {
             u16_element(tags::HIGH_BIT, VR::US, 7),
             u16_element(tags::PIXEL_REPRESENTATION, VR::US, 0),
             str_element(tags::PHOTOMETRIC_INTERPRETATION, VR::CS, "MONOCHROME2"),
-            DataElement::new(tags::PIXEL_DATA, VR::OW, dcmnorm_core::PrimitiveValue::from(vec![0u8; 4])),
+            DataElement::new(
+                tags::PIXEL_DATA,
+                VR::OW,
+                dcmnorm_core::PrimitiveValue::from(vec![0u8; 4]),
+            ),
         ]
     }
 
     fn find<'a>(report: &'a ConsistencyReport, rule_id: &str) -> Option<&'a ConsistencyFinding> {
-        report.findings.iter().find(|finding| finding.rule_id == rule_id)
+        report
+            .findings
+            .iter()
+            .find(|finding| finding.rule_id == rule_id)
     }
 
     #[test]
@@ -680,16 +748,23 @@ mod tests {
         assert!(is_valid_uid("0.1.2"));
         assert!(!is_valid_uid(""));
         assert!(!is_valid_uid("1..2"));
-        assert!(!is_valid_uid("1.02.3"), "a component with a leading zero (other than a bare 0) is invalid");
+        assert!(
+            !is_valid_uid("1.02.3"),
+            "a component with a leading zero (other than a bare 0) is invalid"
+        );
         assert!(!is_valid_uid("1.2.a"));
-        assert!(!is_valid_uid(&format!("1.{}", "2".repeat(64)), ));
+        assert!(!is_valid_uid(&format!("1.{}", "2".repeat(64)),));
     }
 
     #[test]
     fn baseline_image_has_no_findings() {
         let object = object_with(baseline_image_elements(), uids::EXPLICIT_VR_LITTLE_ENDIAN);
         let report = check_dicom_logic(&object);
-        assert!(report.findings.is_empty(), "expected no findings, got {:#?}", report.findings);
+        assert!(
+            report.findings.is_empty(),
+            "expected no findings, got {:#?}",
+            report.findings
+        );
     }
 
     #[test]
@@ -698,7 +773,8 @@ mod tests {
         elements.push(u16_element(tags::BITS_STORED, VR::US, 16));
         let object = object_with(elements, uids::EXPLICIT_VR_LITTLE_ENDIAN);
         let report = check_dicom_logic(&object);
-        let finding = find(&report, "pixel/bits-stored-exceeds-allocated").expect("expected a finding");
+        let finding =
+            find(&report, "pixel/bits-stored-exceeds-allocated").expect("expected a finding");
         assert_eq!(finding.severity, Severity::Error);
     }
 
@@ -718,7 +794,8 @@ mod tests {
         elements.push(str_element(tags::PHOTOMETRIC_INTERPRETATION, VR::CS, "RGB"));
         let object = object_with(elements, uids::EXPLICIT_VR_LITTLE_ENDIAN);
         let report = check_dicom_logic(&object);
-        let finding = find(&report, "pixel/samples-per-pixel-photometric-mismatch").expect("expected a finding");
+        let finding = find(&report, "pixel/samples-per-pixel-photometric-mismatch")
+            .expect("expected a finding");
         assert_eq!(finding.severity, Severity::Error);
     }
 
@@ -728,18 +805,27 @@ mod tests {
         elements.push(u16_element(tags::PLANAR_CONFIGURATION, VR::US, 1));
         let object = object_with(elements, uids::EXPLICIT_VR_LITTLE_ENDIAN);
         let report = check_dicom_logic(&object);
-        let finding = find(&report, "pixel/planar-configuration-on-monochrome").expect("expected a finding");
+        let finding =
+            find(&report, "pixel/planar-configuration-on-monochrome").expect("expected a finding");
         assert_eq!(finding.severity, Severity::Warning);
     }
 
     #[test]
     fn palette_color_without_lut_data_is_an_error() {
         let mut elements = baseline_image_elements();
-        elements.push(str_element(tags::PHOTOMETRIC_INTERPRETATION, VR::CS, "PALETTE COLOR"));
+        elements.push(str_element(
+            tags::PHOTOMETRIC_INTERPRETATION,
+            VR::CS,
+            "PALETTE COLOR",
+        ));
         let object = object_with(elements, uids::EXPLICIT_VR_LITTLE_ENDIAN);
         let report = check_dicom_logic(&object);
         assert_eq!(
-            report.findings.iter().filter(|f| f.rule_id == "pixel/palette-color-missing-lut").count(),
+            report
+                .findings
+                .iter()
+                .filter(|f| f.rule_id == "pixel/palette-color-missing-lut")
+                .count(),
             3,
             "expected one finding per missing R/G/B LUT: {:#?}",
             report.findings
@@ -772,9 +858,15 @@ mod tests {
             uids::EXPLICIT_VR_LITTLE_ENDIAN,
         );
         let report = check_dicom_logic(&object);
-        let missing_count =
-            report.findings.iter().filter(|f| f.rule_id == "pixel/required-attribute-missing").count();
-        assert_eq!(missing_count, 5, "Rows/Columns/SamplesPerPixel/BitsAllocated/PhotometricInterpretation");
+        let missing_count = report
+            .findings
+            .iter()
+            .filter(|f| f.rule_id == "pixel/required-attribute-missing")
+            .count();
+        assert_eq!(
+            missing_count, 5,
+            "Rows/Columns/SamplesPerPixel/BitsAllocated/PhotometricInterpretation"
+        );
         assert!(
             find(&report, "pixel/native-length-mismatch").is_none(),
             "downstream pixel rules should not run without the attributes they depend on"
@@ -796,7 +888,8 @@ mod tests {
         ));
         let object = object_with(elements, uids::JPEG_BASELINE8_BIT);
         let report = check_dicom_logic(&object);
-        let finding = find(&report, "pixel/transfer-syntax-fragment-mismatch").expect("expected a finding");
+        let finding =
+            find(&report, "pixel/transfer-syntax-fragment-mismatch").expect("expected a finding");
         assert_eq!(finding.severity, Severity::Error);
     }
 
@@ -818,7 +911,9 @@ mod tests {
     #[test]
     fn fewer_fragments_than_declared_frames_is_an_error() {
         let mut elements = baseline_image_elements();
-        elements.retain(|element| element.tag() != tags::PIXEL_DATA && element.tag() != tags::NUMBER_OF_FRAMES);
+        elements.retain(|element| {
+            element.tag() != tags::PIXEL_DATA && element.tag() != tags::NUMBER_OF_FRAMES
+        });
         elements.push(str_element(tags::NUMBER_OF_FRAMES, VR::IS, "3"));
         let single_fragment: Vec<u8> = vec![0xFF, 0xD8, 0xFF, 0xDB];
         elements.push(DataElement::new(
@@ -828,7 +923,8 @@ mod tests {
         ));
         let object = object_with(elements, uids::JPEG_BASELINE8_BIT);
         let report = check_dicom_logic(&object);
-        let finding = find(&report, "pixel/encapsulated-fragment-count-too-low").expect("expected a finding");
+        let finding =
+            find(&report, "pixel/encapsulated-fragment-count-too-low").expect("expected a finding");
         assert_eq!(finding.severity, Severity::Error);
     }
 
@@ -850,7 +946,8 @@ mod tests {
         elements.push(str_element(tags::SOP_INSTANCE_UID, VR::UI, "9.9.9.9"));
         let object = object_with(elements, uids::EXPLICIT_VR_LITTLE_ENDIAN);
         let report = check_dicom_logic(&object);
-        let finding = find(&report, "uid/sop-instance-uid-meta-mismatch").expect("expected a finding");
+        let finding =
+            find(&report, "uid/sop-instance-uid-meta-mismatch").expect("expected a finding");
         assert_eq!(finding.severity, Severity::Warning);
         assert!(!report.has_errors());
     }
@@ -866,7 +963,11 @@ mod tests {
     #[test]
     fn non_orthonormal_orientation_is_flagged() {
         let mut elements = baseline_image_elements();
-        elements.push(str_element(tags::IMAGE_ORIENTATION_PATIENT, VR::DS, "1\\0\\0\\1\\0\\0"));
+        elements.push(str_element(
+            tags::IMAGE_ORIENTATION_PATIENT,
+            VR::DS,
+            "1\\0\\0\\1\\0\\0",
+        ));
         let object = object_with(elements, uids::EXPLICIT_VR_LITTLE_ENDIAN);
         let report = check_dicom_logic(&object);
         assert!(find(&report, "geometry/orientation-not-orthogonal").is_some());
@@ -875,7 +976,11 @@ mod tests {
     #[test]
     fn non_unit_orientation_vector_is_flagged() {
         let mut elements = baseline_image_elements();
-        elements.push(str_element(tags::IMAGE_ORIENTATION_PATIENT, VR::DS, "2\\0\\0\\0\\1\\0"));
+        elements.push(str_element(
+            tags::IMAGE_ORIENTATION_PATIENT,
+            VR::DS,
+            "2\\0\\0\\0\\1\\0",
+        ));
         let object = object_with(elements, uids::EXPLICIT_VR_LITTLE_ENDIAN);
         let report = check_dicom_logic(&object);
         assert!(find(&report, "geometry/orientation-not-unit-vector").is_some());
@@ -884,7 +989,11 @@ mod tests {
     #[test]
     fn well_formed_orientation_has_no_geometry_findings() {
         let mut elements = baseline_image_elements();
-        elements.push(str_element(tags::IMAGE_ORIENTATION_PATIENT, VR::DS, "1\\0\\0\\0\\1\\0"));
+        elements.push(str_element(
+            tags::IMAGE_ORIENTATION_PATIENT,
+            VR::DS,
+            "1\\0\\0\\0\\1\\0",
+        ));
         let object = object_with(elements, uids::EXPLICIT_VR_LITTLE_ENDIAN);
         let report = check_dicom_logic(&object);
         assert!(find(&report, "geometry/orientation-not-unit-vector").is_none());
@@ -944,6 +1053,10 @@ mod tests {
     fn real_fixture_rle_file_has_no_errors() {
         let object = super::super::io::read_dicom_file(fixture_path("mr_rle.dcm")).unwrap();
         let report = check_dicom_logic(&object);
-        assert!(!report.has_errors(), "expected no errors, got {:#?}", report.findings);
+        assert!(
+            !report.has_errors(),
+            "expected no errors, got {:#?}",
+            report.findings
+        );
     }
 }

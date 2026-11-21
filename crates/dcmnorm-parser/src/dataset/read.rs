@@ -484,7 +484,9 @@ where
                         self.parser
                             .read_to_vec(len as u32, &mut value)
                             .map(|_| Ok(DataToken::ItemValue(value)))
-                            .unwrap_or_else(|e| Err(e).context(ReadItemValueSnafu { len: len as u32 })),
+                            .unwrap_or_else(|e| {
+                                Err(e).context(ReadItemValueSnafu { len: len as u32 })
+                            }),
                     )
                 }
             } else if let Some(header) = self.last_header {
@@ -672,7 +674,7 @@ where
                         Some(Err(e).context(ReadHeaderSnafu))
                     }
                 }
-            }
+            };
         }
     }
 }
@@ -700,22 +702,38 @@ where
     /// end of stream), so callers must check the returned range against the source's length.
     pub fn skip_value(&mut self) -> Result<SkippedValue> {
         let header = match (self.peek.as_ref(), self.last_header) {
-            (None, Some(header)) if !header.is_encapsulated_pixeldata() && !self.in_sequence => header,
-            _ => return SkipNotApplicableSnafu { context: "no element value is next" }.fail(),
+            (None, Some(header)) if !header.is_encapsulated_pixeldata() && !self.in_sequence => {
+                header
+            }
+            _ => {
+                return SkipNotApplicableSnafu {
+                    context: "no element value is next",
+                }
+                .fail()
+            }
         };
         let Some(length) = header.len.get() else {
-            return SkipNotApplicableSnafu { context: "undefined-length value" }.fail();
+            return SkipNotApplicableSnafu {
+                context: "undefined-length value",
+            }
+            .fail();
         };
         let position = self.parser.position();
         let result = self.parser.skip_bytes_seek(u64::from(length));
         self.last_header = None;
         if let Err(source) = result {
             self.hard_break = true;
-            return Err(source).context(SkipValueSnafu { len: u64::from(length), tag: header.tag });
+            return Err(source).context(SkipValueSnafu {
+                len: u64::from(length),
+                tag: header.tag,
+            });
         }
         // as after reading a value: sequences/items can end after this element
         self.delimiter_check_pending = true;
-        Ok(SkippedValue { position, length: u64::from(length) })
+        Ok(SkippedValue {
+            position,
+            length: u64::from(length),
+        })
     }
 
     /// Skip a whole encapsulated pixel data value, right after its `PixelSequenceStart` token
@@ -730,7 +748,12 @@ where
     pub fn skip_pixel_sequence(&mut self) -> Result<SkippedValue> {
         match (self.peek.as_ref(), self.last_header) {
             (None, Some(header)) if header.is_encapsulated_pixeldata() => {}
-            _ => return SkipNotApplicableSnafu { context: "no encapsulated pixel data is next" }.fail(),
+            _ => {
+                return SkipNotApplicableSnafu {
+                    context: "no encapsulated pixel data is next",
+                }
+                .fail()
+            }
         }
         self.last_header = None;
         let position = self.parser.position();
@@ -807,17 +830,17 @@ where
                 match end_of_sequence.cmp(&bytes_read) {
                     Ordering::Equal => {
                         // end of delimiter, as indicated by the element's length
-                        let token;
-                        match sd.typ {
+
+                        let token = match sd.typ {
                             SeqTokenType::Sequence => {
                                 self.in_sequence = false;
-                                token = DataToken::SequenceEnd;
+                                DataToken::SequenceEnd
                             }
                             SeqTokenType::Item => {
                                 self.in_sequence = true;
-                                token = DataToken::ItemEnd;
+                                DataToken::ItemEnd
                             }
-                        }
+                        };
                         self.pop_seq_token();
                         return Ok(Some(token));
                     }
@@ -1532,7 +1555,7 @@ mod tests {
             b'T', b'E', b'S', b'T', // value = "TEST"
         ];
 
-        let ground_truth = vec![
+        let ground_truth = [
             DataToken::SequenceStart {
                 tag: Tag(0x0018, 0x6011),
                 len: Length::UNDEFINED,
@@ -1739,6 +1762,8 @@ mod tests {
                 );
             })
             .expect("spawning the test thread should succeed");
-        handle.join().expect("reading the data set should not panic");
+        handle
+            .join()
+            .expect("reading the data set should not panic");
     }
 }

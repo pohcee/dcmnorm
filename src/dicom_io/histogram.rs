@@ -72,7 +72,12 @@ pub fn compute_frame_histogram(
     match peek.samples_per_pixel {
         1 => {
             let (_metadata, values) = decode_frame_grayscale_values(object, frame_index)?;
-            Ok(vec![histogram_from_values(frame_index, None, &values, options)])
+            Ok(vec![histogram_from_values(
+                frame_index,
+                None,
+                &values,
+                options,
+            )])
         }
         3 => {
             let (_metadata, rgb_bytes) = decode_frame_rgb_values(object, frame_index)?;
@@ -98,7 +103,11 @@ pub fn compute_instance_histograms(
     Ok(histograms)
 }
 
-fn rgb_channel_histograms(frame_index: usize, rgb_bytes: &[u8], options: &HistogramOptions) -> Vec<FrameHistogram> {
+fn rgb_channel_histograms(
+    frame_index: usize,
+    rgb_bytes: &[u8],
+    options: &HistogramOptions,
+) -> Vec<FrameHistogram> {
     let pixel_count = rgb_bytes.len() / 3;
     let mut red = Vec::with_capacity(pixel_count);
     let mut green = Vec::with_capacity(pixel_count);
@@ -147,11 +156,19 @@ fn histogram_from_values(
     } else {
         (observed_min, observed_max)
     };
-    let mean = if pixel_count == 0 { 0.0 } else { sum / pixel_count as f64 };
+    let mean = if pixel_count == 0 {
+        0.0
+    } else {
+        sum / pixel_count as f64
+    };
     let variance = if pixel_count == 0 {
         0.0
     } else {
-        values.iter().map(|value| (value - mean).powi(2)).sum::<f64>() / pixel_count as f64
+        values
+            .iter()
+            .map(|value| (value - mean).powi(2))
+            .sum::<f64>()
+            / pixel_count as f64
     };
 
     let range_min = options.min_value.unwrap_or(observed_min);
@@ -165,7 +182,8 @@ fn histogram_from_values(
 
     let mut counts = vec![0u32; bin_count as usize];
     for &value in values {
-        let bin_index = (((value - range_min) / bin_width) as i64).clamp(0, bin_count as i64 - 1) as usize;
+        let bin_index =
+            (((value - range_min) / bin_width) as i64).clamp(0, bin_count as i64 - 1) as usize;
         counts[bin_index] += 1;
     }
 
@@ -193,7 +211,9 @@ mod tests {
     use crate::dicom_io::read_dicom_file;
 
     fn fixture_path(name: &str) -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test/files").join(name)
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("test/files")
+            .join(name)
     }
 
     /// The Node binding's `computeHistogram` with `frameIndex` histograms a
@@ -203,12 +223,24 @@ mod tests {
     fn frame_histogram_of_a_single_frame_read_matches_the_full_read() {
         let path = fixture_path("us2.dcm");
         let full = read_dicom_file(&path).unwrap();
-        let options = HistogramOptions { bin_count: 64, min_value: None, max_value: None };
+        let options = HistogramOptions {
+            bin_count: 64,
+            min_value: None,
+            max_value: None,
+        };
         for frame_index in [0, 113, 226] {
-            let single = crate::dicom_io::read_dicom_file_for_frame(&path, frame_index).unwrap().unwrap();
+            let single = crate::dicom_io::read_dicom_file_for_frame(&path, frame_index)
+                .unwrap()
+                .unwrap();
             assert_eq!(
-                format!("{:?}", compute_frame_histogram(&single, frame_index, &options).unwrap()),
-                format!("{:?}", compute_frame_histogram(&full, frame_index, &options).unwrap()),
+                format!(
+                    "{:?}",
+                    compute_frame_histogram(&single, frame_index, &options).unwrap()
+                ),
+                format!(
+                    "{:?}",
+                    compute_frame_histogram(&full, frame_index, &options).unwrap()
+                ),
                 "frame {frame_index}"
             );
         }
@@ -224,7 +256,11 @@ mod tests {
 
         let histograms = compute_frame_histogram(&object, 0, &options).unwrap();
 
-        assert_eq!(histograms.len(), 1, "a grayscale frame should produce exactly one histogram");
+        assert_eq!(
+            histograms.len(),
+            1,
+            "a grayscale frame should produce exactly one histogram"
+        );
         let histogram = &histograms[0];
         assert!(histogram.channel.is_none());
         assert_eq!(histogram.bin_count, 16);
@@ -257,7 +293,8 @@ mod tests {
     #[test]
     fn instance_histograms_cover_every_frame_in_order() {
         let object = read_dicom_file(fixture_path("ct.dcm")).unwrap();
-        let histograms = compute_instance_histograms(&object, &HistogramOptions::default()).unwrap();
+        let histograms =
+            compute_instance_histograms(&object, &HistogramOptions::default()).unwrap();
 
         assert!(!histograms.is_empty());
         for (index, histogram) in histograms.iter().enumerate() {
@@ -270,12 +307,24 @@ mod tests {
         // us.dcm is SamplesPerPixel 3 / PhotometricInterpretation RGB - see the sibling
         // ybr_frame_is_converted_to_rgb_before_binning test below for the YBR conversion path.
         let object = read_dicom_file(fixture_path("us.dcm")).unwrap();
-        assert_eq!(super::read_render_metadata(&object).unwrap().samples_per_pixel, 3);
+        assert_eq!(
+            super::read_render_metadata(&object)
+                .unwrap()
+                .samples_per_pixel,
+            3
+        );
 
         let histograms = compute_frame_histogram(&object, 0, &HistogramOptions::default()).unwrap();
 
-        assert_eq!(histograms.len(), 3, "an RGB frame should produce one histogram per channel");
-        let channels: Vec<&str> = histograms.iter().map(|h| h.channel.as_deref().unwrap()).collect();
+        assert_eq!(
+            histograms.len(),
+            3,
+            "an RGB frame should produce one histogram per channel"
+        );
+        let channels: Vec<&str> = histograms
+            .iter()
+            .map(|h| h.channel.as_deref().unwrap())
+            .collect();
         assert_eq!(channels, ["red", "green", "blue"]);
         for histogram in &histograms {
             assert_eq!(histogram.range_min, 0.0);
@@ -293,7 +342,12 @@ mod tests {
         // decode_frame_rgb_values's YBR-to-RGB conversion (shared with 2D rendering), not just a
         // native RGB passthrough.
         let object = read_dicom_file(fixture_path("wsi_ybr.dcm")).unwrap();
-        assert_eq!(super::read_render_metadata(&object).unwrap().samples_per_pixel, 3);
+        assert_eq!(
+            super::read_render_metadata(&object)
+                .unwrap()
+                .samples_per_pixel,
+            3
+        );
 
         let histograms = compute_frame_histogram(&object, 0, &HistogramOptions::default()).unwrap();
 

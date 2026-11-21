@@ -371,7 +371,7 @@ mod tests {
     #[test]
     fn decode_explicit_vr_be() {
         let dec = ExplicitVRBigEndianDecoder::default();
-        let mut cursor = Cursor::new(RAW.as_ref());
+        let mut cursor = Cursor::new(RAW);
 
         fn read_n<'a>(cursor: &mut Cursor<&'a [u8]>, n: usize) -> &'a [u8] {
             let pos = cursor.position() as usize;
@@ -438,14 +438,7 @@ mod tests {
         test_vr(&dec, &mut cursor, 0x0010, 0x0040, VR::CS, b"O ");
         test_vr(&dec, &mut cursor, 0x0010, 0x0030, VR::DA, b"19800101");
         test_vr(&dec, &mut cursor, 0x0010, 0x1020, VR::DS, b"1.70");
-        test_vr(
-            &dec,
-            &mut cursor,
-            0x0008,
-            0x0015,
-            VR::DT,
-            b"20051231235960",
-        );
+        test_vr(&dec, &mut cursor, 0x0008, 0x0015, VR::DT, b"20051231235960");
         test_vr(
             &dec,
             &mut cursor,

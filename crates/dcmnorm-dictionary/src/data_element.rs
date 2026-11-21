@@ -178,7 +178,9 @@ mod tests {
     use crate::tags;
 
     use super::StandardDataDictionary;
-    use dcmnorm_core::dictionary::{DataDictionary, DataDictionaryEntryRef, TagRange::*, VirtualVr};
+    use dcmnorm_core::dictionary::{
+        DataDictionary, DataDictionaryEntryRef, TagRange::*, VirtualVr,
+    };
     use dcmnorm_core::header::{Tag, VR};
     use dcmnorm_core::ops::AttributeSelector;
 
@@ -420,14 +422,26 @@ mod tests {
     fn odd_group_never_matches_repeating_public_entries() {
         let dict = StandardDataDictionary;
         // the public repeating entries still resolve for even groups
-        assert_eq!(dict.by_tag(Tag(0x5000, 0x0010)).map(|e| e.vr), Some(VR::US.into()));
-        assert_eq!(dict.by_tag(Tag(0x6002, 0x0010)).map(|e| e.vr), Some(VR::US.into()));
+        assert_eq!(
+            dict.by_tag(Tag(0x5000, 0x0010)).map(|e| e.vr),
+            Some(VR::US.into())
+        );
+        assert_eq!(
+            dict.by_tag(Tag(0x6002, 0x0010)).map(|e| e.vr),
+            Some(VR::US.into())
+        );
         // odd groups: private creators, never the public repeating entries
         for group in [0x50F1, 0x6001, 0x5001] {
-            let entry = dict.by_tag(Tag(group, 0x0010)).expect("private creator entry");
+            let entry = dict
+                .by_tag(Tag(group, 0x0010))
+                .expect("private creator entry");
             assert_eq!(entry.alias, "PrivateCreator");
             assert_eq!(entry.vr, VR::LO.into());
-            assert!(dict.by_tag(Tag(group, 0x3000)).is_none(), "({group:04X},3000) is private data");
+            assert!(
+                dict.by_tag(Tag(group, 0x3000)).is_none(),
+                "{}",
+                "({group:04X},3000) is private data"
+            );
         }
     }
 }

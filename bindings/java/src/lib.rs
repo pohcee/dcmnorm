@@ -30,18 +30,22 @@ use dcmnorm::dicom_io::{
     apply_filter_to_object, build_volume as dcm_build_volume, dicom_file_to_json,
     echo_scu as dcm_echo_scu, find_scu as dcm_find_scu, move_scu as dcm_move_scu,
     pack_dicom_frame_stack_texture as dcm_pack_dicom_frame_stack_texture,
-    pack_dicom_frame_texture as dcm_pack_dicom_frame_texture, pack_volume_texture as dcm_pack_volume_texture,
-    parse_attribute_override, parse_filter_requests, parse_tag_key, probe_dicom_file_for_sop_class_uid,
-    read_dcmnorm_object_for_filter, read_dicom_file, read_dicom_json_with_options, reformat_plane as dcm_reformat_plane,
-    remove_attribute, remove_private_tags_inplace, render_dicom_frame as dcm_render_dicom_frame, set_attribute,
-    store_scu as dcm_store_scu, write_dicom_file, write_dicom_json_with_options,
-    write_dicom_video as dcm_write_dicom_video, write_dicomdir as dcm_write_dicomdir,
-    DicomdirEntry as DcmDicomdirEntry, DicomdirOptions as DcmDicomdirOptions, CancelMode as DcmCancelMode, DicomJsonBulkDataMode, DicomJsonFormat,
-    DicomJsonKeyStyle, DicomJsonReadOptions, DicomJsonWriteOptions, DimseLogger, EchoScuOptions as DcmEchoScuOptions,
-    FindScuOptions as DcmFindScuOptions, Interpolation as DcmInterpolation, MoveScuOptions as DcmMoveScuOptions, QueryRetrieveLevel as DcmQueryRetrieveLevel,
-    PlaneParams as DcmPlaneParams, RenderOutputFormat as DcmRenderOutputFormat,
-    RenderPipelineOptions as DcmRenderPipelineOptions, SlabProjection as DcmSlabProjection,
-    StoreScuOptions as DcmStoreScuOptions, TextureCompression as DcmTextureCompression, Volume as DcmVolume,
+    pack_dicom_frame_texture as dcm_pack_dicom_frame_texture,
+    pack_volume_texture as dcm_pack_volume_texture, parse_attribute_override,
+    parse_filter_requests, parse_tag_key, probe_dicom_file_for_sop_class_uid,
+    read_dcmnorm_object_for_filter, read_dicom_file, read_dicom_json_with_options,
+    reformat_plane as dcm_reformat_plane, remove_attribute, remove_private_tags_inplace,
+    render_dicom_frame as dcm_render_dicom_frame, set_attribute, store_scu as dcm_store_scu,
+    write_dicom_file, write_dicom_json_with_options, write_dicom_video as dcm_write_dicom_video,
+    write_dicomdir as dcm_write_dicomdir, CancelMode as DcmCancelMode, DicomJsonBulkDataMode,
+    DicomJsonFormat, DicomJsonKeyStyle, DicomJsonReadOptions, DicomJsonWriteOptions,
+    DicomdirEntry as DcmDicomdirEntry, DicomdirOptions as DcmDicomdirOptions, DimseLogger,
+    EchoScuOptions as DcmEchoScuOptions, FindScuOptions as DcmFindScuOptions,
+    Interpolation as DcmInterpolation, MoveScuOptions as DcmMoveScuOptions,
+    PlaneParams as DcmPlaneParams, QueryRetrieveLevel as DcmQueryRetrieveLevel,
+    RenderOutputFormat as DcmRenderOutputFormat, RenderPipelineOptions as DcmRenderPipelineOptions,
+    SlabProjection as DcmSlabProjection, StoreScuOptions as DcmStoreScuOptions,
+    TextureCompression as DcmTextureCompression, Volume as DcmVolume,
 };
 
 const EXCEPTION_CLASS: &str = "com/pohcee/dcmnorm/DcmnormException";
@@ -97,7 +101,9 @@ fn throw_runtime<T: Default>(env: &mut JNIEnv, message: impl AsRef<str>) -> T {
 /// indicate a caller bug (every public Java method guards against passing `null` for a
 /// non-optional `String`), not a DICOM-data problem, but handled the same way regardless.
 fn get_string(env: &mut JNIEnv, value: &JString) -> Result<String, String> {
-    env.get_string(value).map(|s| s.into()).map_err(|error| format!("invalid string argument: {error}"))
+    env.get_string(value)
+        .map(|s| s.into())
+        .map_err(|error| format!("invalid string argument: {error}"))
 }
 
 fn parse_json<T: for<'de> Deserialize<'de> + Default>(json: &str) -> Result<T, String> {
@@ -111,7 +117,9 @@ fn parse_json_format(value: Option<&str>) -> Result<DicomJsonFormat, String> {
     match value {
         None | Some("flat") => Ok(DicomJsonFormat::Flat),
         Some("standard") => Ok(DicomJsonFormat::Standard),
-        Some(other) => Err(format!("invalid format '{other}'; expected 'flat' or 'standard'")),
+        Some(other) => Err(format!(
+            "invalid format '{other}'; expected 'flat' or 'standard'"
+        )),
     }
 }
 
@@ -119,7 +127,9 @@ fn parse_key_style(value: Option<&str>) -> Result<DicomJsonKeyStyle, String> {
     match value {
         None | Some("name") => Ok(DicomJsonKeyStyle::Name),
         Some("hex") => Ok(DicomJsonKeyStyle::Hex),
-        Some(other) => Err(format!("invalid keyStyle '{other}'; expected 'name' or 'hex'")),
+        Some(other) => Err(format!(
+            "invalid keyStyle '{other}'; expected 'name' or 'hex'"
+        )),
     }
 }
 
@@ -132,15 +142,21 @@ fn parse_bulk_data_mode(value: Option<&str>) -> Result<DicomJsonBulkDataMode, St
     match value {
         None | Some("uri") => Ok(DicomJsonBulkDataMode::Uri),
         Some("inline") => Ok(DicomJsonBulkDataMode::InlineBinary),
-        Some(other) => Err(format!("invalid bulkData '{other}'; expected 'uri' or 'inline'")),
+        Some(other) => Err(format!(
+            "invalid bulkData '{other}'; expected 'uri' or 'inline'"
+        )),
     }
 }
 
-fn parse_render_output_format(value: Option<&str>) -> Result<(DcmRenderOutputFormat, &'static str), String> {
+fn parse_render_output_format(
+    value: Option<&str>,
+) -> Result<(DcmRenderOutputFormat, &'static str), String> {
     match value {
         None | Some("jpeg") | Some("jpg") => Ok((DcmRenderOutputFormat::Jpeg, "image/jpeg")),
         Some("png") => Ok((DcmRenderOutputFormat::Png, "image/png")),
-        Some(other) => Err(format!("invalid format '{other}'; expected 'jpeg' or 'png'")),
+        Some(other) => Err(format!(
+            "invalid format '{other}'; expected 'jpeg' or 'png'"
+        )),
     }
 }
 
@@ -151,24 +167,28 @@ fn parse_render_color(value: &str) -> Result<[u8; 3], String> {
 
     if let Some(hex) = trimmed.strip_prefix('#') {
         if hex.len() != 6 {
-            return Err(format!("invalid color '{value}'; hex color must be #RRGGBB"));
+            return Err(format!(
+                "invalid color '{value}'; hex color must be #RRGGBB"
+            ));
         }
         let channel = |range: std::ops::Range<usize>| {
-            u8::from_str_radix(&hex[range], 16).map_err(|_| format!("invalid color '{value}'; not a valid hex color"))
+            u8::from_str_radix(&hex[range], 16)
+                .map_err(|_| format!("invalid color '{value}'; not a valid hex color"))
         };
         return Ok([channel(0..2)?, channel(2..4)?, channel(4..6)?]);
     }
 
     let parts: Vec<&str> = trimmed.split(',').collect();
     if parts.len() != 3 {
-        return Err(format!("invalid color '{value}'; expected R,G,B (0-255 each) or #RRGGBB"));
+        return Err(format!(
+            "invalid color '{value}'; expected R,G,B (0-255 each) or #RRGGBB"
+        ));
     }
     let mut channels = [0u8; 3];
     for (index, part) in parts.iter().enumerate() {
-        channels[index] = part
-            .trim()
-            .parse::<u8>()
-            .map_err(|_| format!("invalid color '{value}'; expected R,G,B (0-255 each) or #RRGGBB"))?;
+        channels[index] = part.trim().parse::<u8>().map_err(|_| {
+            format!("invalid color '{value}'; expected R,G,B (0-255 each) or #RRGGBB")
+        })?;
     }
     Ok(channels)
 }
@@ -178,15 +198,24 @@ fn overlay_pipeline_fields(
     overlay_index: Option<u32>,
     overlay_color: Option<&str>,
 ) -> Result<(bool, Option<usize>, [u8; 3]), String> {
-    let color = overlay_color.map(parse_render_color).transpose()?.unwrap_or([0, 255, 0]);
-    Ok((show_overlays.unwrap_or(true), overlay_index.map(|value| value as usize), color))
+    let color = overlay_color
+        .map(parse_render_color)
+        .transpose()?
+        .unwrap_or([0, 255, 0]);
+    Ok((
+        show_overlays.unwrap_or(true),
+        overlay_index.map(|value| value as usize),
+        color,
+    ))
 }
 
 fn parse_interpolation(value: Option<&str>) -> Result<DcmInterpolation, String> {
     match value {
         None | Some("trilinear") => Ok(DcmInterpolation::Trilinear),
         Some("nearest") => Ok(DcmInterpolation::Nearest),
-        Some(other) => Err(format!("invalid interpolation '{other}'; expected 'trilinear' or 'nearest'")),
+        Some(other) => Err(format!(
+            "invalid interpolation '{other}'; expected 'trilinear' or 'nearest'"
+        )),
     }
 }
 
@@ -195,7 +224,9 @@ fn parse_slab_projection(value: Option<&str>) -> Result<DcmSlabProjection, Strin
         None | Some("mip") => Ok(DcmSlabProjection::MaximumIntensity),
         Some("minip") => Ok(DcmSlabProjection::MinimumIntensity),
         Some("average") => Ok(DcmSlabProjection::Average),
-        Some(other) => Err(format!("invalid slabProjection '{other}'; expected 'mip', 'minip', or 'average'")),
+        Some(other) => Err(format!(
+            "invalid slabProjection '{other}'; expected 'mip', 'minip', or 'average'"
+        )),
     }
 }
 
@@ -203,7 +234,9 @@ fn parse_texture_compression(value: Option<&str>) -> Result<DcmTextureCompressio
     match value {
         None | Some("gzip") => Ok(DcmTextureCompression::Gzip),
         Some("none") => Ok(DcmTextureCompression::None),
-        Some(other) => Err(format!("invalid compression '{other}'; expected 'gzip' or 'none'")),
+        Some(other) => Err(format!(
+            "invalid compression '{other}'; expected 'gzip' or 'none'"
+        )),
     }
 }
 
@@ -225,9 +258,18 @@ struct JavaDimseLogger {
 
 impl DimseLogger for JavaDimseLogger {
     fn log(&self, message: String) {
-        let Ok(mut env) = self.vm.get_env() else { return };
-        let Ok(jmessage) = env.new_string(&message) else { return };
-        let _ = env.call_method(&self.callback, "log", "(Ljava/lang/String;)V", &[JValue::Object(&jmessage)]);
+        let Ok(mut env) = self.vm.get_env() else {
+            return;
+        };
+        let Ok(jmessage) = env.new_string(&message) else {
+            return;
+        };
+        let _ = env.call_method(
+            &self.callback,
+            "log",
+            "(Ljava/lang/String;)V",
+            &[JValue::Object(&jmessage)],
+        );
         // A throwing `log` implementation leaves an exception pending on this thread - clear it
         // rather than letting it leak into whatever JNI call happens next (which would otherwise
         // misbehave/abort under `-Xcheck:jni`). `log` is documented as "exceptions are
@@ -239,13 +281,20 @@ impl DimseLogger for JavaDimseLogger {
 /// Takes `env` and the raw `on_log` argument (nullable `DimseLogger`) and produces the
 /// `Option<Box<dyn DimseLogger>>` dcmnorm's SCU options expect. Must run BEFORE `guarded()` - it
 /// needs `env`, which `guarded()`'s closure may not touch.
-fn java_dimse_logger(env: &mut JNIEnv, on_log: &JObject) -> Result<Option<Box<dyn DimseLogger>>, String> {
+fn java_dimse_logger(
+    env: &mut JNIEnv,
+    on_log: &JObject,
+) -> Result<Option<Box<dyn DimseLogger>>, String> {
     if on_log.is_null() {
         return Ok(None);
     }
     let vm = env.get_java_vm().map_err(|error| error.to_string())?;
-    let callback = env.new_global_ref(on_log).map_err(|error| error.to_string())?;
-    Ok(Some(Box::new(JavaDimseLogger { vm, callback }) as Box<dyn DimseLogger>))
+    let callback = env
+        .new_global_ref(on_log)
+        .map_err(|error| error.to_string())?;
+    Ok(Some(
+        Box::new(JavaDimseLogger { vm, callback }) as Box<dyn DimseLogger>
+    ))
 }
 
 // -------------------------------------------------------------------------------------------
@@ -255,22 +304,46 @@ fn java_dimse_logger(env: &mut JNIEnv, on_log: &JObject) -> Result<Option<Box<dy
 /// Constructs a `com.pohcee.dcmnorm.RenderedFrame` via its `(String, byte[])` constructor, which
 /// parses `metadata_json` itself - see that class's source for the schema (mimeType/width/height/
 /// overlays/selectedOverlayIndex).
-fn new_rendered_frame(env: &mut JNIEnv, metadata_json: &str, data: &[u8]) -> Result<jobject, String> {
-    let class = env.find_class("com/pohcee/dcmnorm/RenderedFrame").map_err(|error| error.to_string())?;
-    let jmeta = env.new_string(metadata_json).map_err(|error| error.to_string())?;
-    let jdata = env.byte_array_from_slice(data).map_err(|error| error.to_string())?;
+fn new_rendered_frame(
+    env: &mut JNIEnv,
+    metadata_json: &str,
+    data: &[u8],
+) -> Result<jobject, String> {
+    let class = env
+        .find_class("com/pohcee/dcmnorm/RenderedFrame")
+        .map_err(|error| error.to_string())?;
+    let jmeta = env
+        .new_string(metadata_json)
+        .map_err(|error| error.to_string())?;
+    let jdata = env
+        .byte_array_from_slice(data)
+        .map_err(|error| error.to_string())?;
     let object = env
-        .new_object(class, "(Ljava/lang/String;[B)V", &[JValue::Object(&jmeta), JValue::Object(&jdata)])
+        .new_object(
+            class,
+            "(Ljava/lang/String;[B)V",
+            &[JValue::Object(&jmeta), JValue::Object(&jdata)],
+        )
         .map_err(|error| error.to_string())?;
     Ok(object.into_raw())
 }
 
 fn new_rendered_movie(env: &mut JNIEnv, mime_type: &str, data: &[u8]) -> Result<jobject, String> {
-    let class = env.find_class("com/pohcee/dcmnorm/RenderedMovie").map_err(|error| error.to_string())?;
-    let jmime = env.new_string(mime_type).map_err(|error| error.to_string())?;
-    let jdata = env.byte_array_from_slice(data).map_err(|error| error.to_string())?;
+    let class = env
+        .find_class("com/pohcee/dcmnorm/RenderedMovie")
+        .map_err(|error| error.to_string())?;
+    let jmime = env
+        .new_string(mime_type)
+        .map_err(|error| error.to_string())?;
+    let jdata = env
+        .byte_array_from_slice(data)
+        .map_err(|error| error.to_string())?;
     let object = env
-        .new_object(class, "(Ljava/lang/String;[B)V", &[JValue::Object(&jmime), JValue::Object(&jdata)])
+        .new_object(
+            class,
+            "(Ljava/lang/String;[B)V",
+            &[JValue::Object(&jmime), JValue::Object(&jdata)],
+        )
         .map_err(|error| error.to_string())?;
     Ok(object.into_raw())
 }
@@ -280,17 +353,34 @@ fn new_rendered_movie(env: &mut JNIEnv, mime_type: &str, data: &[u8]) -> Result<
 /// this payload's field names/casing already shared with the CLI sidecar and the render-server
 /// (see that method's own doc comment) - so this binding reuses it exactly rather than
 /// re-deriving an equivalent JSON shape by hand.
-fn new_texture_export_result(env: &mut JNIEnv, meta_json: &str, data: &[u8]) -> Result<jobject, String> {
-    let class = env.find_class("com/pohcee/dcmnorm/TextureExportResult").map_err(|error| error.to_string())?;
-    let jmeta = env.new_string(meta_json).map_err(|error| error.to_string())?;
-    let jdata = env.byte_array_from_slice(data).map_err(|error| error.to_string())?;
+fn new_texture_export_result(
+    env: &mut JNIEnv,
+    meta_json: &str,
+    data: &[u8],
+) -> Result<jobject, String> {
+    let class = env
+        .find_class("com/pohcee/dcmnorm/TextureExportResult")
+        .map_err(|error| error.to_string())?;
+    let jmeta = env
+        .new_string(meta_json)
+        .map_err(|error| error.to_string())?;
+    let jdata = env
+        .byte_array_from_slice(data)
+        .map_err(|error| error.to_string())?;
     let object = env
-        .new_object(class, "(Ljava/lang/String;[B)V", &[JValue::Object(&jmeta), JValue::Object(&jdata)])
+        .new_object(
+            class,
+            "(Ljava/lang/String;[B)V",
+            &[JValue::Object(&jmeta), JValue::Object(&jdata)],
+        )
         .map_err(|error| error.to_string())?;
     Ok(object.into_raw())
 }
 
-fn render_pipeline_options_json(rendered: &dcmnorm::dicom_io::RenderFrameOutput, mime_type: &str) -> String {
+fn render_pipeline_options_json(
+    rendered: &dcmnorm::dicom_io::RenderFrameOutput,
+    mime_type: &str,
+) -> String {
     let overlays: Vec<serde_json::Value> = rendered
         .overlays
         .iter()
@@ -339,10 +429,12 @@ pub extern "system" fn Java_com_pohcee_dcmnorm_Dcmnorm_nativeReadTags<'local>(
     };
 
     let result = guarded(|| {
-        let tags: Vec<String> = serde_json::from_str(&tags_json).map_err(|error| error.to_string())?;
+        let tags: Vec<String> =
+            serde_json::from_str(&tags_json).map_err(|error| error.to_string())?;
         let path = PathBuf::from(file_path);
         let requests = parse_filter_requests(&tags).map_err(|error| error.to_string())?;
-        let mut object = read_dcmnorm_object_for_filter(&path, &requests).map_err(|error| error.to_string())?;
+        let mut object =
+            read_dcmnorm_object_for_filter(&path, &requests).map_err(|error| error.to_string())?;
         apply_filter_to_object(&mut object, &requests);
         write_dicom_json_with_options(
             &object,
@@ -398,10 +490,14 @@ pub extern "system" fn Java_com_pohcee_dcmnorm_Dcmnorm_nativeReadJson<'local>(
     };
 
     let result = catch_api_panic(|| {
-        let options: ReadJsonOptionsIn = parse_json(&options_json).map_err(ApiError::invalid_argument)?;
-        let format = parse_json_format(options.format.as_deref()).map_err(ApiError::invalid_argument)?;
-        let key_style = parse_key_style(options.key_style.as_deref()).map_err(ApiError::invalid_argument)?;
-        let bulk_data_mode = parse_bulk_data_mode(options.bulk_data.as_deref()).map_err(ApiError::invalid_argument)?;
+        let options: ReadJsonOptionsIn =
+            parse_json(&options_json).map_err(ApiError::invalid_argument)?;
+        let format =
+            parse_json_format(options.format.as_deref()).map_err(ApiError::invalid_argument)?;
+        let key_style =
+            parse_key_style(options.key_style.as_deref()).map_err(ApiError::invalid_argument)?;
+        let bulk_data_mode = parse_bulk_data_mode(options.bulk_data.as_deref())
+            .map_err(ApiError::invalid_argument)?;
         dicom_file_to_json(
             PathBuf::from(file_path),
             DicomJsonWriteOptions {
@@ -459,12 +555,19 @@ pub extern "system" fn Java_com_pohcee_dcmnorm_Dcmnorm_nativeWriteJson<'local>(
     let result = guarded(|| {
         let options: WriteJsonOptionsIn = parse_json(&options_json)?;
         let format = parse_json_format(options.format.as_deref())?;
-        let bulk_data_source =
-            options.bulk_data_source_path.as_ref().map(std::fs::read).transpose().map_err(|error| error.to_string())?;
+        let bulk_data_source = options
+            .bulk_data_source_path
+            .as_ref()
+            .map(std::fs::read)
+            .transpose()
+            .map_err(|error| error.to_string())?;
 
         let mut object = read_dicom_json_with_options(
             &json,
-            DicomJsonReadOptions { format, bulk_data_source: bulk_data_source.as_deref() },
+            DicomJsonReadOptions {
+                format,
+                bulk_data_source: bulk_data_source.as_deref(),
+            },
         )
         .map_err(|error| error.to_string())?;
 
@@ -511,11 +614,13 @@ pub extern "system" fn Java_com_pohcee_dcmnorm_Dcmnorm_nativeEditTags<'local>(
         let removes = options.remove.unwrap_or_default();
         let remove_private_tags = options.remove_private_tags.unwrap_or(false);
 
-        let mut object = read_dicom_file(PathBuf::from(&file_path)).map_err(|error| error.to_string())?;
+        let mut object =
+            read_dicom_file(PathBuf::from(&file_path)).map_err(|error| error.to_string())?;
 
         for (key, value) in &sets {
             let assignment = format!("{key}={value}");
-            let (tag, vr, value) = parse_attribute_override(&assignment).map_err(|error| error.to_string())?;
+            let (tag, vr, value) =
+                parse_attribute_override(&assignment).map_err(|error| error.to_string())?;
             set_attribute(&mut object, tag, vr, value).map_err(|error| error.to_string())?;
         }
 
@@ -528,7 +633,8 @@ pub extern "system" fn Java_com_pohcee_dcmnorm_Dcmnorm_nativeEditTags<'local>(
             remove_private_tags_inplace(&mut object);
         }
 
-        write_dicom_file(&mut object, PathBuf::from(&output_path)).map_err(|error| error.to_string())
+        write_dicom_file(&mut object, PathBuf::from(&output_path))
+            .map_err(|error| error.to_string())
     });
 
     if let Err(message) = result {
@@ -560,7 +666,10 @@ pub extern "system" fn Java_com_pohcee_dcmnorm_Dcmnorm_nativeTranscode<'local>(
     };
 
     let result = catch_api_panic(|| {
-        let mut object = transcode_source(DicomSource::Path(&PathBuf::from(file_path)), &transfer_syntax_uid)?;
+        let mut object = transcode_source(
+            DicomSource::Path(&PathBuf::from(file_path)),
+            &transfer_syntax_uid,
+        )?;
         write_dicom_file(&mut object, PathBuf::from(output_path))
             .map_err(|error| ApiError::from(error).with_target_ts(Some(&transfer_syntax_uid)))
     });
@@ -582,10 +691,12 @@ pub extern "system" fn Java_com_pohcee_dcmnorm_Dcmnorm_nativeCheckDicom<'local>(
         Ok(value) => value,
         Err(_) => return 0,
     };
-    let is_dicom = panic::catch_unwind(AssertUnwindSafe(|| probe_dicom_file_for_sop_class_uid(PathBuf::from(file_path))))
-        .ok()
-        .and_then(|result| result.ok())
-        .unwrap_or(false);
+    let is_dicom = panic::catch_unwind(AssertUnwindSafe(|| {
+        probe_dicom_file_for_sop_class_uid(PathBuf::from(file_path))
+    }))
+    .ok()
+    .and_then(|result| result.ok())
+    .unwrap_or(false);
     jboolean::from(is_dicom)
 }
 
@@ -637,8 +748,8 @@ pub extern "system" fn Java_com_pohcee_dcmnorm_Dcmnorm_nativeWriteDicomdir<'loca
     };
 
     let result = guarded(|| {
-        let entries: Vec<DicomdirEntryIn> =
-            serde_json::from_str(&entries_json).map_err(|error| format!("invalid DICOMDIR entries: {error}"))?;
+        let entries: Vec<DicomdirEntryIn> = serde_json::from_str(&entries_json)
+            .map_err(|error| format!("invalid DICOMDIR entries: {error}"))?;
         let options: WriteDicomdirOptionsIn = parse_json(&options_json)?;
         let mut built = Vec::with_capacity(entries.len());
         for entry in entries {
@@ -646,17 +757,31 @@ pub extern "system" fn Java_com_pohcee_dcmnorm_Dcmnorm_nativeWriteDicomdir<'loca
             let one = match (entry.json, entry.path) {
                 (Some(json), None) => {
                     let format = parse_json_format(entry.format.as_deref())?;
-                    DcmDicomdirEntry::from_json(entry.file_id, &json, format, entry.transfer_syntax_uid.as_deref())
-                        .map_err(|error| error.to_string())?
+                    DcmDicomdirEntry::from_json(
+                        entry.file_id,
+                        &json,
+                        format,
+                        entry.transfer_syntax_uid.as_deref(),
+                    )
+                    .map_err(|error| error.to_string())?
                 }
                 (None, Some(path)) => {
-                    let mut one = DcmDicomdirEntry::from_file(entry.file_id, &path).map_err(|error| error.to_string())?;
-                    if let Some(ts) = entry.transfer_syntax_uid.as_deref().filter(|ts| !ts.is_empty()) {
+                    let mut one = DcmDicomdirEntry::from_file(entry.file_id, &path)
+                        .map_err(|error| error.to_string())?;
+                    if let Some(ts) = entry
+                        .transfer_syntax_uid
+                        .as_deref()
+                        .filter(|ts| !ts.is_empty())
+                    {
                         one.transfer_syntax_uid = ts.to_owned();
                     }
                     one
                 }
-                _ => return Err(format!("DICOMDIR entry {label}: give exactly one of json and path")),
+                _ => {
+                    return Err(format!(
+                        "DICOMDIR entry {label}: give exactly one of json and path"
+                    ))
+                }
             };
             built.push(one);
         }
@@ -740,13 +865,18 @@ pub extern "system" fn Java_com_pohcee_dcmnorm_Dcmnorm_nativeEchoScu<'local>(
     };
 
     let result = catch_api_panic(|| {
-        let options: EchoScuOptionsIn = parse_json(&options_json).map_err(ApiError::invalid_argument)?;
+        let options: EchoScuOptionsIn =
+            parse_json(&options_json).map_err(ApiError::invalid_argument)?;
         dcm_echo_scu(
             &destination,
             DcmEchoScuOptions {
-                calling_ae_title: options.calling_ae_title.unwrap_or_else(|| "DCMNORM".to_owned()),
+                calling_ae_title: options
+                    .calling_ae_title
+                    .unwrap_or_else(|| "DCMNORM".to_owned()),
                 called_ae_title: options.called_ae_title,
-                timeout: options.timeout_ms.map(|ms| Duration::from_millis(ms as u64)),
+                timeout: options
+                    .timeout_ms
+                    .map(|ms| Duration::from_millis(ms as u64)),
                 on_log: logger,
                 cancel: None,
             },
@@ -802,19 +932,25 @@ pub extern "system" fn Java_com_pohcee_dcmnorm_Dcmnorm_nativeStoreScu<'local>(
     };
 
     let result = catch_api_panic(|| {
-        let files: Vec<String> = serde_json::from_str(&files_json).map_err(|error| ApiError::invalid_argument(error.to_string()))?;
+        let files: Vec<String> = serde_json::from_str(&files_json)
+            .map_err(|error| ApiError::invalid_argument(error.to_string()))?;
         let files: Vec<PathBuf> = files.into_iter().map(PathBuf::from).collect();
-        let options: StoreScuOptionsIn = parse_json(&options_json).map_err(ApiError::invalid_argument)?;
+        let options: StoreScuOptionsIn =
+            parse_json(&options_json).map_err(ApiError::invalid_argument)?;
 
         let results = dcm_store_scu(
             &destination,
             &files,
             DcmStoreScuOptions {
-                calling_ae_title: options.calling_ae_title.unwrap_or_else(|| "DCMNORM".to_owned()),
+                calling_ae_title: options
+                    .calling_ae_title
+                    .unwrap_or_else(|| "DCMNORM".to_owned()),
                 called_ae_title: options.called_ae_title,
                 max_pdu_length: options.max_pdu_length.unwrap_or(16384),
                 never_transcode: options.never_transcode.unwrap_or(false),
-                timeout: options.timeout_ms.map(|ms| Duration::from_millis(ms as u64)),
+                timeout: options
+                    .timeout_ms
+                    .map(|ms| Duration::from_millis(ms as u64)),
                 on_log: logger,
                 cancel: None,
             },
@@ -825,7 +961,8 @@ pub extern "system" fn Java_com_pohcee_dcmnorm_Dcmnorm_nativeStoreScu<'local>(
             .into_iter()
             .map(|result| serde_json::json!({"sopInstanceUid": result.sop_instance_uid, "status": result.status}))
             .collect();
-        serde_json::to_string(&values).map_err(|error| ApiError::invalid_argument(error.to_string()))
+        serde_json::to_string(&values)
+            .map_err(|error| ApiError::invalid_argument(error.to_string()))
     });
 
     match result {
@@ -879,24 +1016,31 @@ pub extern "system" fn Java_com_pohcee_dcmnorm_Dcmnorm_nativeFindScu<'local>(
     };
 
     let result = catch_api_panic(|| {
-        let query: HashMap<String, String> = serde_json::from_str(&query_json).map_err(|error| ApiError::invalid_argument(error.to_string()))?;
-        let options: FindScuOptionsIn = parse_json(&options_json).map_err(ApiError::invalid_argument)?;
+        let query: HashMap<String, String> = serde_json::from_str(&query_json)
+            .map_err(|error| ApiError::invalid_argument(error.to_string()))?;
+        let options: FindScuOptionsIn =
+            parse_json(&options_json).map_err(ApiError::invalid_argument)?;
 
         let matches = dcm_find_scu(
             &destination,
             &query,
             DcmFindScuOptions {
-                calling_ae_title: options.calling_ae_title.unwrap_or_else(|| "DCMNORM".to_owned()),
+                calling_ae_title: options
+                    .calling_ae_title
+                    .unwrap_or_else(|| "DCMNORM".to_owned()),
                 called_ae_title: options.called_ae_title,
                 max_pdu_length: options.max_pdu_length.unwrap_or(16384),
-                timeout: options.timeout_ms.map(|ms| Duration::from_millis(ms as u64)),
+                timeout: options
+                    .timeout_ms
+                    .map(|ms| Duration::from_millis(ms as u64)),
                 on_log: logger,
                 cancel: None,
             },
         )
         .map_err(ApiError::from)?;
 
-        serde_json::to_string(&matches).map_err(|error| ApiError::invalid_argument(error.to_string()))
+        serde_json::to_string(&matches)
+            .map_err(|error| ApiError::invalid_argument(error.to_string()))
     });
 
     match result {
@@ -959,10 +1103,15 @@ pub extern "system" fn Java_com_pohcee_dcmnorm_Dcmnorm_nativeMoveScu<'local>(
     };
 
     let result = catch_api_panic(|| {
-        let options: MoveScuOptionsIn = parse_json(&options_json).map_err(ApiError::invalid_argument)?;
+        let options: MoveScuOptionsIn =
+            parse_json(&options_json).map_err(ApiError::invalid_argument)?;
         let query_retrieve_level = options
             .query_retrieve_level
-            .map(|level| level.parse::<DcmQueryRetrieveLevel>().map_err(|error| ApiError::invalid_argument(error.to_string())))
+            .map(|level| {
+                level
+                    .parse::<DcmQueryRetrieveLevel>()
+                    .map_err(|error| ApiError::invalid_argument(error.to_string()))
+            })
             .transpose()?;
 
         let outcome = dcm_move_scu(
@@ -970,12 +1119,18 @@ pub extern "system" fn Java_com_pohcee_dcmnorm_Dcmnorm_nativeMoveScu<'local>(
             &move_destination_ae,
             &study_instance_uid,
             DcmMoveScuOptions {
-                calling_ae_title: options.calling_ae_title.unwrap_or_else(|| "DCMNORM".to_owned()),
+                calling_ae_title: options
+                    .calling_ae_title
+                    .unwrap_or_else(|| "DCMNORM".to_owned()),
                 called_ae_title: options.called_ae_title,
                 max_pdu_length: options.max_pdu_length.unwrap_or(16384),
-                timeout: options.timeout_ms.map(|ms| Duration::from_millis(ms as u64)),
+                timeout: options
+                    .timeout_ms
+                    .map(|ms| Duration::from_millis(ms as u64)),
                 stale_data_path: options.watch_path.map(PathBuf::from),
-                stale_data_timeout: options.stale_data_timeout_ms.map(|ms| Duration::from_millis(ms as u64)),
+                stale_data_timeout: options
+                    .stale_data_timeout_ms
+                    .map(|ms| Duration::from_millis(ms as u64)),
                 on_log: logger,
                 cancel: None,
                 query_retrieve_level,
@@ -1018,10 +1173,15 @@ fn unique_temp_path(extension: &str) -> PathBuf {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
 
-    let nanos =
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
     let sequence = COUNTER.fetch_add(1, Ordering::Relaxed);
-    std::env::temp_dir().join(format!("dcmnorm-java-{}-{nanos}-{sequence}.{extension}", std::process::id()))
+    std::env::temp_dir().join(format!(
+        "dcmnorm-java-{}-{nanos}-{sequence}.{extension}",
+        std::process::id()
+    ))
 }
 
 #[derive(Deserialize, Default)]
@@ -1061,12 +1221,16 @@ pub extern "system" fn Java_com_pohcee_dcmnorm_Dcmnorm_nativeRenderFrame<'local>
     };
 
     let result = catch_api_panic(|| {
-        let options: RenderFrameOptionsIn = parse_json(&options_json).map_err(ApiError::invalid_argument)?;
-        let (render_format, mime_type) =
-            parse_render_output_format(options.format.as_deref()).map_err(ApiError::invalid_argument)?;
-        let (show_overlays, overlay_index, overlay_color) =
-            overlay_pipeline_fields(options.show_overlays, options.overlay_index, options.overlay_color.as_deref())
-                .map_err(ApiError::invalid_argument)?;
+        let options: RenderFrameOptionsIn =
+            parse_json(&options_json).map_err(ApiError::invalid_argument)?;
+        let (render_format, mime_type) = parse_render_output_format(options.format.as_deref())
+            .map_err(ApiError::invalid_argument)?;
+        let (show_overlays, overlay_index, overlay_color) = overlay_pipeline_fields(
+            options.show_overlays,
+            options.overlay_index,
+            options.overlay_color.as_deref(),
+        )
+        .map_err(ApiError::invalid_argument)?;
 
         let object = read_dicom_file(PathBuf::from(&file_path))?;
         let source_ts = object.meta().transfer_syntax().to_owned();
@@ -1083,13 +1247,16 @@ pub extern "system" fn Java_com_pohcee_dcmnorm_Dcmnorm_nativeRenderFrame<'local>
             ..Default::default()
         };
         let frame_index = pipeline_options.frame_index;
-        let rendered = dcm_render_dicom_frame(&object, render_format, &pipeline_options).map_err(|error| {
-            let error = ApiError::from(error).with_source_ts(Some(&source_ts));
-            match error.kind {
-                ApiErrorKind::Decode | ApiErrorKind::Render => error.with_frame_index(frame_index),
-                _ => error,
-            }
-        })?;
+        let rendered =
+            dcm_render_dicom_frame(&object, render_format, &pipeline_options).map_err(|error| {
+                let error = ApiError::from(error).with_source_ts(Some(&source_ts));
+                match error.kind {
+                    ApiErrorKind::Decode | ApiErrorKind::Render => {
+                        error.with_frame_index(frame_index)
+                    }
+                    _ => error,
+                }
+            })?;
         let metadata_json = render_pipeline_options_json(&rendered, mime_type);
         Ok((metadata_json, rendered.bytes))
     });
@@ -1134,7 +1301,8 @@ pub extern "system" fn Java_com_pohcee_dcmnorm_Dcmnorm_nativeRenderMovie<'local>
 
     let result = guarded(|| {
         let options: RenderMovieOptionsIn = parse_json(&options_json)?;
-        let object = read_dicom_file(PathBuf::from(&file_path)).map_err(|error| error.to_string())?;
+        let object =
+            read_dicom_file(PathBuf::from(&file_path)).map_err(|error| error.to_string())?;
         let pipeline_options = DcmRenderPipelineOptions {
             window_center: options.window_center,
             window_width: options.window_width,
@@ -1147,8 +1315,10 @@ pub extern "system" fn Java_com_pohcee_dcmnorm_Dcmnorm_nativeRenderMovie<'local>
         // write_dicom_video needs a real (seekable) output file for ffmpeg's muxer - render to a
         // private temp file, then read it back, same trade-off the Node/Python bindings make.
         let temp_path = unique_temp_path("mp4");
-        let render_result = dcm_write_dicom_video(&object, &temp_path, &pipeline_options, fps).map_err(|error| error.to_string());
-        let bytes = render_result.and_then(|_| std::fs::read(&temp_path).map_err(|error| error.to_string()));
+        let render_result = dcm_write_dicom_video(&object, &temp_path, &pipeline_options, fps)
+            .map_err(|error| error.to_string());
+        let bytes = render_result
+            .and_then(|_| std::fs::read(&temp_path).map_err(|error| error.to_string()));
         let _ = std::fs::remove_file(&temp_path);
         bytes
     });
@@ -1192,7 +1362,8 @@ pub extern "system" fn Java_com_pohcee_dcmnorm_Dcmnorm_nativeBuildVolume<'local>
     };
 
     let result = guarded(|| {
-        let paths: Vec<String> = serde_json::from_str(&file_paths_json).map_err(|error| error.to_string())?;
+        let paths: Vec<String> =
+            serde_json::from_str(&file_paths_json).map_err(|error| error.to_string())?;
         let paths: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
         dcm_build_volume(&paths).map_err(|error| error.to_string())
     });
@@ -1258,8 +1429,11 @@ pub extern "system" fn Java_com_pohcee_dcmnorm_Dcmnorm_nativeVolumeNumSlices<'lo
 }
 
 fn new_double_array(env: &mut JNIEnv, values: &[f64]) -> Result<jdoubleArray, String> {
-    let array = env.new_double_array(values.len() as i32).map_err(|error| error.to_string())?;
-    env.set_double_array_region(&array, 0, values).map_err(|error| error.to_string())?;
+    let array = env
+        .new_double_array(values.len() as i32)
+        .map_err(|error| error.to_string())?;
+    env.set_double_array_region(&array, 0, values)
+        .map_err(|error| error.to_string())?;
     Ok(array.into_raw())
 }
 
@@ -1344,7 +1518,8 @@ pub extern "system" fn Java_com_pohcee_dcmnorm_Dcmnorm_nativeVolumeReformat<'loc
     let volume = unsafe { volume_from_handle(handle) };
 
     let result = guarded(|| {
-        let params: ReformatParamsIn = serde_json::from_str(&params_json).map_err(|error| error.to_string())?;
+        let params: ReformatParamsIn =
+            serde_json::from_str(&params_json).map_err(|error| error.to_string())?;
         let (render_format, mime_type) = parse_render_output_format(params.format.as_deref())?;
         let plane_params = DcmPlaneParams {
             origin: params.origin,
@@ -1361,8 +1536,8 @@ pub extern "system" fn Java_com_pohcee_dcmnorm_Dcmnorm_nativeVolumeReformat<'loc
         };
         let jpeg_quality = params.jpeg_quality.unwrap_or(90) as u8;
 
-        let rendered =
-            dcm_reformat_plane(&volume, &plane_params, render_format, jpeg_quality).map_err(|error| error.to_string())?;
+        let rendered = dcm_reformat_plane(&volume, &plane_params, render_format, jpeg_quality)
+            .map_err(|error| error.to_string())?;
         let metadata_json = serde_json::json!({
             "mimeType": mime_type,
             "width": rendered.width,
@@ -1422,14 +1597,17 @@ pub extern "system" fn Java_com_pohcee_dcmnorm_Dcmnorm_nativeVolumeExportTexture
             (Some(center), Some(width)) => Some((center, width)),
             _ => None,
         };
-        let packed = dcm_pack_volume_texture(&volume, options.target_max_dim, default_window, compression)
-            .map_err(|error| error.to_string())?;
-        let meta_json = serde_json::to_string(&packed.meta.to_json()).map_err(|error| error.to_string())?;
+        let packed =
+            dcm_pack_volume_texture(&volume, options.target_max_dim, default_window, compression)
+                .map_err(|error| error.to_string())?;
+        let meta_json =
+            serde_json::to_string(&packed.meta.to_json()).map_err(|error| error.to_string())?;
         Ok((meta_json, packed.payload))
     });
 
     match result {
-        Ok((meta_json, payload)) => match new_texture_export_result(&mut env, &meta_json, &payload) {
+        Ok((meta_json, payload)) => match new_texture_export_result(&mut env, &meta_json, &payload)
+        {
             Ok(object) => object,
             Err(message) => throw(&mut env, message),
         },
@@ -1465,7 +1643,8 @@ pub extern "system" fn Java_com_pohcee_dcmnorm_Dcmnorm_nativeExportFrameTexture<
             _ => None,
         };
 
-        let object = read_dicom_file(PathBuf::from(&file_path)).map_err(|error| error.to_string())?;
+        let object =
+            read_dicom_file(PathBuf::from(&file_path)).map_err(|error| error.to_string())?;
         let packed = dcm_pack_dicom_frame_texture(
             &object,
             options.frame_index.unwrap_or(0) as usize,
@@ -1474,12 +1653,14 @@ pub extern "system" fn Java_com_pohcee_dcmnorm_Dcmnorm_nativeExportFrameTexture<
             compression,
         )
         .map_err(|error| error.to_string())?;
-        let meta_json = serde_json::to_string(&packed.meta.to_json()).map_err(|error| error.to_string())?;
+        let meta_json =
+            serde_json::to_string(&packed.meta.to_json()).map_err(|error| error.to_string())?;
         Ok((meta_json, packed.payload))
     });
 
     match result {
-        Ok((meta_json, payload)) => match new_texture_export_result(&mut env, &meta_json, &payload) {
+        Ok((meta_json, payload)) => match new_texture_export_result(&mut env, &meta_json, &payload)
+        {
             Ok(object) => object,
             Err(message) => throw(&mut env, message),
         },
@@ -1517,7 +1698,8 @@ pub extern "system" fn Java_com_pohcee_dcmnorm_Dcmnorm_nativeExportFrameStackTex
     };
 
     let result = guarded(|| {
-        let sources: Vec<FrameStackSourceIn> = serde_json::from_str(&sources_json).map_err(|error| error.to_string())?;
+        let sources: Vec<FrameStackSourceIn> =
+            serde_json::from_str(&sources_json).map_err(|error| error.to_string())?;
         let options: TextureExportOptionsIn = parse_json(&options_json)?;
         let compression = parse_texture_compression(options.compression.as_deref())?;
         let default_window = match (options.window_center, options.window_width) {
@@ -1529,7 +1711,9 @@ pub extern "system" fn Java_com_pohcee_dcmnorm_Dcmnorm_nativeExportFrameStackTex
         // contributes - avoids re-parsing the same multi-MB file per frame for a cine loop.
         let objects = sources
             .iter()
-            .map(|source| read_dicom_file(PathBuf::from(&source.file_path)).map_err(|error| error.to_string()))
+            .map(|source| {
+                read_dicom_file(PathBuf::from(&source.file_path)).map_err(|error| error.to_string())
+            })
             .collect::<Result<Vec<_>, _>>()?;
 
         let mut frame_refs: Vec<(&dcmnorm_object::DefaultDicomObject, usize)> = Vec::new();
@@ -1540,13 +1724,16 @@ pub extern "system" fn Java_com_pohcee_dcmnorm_Dcmnorm_nativeExportFrameStackTex
             }
         }
 
-        let packed = dcm_pack_dicom_frame_stack_texture(&frame_refs, default_window, compression).map_err(|error| error.to_string())?;
-        let meta_json = serde_json::to_string(&packed.meta.to_json()).map_err(|error| error.to_string())?;
+        let packed = dcm_pack_dicom_frame_stack_texture(&frame_refs, default_window, compression)
+            .map_err(|error| error.to_string())?;
+        let meta_json =
+            serde_json::to_string(&packed.meta.to_json()).map_err(|error| error.to_string())?;
         Ok((meta_json, packed.payload))
     });
 
     match result {
-        Ok((meta_json, payload)) => match new_texture_export_result(&mut env, &meta_json, &payload) {
+        Ok((meta_json, payload)) => match new_texture_export_result(&mut env, &meta_json, &payload)
+        {
             Ok(object) => object,
             Err(message) => throw(&mut env, message),
         },

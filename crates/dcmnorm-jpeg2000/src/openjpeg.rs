@@ -12,7 +12,9 @@ use openjpeg_sys as sys;
 use crate::threads::per_call_threads;
 use crate::{DecodedComponent, DecodedImage};
 
-const JP2_SIGNATURE: &[u8] = &[0x00, 0x00, 0x00, 0x0C, 0x6A, 0x50, 0x20, 0x20, 0x0D, 0x0A, 0x87, 0x0A];
+const JP2_SIGNATURE: &[u8] = &[
+    0x00, 0x00, 0x00, 0x0C, 0x6A, 0x50, 0x20, 0x20, 0x0D, 0x0A, 0x87, 0x0A,
+];
 const J2K_SIGNATURE: &[u8] = &[0xFF, 0x4F, 0xFF, 0x51];
 
 struct Source<'a> {
@@ -20,14 +22,20 @@ struct Source<'a> {
     pos: usize,
 }
 
-unsafe extern "C" fn read_fn(buffer: *mut c_void, nb_bytes: usize, user_data: *mut c_void) -> usize {
+unsafe extern "C" fn read_fn(
+    buffer: *mut c_void,
+    nb_bytes: usize,
+    user_data: *mut c_void,
+) -> usize {
     let source = unsafe { &mut *(user_data as *mut Source) };
     let remaining = source.data.len() - source.pos;
     if remaining == 0 {
         return usize::MAX; // (OPJ_SIZE_T)-1: end of stream
     }
     let n = nb_bytes.min(remaining);
-    unsafe { std::ptr::copy_nonoverlapping(source.data.as_ptr().add(source.pos), buffer as *mut u8, n) };
+    unsafe {
+        std::ptr::copy_nonoverlapping(source.data.as_ptr().add(source.pos), buffer as *mut u8, n)
+    };
     source.pos += n;
     n
 }
@@ -109,7 +117,11 @@ pub fn decode(data: &[u8]) -> Result<DecodedImage, String> {
         return Err("opj_create_decompress failed".to_owned());
     }
     unsafe {
-        sys::opj_set_error_handler(codec.0, Some(error_fn), &mut errors as *mut Vec<String> as *mut c_void);
+        sys::opj_set_error_handler(
+            codec.0,
+            Some(error_fn),
+            &mut errors as *mut Vec<String> as *mut c_void,
+        );
     }
 
     let mut params: sys::opj_dparameters_t = unsafe { std::mem::zeroed() };
@@ -132,7 +144,11 @@ pub fn decode(data: &[u8]) -> Result<DecodedImage, String> {
         sys::opj_stream_set_skip_function(stream.0, Some(skip_fn));
         sys::opj_stream_set_seek_function(stream.0, Some(seek_fn));
         sys::opj_stream_set_user_data_length(stream.0, data.len() as u64);
-        sys::opj_stream_set_user_data(stream.0, source.as_mut() as *mut Source as *mut c_void, None);
+        sys::opj_stream_set_user_data(
+            stream.0,
+            source.as_mut() as *mut Source as *mut c_void,
+            None,
+        );
     }
 
     let mut image_ptr: *mut sys::opj_image_t = std::ptr::null_mut();

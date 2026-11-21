@@ -104,7 +104,9 @@ pub fn parse_tag_path(key: &str) -> Result<Vec<DicomPathSegment>, io::Error> {
                 Some(idx_str.parse::<usize>().map_err(|_| {
                     io::Error::new(
                         ErrorKind::InvalidInput,
-                        format!("invalid sequence item index '{idx_str}' in DICOM path '{trimmed}'"),
+                        format!(
+                            "invalid sequence item index '{idx_str}' in DICOM path '{trimmed}'"
+                        ),
                     )
                 })?)
             };
@@ -237,7 +239,10 @@ fn set_segments_in_dataset(
 }
 
 /// Removes a flat or nested sequence DICOM attribute (`PatientName`, `Seq.0.Tag`, `Seq[0].Tag`).
-pub fn remove_attribute_path(object: &mut DefaultDicomObject, key: &str) -> Result<bool, io::Error> {
+pub fn remove_attribute_path(
+    object: &mut DefaultDicomObject,
+    key: &str,
+) -> Result<bool, io::Error> {
     let segments = parse_tag_path(key)?;
     if segments.len() == 1 {
         if let DicomPathSegment::Leaf(tag) = segments[0] {
@@ -440,8 +445,12 @@ fn set_meta_attribute(meta: &mut FileMetaTable, tag: Tag, value: String) -> Resu
         tags::IMPLEMENTATION_CLASS_UID => meta.implementation_class_uid = value,
         tags::IMPLEMENTATION_VERSION_NAME => meta.implementation_version_name = Some(value),
         tags::SOURCE_APPLICATION_ENTITY_TITLE => meta.source_application_entity_title = Some(value),
-        tags::SENDING_APPLICATION_ENTITY_TITLE => meta.sending_application_entity_title = Some(value),
-        tags::RECEIVING_APPLICATION_ENTITY_TITLE => meta.receiving_application_entity_title = Some(value),
+        tags::SENDING_APPLICATION_ENTITY_TITLE => {
+            meta.sending_application_entity_title = Some(value)
+        }
+        tags::RECEIVING_APPLICATION_ENTITY_TITLE => {
+            meta.receiving_application_entity_title = Some(value)
+        }
         tags::PRIVATE_INFORMATION_CREATOR_UID => meta.private_information_creator_uid = Some(value),
         _ => {
             return Err(io::Error::new(
@@ -490,10 +499,18 @@ fn remove_meta_attribute(meta: &mut FileMetaTable, tag: Tag) -> bool {
             was_present
         }
         tags::IMPLEMENTATION_VERSION_NAME => meta.implementation_version_name.take().is_some(),
-        tags::SOURCE_APPLICATION_ENTITY_TITLE => meta.source_application_entity_title.take().is_some(),
-        tags::SENDING_APPLICATION_ENTITY_TITLE => meta.sending_application_entity_title.take().is_some(),
-        tags::RECEIVING_APPLICATION_ENTITY_TITLE => meta.receiving_application_entity_title.take().is_some(),
-        tags::PRIVATE_INFORMATION_CREATOR_UID => meta.private_information_creator_uid.take().is_some(),
+        tags::SOURCE_APPLICATION_ENTITY_TITLE => {
+            meta.source_application_entity_title.take().is_some()
+        }
+        tags::SENDING_APPLICATION_ENTITY_TITLE => {
+            meta.sending_application_entity_title.take().is_some()
+        }
+        tags::RECEIVING_APPLICATION_ENTITY_TITLE => {
+            meta.receiving_application_entity_title.take().is_some()
+        }
+        tags::PRIVATE_INFORMATION_CREATOR_UID => {
+            meta.private_information_creator_uid.take().is_some()
+        }
         _ => false,
     }
 }
@@ -536,7 +553,8 @@ mod tests {
             ]
         );
 
-        let p_bracket = parse_tag_path("RequestAttributesSequence[1].PerformingPhysicianName").unwrap();
+        let p_bracket =
+            parse_tag_path("RequestAttributesSequence[1].PerformingPhysicianName").unwrap();
         assert_eq!(
             p_bracket,
             vec![
@@ -596,7 +614,10 @@ mod tests {
             "SMITH^SECOND"
         );
 
-        assert!(remove_attribute_path(&mut obj, "RequestAttributesSequence.ScheduledStationName").unwrap());
+        assert!(
+            remove_attribute_path(&mut obj, "RequestAttributesSequence.ScheduledStationName")
+                .unwrap()
+        );
         let seq_after = obj
             .element(tags::REQUEST_ATTRIBUTES_SEQUENCE)
             .unwrap()

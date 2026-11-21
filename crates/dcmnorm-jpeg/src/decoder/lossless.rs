@@ -304,9 +304,7 @@ mod restart_marker_regression_test {
         let dri: &[u8] = &[0xFF, 0xDD, 0x00, 0x04, 0x00, 0x02];
         // SOS: 1 component, selector=1 using DC table 0, predictor selection Ss=1 (Ra), Se=0,
         // Ah/Al=0.
-        let sos: &[u8] = &[
-            0xFF, 0xDA, 0x00, 0x08, 0x01, 0x01, 0x00, 0x01, 0x00, 0x00,
-        ];
+        let sos: &[u8] = &[0xFF, 0xDA, 0x00, 0x08, 0x01, 0x01, 0x00, 0x01, 0x00, 0x00];
         // Entropy-coded data, MSB-first bit packing:
         //   sample 0 (scan start, default predictor=128): category 2 "110" + extra "10"
         //     (additional=2 => diff=+2) => "11010101" (byte-aligned) = 0xD5, decoded value 130
@@ -329,7 +327,9 @@ mod restart_marker_regression_test {
         bytes.extend_from_slice(eoi);
 
         let mut decoder = Decoder::new(&bytes[..]);
-        let pixels = decoder.decode().expect("synthetic restart-marker JPEG should decode");
+        let pixels = decoder
+            .decode()
+            .expect("synthetic restart-marker JPEG should decode");
 
         // If the restart-reset fix were absent, sample 2 would incorrectly predict from the
         // left neighbor (131) instead of resetting to the default constant (128), giving 128

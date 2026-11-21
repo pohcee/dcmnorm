@@ -225,7 +225,7 @@ impl PixelDataReader for JpegAdapter {
         let dst_offset = base_offset;
 
         let mut decoder = Decoder::new(&mut cursor);
-            set_default_color_transform(&mut decoder, src);
+        set_default_color_transform(&mut decoder, src);
         let decoded = decoder
             .decode()
             .map_err(|e| Box::new(e) as Box<_>)
@@ -241,7 +241,10 @@ impl PixelDataReader for JpegAdapter {
 /// The colour space of a stream that declares none comes from Photometric Interpretation
 /// (pohcee/dcmnorm#32): RGB with component identifiers 0,1,2 and no JFIF/Adobe marker is RGB,
 /// not the YCbCr a standalone JPEG would default to.
-fn set_default_color_transform<R: std::io::Read>(decoder: &mut Decoder<R>, src: &dyn PixelDataObject) {
+fn set_default_color_transform<R: std::io::Read>(
+    decoder: &mut Decoder<R>,
+    src: &dyn PixelDataObject,
+) {
     if src.photometric_interpretation().map(str::trim) == Some("RGB") {
         decoder.set_default_color_transform(ColorTransform::RGB);
     }
@@ -289,7 +292,9 @@ impl PixelDataWriter for JpegAdapter {
         let color_type = match samples_per_pixel {
             1 => ColorType::Luma,
             3 => ColorType::Rgb,
-            _ => { whatever!("Unsupported samples per pixel: {}", samples_per_pixel) }
+            _ => {
+                whatever!("Unsupported samples per pixel: {}", samples_per_pixel)
+            }
         };
 
         // record dst length before encoding to know full jpeg size
@@ -365,7 +370,11 @@ impl PixelDataWriter for JpegAdapter {
             // set Photometric Interpretation to describe the compressed stream (PS3.5 Section
             // 8.2.1): `jpeg-encoder` converts the RGB samples to YCbCr, so YBR_FULL_422 when
             // chroma is subsampled (as upstream dicom-rs does), or YBR_FULL when it is not
-            let ybr = if chroma_subsampled { "YBR_FULL_422" } else { "YBR_FULL" };
+            let ybr = if chroma_subsampled {
+                "YBR_FULL_422"
+            } else {
+                "YBR_FULL"
+            };
             if pmi != Some(ybr) {
                 changes.push(AttributeOp::new(
                     Tag(0x0028, 0x0004),
@@ -396,7 +405,9 @@ fn narrow_8bit(frame_data: &[u8], bits_stored: u16) -> EncodeResult<Cow<'_, [u8]
             }
             Ok(Cow::Owned(v))
         }
-        b => { whatever!("Unsupported Bits Stored {}", b) }
+        b => {
+            whatever!("Unsupported Bits Stored {}", b)
+        }
     }
 }
 
@@ -405,7 +416,9 @@ mod tests {
     use super::JpegAdapter;
     use dcmnorm_core::ops::{AttributeAction, AttributeOp};
     use dcmnorm_core::Tag;
-    use dcmnorm_encoding::adapters::{EncodeOptions, PixelDataObject, PixelDataWriter, RawPixelData};
+    use dcmnorm_encoding::adapters::{
+        EncodeOptions, PixelDataObject, PixelDataWriter, RawPixelData,
+    };
     use std::borrow::Cow;
 
     /// A native 8-bit RGB single frame.
@@ -415,25 +428,52 @@ mod tests {
     }
 
     impl PixelDataObject for NativeRgb {
-        fn transfer_syntax_uid(&self) -> &str { "1.2.840.10008.1.2.1" }
-        fn rows(&self) -> Option<u16> { Some(self.size) }
-        fn cols(&self) -> Option<u16> { Some(self.size) }
-        fn samples_per_pixel(&self) -> Option<u16> { Some(3) }
-        fn bits_allocated(&self) -> Option<u16> { Some(8) }
-        fn bits_stored(&self) -> Option<u16> { Some(8) }
-        fn photometric_interpretation(&self) -> Option<&str> { Some("RGB") }
-        fn number_of_frames(&self) -> Option<u32> { Some(1) }
-        fn number_of_fragments(&self) -> Option<u32> { Some(1) }
+        fn transfer_syntax_uid(&self) -> &str {
+            "1.2.840.10008.1.2.1"
+        }
+        fn rows(&self) -> Option<u16> {
+            Some(self.size)
+        }
+        fn cols(&self) -> Option<u16> {
+            Some(self.size)
+        }
+        fn samples_per_pixel(&self) -> Option<u16> {
+            Some(3)
+        }
+        fn bits_allocated(&self) -> Option<u16> {
+            Some(8)
+        }
+        fn bits_stored(&self) -> Option<u16> {
+            Some(8)
+        }
+        fn photometric_interpretation(&self) -> Option<&str> {
+            Some("RGB")
+        }
+        fn number_of_frames(&self) -> Option<u32> {
+            Some(1)
+        }
+        fn number_of_fragments(&self) -> Option<u32> {
+            Some(1)
+        }
         fn fragment(&self, fragment: usize) -> Option<Cow<'_, [u8]>> {
             (fragment == 0).then(|| Cow::Borrowed(&self.samples[..]))
         }
-        fn offset_table(&self) -> Option<Cow<'_, [u32]>> { None }
-        fn raw_pixel_data(&self) -> Option<RawPixelData> { None }
+        fn offset_table(&self) -> Option<Cow<'_, [u32]>> {
+            None
+        }
+        fn raw_pixel_data(&self) -> Option<RawPixelData> {
+            None
+        }
     }
 
     fn encode_red_square(quality: Option<u8>) -> (Vec<AttributeOp>, Vec<u8>) {
         let size = 16;
-        let samples = [255u8, 0, 0].iter().copied().cycle().take(size as usize * size as usize * 3).collect();
+        let samples = [255u8, 0, 0]
+            .iter()
+            .copied()
+            .cycle()
+            .take(size as usize * size as usize * 3)
+            .collect();
         let mut options = EncodeOptions::new();
         options.quality = quality;
         let mut encoded = Vec::new();
@@ -444,10 +484,12 @@ mod tests {
     }
 
     fn photometric_interpretation_set(ops: &[AttributeOp]) -> Option<String> {
-        ops.iter().find(|op| op.selector == Tag(0x0028, 0x0004).into()).map(|op| match &op.action {
-            AttributeAction::SetStr(value) => value.to_string(),
-            other => panic!("unexpected Photometric Interpretation action {:?}", other),
-        })
+        ops.iter()
+            .find(|op| op.selector == Tag(0x0028, 0x0004).into())
+            .map(|op| match &op.action {
+                AttributeAction::SetStr(value) => value.to_string(),
+                other => panic!("unexpected Photometric Interpretation action {:?}", other),
+            })
     }
 
     /// Port of upstream dicom-rs's `write_jpeg_baseline_sets_ybr_full_422` (636ae060): the encoder
@@ -456,7 +498,10 @@ mod tests {
     #[test]
     fn encoding_rgb_labels_the_result_ybr_full_422_when_chroma_is_subsampled() {
         let (ops, encoded) = encode_red_square(None);
-        assert_eq!(photometric_interpretation_set(&ops).as_deref(), Some("YBR_FULL_422"));
+        assert_eq!(
+            photometric_interpretation_set(&ops).as_deref(),
+            Some("YBR_FULL_422")
+        );
 
         // and the codestream agrees: `jpeg-encoder` writes a JFIF stream, which is YCbCr,
         // with 2x2 sampling on the luma component of the 3-component SOF0 frame header
@@ -470,13 +515,19 @@ mod tests {
     #[test]
     fn encoding_rgb_labels_the_result_ybr_full_without_chroma_subsampling() {
         let (ops, encoded) = encode_red_square(Some(95));
-        assert_eq!(photometric_interpretation_set(&ops).as_deref(), Some("YBR_FULL"));
+        assert_eq!(
+            photometric_interpretation_set(&ops).as_deref(),
+            Some("YBR_FULL")
+        );
         assert_eq!(sof0_luma_sampling(&encoded), 0x11);
     }
 
     /// Sampling factors (H << 4 | V) of the first component in the SOF0 segment.
     fn sof0_luma_sampling(jpeg: &[u8]) -> u8 {
-        let sof = jpeg.windows(2).position(|w| w == [0xFF, 0xC0]).expect("baseline SOF0 marker");
+        let sof = jpeg
+            .windows(2)
+            .position(|w| w == [0xFF, 0xC0])
+            .expect("baseline SOF0 marker");
         // FFC0, length (2), precision (1), height (2), width (2), components (1), then
         // per component: id (1), sampling (1), quantization table (1)
         assert_eq!(jpeg[sof + 9], 3, "expected a 3-component frame");

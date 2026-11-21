@@ -54,11 +54,19 @@ impl std::ops::DerefMut for DefaultDicomObject {
 impl DefaultDicomObject {
     /// Construct a new, empty object already carrying the given meta table.
     pub fn new_empty_with_meta(meta: FileMetaTable) -> Self {
-        FileDicomObject { meta, object: InMemDicomObject::new_empty() }
+        FileDicomObject {
+            meta,
+            object: InMemDicomObject::new_empty(),
+        }
     }
 
     /// Insert or replace a text element by tag and VR, creating it if absent.
-    pub fn put_str(&mut self, tag: dcmnorm_core::Tag, vr: dcmnorm_core::VR, value: impl Into<String>) {
+    pub fn put_str(
+        &mut self,
+        tag: dcmnorm_core::Tag,
+        vr: dcmnorm_core::VR,
+        value: impl Into<String>,
+    ) {
         self.object.put_str(tag, vr, value);
     }
 
@@ -76,9 +84,11 @@ impl DefaultDicomObject {
     /// any [`Read`] source.
     pub fn from_reader(mut source: impl Read) -> Result<Self, ReadError> {
         let mut meta = FileMetaTable::read_from(&mut source)?.ok_or(ReadError::NotDicom)?;
-        let ts = meta.transfer_syntax_ts().ok_or_else(|| ReadError::UnsupportedTransferSyntax {
-            uid: meta.transfer_syntax.clone(),
-        })?;
+        let ts = meta
+            .transfer_syntax_ts()
+            .ok_or_else(|| ReadError::UnsupportedTransferSyntax {
+                uid: meta.transfer_syntax.clone(),
+            })?;
         let object = InMemDicomObject::read_dataset_with_ts(source, ts)?;
         backfill_media_storage_uids(&mut meta, &object);
         Ok(FileDicomObject { meta, object })
@@ -162,9 +172,11 @@ impl OpenFileOptions {
 
     pub fn from_reader(self, mut source: impl Read) -> Result<DefaultDicomObject, ReadError> {
         let mut meta = self.read_meta(&mut source)?;
-        let ts = meta.transfer_syntax_ts().ok_or_else(|| ReadError::UnsupportedTransferSyntax {
-            uid: meta.transfer_syntax.clone(),
-        })?;
+        let ts = meta
+            .transfer_syntax_ts()
+            .ok_or_else(|| ReadError::UnsupportedTransferSyntax {
+                uid: meta.transfer_syntax.clone(),
+            })?;
 
         let options = DataSetReaderOptions::default().flexible_decoding(self.flexible_decoding);
         let object = if let Some(stop_tag) = self.read_until {
@@ -193,22 +205,37 @@ impl OpenFileOptions {
             source,
             context: "opening file",
         })?;
-        let mut source = CountingReader { inner: BufReader::new(file), count: 0 };
+        let mut source = CountingReader {
+            inner: BufReader::new(file),
+            count: 0,
+        };
         let mut meta = self.read_meta(&mut source)?;
-        let ts = meta.transfer_syntax_ts().ok_or_else(|| ReadError::UnsupportedTransferSyntax {
-            uid: meta.transfer_syntax.clone(),
-        })?;
-        if ts.is_encapsulated_pixel_data() || !matches!(ts.codec(), dcmnorm_encoding::transfer_syntax::Codec::None) {
+        let ts = meta
+            .transfer_syntax_ts()
+            .ok_or_else(|| ReadError::UnsupportedTransferSyntax {
+                uid: meta.transfer_syntax.clone(),
+            })?;
+        if ts.is_encapsulated_pixel_data()
+            || !matches!(ts.codec(), dcmnorm_encoding::transfer_syntax::Codec::None)
+        {
             return Ok(None);
         }
 
         let (object, header) = crate::mem::read_dataset_until_pixel_data_header(&mut source, ts)?;
-        let Some(header) = header else { return Ok(None) };
-        let Some(length) = header.len.get() else { return Ok(None) };
+        let Some(header) = header else {
+            return Ok(None);
+        };
+        let Some(length) = header.len.get() else {
+            return Ok(None);
+        };
         backfill_media_storage_uids(&mut meta, &object);
         Ok(Some((
             FileDicomObject { meta, object },
-            PixelDataValueLocation { vr: header.vr, length, offset: source.count },
+            PixelDataValueLocation {
+                vr: header.vr,
+                length,
+                offset: source.count,
+            },
         )))
     }
 
@@ -234,9 +261,18 @@ impl OpenFileOptions {
         })?;
         let file_len = file
             .metadata()
-            .map_err(|source| ReadError::Io { source, context: "reading file metadata" })?
+            .map_err(|source| ReadError::Io {
+                source,
+                context: "reading file metadata",
+            })?
             .len();
-        self.from_reader_deferring(BufReader::new(file), Some(file_len), defer, defer_pixel_sequences, false)
+        self.from_reader_deferring(
+            BufReader::new(file),
+            Some(file_len),
+            defer,
+            defer_pixel_sequences,
+            false,
+        )
     }
 
     /// [`Self::open_file_deferring`] over any seekable Part 10 source, positioned at its
@@ -258,15 +294,21 @@ impl OpenFileOptions {
         stop_at_pixel_data: bool,
     ) -> Result<Option<(DefaultDicomObject, crate::mem::DeferredValues)>, ReadError> {
         let mut meta = self.read_meta(&mut source)?;
-        let ts = meta.transfer_syntax_ts().ok_or_else(|| ReadError::UnsupportedTransferSyntax {
-            uid: meta.transfer_syntax.clone(),
-        })?;
-        if matches!(ts.codec(), dcmnorm_encoding::transfer_syntax::Codec::Dataset(_)) {
+        let ts = meta
+            .transfer_syntax_ts()
+            .ok_or_else(|| ReadError::UnsupportedTransferSyntax {
+                uid: meta.transfer_syntax.clone(),
+            })?;
+        if matches!(
+            ts.codec(),
+            dcmnorm_encoding::transfer_syntax::Codec::Dataset(_)
+        ) {
             return Ok(None);
         }
-        let base_offset = source
-            .stream_position()
-            .map_err(|source| ReadError::Io { source, context: "locating data set" })?;
+        let base_offset = source.stream_position().map_err(|source| ReadError::Io {
+            source,
+            context: "locating data set",
+        })?;
 
         let mut reader = dcmnorm_parser::dataset::DataSetReader::new_with_ts(source, ts)
             .map_err(|source| ReadError::Dataset { source })?;
@@ -289,21 +331,27 @@ impl OpenFileOptions {
         Ok(match self.read_preamble {
             // Peek-and-detect: falls back to treating `source` as meta-less if the preamble or
             // "DICM" magic aren't there.
-            ReadPreamble::Auto => FileMetaTable::read_from(&mut source)?.ok_or(ReadError::NotDicom)?,
+            ReadPreamble::Auto => {
+                FileMetaTable::read_from(&mut source)?.ok_or(ReadError::NotDicom)?
+            }
             // No detection/fallback: the preamble and magic are required, and their absence (or
             // mismatch) is a hard error rather than a silent reinterpretation as meta-less -
             // matching what a caller who explicitly opted out of auto-detection would expect.
             ReadPreamble::Always => {
                 let mut preamble = [0u8; PREAMBLE_LEN];
-                source.read_exact(&mut preamble).map_err(|source| ReadError::Io {
-                    source,
-                    context: "reading 128-byte preamble",
-                })?;
+                source
+                    .read_exact(&mut preamble)
+                    .map_err(|source| ReadError::Io {
+                        source,
+                        context: "reading 128-byte preamble",
+                    })?;
                 let mut magic = [0u8; 4];
-                source.read_exact(&mut magic).map_err(|source| ReadError::Io {
-                    source,
-                    context: "reading \"DICM\" magic",
-                })?;
+                source
+                    .read_exact(&mut magic)
+                    .map_err(|source| ReadError::Io {
+                        source,
+                        context: "reading \"DICM\" magic",
+                    })?;
                 if &magic != DICM_MAGIC {
                     return Err(ReadError::NotDicom);
                 }
@@ -380,7 +428,9 @@ pub fn read_dataset_trial_parse(bytes: &[u8]) -> Option<(InMemDicomObject, &'sta
         "1.2.840.10008.1.2.2",
     ];
     for uid in CANDIDATES {
-        let Some(ts) = TransferSyntaxRegistry.get(uid) else { continue };
+        let Some(ts) = TransferSyntaxRegistry.get(uid) else {
+            continue;
+        };
         if let Ok(object) = InMemDicomObject::read_dataset_with_ts(Cursor::new(bytes), ts) {
             return Some((object, uid));
         }
@@ -411,7 +461,13 @@ mod tests {
             .read_preamble(ReadPreamble::Always)
             .open_file(fixture("mr_small.dcm"))
             .expect("a real Part 10 file has a preamble and DICM magic");
-        assert_eq!(object.get(tags::MODALITY).and_then(|e| e.to_str().ok()).as_deref(), Some("MR"));
+        assert_eq!(
+            object
+                .get(tags::MODALITY)
+                .and_then(|e| e.to_str().ok())
+                .as_deref(),
+            Some("MR")
+        );
     }
 
     #[test]
@@ -436,9 +492,19 @@ mod tests {
 
     #[test]
     fn explicit_vr_big_endian_file_reads_with_correct_values() {
-        let object =
-            OpenFileOptions::new().open_file(fixture("explicit_vr_be.dcm")).expect("should read");
-        assert_eq!(object.meta().transfer_syntax.trim_end_matches('\0'), "1.2.840.10008.1.2.2");
-        assert_eq!(object.get(tags::MODALITY).and_then(|e| e.to_str().ok()).as_deref(), Some("US"));
+        let object = OpenFileOptions::new()
+            .open_file(fixture("explicit_vr_be.dcm"))
+            .expect("should read");
+        assert_eq!(
+            object.meta().transfer_syntax.trim_end_matches('\0'),
+            "1.2.840.10008.1.2.2"
+        );
+        assert_eq!(
+            object
+                .get(tags::MODALITY)
+                .and_then(|e| e.to_str().ok())
+                .as_deref(),
+            Some("US")
+        );
     }
 }

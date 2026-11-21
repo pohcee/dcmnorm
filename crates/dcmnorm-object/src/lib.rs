@@ -13,8 +13,8 @@ pub use file::{
     OpenFileOptions, PixelDataValueLocation, ReadPreamble,
 };
 pub use mem::{
-    ApplyOpError, DeferredValueLocation, DeferredValues, InMemDicomObject, InMemElement, InMemFragment,
-    MissingElementError,
+    ApplyOpError, DeferredValueLocation, DeferredValues, InMemDicomObject, InMemElement,
+    InMemFragment, MissingElementError,
 };
 pub use meta::{FileMetaTable, FileMetaTableBuilder};
 

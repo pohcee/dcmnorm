@@ -339,7 +339,10 @@ impl Iso2022 {
     /// The bytes of one non-ASCII character and the set it needs, preferring the sets
     /// currently designated (no escape sequence) over the others.
     fn encode_char(&self, ch: char, g0: G0, g1: G1) -> Option<(Vec<u8>, Designation)> {
-        let current = [designation_term(Designation::G0(g0)), designation_term(Designation::G1(g1))];
+        let current = [
+            designation_term(Designation::G0(g0)),
+            designation_term(Designation::G1(g1)),
+        ];
         let mut order: Vec<Term> = current.iter().copied().flatten().collect();
         order.push(self.initial);
         order.extend(ALL_TERMS.iter().copied());
@@ -377,13 +380,21 @@ fn encode_in(term: Term, ch: char) -> Option<(Vec<u8>, Designation)> {
     match term {
         Term::Ir87 => {
             let bytes = EUC_JP.encode(text, EncoderTrap::Strict).ok()?;
-            (bytes.len() == 2 && in_g1_range(&bytes))
-                .then(|| (bytes.iter().map(|b| b & 0x7F).collect(), Designation::G0(G0::Jis0208)))
+            (bytes.len() == 2 && in_g1_range(&bytes)).then(|| {
+                (
+                    bytes.iter().map(|b| b & 0x7F).collect(),
+                    Designation::G0(G0::Jis0208),
+                )
+            })
         }
         Term::Ir13 => {
             let code = ch as u32;
-            (0xFF61..=0xFF9F).contains(&code)
-                .then(|| (vec![(code - 0xFF61 + 0xA1) as u8], Designation::G1(G1::Katakana)))
+            (0xFF61..=0xFF9F).contains(&code).then(|| {
+                (
+                    vec![(code - 0xFF61 + 0xA1) as u8],
+                    Designation::G1(G1::Katakana),
+                )
+            })
         }
         Term::Ir149 | Term::Ir58 => {
             let (encoding, set): (&dyn Encoding, G1) = if term == Term::Ir149 {
@@ -434,7 +445,10 @@ fn parse_escape(rest: &[u8]) -> Option<(usize, Designation)> {
         [b'$', b'(', b'D', ..] => (3, Designation::G0(G0::Jis0212)),
         [b'$', b')', b'C', ..] => (3, Designation::G1(G1::Ksc)),
         [b'$', b')', b'A', ..] => (3, Designation::G1(G1::Gb2312)),
-        [b'-', final_byte, ..] => (2, Designation::G1(G1::Single(Term::from_single_byte_final(*final_byte)?))),
+        [b'-', final_byte, ..] => (
+            2,
+            Designation::G1(G1::Single(Term::from_single_byte_final(*final_byte)?)),
+        ),
         _ => return None,
     })
 }
@@ -479,7 +493,8 @@ mod tests {
     #[test]
     fn decodes_ps3_5_h_3_1_example() {
         let codec = charset(&["", "ISO 2022 IR 87"]);
-        let bytes = b"Yamada^Tarou=\x1b$B;3ED\x1b(B^\x1b$BB@O:\x1b(B=\x1b$B$d$^$@\x1b(B^\x1b$B$?$m$&\x1b(B";
+        let bytes =
+            b"Yamada^Tarou=\x1b$B;3ED\x1b(B^\x1b$BB@O:\x1b(B=\x1b$B$d$^$@\x1b(B^\x1b$B$?$m$&\x1b(B";
         let text = "Yamada^Tarou=山田^太郎=やまだ^たろう";
         assert_eq!(codec.decode(bytes), text);
         assert_eq!(codec.encode(text).unwrap(), bytes);
@@ -517,10 +532,19 @@ mod tests {
 
     #[test]
     fn names_and_unknown_values() {
-        assert_eq!(charset(&["", "ISO 2022 IR 87"]).name(), "ISO 2022 IR 6\\ISO 2022 IR 87");
-        assert_eq!(charset(&["", "BOGUS", "ISO 2022 IR 149"]).name(), "ISO 2022 IR 6\\ISO 2022 IR 149");
+        assert_eq!(
+            charset(&["", "ISO 2022 IR 87"]).name(),
+            "ISO 2022 IR 6\\ISO 2022 IR 87"
+        );
+        assert_eq!(
+            charset(&["", "BOGUS", "ISO 2022 IR 149"]).name(),
+            "ISO 2022 IR 6\\ISO 2022 IR 149"
+        );
         assert!(Iso2022::from_codes(&["BOGUS", "ALSO BOGUS"]).is_none());
         // a stray escape sequence that is not a designation is kept
-        assert_eq!(charset(&["", "ISO 2022 IR 87"]).decode(b"a\x1b%Gb"), "a\u{1b}%Gb");
+        assert_eq!(
+            charset(&["", "ISO 2022 IR 87"]).decode(b"a\x1b%Gb"),
+            "a\u{1b}%Gb"
+        );
     }
 }

@@ -21,7 +21,10 @@ use crate::pdu::{self, PDataValue, PDataValueType, Pdu, PDU_HEADER_SIZE};
 /// between messages.
 #[derive(Debug)]
 pub enum Incoming {
-    Command { presentation_context_id: u8, data: Vec<u8> },
+    Command {
+        presentation_context_id: u8,
+        data: Vec<u8>,
+    },
     Pdu(Pdu),
 }
 
@@ -39,60 +42,100 @@ pub(crate) struct Receiver {
 }
 
 enum Assembled {
-    Message { presentation_context_id: u8, data: Vec<u8> },
+    Message {
+        presentation_context_id: u8,
+        data: Vec<u8>,
+    },
     Other(Pdu),
 }
 
 impl Receiver {
     /// The next PDU. Queued PDVs (left over from a PDU that also held an earlier message) come first, as one P-DATA-TF.
-    pub(crate) fn receive_pdu<R: Read>(&mut self, stream: &mut R, max_pdu_length: u32) -> Result<Pdu> {
+    pub(crate) fn receive_pdu<R: Read>(
+        &mut self,
+        stream: &mut R,
+        max_pdu_length: u32,
+    ) -> Result<Pdu> {
         if !self.pending.is_empty() {
-            return Ok(Pdu::PData { data: self.pending.drain(..).collect() });
+            return Ok(Pdu::PData {
+                data: self.pending.drain(..).collect(),
+            });
         }
         self.read_pdu(stream, max_pdu_length)
     }
 
     /// The next complete command, or the PDU that arrived instead of one between messages.
-    pub(crate) fn receive_command<R: Read>(&mut self, stream: &mut R, max_pdu_length: u32) -> Result<Incoming> {
+    pub(crate) fn receive_command<R: Read>(
+        &mut self,
+        stream: &mut R,
+        max_pdu_length: u32,
+    ) -> Result<Incoming> {
         match self.assemble(stream, max_pdu_length, PDataValueType::Command)? {
-            Assembled::Message { presentation_context_id, data } => Ok(Incoming::Command { presentation_context_id, data }),
+            Assembled::Message {
+                presentation_context_id,
+                data,
+            } => Ok(Incoming::Command {
+                presentation_context_id,
+                data,
+            }),
             Assembled::Other(pdu) => Ok(Incoming::Pdu(pdu)),
         }
     }
 
     /// The complete data set that follows the command just received.
-    pub(crate) fn receive_data_set<R: Read>(&mut self, stream: &mut R, max_pdu_length: u32) -> Result<Vec<u8>> {
+    pub(crate) fn receive_data_set<R: Read>(
+        &mut self,
+        stream: &mut R,
+        max_pdu_length: u32,
+    ) -> Result<Vec<u8>> {
         match self.assemble(stream, max_pdu_length, PDataValueType::Data)? {
             Assembled::Message { data, .. } => Ok(data),
             Assembled::Other(pdu) => Err(Error::UnexpectedPdu(Box::new(pdu))),
         }
     }
 
-    fn assemble<R: Read>(&mut self, stream: &mut R, max_pdu_length: u32, want: PDataValueType) -> Result<Assembled> {
+    fn assemble<R: Read>(
+        &mut self,
+        stream: &mut R,
+        max_pdu_length: u32,
+        want: PDataValueType,
+    ) -> Result<Assembled> {
         loop {
             if let Some(pdv) = self.pending.pop_front() {
                 if pdv.value_type != want {
                     let got = pdv.value_type;
                     self.partial.clear();
                     self.partial_context = None;
-                    return Err(Error::UnexpectedPdv { expected: want, got });
+                    return Err(Error::UnexpectedPdv {
+                        expected: want,
+                        got,
+                    });
                 }
-                self.partial_context.get_or_insert(pdv.presentation_context_id);
+                self.partial_context
+                    .get_or_insert(pdv.presentation_context_id);
                 if self.partial.is_empty() {
                     self.partial = pdv.data; // the common single-fragment case: no copy
                 } else {
                     self.partial.extend_from_slice(&pdv.data);
                 }
                 if pdv.is_last {
-                    let presentation_context_id = self.partial_context.take().unwrap_or(pdv.presentation_context_id);
-                    return Ok(Assembled::Message { presentation_context_id, data: std::mem::take(&mut self.partial) });
+                    let presentation_context_id = self
+                        .partial_context
+                        .take()
+                        .unwrap_or(pdv.presentation_context_id);
+                    return Ok(Assembled::Message {
+                        presentation_context_id,
+                        data: std::mem::take(&mut self.partial),
+                    });
                 }
                 continue;
             }
             match self.read_pdu(stream, max_pdu_length)? {
                 Pdu::PData { data } => self.pending.extend(data),
                 // A release/abort is only valid between messages; in the middle of one the message is lost either way.
-                other if self.partial.is_empty() && self.partial_context.is_none() => return Ok(Assembled::Other(other)),
+                other if self.partial.is_empty() && self.partial_context.is_none() => {
+                    return Ok(Assembled::Other(other))
+                }
                 other => {
                     self.partial.clear();
                     self.partial_context = None;
@@ -110,11 +153,15 @@ impl Receiver {
             let need = if self.filled < header {
                 header
             } else {
-                let length = u32::from_be_bytes([self.raw[2], self.raw[3], self.raw[4], self.raw[5]]);
+                let length =
+                    u32::from_be_bytes([self.raw[2], self.raw[3], self.raw[4], self.raw[5]]);
                 if length > max_pdu_length {
                     self.raw.clear();
                     self.filled = 0;
-                    return Err(Error::Pdu(pdu::Error::PduTooLarge { pdu_length: length, max_pdu_length }));
+                    return Err(Error::Pdu(pdu::Error::PduTooLarge {
+                        pdu_length: length,
+                        max_pdu_length,
+                    }));
                 }
                 header + length as usize
             };
@@ -143,7 +190,12 @@ mod tests {
     use std::io::{self, Cursor};
 
     fn pdv(value_type: PDataValueType, is_last: bool, data: &[u8]) -> PDataValue {
-        PDataValue { presentation_context_id: 1, value_type, is_last, data: data.to_vec() }
+        PDataValue {
+            presentation_context_id: 1,
+            value_type,
+            is_last,
+            data: data.to_vec(),
+        }
     }
     fn pdu_bytes(pdu: &Pdu) -> Vec<u8> {
         let mut out = Vec::new();
@@ -156,30 +208,47 @@ mod tests {
     /// dcm4che's C-STORE: the command and the FIRST data fragment share a PDU, the rest follows in later PDUs.
     #[test]
     fn data_set_split_across_the_command_pdu_and_later_pdus() {
-        let mut wire = pdu_bytes(&Pdu::PData { data: vec![pdv(Command, true, b"cmd"), pdv(Data, false, b"part1-")] });
-        wire.extend(pdu_bytes(&Pdu::PData { data: vec![pdv(Data, false, b"part2-")] }));
-        wire.extend(pdu_bytes(&Pdu::PData { data: vec![pdv(Data, true, b"part3")] }));
+        let mut wire = pdu_bytes(&Pdu::PData {
+            data: vec![pdv(Command, true, b"cmd"), pdv(Data, false, b"part1-")],
+        });
+        wire.extend(pdu_bytes(&Pdu::PData {
+            data: vec![pdv(Data, false, b"part2-")],
+        }));
+        wire.extend(pdu_bytes(&Pdu::PData {
+            data: vec![pdv(Data, true, b"part3")],
+        }));
         let mut stream = Cursor::new(wire);
         let mut r = Receiver::default();
         match r.receive_command(&mut stream, MAX).unwrap() {
-            Incoming::Command { presentation_context_id, data } => assert_eq!((presentation_context_id, data.as_slice()), (1, &b"cmd"[..])),
+            Incoming::Command {
+                presentation_context_id,
+                data,
+            } => assert_eq!((presentation_context_id, data.as_slice()), (1, &b"cmd"[..])),
             other => panic!("expected a command, got {other:?}"),
         }
-        assert_eq!(r.receive_data_set(&mut stream, MAX).unwrap(), b"part1-part2-part3");
+        assert_eq!(
+            r.receive_data_set(&mut stream, MAX).unwrap(),
+            b"part1-part2-part3"
+        );
     }
 
     /// dcm4che's C-FIND: pending response, its identifier and the final response in ONE PDU.
     #[test]
     fn several_messages_in_one_pdu_are_all_delivered_in_order() {
         let wire = pdu_bytes(&Pdu::PData {
-            data: vec![pdv(Command, true, b"pending"), pdv(Data, true, b"match"), pdv(Command, true, b"final")],
+            data: vec![
+                pdv(Command, true, b"pending"),
+                pdv(Data, true, b"match"),
+                pdv(Command, true, b"final"),
+            ],
         });
         let mut stream = Cursor::new(wire);
         let mut r = Receiver::default();
-        let command = |r: &mut Receiver, s: &mut Cursor<Vec<u8>>| match r.receive_command(s, MAX).unwrap() {
-            Incoming::Command { data, .. } => data,
-            other => panic!("expected a command, got {other:?}"),
-        };
+        let command =
+            |r: &mut Receiver, s: &mut Cursor<Vec<u8>>| match r.receive_command(s, MAX).unwrap() {
+                Incoming::Command { data, .. } => data,
+                other => panic!("expected a command, got {other:?}"),
+            };
         assert_eq!(command(&mut r, &mut stream), b"pending");
         assert_eq!(r.receive_data_set(&mut stream, MAX).unwrap(), b"match");
         assert_eq!(command(&mut r, &mut stream), b"final");
@@ -187,8 +256,12 @@ mod tests {
 
     #[test]
     fn a_command_split_into_fragments_is_reassembled() {
-        let mut wire = pdu_bytes(&Pdu::PData { data: vec![pdv(Command, false, b"com")] });
-        wire.extend(pdu_bytes(&Pdu::PData { data: vec![pdv(Command, true, b"mand")] }));
+        let mut wire = pdu_bytes(&Pdu::PData {
+            data: vec![pdv(Command, false, b"com")],
+        });
+        wire.extend(pdu_bytes(&Pdu::PData {
+            data: vec![pdv(Command, true, b"mand")],
+        }));
         let mut r = Receiver::default();
         match r.receive_command(&mut Cursor::new(wire), MAX).unwrap() {
             Incoming::Command { data, .. } => assert_eq!(data, b"command"),
@@ -199,7 +272,10 @@ mod tests {
     #[test]
     fn release_between_messages_is_returned_as_a_pdu() {
         let mut r = Receiver::default();
-        match r.receive_command(&mut Cursor::new(pdu_bytes(&Pdu::ReleaseRQ)), MAX).unwrap() {
+        match r
+            .receive_command(&mut Cursor::new(pdu_bytes(&Pdu::ReleaseRQ)), MAX)
+            .unwrap()
+        {
             Incoming::Pdu(Pdu::ReleaseRQ) => {}
             other => panic!("expected A-RELEASE-RQ, got {other:?}"),
         }
@@ -207,25 +283,37 @@ mod tests {
 
     #[test]
     fn data_where_a_command_is_expected_is_a_protocol_error() {
-        let wire = pdu_bytes(&Pdu::PData { data: vec![pdv(Data, true, b"stray")] });
+        let wire = pdu_bytes(&Pdu::PData {
+            data: vec![pdv(Data, true, b"stray")],
+        });
         let mut r = Receiver::default();
         assert!(matches!(
             r.receive_command(&mut Cursor::new(wire), MAX),
-            Err(Error::UnexpectedPdv { expected: Command, got: Data })
+            Err(Error::UnexpectedPdv {
+                expected: Command,
+                got: Data
+            })
         ));
     }
 
     #[test]
     fn release_in_the_middle_of_a_data_set_is_an_error() {
-        let mut wire = pdu_bytes(&Pdu::PData { data: vec![pdv(Data, false, b"half")] });
+        let mut wire = pdu_bytes(&Pdu::PData {
+            data: vec![pdv(Data, false, b"half")],
+        });
         wire.extend(pdu_bytes(&Pdu::ReleaseRQ));
         let mut r = Receiver::default();
-        assert!(matches!(r.receive_data_set(&mut Cursor::new(wire), MAX), Err(Error::UnexpectedPdu(_))));
+        assert!(matches!(
+            r.receive_data_set(&mut Cursor::new(wire), MAX),
+            Err(Error::UnexpectedPdu(_))
+        ));
     }
 
     #[test]
     fn leftover_pdvs_come_first_from_receive_pdu() {
-        let wire = pdu_bytes(&Pdu::PData { data: vec![pdv(Command, true, b"rsp"), pdv(Data, true, b"failed-list")] });
+        let wire = pdu_bytes(&Pdu::PData {
+            data: vec![pdv(Command, true, b"rsp"), pdv(Data, true, b"failed-list")],
+        });
         let mut stream = Cursor::new(wire);
         let mut r = Receiver::default();
         r.receive_command(&mut stream, MAX).unwrap();
@@ -259,9 +347,18 @@ mod tests {
     /// The timeout tick must not lose the bytes of a half-read PDU (or a half-assembled message): retrying continues.
     #[test]
     fn timeouts_in_the_middle_of_a_pdu_and_of_a_message_are_resumable() {
-        let mut wire = pdu_bytes(&Pdu::PData { data: vec![pdv(Command, true, b"cmd"), pdv(Data, false, &[7u8; 300])] });
-        wire.extend(pdu_bytes(&Pdu::PData { data: vec![pdv(Data, true, &[8u8; 300])] }));
-        let mut stream = Trickle { bytes: wire, pos: 0, chunk: 7, block_next: true };
+        let mut wire = pdu_bytes(&Pdu::PData {
+            data: vec![pdv(Command, true, b"cmd"), pdv(Data, false, &[7u8; 300])],
+        });
+        wire.extend(pdu_bytes(&Pdu::PData {
+            data: vec![pdv(Data, true, &[8u8; 300])],
+        }));
+        let mut stream = Trickle {
+            bytes: wire,
+            pos: 0,
+            chunk: 7,
+            block_next: true,
+        };
         let mut r = Receiver::default();
         let mut timeouts = 0;
         let command = loop {
@@ -280,7 +377,10 @@ mod tests {
                 Err(e) => panic!("unexpected error {e}"),
             }
         };
-        assert!(timeouts > 50, "the test stream should have timed out many times, got {timeouts}");
+        assert!(
+            timeouts > 50,
+            "the test stream should have timed out many times, got {timeouts}"
+        );
         assert_eq!(data.len(), 600);
         assert!(data[..300].iter().all(|&b| b == 7) && data[300..].iter().all(|&b| b == 8));
     }
@@ -299,6 +399,9 @@ mod tests {
     #[test]
     fn eof_is_an_io_error() {
         let mut r = Receiver::default();
-        assert!(matches!(r.receive_pdu(&mut Cursor::new(vec![0x04, 0x00, 0x00]), MAX), Err(Error::Io(_))));
+        assert!(matches!(
+            r.receive_pdu(&mut Cursor::new(vec![0x04, 0x00, 0x00]), MAX),
+            Err(Error::Io(_))
+        ));
     }
 }

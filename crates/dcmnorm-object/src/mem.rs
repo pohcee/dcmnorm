@@ -9,7 +9,7 @@
 use std::io::{Read, Write};
 
 use dcmnorm_core::header::{DataElement, HasLength, Header, Tag};
-use dcmnorm_core::value::{C, DataSetSequence, PixelFragmentSequence, Value};
+use dcmnorm_core::value::{DataSetSequence, PixelFragmentSequence, Value, C};
 use dcmnorm_core::{ops::AttributeOp, PrimitiveValue, VR};
 use dcmnorm_encoding::transfer_syntax::{Codec, TransferSyntax};
 use dcmnorm_parser::dataset::read::DataSetReaderOptions;
@@ -40,7 +40,9 @@ impl HasLength for InMemDicomObject {
 impl InMemDicomObject {
     /// An empty object with no elements.
     pub fn new_empty() -> Self {
-        InMemDicomObject { elements: Vec::new() }
+        InMemDicomObject {
+            elements: Vec::new(),
+        }
     }
 
     /// Build an object directly from a list of elements, sorting them into tag order.
@@ -91,7 +93,11 @@ impl InMemDicomObject {
     /// (`--set KEY=VALUE`) and DIMSE command/identifier construction that only ever deal in
     /// string values.
     pub fn put_str(&mut self, tag: Tag, vr: VR, value: impl Into<String>) {
-        self.put(DataElement::new(tag, vr, PrimitiveValue::from(value.into())));
+        self.put(DataElement::new(
+            tag,
+            vr,
+            PrimitiveValue::from(value.into()),
+        ));
     }
 
     /// Insert or replace an element, keeping the element list in tag order.
@@ -163,25 +169,33 @@ impl InMemDicomObject {
             AttributeAction::Set(value) => {
                 self.put(DataElement::new(tag, vr_for_action_value(&value), value));
             }
-            AttributeAction::SetIfMissing(value)
-                if self.get(tag).is_none() => {
-                    self.put(DataElement::new(tag, vr_for_action_value(&value), value));
-                }
-            AttributeAction::SetStr(s) => {
-                self.put(DataElement::new(tag, current_vr(), PrimitiveValue::from(s.into_owned())));
+            AttributeAction::SetIfMissing(value) if self.get(tag).is_none() => {
+                self.put(DataElement::new(tag, vr_for_action_value(&value), value));
             }
-            AttributeAction::SetStrIfMissing(s)
-                if self.get(tag).is_none() => {
-                    self.put(DataElement::new(tag, VR::CS, PrimitiveValue::from(s.into_owned())));
-                }
-            AttributeAction::Replace(value)
-                if self.get(tag).is_some() => {
-                    self.put(DataElement::new(tag, vr_for_action_value(&value), value));
-                }
-            AttributeAction::ReplaceStr(s)
-                if self.get(tag).is_some() => {
-                    self.put(DataElement::new(tag, current_vr(), PrimitiveValue::from(s.into_owned())));
-                }
+            AttributeAction::SetStr(s) => {
+                self.put(DataElement::new(
+                    tag,
+                    current_vr(),
+                    PrimitiveValue::from(s.into_owned()),
+                ));
+            }
+            AttributeAction::SetStrIfMissing(s) if self.get(tag).is_none() => {
+                self.put(DataElement::new(
+                    tag,
+                    VR::CS,
+                    PrimitiveValue::from(s.into_owned()),
+                ));
+            }
+            AttributeAction::Replace(value) if self.get(tag).is_some() => {
+                self.put(DataElement::new(tag, vr_for_action_value(&value), value));
+            }
+            AttributeAction::ReplaceStr(s) if self.get(tag).is_some() => {
+                self.put(DataElement::new(
+                    tag,
+                    current_vr(),
+                    PrimitiveValue::from(s.into_owned()),
+                ));
+            }
             _ => {}
         }
         Ok(())
@@ -303,7 +317,10 @@ impl std::fmt::Display for ApplyOpError {
         match self {
             ApplyOpError::MissingElement(source) => write!(f, "{source}"),
             ApplyOpError::UnsupportedSelector => {
-                write!(f, "attribute operation selector is not a single top-level tag")
+                write!(
+                    f,
+                    "attribute operation selector is not a single top-level tag"
+                )
             }
         }
     }
@@ -323,7 +340,9 @@ fn build_dataset(
     loop {
         let Some(token) = tokens.next() else {
             if in_item {
-                return Err(ReadError::UnexpectedToken { context: "expected ItemEnd, got end of stream" });
+                return Err(ReadError::UnexpectedToken {
+                    context: "expected ItemEnd, got end of stream",
+                });
             }
             break;
         };
@@ -414,7 +433,9 @@ pub(crate) fn read_dataset_until<'r>(
                 let mut items: C<InMemDicomObject> = C::new();
                 loop {
                     match next_required(&mut reader)? {
-                        DataToken::ItemStart { .. } => items.push(build_dataset(&mut reader, true)?),
+                        DataToken::ItemStart { .. } => {
+                            items.push(build_dataset(&mut reader, true)?)
+                        }
                         DataToken::SequenceEnd => break,
                         _ => {
                             return Err(ReadError::UnexpectedToken {
@@ -423,7 +444,11 @@ pub(crate) fn read_dataset_until<'r>(
                         }
                     }
                 }
-                elements.push(DataElement::new(tag, VR::SQ, Value::Sequence(DataSetSequence::new(items, len))));
+                elements.push(DataElement::new(
+                    tag,
+                    VR::SQ,
+                    Value::Sequence(DataSetSequence::new(items, len)),
+                ));
                 if tag >= stop_tag {
                     break;
                 }
@@ -459,7 +484,13 @@ pub(crate) fn read_dataset_until<'r>(
 pub(crate) fn read_dataset_until_pixel_data_header<'r>(
     source: impl Read + 'r,
     ts: &TransferSyntax,
-) -> Result<(InMemDicomObject, Option<dcmnorm_core::header::DataElementHeader>), ReadError> {
+) -> Result<
+    (
+        InMemDicomObject,
+        Option<dcmnorm_core::header::DataElementHeader>,
+    ),
+    ReadError,
+> {
     const PIXEL_DATA: Tag = Tag(0x7FE0, 0x0010);
     let mut reader =
         DataSetReader::new_with_ts(source, ts).map_err(|source| ReadError::Dataset { source })?;
@@ -481,7 +512,9 @@ pub(crate) fn read_dataset_until_pixel_data_header<'r>(
                 let mut items: C<InMemDicomObject> = C::new();
                 loop {
                     match next_required(&mut reader)? {
-                        DataToken::ItemStart { .. } => items.push(build_dataset(&mut reader, true)?),
+                        DataToken::ItemStart { .. } => {
+                            items.push(build_dataset(&mut reader, true)?)
+                        }
                         DataToken::SequenceEnd => break,
                         _ => {
                             return Err(ReadError::UnexpectedToken {
@@ -490,7 +523,11 @@ pub(crate) fn read_dataset_until_pixel_data_header<'r>(
                         }
                     }
                 }
-                elements.push(DataElement::new(tag, VR::SQ, Value::Sequence(DataSetSequence::new(items, len))));
+                elements.push(DataElement::new(
+                    tag,
+                    VR::SQ,
+                    Value::Sequence(DataSetSequence::new(items, len)),
+                ));
                 if tag > PIXEL_DATA {
                     break;
                 }
@@ -589,8 +626,12 @@ impl DeferredValues {
         self.entries
             .values()
             .map(|entry| match entry {
-                DeferredEntry::Value(location) => location.offset + location.defined_length().unwrap_or(0),
-                DeferredEntry::Items(items) => items.iter().map(DeferredValues::max_end).max().unwrap_or(0),
+                DeferredEntry::Value(location) => {
+                    location.offset + location.defined_length().unwrap_or(0)
+                }
+                DeferredEntry::Items(items) => {
+                    items.iter().map(DeferredValues::max_end).max().unwrap_or(0)
+                }
             })
             .max()
             .unwrap_or(0)
@@ -616,15 +657,18 @@ pub(crate) fn build_dataset_deferring<R: Read + std::io::Seek>(
 ) -> Result<(InMemDicomObject, DeferredValues), ReadError> {
     let mut elements = Vec::new();
     let mut deferred = DeferredValues::default();
-    let to_location = |skipped: dcmnorm_parser::dataset::read::SkippedValue| DeferredValueLocation {
-        offset: base_offset + skipped.position,
-        length: skipped.length,
-    };
+    let to_location =
+        |skipped: dcmnorm_parser::dataset::read::SkippedValue| DeferredValueLocation {
+            offset: base_offset + skipped.position,
+            length: skipped.length,
+        };
 
     loop {
         let Some(token) = reader.next() else {
             if in_item {
-                return Err(ReadError::UnexpectedToken { context: "expected ItemEnd, got end of stream" });
+                return Err(ReadError::UnexpectedToken {
+                    context: "expected ItemEnd, got end of stream",
+                });
             }
             break;
         };
@@ -632,13 +676,25 @@ pub(crate) fn build_dataset_deferring<R: Read + std::io::Seek>(
         match token? {
             DataToken::ItemEnd if in_item => break,
 
-            DataToken::ElementHeader(header) if stop_at_pixel_data && !in_item && header.tag == Tag(0x7FE0, 0x0010) => {
+            DataToken::ElementHeader(header)
+                if stop_at_pixel_data && !in_item && header.tag == Tag(0x7FE0, 0x0010) =>
+            {
                 let location = DeferredValueLocation {
                     offset: base_offset + reader.source_position(),
-                    length: header.len.get().map(u64::from).unwrap_or(DeferredValueLocation::UNDEFINED_LENGTH),
+                    length: header
+                        .len
+                        .get()
+                        .map(u64::from)
+                        .unwrap_or(DeferredValueLocation::UNDEFINED_LENGTH),
                 };
-                deferred.entries.insert(header.tag, DeferredEntry::Value(location));
-                elements.push(DataElement::new(header.tag, header.vr, PrimitiveValue::U8(C::new())));
+                deferred
+                    .entries
+                    .insert(header.tag, DeferredEntry::Value(location));
+                elements.push(DataElement::new(
+                    header.tag,
+                    header.vr,
+                    PrimitiveValue::U8(C::new()),
+                ));
                 break;
             }
 
@@ -649,15 +705,26 @@ pub(crate) fn build_dataset_deferring<R: Read + std::io::Seek>(
                     length: DeferredValueLocation::UNDEFINED_LENGTH,
                 };
                 deferred.entries.insert(tag, DeferredEntry::Value(location));
-                let placeholder = PixelFragmentSequence::new(C::<u32>::new(), C::<InMemFragment>::new());
-                elements.push(DataElement::new(tag, VR::OB, Value::PixelSequence(placeholder)));
+                let placeholder =
+                    PixelFragmentSequence::new(C::<u32>::new(), C::<InMemFragment>::new());
+                elements.push(DataElement::new(
+                    tag,
+                    VR::OB,
+                    Value::PixelSequence(placeholder),
+                ));
                 break;
             }
 
             DataToken::ElementHeader(header) if header.len.is_defined() && defer(&header) => {
                 let skipped = reader.skip_value()?;
-                deferred.entries.insert(header.tag, DeferredEntry::Value(to_location(skipped)));
-                elements.push(DataElement::new(header.tag, header.vr, PrimitiveValue::U8(C::new())));
+                deferred
+                    .entries
+                    .insert(header.tag, DeferredEntry::Value(to_location(skipped)));
+                elements.push(DataElement::new(
+                    header.tag,
+                    header.vr,
+                    PrimitiveValue::U8(C::new()),
+                ));
             }
 
             DataToken::ElementHeader(header) => {
@@ -691,7 +758,9 @@ pub(crate) fn build_dataset_deferring<R: Read + std::io::Seek>(
                     }
                 }
                 if item_scopes.iter().any(|scope| !scope.is_empty()) {
-                    deferred.entries.insert(tag, DeferredEntry::Items(item_scopes));
+                    deferred
+                        .entries
+                        .insert(tag, DeferredEntry::Items(item_scopes));
                 }
                 let value = Value::Sequence(DataSetSequence::new(items, len));
                 elements.push(DataElement::new(tag, VR::SQ, value));
@@ -700,9 +769,16 @@ pub(crate) fn build_dataset_deferring<R: Read + std::io::Seek>(
             DataToken::PixelSequenceStart if defer_pixel_sequences => {
                 let skipped = reader.skip_pixel_sequence()?;
                 let tag = Tag(0x7FE0, 0x0010);
-                deferred.entries.insert(tag, DeferredEntry::Value(to_location(skipped)));
-                let placeholder = PixelFragmentSequence::new(C::<u32>::new(), C::<InMemFragment>::new());
-                elements.push(DataElement::new(tag, VR::OB, Value::PixelSequence(placeholder)));
+                deferred
+                    .entries
+                    .insert(tag, DeferredEntry::Value(to_location(skipped)));
+                let placeholder =
+                    PixelFragmentSequence::new(C::<u32>::new(), C::<InMemFragment>::new());
+                elements.push(DataElement::new(
+                    tag,
+                    VR::OB,
+                    Value::PixelSequence(placeholder),
+                ));
             }
 
             DataToken::PixelSequenceStart => {
@@ -732,7 +808,9 @@ fn read_pixel_sequence(
     tokens: &mut impl Iterator<Item = Result<DataToken, dcmnorm_parser::dataset::read::Error>>,
 ) -> Result<Value<InMemDicomObject, InMemFragment>, ReadError> {
     let offset_table = match next_required(tokens)? {
-        DataToken::ItemStart { len } if len == dcmnorm_core::header::Length(0) => {
+        DataToken::ItemStart {
+            len: dcmnorm_core::header::Length(0),
+        } => {
             expect_item_end(tokens)?;
             Vec::new()
         }
@@ -778,7 +856,10 @@ fn read_pixel_sequence(
         }
     }
 
-    Ok(Value::PixelSequence(PixelFragmentSequence::new(offset_table, fragments)))
+    Ok(Value::PixelSequence(PixelFragmentSequence::new(
+        offset_table,
+        fragments,
+    )))
 }
 
 fn expect_item_end(
@@ -786,7 +867,9 @@ fn expect_item_end(
 ) -> Result<(), ReadError> {
     match next_required(tokens)? {
         DataToken::ItemEnd => Ok(()),
-        _ => Err(ReadError::UnexpectedToken { context: "expected ItemEnd" }),
+        _ => Err(ReadError::UnexpectedToken {
+            context: "expected ItemEnd",
+        }),
     }
 }
 
@@ -795,7 +878,9 @@ fn next_required(
 ) -> Result<DataToken, ReadError> {
     tokens
         .next()
-        .ok_or(ReadError::UnexpectedToken { context: "unexpected end of token stream" })?
+        .ok_or(ReadError::UnexpectedToken {
+            context: "unexpected end of token stream",
+        })?
         .map_err(ReadError::from)
 }
 
@@ -804,7 +889,9 @@ fn expect_primitive_value(
 ) -> Result<PrimitiveValue, ReadError> {
     match next_required(tokens)? {
         DataToken::PrimitiveValue(v) => Ok(v),
-        _ => Err(ReadError::UnexpectedToken { context: "expected PrimitiveValue after ElementHeader" }),
+        _ => Err(ReadError::UnexpectedToken {
+            context: "expected PrimitiveValue after ElementHeader",
+        }),
     }
 }
 
@@ -829,18 +916,27 @@ pub(crate) fn write_element_tokens<W: Write>(
         }
         Value::Sequence(seq) => {
             writer
-                .write(DataToken::SequenceStart { tag: element.tag(), len: seq.length() })
+                .write(DataToken::SequenceStart {
+                    tag: element.tag(),
+                    len: seq.length(),
+                })
                 .map_err(|source| WriteError::Dataset { source })?;
             for item in seq.items() {
                 writer
-                    .write(DataToken::ItemStart { len: dcmnorm_core::header::Length::UNDEFINED })
+                    .write(DataToken::ItemStart {
+                        len: dcmnorm_core::header::Length::UNDEFINED,
+                    })
                     .map_err(|source| WriteError::Dataset { source })?;
                 for item_element in item.iter() {
                     write_element_tokens(writer, item_element)?;
                 }
-                writer.write(DataToken::ItemEnd).map_err(|source| WriteError::Dataset { source })?;
+                writer
+                    .write(DataToken::ItemEnd)
+                    .map_err(|source| WriteError::Dataset { source })?;
             }
-            writer.write(DataToken::SequenceEnd).map_err(|source| WriteError::Dataset { source })?;
+            writer
+                .write(DataToken::SequenceEnd)
+                .map_err(|source| WriteError::Dataset { source })?;
         }
         Value::PixelSequence(pix) => {
             writer
@@ -860,17 +956,25 @@ pub(crate) fn write_element_tokens<W: Write>(
                     .write(DataToken::OffsetTable(offset_table.to_vec()))
                     .map_err(|source| WriteError::Dataset { source })?;
             }
-            writer.write(DataToken::ItemEnd).map_err(|source| WriteError::Dataset { source })?;
+            writer
+                .write(DataToken::ItemEnd)
+                .map_err(|source| WriteError::Dataset { source })?;
             for fragment in pix.fragments() {
                 writer
-                    .write(DataToken::ItemStart { len: dcmnorm_core::header::Length::defined(fragment.len() as u32) })
+                    .write(DataToken::ItemStart {
+                        len: dcmnorm_core::header::Length::defined(fragment.len() as u32),
+                    })
                     .map_err(|source| WriteError::Dataset { source })?;
                 writer
                     .write_item_value(fragment)
                     .map_err(|source| WriteError::Dataset { source })?;
-                writer.write(DataToken::ItemEnd).map_err(|source| WriteError::Dataset { source })?;
+                writer
+                    .write(DataToken::ItemEnd)
+                    .map_err(|source| WriteError::Dataset { source })?;
             }
-            writer.write(DataToken::SequenceEnd).map_err(|source| WriteError::Dataset { source })?;
+            writer
+                .write(DataToken::SequenceEnd)
+                .map_err(|source| WriteError::Dataset { source })?;
         }
     }
     Ok(())
@@ -1045,20 +1149,25 @@ mod tests {
     fn malformed_sequence_file_parses_tolerantly() {
         let object = open_fixture("bad_sequence.dcm");
         assert_eq!(
-            object.get(dcmnorm_dictionary::tags::MODALITY).and_then(|e| e.to_str().ok()).as_deref(),
+            object
+                .get(dcmnorm_dictionary::tags::MODALITY)
+                .and_then(|e| e.to_str().ok())
+                .as_deref(),
             Some("CT")
         );
     }
 
     #[test]
     fn missing_transfer_syntax_uid_is_a_clean_error_not_a_panic() {
-        let result = crate::file::DefaultDicomObject::open_file(fixture_path("meta_missing_tsyntax.dcm"));
+        let result =
+            crate::file::DefaultDicomObject::open_file(fixture_path("meta_missing_tsyntax.dcm"));
         assert!(result.is_err(), "expected an error, got {result:?}");
     }
 
     #[test]
     fn missing_meta_group_length_is_a_clean_error_not_a_panic() {
-        let result = crate::file::DefaultDicomObject::open_file(fixture_path("nometa_group_length.dcm"));
+        let result =
+            crate::file::DefaultDicomObject::open_file(fixture_path("nometa_group_length.dcm"));
         assert!(result.is_err(), "expected an error, got {result:?}");
     }
 
@@ -1070,21 +1179,37 @@ mod tests {
 
     #[test]
     fn truncated_rtplan_is_a_clean_error_not_a_panic() {
-        let result = crate::file::DefaultDicomObject::open_file(fixture_path("rtplan_truncated.dcm"));
+        let result =
+            crate::file::DefaultDicomObject::open_file(fixture_path("rtplan_truncated.dcm"));
         assert!(result.is_err(), "expected an error, got {result:?}");
     }
 
     #[test]
     fn odd_length_pixel_data_parses_with_correct_dimensions() {
         let object = open_fixture("sc_odd_length.dcm");
-        assert_eq!(object.get(dcmnorm_dictionary::tags::ROWS).and_then(|e| e.uint16().ok()), Some(3));
-        assert_eq!(object.get(dcmnorm_dictionary::tags::COLUMNS).and_then(|e| e.uint16().ok()), Some(3));
+        assert_eq!(
+            object
+                .get(dcmnorm_dictionary::tags::ROWS)
+                .and_then(|e| e.uint16().ok()),
+            Some(3)
+        );
+        assert_eq!(
+            object
+                .get(dcmnorm_dictionary::tags::COLUMNS)
+                .and_then(|e| e.uint16().ok()),
+            Some(3)
+        );
     }
 
     #[test]
     fn odd_length_jpeg_pixel_data_parses_correctly() {
         let object = open_fixture("sc_odd_length_jpeg.dcm");
-        assert_eq!(object.get(dcmnorm_dictionary::tags::ROWS).and_then(|e| e.uint16().ok()), Some(3));
+        assert_eq!(
+            object
+                .get(dcmnorm_dictionary::tags::ROWS)
+                .and_then(|e| e.uint16().ok()),
+            Some(3)
+        );
     }
 
     /// Deeply nested sequences (RT Structure Set's ROI Contour -> Contour Sequence -> Contour
@@ -1101,7 +1226,10 @@ mod tests {
         let object = InMemDicomObject::read_dataset_with_ts(std::io::Cursor::new(bytes), ts)
             .expect("rtstruct.dcm should parse as a bare Implicit VR LE data set");
         assert_eq!(
-            object.get(dcmnorm_dictionary::tags::MODALITY).and_then(|e| e.to_str().ok()).as_deref(),
+            object
+                .get(dcmnorm_dictionary::tags::MODALITY)
+                .and_then(|e| e.to_str().ok())
+                .as_deref(),
             Some("RTSTRUCT")
         );
     }
@@ -1110,7 +1238,10 @@ mod tests {
     fn rtdose_object_parses_without_error() {
         let object = open_fixture("rtdose.dcm");
         assert_eq!(
-            object.get(dcmnorm_dictionary::tags::MODALITY).and_then(|e| e.to_str().ok()).as_deref(),
+            object
+                .get(dcmnorm_dictionary::tags::MODALITY)
+                .and_then(|e| e.to_str().ok())
+                .as_deref(),
             Some("RTDOSE")
         );
     }
@@ -1123,13 +1254,19 @@ mod tests {
     #[test]
     fn jpeg2000_pixel_sequence_has_the_expected_fragment_and_offset_table_shape() {
         let object = open_fixture("jpeg2000_tiny.dcm");
-        let element = object.element(dcmnorm_dictionary::tags::PIXEL_DATA).unwrap();
+        let element = object
+            .element(dcmnorm_dictionary::tags::PIXEL_DATA)
+            .unwrap();
         match element.value() {
             Value::PixelSequence(seq) => {
                 assert_eq!(seq.offset_table().len(), 0);
                 assert_eq!(seq.fragments().len(), 1);
                 let fragment = &seq.fragments()[0];
-                assert_eq!(fragment[0..2], [0xFF, 0x4F], "fragment should start with the JPEG2000 SOC marker");
+                assert_eq!(
+                    fragment[0..2],
+                    [0xFF, 0x4F],
+                    "fragment should start with the JPEG2000 SOC marker"
+                );
                 assert_eq!(
                     fragment[fragment.len() - 2..],
                     [0xFF, 0xD9],

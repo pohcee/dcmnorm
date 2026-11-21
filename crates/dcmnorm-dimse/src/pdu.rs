@@ -56,8 +56,13 @@ pub const DEFAULT_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_se
 pub enum Error {
     Io(std::io::Error),
     UnexpectedEof,
-    PduTooLarge { pdu_length: u32, max_pdu_length: u32 },
-    InvalidField { field: &'static str },
+    PduTooLarge {
+        pdu_length: u32,
+        max_pdu_length: u32,
+    },
+    InvalidField {
+        field: &'static str,
+    },
     Text(String),
 }
 
@@ -66,8 +71,14 @@ impl fmt::Display for Error {
         match self {
             Error::Io(e) => write!(f, "I/O error: {e}"),
             Error::UnexpectedEof => write!(f, "unexpected end of PDU data"),
-            Error::PduTooLarge { pdu_length, max_pdu_length } => {
-                write!(f, "incoming PDU too large: {pdu_length} bytes, maximum is {max_pdu_length}")
+            Error::PduTooLarge {
+                pdu_length,
+                max_pdu_length,
+            } => {
+                write!(
+                    f,
+                    "incoming PDU too large: {pdu_length} bytes, maximum is {max_pdu_length}"
+                )
             }
             Error::InvalidField { field } => write!(f, "invalid or missing PDU field `{field}`"),
             Error::Text(msg) => write!(f, "{msg}"),
@@ -133,7 +144,11 @@ impl PresentationContextResultReason {
             2 => Self::NoReason,
             3 => Self::AbstractSyntaxNotSupported,
             4 => Self::TransferSyntaxesNotSupported,
-            _ => return Err(Error::InvalidField { field: "Presentation-context Result/Reason" }),
+            _ => {
+                return Err(Error::InvalidField {
+                    field: "Presentation-context Result/Reason",
+                })
+            }
         })
     }
 }
@@ -167,7 +182,11 @@ pub struct AssociationRJ {
 
 impl fmt::Display for AssociationRJ {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "result={:?} source={} reason={}", self.result, self.source, self.reason)
+        write!(
+            f,
+            "result={:?} source={} reason={}",
+            self.result, self.source, self.reason
+        )
     }
 }
 
@@ -194,11 +213,23 @@ pub struct AbortRQSource {
 }
 
 impl AbortRQSource {
-    pub const SERVICE_USER: Self = Self { source: 0x00, reason: 0x00 };
+    pub const SERVICE_USER: Self = Self {
+        source: 0x00,
+        reason: 0x00,
+    };
     /// Service-provider, reason-not-specified.
-    pub const SERVICE_PROVIDER: Self = Self { source: 0x02, reason: 0x00 };
-    pub const UNEXPECTED_PDU: Self = Self { source: 0x02, reason: 0x02 };
-    pub const UNRECOGNIZED_PDU: Self = Self { source: 0x02, reason: 0x01 };
+    pub const SERVICE_PROVIDER: Self = Self {
+        source: 0x02,
+        reason: 0x00,
+    };
+    pub const UNEXPECTED_PDU: Self = Self {
+        source: 0x02,
+        reason: 0x02,
+    };
+    pub const UNRECOGNIZED_PDU: Self = Self {
+        source: 0x02,
+        reason: 0x01,
+    };
 }
 
 #[derive(Clone, Eq, PartialEq, Debug)]
@@ -238,13 +269,20 @@ pub enum Pdu {
     AssociationRQ(AssociationRQ),
     AssociationAC(AssociationAC),
     AssociationRJ(AssociationRJ),
-    PData { data: Vec<PDataValue> },
+    PData {
+        data: Vec<PDataValue>,
+    },
     ReleaseRQ,
     ReleaseRP,
-    AbortRQ { source: AbortRQSource },
+    AbortRQ {
+        source: AbortRQSource,
+    },
     /// An unrecognized PDU type - passed through so the association layer can abort cleanly
     /// with a clear reason instead of silently misinterpreting it as something else.
-    Unknown { pdu_type: u8, data: Vec<u8> },
+    Unknown {
+        pdu_type: u8,
+        data: Vec<u8>,
+    },
 }
 
 // ===== Reading =====
@@ -370,11 +408,19 @@ pub fn parse_pdu_body(pdu_type: u8, body: &[u8]) -> Result<Pdu> {
             let result = match c.u8()? {
                 1 => AssociationRJResult::Permanent,
                 2 => AssociationRJResult::Transient,
-                _ => return Err(Error::InvalidField { field: "AssociationRJ Result" }),
+                _ => {
+                    return Err(Error::InvalidField {
+                        field: "AssociationRJ Result",
+                    })
+                }
             };
             let source = c.u8()?;
             let reason = c.u8()?;
-            Ok(Pdu::AssociationRJ(AssociationRJ { result, source, reason }))
+            Ok(Pdu::AssociationRJ(AssociationRJ {
+                result,
+                source,
+                reason,
+            }))
         }
         0x04 => {
             // P-DATA-TF PDU Structure (PS3.8 §9.3.5)
@@ -382,15 +428,25 @@ pub fn parse_pdu_body(pdu_type: u8, body: &[u8]) -> Result<Pdu> {
             while c.remaining() > 0 {
                 let item_length = c.u32()? as usize;
                 if item_length < 2 {
-                    return Err(Error::InvalidField { field: "PDV item-length" });
+                    return Err(Error::InvalidField {
+                        field: "PDV item-length",
+                    });
                 }
                 let presentation_context_id = c.u8()?;
                 let header = c.u8()?;
-                let value_type =
-                    if header & 0x01 != 0 { PDataValueType::Command } else { PDataValueType::Data };
+                let value_type = if header & 0x01 != 0 {
+                    PDataValueType::Command
+                } else {
+                    PDataValueType::Data
+                };
                 let is_last = header & 0x02 != 0;
                 let data = c.bytes(item_length - 2)?.to_vec();
-                values.push(PDataValue { presentation_context_id, value_type, is_last, data });
+                values.push(PDataValue {
+                    presentation_context_id,
+                    value_type,
+                    is_last,
+                    data,
+                });
             }
             Ok(Pdu::PData { data: values })
         }
@@ -401,9 +457,14 @@ pub fn parse_pdu_body(pdu_type: u8, body: &[u8]) -> Result<Pdu> {
             c.skip(2)?; // reserved
             let source = c.u8()?;
             let reason = c.u8()?;
-            Ok(Pdu::AbortRQ { source: AbortRQSource { source, reason } })
+            Ok(Pdu::AbortRQ {
+                source: AbortRQSource { source, reason },
+            })
         }
-        other => Ok(Pdu::Unknown { pdu_type: other, data: body.to_vec() }),
+        other => Ok(Pdu::Unknown {
+            pdu_type: other,
+            data: body.to_vec(),
+        }),
     }
 }
 
@@ -428,7 +489,9 @@ fn parse_presentation_context_proposed(
     }
     Ok(PresentationContextProposed {
         id,
-        abstract_syntax: abstract_syntax.ok_or(Error::InvalidField { field: "Abstract-syntax-name" })?,
+        abstract_syntax: abstract_syntax.ok_or(Error::InvalidField {
+            field: "Abstract-syntax-name",
+        })?,
         transfer_syntaxes,
     })
 }
@@ -451,7 +514,11 @@ fn parse_presentation_context_result(
             transfer_syntax = text;
         }
     }
-    Ok(PresentationContextResult { id, reason, transfer_syntax })
+    Ok(PresentationContextResult {
+        id,
+        reason,
+        transfer_syntax,
+    })
 }
 
 fn parse_user_variables(c: &mut Cur<'_>, codec: &dyn TextCodec) -> Result<Vec<UserVariableItem>> {
@@ -463,11 +530,13 @@ fn parse_user_variables(c: &mut Cur<'_>, codec: &dyn TextCodec) -> Result<Vec<Us
         match item_type {
             0x51 => {
                 if item_length != 4 {
-                    return Err(Error::InvalidField { field: "Maximum-length-received" });
+                    return Err(Error::InvalidField {
+                        field: "Maximum-length-received",
+                    });
                 }
-                items.push(UserVariableItem::MaxLength(
-                    u32::from_be_bytes(c.bytes(4)?.try_into().unwrap()),
-                ));
+                items.push(UserVariableItem::MaxLength(u32::from_be_bytes(
+                    c.bytes(4)?.try_into().unwrap(),
+                )));
             }
             0x52 => {
                 items.push(UserVariableItem::ImplementationClassUID(c.text(
@@ -484,7 +553,10 @@ fn parse_user_variables(c: &mut Cur<'_>, codec: &dyn TextCodec) -> Result<Vec<Us
                 )?));
             }
             other => {
-                items.push(UserVariableItem::Other(other, c.bytes(item_length)?.to_vec()));
+                items.push(UserVariableItem::Other(
+                    other,
+                    c.bytes(item_length)?.to_vec(),
+                ));
             }
         }
     }
@@ -508,7 +580,9 @@ fn write_chunk_u16(out: &mut Vec<u8>, body: impl FnOnce(&mut Vec<u8>)) {
 }
 
 fn write_ae_title(out: &mut Vec<u8>, title: &str, codec: &dyn TextCodec) -> Result<()> {
-    let mut bytes = codec.encode(title).map_err(|_| Error::InvalidField { field: "AE-title" })?;
+    let mut bytes = codec
+        .encode(title)
+        .map_err(|_| Error::InvalidField { field: "AE-title" })?;
     bytes.resize(16, b' ');
     out.extend_from_slice(&bytes);
     Ok(())
@@ -734,7 +808,8 @@ mod tests {
         write_pdu(&mut bytes, pdu).expect("write_pdu should not fail for an in-memory buffer");
         let pdu_type = bytes[0];
         let body = &bytes[PDU_HEADER_SIZE as usize..];
-        parse_pdu_body(pdu_type, body).expect("parse_pdu_body should read back what write_pdu wrote")
+        parse_pdu_body(pdu_type, body)
+            .expect("parse_pdu_body should read back what write_pdu wrote")
     }
 
     #[test]
@@ -820,13 +895,21 @@ mod tests {
 
     #[test]
     fn association_rj_roundtrips_result_and_raw_source_reason_codes() {
-        let rj = AssociationRJ { result: AssociationRJResult::Permanent, source: 1, reason: 2 };
+        let rj = AssociationRJ {
+            result: AssociationRJResult::Permanent,
+            source: 1,
+            reason: 2,
+        };
         let Pdu::AssociationRJ(got) = roundtrip(&Pdu::AssociationRJ(rj.clone())) else {
             panic!("expected AssociationRJ back");
         };
         assert_eq!(got, rj);
 
-        let rj = AssociationRJ { result: AssociationRJResult::Transient, source: 2, reason: 4 };
+        let rj = AssociationRJ {
+            result: AssociationRJResult::Transient,
+            source: 2,
+            reason: 4,
+        };
         let Pdu::AssociationRJ(got) = roundtrip(&Pdu::AssociationRJ(rj.clone())) else {
             panic!("expected AssociationRJ back");
         };
@@ -861,7 +944,9 @@ mod tests {
         let Pdu::PData { data: got } = roundtrip(&pdu) else {
             panic!("expected PData back");
         };
-        let Pdu::PData { data: want } = pdu else { unreachable!() };
+        let Pdu::PData { data: want } = pdu else {
+            unreachable!()
+        };
         assert_eq!(got, want);
     }
 
@@ -888,7 +973,10 @@ mod tests {
 
     #[test]
     fn unknown_pdu_type_passes_its_raw_body_through_unmodified() {
-        let pdu = Pdu::Unknown { pdu_type: 0x99, data: vec![1, 2, 3, 4, 5] };
+        let pdu = Pdu::Unknown {
+            pdu_type: 0x99,
+            data: vec![1, 2, 3, 4, 5],
+        };
         let Pdu::Unknown { pdu_type, data } = roundtrip(&pdu) else {
             panic!("expected Unknown back");
         };

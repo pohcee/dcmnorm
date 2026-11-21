@@ -215,9 +215,14 @@ impl FileMetaTable {
     /// Endian, per PS3.10 §7.1) to `to`.
     pub fn write_to<W: Write>(&self, mut to: W) -> Result<(), WriteError> {
         to.write_all(&[0u8; PREAMBLE_LEN])
-            .map_err(|source| WriteError::Io { source, context: "writing preamble" })?;
-        to.write_all(DICM_MAGIC)
-            .map_err(|source| WriteError::Io { source, context: "writing DICM magic" })?;
+            .map_err(|source| WriteError::Io {
+                source,
+                context: "writing preamble",
+            })?;
+        to.write_all(DICM_MAGIC).map_err(|source| WriteError::Io {
+            source,
+            context: "writing DICM magic",
+        })?;
 
         let ts = TransferSyntaxRegistry
             .get(dcmnorm_dictionary::uids::EXPLICIT_VR_LITTLE_ENDIAN)
@@ -296,9 +301,11 @@ impl FileMetaTable {
             .expect("Explicit VR Little Endian must be registered");
 
         let mut table = FileMetaTable::default();
-        let reader =
-            dcmnorm_parser::dataset::DataSetReader::new_with_ts(std::io::Cursor::new(meta_bytes), ts)
-                .map_err(|source| ReadError::Dataset { source })?;
+        let reader = dcmnorm_parser::dataset::DataSetReader::new_with_ts(
+            std::io::Cursor::new(meta_bytes),
+            ts,
+        )
+        .map_err(|source| ReadError::Dataset { source })?;
 
         // The meta group (beyond the group length element already consumed above) is always a
         // flat sequence of primitive elements (no sequences, no encapsulated pixel data) - fold
@@ -364,10 +371,11 @@ impl FileMetaTable {
 /// value is needed *before* we know how many further bytes belong to the meta group at all.
 fn read_group_length_element<R: Read>(from: &mut R) -> Result<u32, ReadError> {
     let mut header = [0u8; 8];
-    from.read_exact(&mut header).map_err(|source| ReadError::Io {
-        source,
-        context: "reading file meta group length element header",
-    })?;
+    from.read_exact(&mut header)
+        .map_err(|source| ReadError::Io {
+            source,
+            context: "reading file meta group length element header",
+        })?;
 
     let tag = Tag(
         u16::from_le_bytes([header[0], header[1]]),
@@ -386,10 +394,11 @@ fn read_group_length_element<R: Read>(from: &mut R) -> Result<u32, ReadError> {
     }
 
     let mut value = [0u8; 4];
-    from.read_exact(&mut value).map_err(|source| ReadError::Io {
-        source,
-        context: "reading file meta group length value",
-    })?;
+    from.read_exact(&mut value)
+        .map_err(|source| ReadError::Io {
+            source,
+            context: "reading file meta group length value",
+        })?;
     Ok(u32::from_le_bytes(value))
 }
 
@@ -473,7 +482,8 @@ impl FileMetaTableBuilder {
             let mut table = self.table;
             table.implementation_class_uid = crate::IMPLEMENTATION_CLASS_UID.to_owned();
             if table.implementation_version_name.is_none() {
-                table.implementation_version_name = Some(crate::IMPLEMENTATION_VERSION_NAME.to_owned());
+                table.implementation_version_name =
+                    Some(crate::IMPLEMENTATION_VERSION_NAME.to_owned());
             }
             return Ok(table);
         }
@@ -526,6 +536,9 @@ mod tests {
         bytes.extend_from_slice(&0u32.to_le_bytes()); // group length: 0
 
         let result = FileMetaTable::read_meta_group(std::io::Cursor::new(bytes));
-        assert!(result.is_ok(), "expected a zero-length meta group to parse as empty, got {result:?}");
+        assert!(
+            result.is_ok(),
+            "expected a zero-length meta group to parse as empty, got {result:?}"
+        );
     }
 }

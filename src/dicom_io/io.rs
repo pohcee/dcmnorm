@@ -64,7 +64,9 @@ pub fn jpeg2000_backend() -> Jpeg2000Backend {
     match jpeg2000_codec_preference() {
         Jpeg2000CodecPreference::OpenJpeg => Jpeg2000Backend::OpenJpeg,
         Jpeg2000CodecPreference::Auto | Jpeg2000CodecPreference::Kakadu => {
-            detect_jpeg2000_backend_from_ld_library_path(std::env::var_os("LD_LIBRARY_PATH").as_deref())
+            detect_jpeg2000_backend_from_ld_library_path(
+                std::env::var_os("LD_LIBRARY_PATH").as_deref(),
+            )
         }
     }
 }
@@ -104,7 +106,11 @@ pub fn video_engine_name_for(uid: &str) -> Option<&'static str> {
     if !is_mpeg_transfer_syntax(uid) {
         return None;
     }
-    Some(if cfg!(feature = "ffmpeg-codec-linked") { "builtin" } else { "ffmpeg" })
+    Some(if cfg!(feature = "ffmpeg-codec-linked") {
+        "builtin"
+    } else {
+        "ffmpeg"
+    })
 }
 
 /// One-line summary of the JPEG 2000 codec setup, for diagnostics: classic backend, the OpenHTJ2K
@@ -327,7 +333,10 @@ pub(crate) fn encapsulated_frame_fragment_range(
 /// those genuinely need the manual conversion downstream. Returns `None` when
 /// the flag can't be determined (falls back to the spec-conformant
 /// assumption that MCT was used).
-pub(super) fn jpeg2000_frame_uses_mct(object: &DefaultDicomObject, frame_index: usize) -> Option<bool> {
+pub(super) fn jpeg2000_frame_uses_mct(
+    object: &DefaultDicomObject,
+    frame_index: usize,
+) -> Option<bool> {
     dcmnorm_jpeg2000::codestream::uses_mct(jpeg2000_frame_codestream(object, frame_index)?)
 }
 
@@ -346,7 +355,10 @@ pub(super) fn jpeg2000_frame_component_count(
     object: &DefaultDicomObject,
     frame_index: usize,
 ) -> Option<u16> {
-    Some(dcmnorm_jpeg2000::codestream::read_siz(jpeg2000_frame_codestream(object, frame_index)?)?.components())
+    Some(
+        dcmnorm_jpeg2000::codestream::read_siz(jpeg2000_frame_codestream(object, frame_index)?)?
+            .components(),
+    )
 }
 
 /// The first fragment of a frame.
@@ -374,12 +386,14 @@ fn jpeg2000_frame_fragment(object: &DefaultDicomObject, frame_index: usize) -> O
 /// and component counts (e.g. "24-bit samples, more than BitsAllocated 8" on an 8-bit RGB
 /// secondary capture).
 fn jpeg2000_frame_codestream(object: &DefaultDicomObject, frame_index: usize) -> Option<&[u8]> {
-    dcmnorm_jpeg2000::codestream::locate(jpeg2000_frame_fragment(object, frame_index)?).map(|l| l.codestream)
+    dcmnorm_jpeg2000::codestream::locate(jpeg2000_frame_fragment(object, frame_index)?)
+        .map(|l| l.codestream)
 }
 
 /// The widest component precision (bit depth) in a frame's SIZ marker segment.
 fn jpeg2000_frame_precision(object: &DefaultDicomObject, frame_index: usize) -> Option<u16> {
-    let siz = dcmnorm_jpeg2000::codestream::read_siz(jpeg2000_frame_codestream(object, frame_index)?)?;
+    let siz =
+        dcmnorm_jpeg2000::codestream::read_siz(jpeg2000_frame_codestream(object, frame_index)?)?;
     Some(u16::from(siz.max_precision()))
 }
 
@@ -388,10 +402,18 @@ fn jpeg2000_frame_precision(object: &DefaultDicomObject, frame_index: usize) -> 
 /// has the codestream govern decoding: the decoded samples carry all of its bits, so a native
 /// result keeping BitsStored 8 would be read wrongly (644 as 132). A precision beyond
 /// BitsAllocated has no consistent native form; decoding reports that as an error.
-pub(super) fn jpeg2000_precision_mismatch(object: &DefaultDicomObject, frame_index: usize) -> Option<u16> {
+pub(super) fn jpeg2000_precision_mismatch(
+    object: &DefaultDicomObject,
+    frame_index: usize,
+) -> Option<u16> {
     let precision = jpeg2000_frame_precision(object, frame_index)?;
-    let bits_allocated = object.get(tags::BITS_ALLOCATED).and_then(|e| e.uint16().ok())?;
-    let bits_stored = object.get(tags::BITS_STORED).and_then(|e| e.uint16().ok()).unwrap_or(bits_allocated);
+    let bits_allocated = object
+        .get(tags::BITS_ALLOCATED)
+        .and_then(|e| e.uint16().ok())?;
+    let bits_stored = object
+        .get(tags::BITS_STORED)
+        .and_then(|e| e.uint16().ok())
+        .unwrap_or(bits_allocated);
     (precision > bits_stored).then_some(precision)
 }
 
@@ -401,7 +423,10 @@ pub(super) fn apply_jpeg2000_precision_correction(
     object: &mut DefaultDicomObject,
     precision: u16,
 ) -> Result<(), String> {
-    let bits_allocated = object.get(tags::BITS_ALLOCATED).and_then(|e| e.uint16().ok()).unwrap_or(0);
+    let bits_allocated = object
+        .get(tags::BITS_ALLOCATED)
+        .and_then(|e| e.uint16().ok())
+        .unwrap_or(0);
     if precision > bits_allocated {
         return Err(format!(
             "the JPEG 2000 codestream has {precision}-bit samples, more than BitsAllocated {bits_allocated}"
@@ -410,8 +435,16 @@ pub(super) fn apply_jpeg2000_precision_correction(
     jpeg2000_debug_log(format!(
         "codestream precision is {precision} bits, correcting BitsStored/HighBit before decode"
     ));
-    object.put(DataElement::new(tags::BITS_STORED, VR::US, PrimitiveValue::from(precision)));
-    object.put(DataElement::new(tags::HIGH_BIT, VR::US, PrimitiveValue::from(precision - 1)));
+    object.put(DataElement::new(
+        tags::BITS_STORED,
+        VR::US,
+        PrimitiveValue::from(precision),
+    ));
+    object.put(DataElement::new(
+        tags::HIGH_BIT,
+        VR::US,
+        PrimitiveValue::from(precision - 1),
+    ));
     Ok(())
 }
 
@@ -525,13 +558,14 @@ fn read_dicom_dataset_without_meta(bytes: &[u8]) -> Option<DefaultDicomObject> {
             continue;
         };
 
-        let Ok(dataset) = InMemDicomObject::read_dataset_with_ts(Cursor::new(bytes), transfer_syntax)
+        let Ok(dataset) =
+            InMemDicomObject::read_dataset_with_ts(Cursor::new(bytes), transfer_syntax)
         else {
             continue;
         };
 
-        if let Ok(file_object) = dataset
-            .with_meta(FileMetaTableBuilder::new().transfer_syntax(transfer_syntax_uid))
+        if let Ok(file_object) =
+            dataset.with_meta(FileMetaTableBuilder::new().transfer_syntax(transfer_syntax_uid))
         {
             return Some(file_object);
         }
@@ -555,7 +589,12 @@ where
     options
         .clone()
         .open_file(path_ref)
-        .or_else(|error| options.flexible_decoding(true).open_file(path_ref).map_err(|_| error))
+        .or_else(|error| {
+            options
+                .flexible_decoding(true)
+                .open_file(path_ref)
+                .map_err(|_| error)
+        })
         .or_else(|error| match std::fs::read(path_ref) {
             Ok(bytes) => read_dicom_dataset_without_meta(&bytes).ok_or(error),
             Err(_) => Err(error),
@@ -569,7 +608,12 @@ pub fn read_dicom_bytes(bytes: impl AsRef<[u8]>) -> Result<DefaultDicomObject, R
     options
         .clone()
         .from_reader(Cursor::new(bytes))
-        .or_else(|error| options.flexible_decoding(true).from_reader(Cursor::new(bytes)).map_err(|_| error))
+        .or_else(|error| {
+            options
+                .flexible_decoding(true)
+                .from_reader(Cursor::new(bytes))
+                .map_err(|_| error)
+        })
         .or_else(|error| read_dicom_dataset_without_meta(bytes).ok_or(error))
 }
 
@@ -599,10 +643,11 @@ where
 {
     let path = path.as_ref();
     let _scope = perf::scope("io.read_dicom_file_deferring_bulk_data");
-    let mut file = std::io::BufReader::new(std::fs::File::open(path).map_err(|source| ReadError::Io {
-        source,
-        context: "opening file",
-    })?);
+    let mut file =
+        std::io::BufReader::new(std::fs::File::open(path).map_err(|source| ReadError::Io {
+            source,
+            context: "opening file",
+        })?);
     if dcmnorm_object::FileMetaTable::read_from(&mut file)?.is_none() {
         return Ok(None);
     }
@@ -618,7 +663,9 @@ where
 /// trailing partial element doesn't parse to its file bytes, so a scan of the source never
 /// referenced it either).
 pub(crate) fn defer_bulk_value(header: &dcmnorm_core::header::DataElementHeader) -> bool {
-    let Some(length) = header.len.get() else { return false };
+    let Some(length) = header.len.get() else {
+        return false;
+    };
     let element_size = match header.vr {
         VR::OB | VR::UN => 1,
         VR::OW => 2,
@@ -757,8 +804,13 @@ fn probe_dataset_without_meta_for_sop_class_uid(source: &[u8], eof: bool) -> Dic
     ];
 
     for syntax in syntaxes {
-        match probe_dataset_for_sop_class_uid(source, 0, syntax.explicit_vr, syntax.little_endian, eof)
-        {
+        match probe_dataset_for_sop_class_uid(
+            source,
+            0,
+            syntax.explicit_vr,
+            syntax.little_endian,
+            eof,
+        ) {
             DicomProbeStatus::Found => return DicomProbeStatus::Found,
             DicomProbeStatus::NeedMore => any_need_more = true,
             DicomProbeStatus::NotFound | DicomProbeStatus::Invalid => {}
@@ -780,7 +832,8 @@ fn probe_dataset_for_sop_class_uid(
     eof: bool,
 ) -> DicomProbeStatus {
     while position + 8 <= source.len() {
-        let header = match parse_probe_element_header(source, position, explicit_vr, little_endian) {
+        let header = match parse_probe_element_header(source, position, explicit_vr, little_endian)
+        {
             Ok(header) => header,
             Err(ProbeParseError::NeedMore) => return DicomProbeStatus::NeedMore,
         };
@@ -810,7 +863,12 @@ fn probe_dataset_for_sop_class_uid(
             }
             end
         } else {
-            match skip_probe_undefined_length_value(source, value_offset, explicit_vr, little_endian) {
+            match skip_probe_undefined_length_value(
+                source,
+                value_offset,
+                explicit_vr,
+                little_endian,
+            ) {
                 Ok(end_of_value) => end_of_value + 8,
                 Err(ProbeParseError::NeedMore) => return DicomProbeStatus::NeedMore,
             }
@@ -936,14 +994,22 @@ fn parse_probe_element_header(
     }
 }
 
-fn read_probe_tag(source: &[u8], position: usize, little_endian: bool) -> Result<Tag, ProbeParseError> {
+fn read_probe_tag(
+    source: &[u8],
+    position: usize,
+    little_endian: bool,
+) -> Result<Tag, ProbeParseError> {
     Ok(Tag(
         read_probe_u16(source, position, little_endian)?,
         read_probe_u16(source, position + 2, little_endian)?,
     ))
 }
 
-fn read_probe_u16(source: &[u8], position: usize, little_endian: bool) -> Result<u16, ProbeParseError> {
+fn read_probe_u16(
+    source: &[u8],
+    position: usize,
+    little_endian: bool,
+) -> Result<u16, ProbeParseError> {
     let Some(bytes) = source.get(position..position + 2) else {
         return Err(ProbeParseError::NeedMore);
     };
@@ -955,7 +1021,11 @@ fn read_probe_u16(source: &[u8], position: usize, little_endian: bool) -> Result
     })
 }
 
-fn read_probe_u32(source: &[u8], position: usize, little_endian: bool) -> Result<u32, ProbeParseError> {
+fn read_probe_u32(
+    source: &[u8],
+    position: usize,
+    little_endian: bool,
+) -> Result<u32, ProbeParseError> {
     let Some(bytes) = source.get(position..position + 4) else {
         return Err(ProbeParseError::NeedMore);
     };
@@ -1169,7 +1239,8 @@ fn can_decode_pixel_data<D, R, W>(
     let uid = ts.uid();
     matches!(ts.codec(), Codec::EncapsulatedPixelData(Some(_), _))
         || (kakadu_enabled && is_jpeg2000_transfer_syntax(uid))
-        || ((cfg!(feature = "ffmpeg-codec-linked") || ffmpeg_enabled) && is_mpeg_transfer_syntax(uid))
+        || ((cfg!(feature = "ffmpeg-codec-linked") || ffmpeg_enabled)
+            && is_mpeg_transfer_syntax(uid))
         || (cfg!(feature = "jpeg-ls-codec") && is_jpeg_ls_transfer_syntax(uid))
         || (cfg!(feature = "jpeg-xl-codec") && is_jpeg_xl_transfer_syntax(uid))
 }
@@ -1187,7 +1258,8 @@ fn can_encode_pixel_data<D, R, W>(
         // Only classic JPEG2000 (.90/.91) can be encoded, and only via the OpenJPEG backend -
         // see `encode_jpeg2000_pixel_data`'s doc comment for why Kakadu and Part 2
         // multi-component (.92/.93) aren't included.
-        return cfg!(feature = "jpeg2000-openjpeg-encode") && is_classic_jpeg2000_encode_transfer_syntax(uid);
+        return cfg!(feature = "jpeg2000-openjpeg-encode")
+            && is_classic_jpeg2000_encode_transfer_syntax(uid);
     }
 
     matches!(ts.codec(), Codec::EncapsulatedPixelData(_, Some(_)))
@@ -1238,12 +1310,18 @@ fn encode_jpeg2000_pixel_data(
         .get(tags::COLUMNS)
         .and_then(|e| e.uint16().ok())
         .ok_or_else(|| "missing Columns attribute".to_owned())?;
-    let samples_per_pixel = object.get(tags::SAMPLES_PER_PIXEL).and_then(|e| e.uint16().ok()).unwrap_or(1);
+    let samples_per_pixel = object
+        .get(tags::SAMPLES_PER_PIXEL)
+        .and_then(|e| e.uint16().ok())
+        .unwrap_or(1);
     let bits_allocated = object
         .get(tags::BITS_ALLOCATED)
         .and_then(|e| e.uint16().ok())
         .ok_or_else(|| "missing BitsAllocated attribute".to_owned())?;
-    let bits_stored = object.get(tags::BITS_STORED).and_then(|e| e.uint16().ok()).unwrap_or(bits_allocated);
+    let bits_stored = object
+        .get(tags::BITS_STORED)
+        .and_then(|e| e.uint16().ok())
+        .unwrap_or(bits_allocated);
     let is_signed = object
         .get(tags::PIXEL_REPRESENTATION)
         .and_then(|e| e.uint16().ok())
@@ -1257,7 +1335,9 @@ fn encode_jpeg2000_pixel_data(
         .max(1);
 
     if bits_allocated != 8 && bits_allocated != 16 {
-        return Err(format!("unsupported BitsAllocated for JPEG2000 encoding: {bits_allocated}"));
+        return Err(format!(
+            "unsupported BitsAllocated for JPEG2000 encoding: {bits_allocated}"
+        ));
     }
     let bytes_per_sample = if bits_allocated <= 8 { 1usize } else { 2usize };
     let frame_len =
@@ -1282,7 +1362,12 @@ fn encode_jpeg2000_pixel_data(
         // the encoder takes interleaved samples (pohcee/dcmnorm#30)
         let interleaved;
         let frame_bytes = if planar {
-            interleaved = interleave_planar_frame(frame_bytes, pixels, usize::from(samples_per_pixel), bytes_per_sample);
+            interleaved = interleave_planar_frame(
+                frame_bytes,
+                pixels,
+                usize::from(samples_per_pixel),
+                bytes_per_sample,
+            );
             interleaved.as_slice()
         } else {
             frame_bytes
@@ -1307,11 +1392,19 @@ fn encode_jpeg2000_pixel_data(
 /// Whether native multi-sample pixel data is stored colour-by-plane (PlanarConfiguration 1).
 fn is_planar(object: &DefaultDicomObject, samples_per_pixel: u16) -> bool {
     samples_per_pixel > 1
-        && object.get(tags::PLANAR_CONFIGURATION).and_then(|e| e.uint16().ok()) == Some(1)
+        && object
+            .get(tags::PLANAR_CONFIGURATION)
+            .and_then(|e| e.uint16().ok())
+            == Some(1)
 }
 
 /// One frame of colour-by-plane samples (`R..R G..G B..B`) as interleaved pixels (`RGB RGB ..`).
-fn interleave_planar_frame(frame: &[u8], pixels: usize, samples: usize, bytes_per_sample: usize) -> Vec<u8> {
+fn interleave_planar_frame(
+    frame: &[u8],
+    pixels: usize,
+    samples: usize,
+    bytes_per_sample: usize,
+) -> Vec<u8> {
     let mut out = vec![0u8; pixels * samples * bytes_per_sample];
     for c in 0..samples {
         for i in 0..pixels {
@@ -1326,9 +1419,16 @@ fn interleave_planar_frame(frame: &[u8], pixels: usize, samples: usize, bytes_pe
 /// After encoding to a JPEG 2000 family syntax, a colour image's pixel attributes describe
 /// interleaved samples: PlanarConfiguration is 0 (PS3.5 8.2.4 / 8.2.14).
 fn set_planar_configuration_interleaved(object: &mut DefaultDicomObject) {
-    let samples = object.get(tags::SAMPLES_PER_PIXEL).and_then(|e| e.uint16().ok()).unwrap_or(1);
+    let samples = object
+        .get(tags::SAMPLES_PER_PIXEL)
+        .and_then(|e| e.uint16().ok())
+        .unwrap_or(1);
     if samples > 1 {
-        object.put(DataElement::new(tags::PLANAR_CONFIGURATION, VR::US, PrimitiveValue::from(0u16)));
+        object.put(DataElement::new(
+            tags::PLANAR_CONFIGURATION,
+            VR::US,
+            PrimitiveValue::from(0u16),
+        ));
     }
 }
 
@@ -1352,12 +1452,18 @@ fn encode_htj2k_pixel_data(object: &DefaultDicomObject) -> Result<Vec<Vec<u8>>, 
         .get(tags::COLUMNS)
         .and_then(|e| e.uint16().ok())
         .ok_or_else(|| "missing Columns attribute".to_owned())?;
-    let samples_per_pixel = object.get(tags::SAMPLES_PER_PIXEL).and_then(|e| e.uint16().ok()).unwrap_or(1);
+    let samples_per_pixel = object
+        .get(tags::SAMPLES_PER_PIXEL)
+        .and_then(|e| e.uint16().ok())
+        .unwrap_or(1);
     let bits_allocated = object
         .get(tags::BITS_ALLOCATED)
         .and_then(|e| e.uint16().ok())
         .ok_or_else(|| "missing BitsAllocated attribute".to_owned())?;
-    let bits_stored = object.get(tags::BITS_STORED).and_then(|e| e.uint16().ok()).unwrap_or(bits_allocated);
+    let bits_stored = object
+        .get(tags::BITS_STORED)
+        .and_then(|e| e.uint16().ok())
+        .unwrap_or(bits_allocated);
     let is_signed = object
         .get(tags::PIXEL_REPRESENTATION)
         .and_then(|e| e.uint16().ok())
@@ -1371,10 +1477,14 @@ fn encode_htj2k_pixel_data(object: &DefaultDicomObject) -> Result<Vec<Vec<u8>>, 
         .max(1);
 
     if bits_allocated != 8 && bits_allocated != 16 {
-        return Err(format!("unsupported BitsAllocated for HTJ2K encoding: {bits_allocated}"));
+        return Err(format!(
+            "unsupported BitsAllocated for HTJ2K encoding: {bits_allocated}"
+        ));
     }
     if bits_stored == 0 || bits_stored > bits_allocated {
-        return Err(format!("unsupported BitsStored {bits_stored} for BitsAllocated {bits_allocated}"));
+        return Err(format!(
+            "unsupported BitsStored {bits_stored} for BitsAllocated {bits_allocated}"
+        ));
     }
     let bytes_per_sample = usize::from(bits_allocated / 8);
     let spp = usize::from(samples_per_pixel);
@@ -1506,7 +1616,9 @@ fn decode_jpeg2000_with_kakadu(object: &DefaultDicomObject) -> Result<Vec<u8>, S
     )
 }
 
-fn is_encapsulated_transfer_syntax<D, R, W>(ts: &dcmnorm_encoding::TransferSyntax<D, R, W>) -> bool {
+fn is_encapsulated_transfer_syntax<D, R, W>(
+    ts: &dcmnorm_encoding::TransferSyntax<D, R, W>,
+) -> bool {
     matches!(ts.codec(), Codec::EncapsulatedPixelData(_, _))
 }
 
@@ -1589,7 +1701,10 @@ fn decode_pixel_data(
         jpeg2000_debug_log("attempting Kakadu decode");
         match decode_jpeg2000_with_kakadu(object) {
             Ok(decoded) => {
-                jpeg2000_debug_log(format!("Kakadu decode succeeded ({} decoded bytes)", decoded.len()));
+                jpeg2000_debug_log(format!(
+                    "Kakadu decode succeeded ({} decoded bytes)",
+                    decoded.len()
+                ));
                 replace_with_native_pixel_data(object, decoded)?;
                 normalize_decoded_pixel_data_attributes(object, source_ts.uid(), jpeg2000_uses_mct);
                 object.meta_mut().set_transfer_syntax(
@@ -1755,7 +1870,10 @@ fn decode_pixel_data(
     }
 
     if is_jpeg2000_transfer_syntax(source_ts.uid()) {
-        jpeg2000_debug_log(format!("codec registry reader decode succeeded ({} decoded bytes)", decoded.len()));
+        jpeg2000_debug_log(format!(
+            "codec registry reader decode succeeded ({} decoded bytes)",
+            decoded.len()
+        ));
     }
 
     replace_with_native_pixel_data(object, decoded)?;
@@ -2085,7 +2203,7 @@ fn bytes_to_words<const N: usize, T>(
     convert: fn([u8; N]) -> T,
     bits_allocated: u16,
 ) -> Result<Vec<T>, TranscodeError> {
-    if bytes.len() % N != 0 {
+    if !bytes.len().is_multiple_of(N) {
         return Err(TranscodeError::InvalidDecodedPixelDataLength {
             bits_allocated,
             length: bytes.len(),
@@ -2130,8 +2248,8 @@ fn normalize_decoded_pixel_data_attributes(
         // Multiple Component Transformation, hand back raw un-converted YBR
         // component samples. See jpeg2000_frame_uses_mct for why JPEG 2000
         // otherwise already produces RGB after standard decompression.
-        let preserves_ybr_on_decode =
-            is_rle || (is_jpeg2000_transfer_syntax(source_ts_uid) && jpeg2000_uses_mct == Some(false));
+        let preserves_ybr_on_decode = is_rle
+            || (is_jpeg2000_transfer_syntax(source_ts_uid) && jpeg2000_uses_mct == Some(false));
         let is_ybr = current_photometric.starts_with("YBR_");
         let target_photometric = if preserves_ybr_on_decode && is_ybr {
             current_photometric
@@ -2214,9 +2332,11 @@ mod tests {
         let pixels: Vec<i32> = (0..width * height).map(|i| (i % 251) as i32).collect();
 
         let mut cs = Codestream::new();
-        cs.access_siz_mut().set_image_extent(Point::new(width, height));
+        cs.access_siz_mut()
+            .set_image_extent(Point::new(width, height));
         cs.access_siz_mut().set_num_components(1);
-        cs.access_siz_mut().set_comp_info(0, Point::new(1, 1), 8, false);
+        cs.access_siz_mut()
+            .set_comp_info(0, Point::new(1, 1), 8, false);
         cs.access_siz_mut().set_tile_size(Size::new(width, height));
         cs.access_cod_mut().set_num_decomposition(0);
         cs.access_cod_mut().set_reversible(true);
@@ -2227,7 +2347,8 @@ mod tests {
         cs.write_headers(&mut outfile, &[]).unwrap();
         for y in 0..height as usize {
             let start = y * width as usize;
-            cs.exchange(&pixels[start..start + width as usize], 0).unwrap();
+            cs.exchange(&pixels[start..start + width as usize], 0)
+                .unwrap();
         }
         cs.flush(&mut outfile).unwrap();
         let encoded = outfile.get_data().to_vec();
@@ -2238,23 +2359,62 @@ mod tests {
             .unwrap();
         let mut object = DefaultDicomObject::new_empty_with_meta(meta);
         for element in [
-            DataElement::new(dcmnorm_dictionary::tags::ROWS, VR::US, PrimitiveValue::from(height as u16)),
-            DataElement::new(dcmnorm_dictionary::tags::COLUMNS, VR::US, PrimitiveValue::from(width as u16)),
-            DataElement::new(dcmnorm_dictionary::tags::SAMPLES_PER_PIXEL, VR::US, PrimitiveValue::from(1u16)),
-            DataElement::new(dcmnorm_dictionary::tags::BITS_ALLOCATED, VR::US, PrimitiveValue::from(8u16)),
-            DataElement::new(dcmnorm_dictionary::tags::BITS_STORED, VR::US, PrimitiveValue::from(8u16)),
-            DataElement::new(dcmnorm_dictionary::tags::HIGH_BIT, VR::US, PrimitiveValue::from(7u16)),
-            DataElement::new(dcmnorm_dictionary::tags::PIXEL_REPRESENTATION, VR::US, PrimitiveValue::from(0u16)),
-            DataElement::new(dcmnorm_dictionary::tags::PHOTOMETRIC_INTERPRETATION, VR::CS, PrimitiveValue::from("MONOCHROME2".to_owned())),
-            DataElement::new(dcmnorm_dictionary::tags::PIXEL_DATA, VR::OB, PixelFragmentSequence::new(vec![0], vec![encoded])),
+            DataElement::new(
+                dcmnorm_dictionary::tags::ROWS,
+                VR::US,
+                PrimitiveValue::from(height as u16),
+            ),
+            DataElement::new(
+                dcmnorm_dictionary::tags::COLUMNS,
+                VR::US,
+                PrimitiveValue::from(width as u16),
+            ),
+            DataElement::new(
+                dcmnorm_dictionary::tags::SAMPLES_PER_PIXEL,
+                VR::US,
+                PrimitiveValue::from(1u16),
+            ),
+            DataElement::new(
+                dcmnorm_dictionary::tags::BITS_ALLOCATED,
+                VR::US,
+                PrimitiveValue::from(8u16),
+            ),
+            DataElement::new(
+                dcmnorm_dictionary::tags::BITS_STORED,
+                VR::US,
+                PrimitiveValue::from(8u16),
+            ),
+            DataElement::new(
+                dcmnorm_dictionary::tags::HIGH_BIT,
+                VR::US,
+                PrimitiveValue::from(7u16),
+            ),
+            DataElement::new(
+                dcmnorm_dictionary::tags::PIXEL_REPRESENTATION,
+                VR::US,
+                PrimitiveValue::from(0u16),
+            ),
+            DataElement::new(
+                dcmnorm_dictionary::tags::PHOTOMETRIC_INTERPRETATION,
+                VR::CS,
+                PrimitiveValue::from("MONOCHROME2".to_owned()),
+            ),
+            DataElement::new(
+                dcmnorm_dictionary::tags::PIXEL_DATA,
+                VR::OB,
+                PixelFragmentSequence::new(vec![0], vec![encoded]),
+            ),
         ] {
             object.put(element);
         }
 
         // Default `Auto` preference - the same path a real caller with no special configuration
         // would take. Must complete (not hang) and must decode correctly via OpenHTJ2K.
-        let transcoded = super::transcode_dcmnorm_object(&object, dcmnorm_dictionary::uids::EXPLICIT_VR_LITTLE_ENDIAN)
-            .expect("HTJ2K decode should succeed via OpenHTJ2K");
+        let transcoded = super::transcode_dcmnorm_object(
+            &object,
+            dcmnorm_dictionary::uids::EXPLICIT_VR_LITTLE_ENDIAN,
+        )
+        .expect("HTJ2K decode should succeed via OpenHTJ2K");
         let decoded = transcoded
             .element(dcmnorm_dictionary::tags::PIXEL_DATA)
             .unwrap()
@@ -2277,20 +2437,33 @@ mod tests {
     fn deflated_explicit_vr_little_endian_reads_and_round_trips() {
         let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test/files/deflated.dcm");
         let mut object = read_dicom_file(&fixture).expect("deflated.dcm should read");
-        assert_eq!(object.meta().transfer_syntax.trim_end_matches('\0'), "1.2.840.10008.1.2.1.99");
         assert_eq!(
-            object.get(dcmnorm_dictionary::tags::MODALITY).and_then(|e| e.to_str().ok()).as_deref(),
+            object.meta().transfer_syntax.trim_end_matches('\0'),
+            "1.2.840.10008.1.2.1.99"
+        );
+        assert_eq!(
+            object
+                .get(dcmnorm_dictionary::tags::MODALITY)
+                .and_then(|e| e.to_str().ok())
+                .as_deref(),
             Some("OT")
         );
 
         let out = std::env::temp_dir().join(format!(
             "dcmnorm-deflate-roundtrip-{}.dcm",
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
         write_dicom_file(&mut object, &out).expect("writing a deflated object should succeed");
-        let reread = read_dicom_file(&out).expect("re-reading the just-written deflated file should succeed");
+        let reread = read_dicom_file(&out)
+            .expect("re-reading the just-written deflated file should succeed");
         assert_eq!(
-            reread.get(dcmnorm_dictionary::tags::MODALITY).and_then(|e| e.to_str().ok()).as_deref(),
+            reread
+                .get(dcmnorm_dictionary::tags::MODALITY)
+                .and_then(|e| e.to_str().ok())
+                .as_deref(),
             Some("OT")
         );
         let _ = std::fs::remove_file(&out);
@@ -2309,10 +2482,19 @@ mod tests {
             .read_until(dcmnorm_core::Tag(0x0020, 0x000F))
             .open_file(&fixture)
             .expect("deflated.dcm should read up to the stop tag");
-        assert!(object.get(dcmnorm_dictionary::tags::SOP_INSTANCE_UID).is_some());
-        assert!(object.get(dcmnorm_dictionary::tags::STUDY_INSTANCE_UID).is_some());
-        assert!(object.get(dcmnorm_dictionary::tags::SERIES_INSTANCE_UID).is_some());
-        assert!(object.get(dcmnorm_dictionary::tags::PIXEL_DATA).is_none(), "should stop before PixelData");
+        assert!(object
+            .get(dcmnorm_dictionary::tags::SOP_INSTANCE_UID)
+            .is_some());
+        assert!(object
+            .get(dcmnorm_dictionary::tags::STUDY_INSTANCE_UID)
+            .is_some());
+        assert!(object
+            .get(dcmnorm_dictionary::tags::SERIES_INSTANCE_UID)
+            .is_some());
+        assert!(
+            object.get(dcmnorm_dictionary::tags::PIXEL_DATA).is_none(),
+            "should stop before PixelData"
+        );
     }
 
     fn htj2k_test_object(
@@ -2336,23 +2518,55 @@ mod tests {
             .build()
             .unwrap();
         let mut object = dcmnorm_object::DefaultDicomObject::new_empty_with_meta(meta);
-        let photometric = if samples_per_pixel == 3 { "RGB" } else { "MONOCHROME2" };
+        let photometric = if samples_per_pixel == 3 {
+            "RGB"
+        } else {
+            "MONOCHROME2"
+        };
         let vr = if bits_allocated > 8 { VR::OW } else { VR::OB };
         for element in [
             DataElement::new(tags::ROWS, VR::US, PrimitiveValue::from(rows)),
             DataElement::new(tags::COLUMNS, VR::US, PrimitiveValue::from(cols)),
-            DataElement::new(tags::SAMPLES_PER_PIXEL, VR::US, PrimitiveValue::from(samples_per_pixel)),
-            DataElement::new(tags::BITS_ALLOCATED, VR::US, PrimitiveValue::from(bits_allocated)),
+            DataElement::new(
+                tags::SAMPLES_PER_PIXEL,
+                VR::US,
+                PrimitiveValue::from(samples_per_pixel),
+            ),
+            DataElement::new(
+                tags::BITS_ALLOCATED,
+                VR::US,
+                PrimitiveValue::from(bits_allocated),
+            ),
             DataElement::new(tags::BITS_STORED, VR::US, PrimitiveValue::from(bits_stored)),
-            DataElement::new(tags::HIGH_BIT, VR::US, PrimitiveValue::from(bits_stored - 1)),
-            DataElement::new(tags::PIXEL_REPRESENTATION, VR::US, PrimitiveValue::from(u16::from(signed))),
-            DataElement::new(tags::PHOTOMETRIC_INTERPRETATION, VR::CS, PrimitiveValue::from(photometric.to_owned())),
-            DataElement::new(tags::NUMBER_OF_FRAMES, VR::IS, PrimitiveValue::from(frames.to_string())),
+            DataElement::new(
+                tags::HIGH_BIT,
+                VR::US,
+                PrimitiveValue::from(bits_stored - 1),
+            ),
+            DataElement::new(
+                tags::PIXEL_REPRESENTATION,
+                VR::US,
+                PrimitiveValue::from(u16::from(signed)),
+            ),
+            DataElement::new(
+                tags::PHOTOMETRIC_INTERPRETATION,
+                VR::CS,
+                PrimitiveValue::from(photometric.to_owned()),
+            ),
+            DataElement::new(
+                tags::NUMBER_OF_FRAMES,
+                VR::IS,
+                PrimitiveValue::from(frames.to_string()),
+            ),
         ] {
             object.put(element);
         }
         if samples_per_pixel == 3 {
-            object.put(DataElement::new(tags::PLANAR_CONFIGURATION, VR::US, PrimitiveValue::from(0u16)));
+            object.put(DataElement::new(
+                tags::PLANAR_CONFIGURATION,
+                VR::US,
+                PrimitiveValue::from(0u16),
+            ));
         }
         object.put(DataElement::new(tags::PIXEL_DATA, vr, pixel_data));
         object
@@ -2373,7 +2587,13 @@ mod tests {
 
         let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("test/files/htj2k_conformance");
         for (file, rows, cols, spp, expected) in [
-            ("ds0_ht_02_b11.j2k", 126u16, 64u16, 1u16, 0x3406_5ee0_6095_3dedu64),
+            (
+                "ds0_ht_02_b11.j2k",
+                126u16,
+                64u16,
+                1u16,
+                0x3406_5ee0_6095_3dedu64,
+            ),
             ("ds0_ht_10_b11.j2k", 64, 64, 3, 0x3dcd_ad4d_ac4e_848e),
         ] {
             let codestream = std::fs::read(dir.join(file)).unwrap();
@@ -2392,10 +2612,21 @@ mod tests {
                 1,
                 PixelFragmentSequence::new(vec![0], vec![codestream]).into(),
             );
-            let decoded = super::transcode_dcmnorm_object(&object, dcmnorm_dictionary::uids::EXPLICIT_VR_LITTLE_ENDIAN)
-                .unwrap_or_else(|e| panic!("{file}: {e}"));
-            let bytes = decoded.element(dcmnorm_dictionary::tags::PIXEL_DATA).unwrap().to_bytes().unwrap();
-            assert_eq!(bytes.len(), usize::from(rows) * usize::from(cols) * usize::from(spp), "{file}");
+            let decoded = super::transcode_dcmnorm_object(
+                &object,
+                dcmnorm_dictionary::uids::EXPLICIT_VR_LITTLE_ENDIAN,
+            )
+            .unwrap_or_else(|e| panic!("{file}: {e}"));
+            let bytes = decoded
+                .element(dcmnorm_dictionary::tags::PIXEL_DATA)
+                .unwrap()
+                .to_bytes()
+                .unwrap();
+            assert_eq!(
+                bytes.len(),
+                usize::from(rows) * usize::from(cols) * usize::from(spp),
+                "{file}"
+            );
             assert_eq!(fnv1a64(&bytes), expected, "{file}");
         }
     }
@@ -2420,7 +2651,10 @@ mod tests {
             let values: Vec<u32> = (0..samples as u32)
                 .map(|i| (i.wrapping_mul(2_654_435_761) >> 9) & mask)
                 .collect();
-            let (pixel_data, raw_bytes): (dcmnorm_core::value::Value<dcmnorm_object::InMemDicomObject, Vec<u8>>, Vec<u8>) = if bits_allocated == 8 {
+            let (pixel_data, raw_bytes): (
+                dcmnorm_core::value::Value<dcmnorm_object::InMemDicomObject, Vec<u8>>,
+                Vec<u8>,
+            ) = if bits_allocated == 8 {
                 let bytes: Vec<u8> = values.iter().map(|&v| v as u8).collect();
                 (PrimitiveValue::from(bytes.clone()).into(), bytes)
             } else {
@@ -2452,17 +2686,32 @@ mod tests {
             );
             for target in ["1.2.840.10008.1.2.4.201", "1.2.840.10008.1.2.4.203"] {
                 let label = format!("{rows}x{cols}x{spp} {bits_stored}/{bits_allocated}-bit signed={signed} frames={frames} -> {target}");
-                let encoded = super::transcode_dcmnorm_object(&native, target).unwrap_or_else(|e| panic!("{label}: {e}"));
-                let fragments = encoded.element(tags::PIXEL_DATA).unwrap().fragments().map(|f| f.len());
+                let encoded = super::transcode_dcmnorm_object(&native, target)
+                    .unwrap_or_else(|e| panic!("{label}: {e}"));
+                let fragments = encoded
+                    .element(tags::PIXEL_DATA)
+                    .unwrap()
+                    .fragments()
+                    .map(|f| f.len());
                 assert_eq!(fragments, Some(frames), "{label}: one fragment per frame");
                 assert_eq!(
-                    encoded.element(tags::PHOTOMETRIC_INTERPRETATION).unwrap().to_str().unwrap().trim(),
+                    encoded
+                        .element(tags::PHOTOMETRIC_INTERPRETATION)
+                        .unwrap()
+                        .to_str()
+                        .unwrap()
+                        .trim(),
                     if spp == 3 { "RGB" } else { "MONOCHROME2" },
                     "{label}"
                 );
-                let decoded = super::transcode_dcmnorm_object(&encoded, uids::EXPLICIT_VR_LITTLE_ENDIAN)
-                    .unwrap_or_else(|e| panic!("{label}: decode: {e}"));
-                let bytes = decoded.element(tags::PIXEL_DATA).unwrap().to_bytes().unwrap();
+                let decoded =
+                    super::transcode_dcmnorm_object(&encoded, uids::EXPLICIT_VR_LITTLE_ENDIAN)
+                        .unwrap_or_else(|e| panic!("{label}: decode: {e}"));
+                let bytes = decoded
+                    .element(tags::PIXEL_DATA)
+                    .unwrap()
+                    .to_bytes()
+                    .unwrap();
                 assert_eq!(bytes.as_ref(), raw_bytes.as_slice(), "{label}");
             }
         }
@@ -2471,15 +2720,29 @@ mod tests {
     #[test]
     fn htj2k_capabilities_are_reported_accurately() {
         let support = super::list_transfer_syntax_support();
-        let entry = |uid: &str| support.iter().find(|entry| entry.uid == uid).unwrap().clone();
+        let entry = |uid: &str| {
+            support
+                .iter()
+                .find(|entry| entry.uid == uid)
+                .unwrap()
+                .clone()
+        };
         for uid in ["1.2.840.10008.1.2.4.201", "1.2.840.10008.1.2.4.203"] {
             let entry = entry(uid);
-            assert!(entry.can_decode_pixel_data && entry.can_encode_pixel_data && entry.can_transcode_to(), "{uid}");
+            assert!(
+                entry.can_decode_pixel_data
+                    && entry.can_encode_pixel_data
+                    && entry.can_transcode_to(),
+                "{uid}"
+            );
             assert!(super::can_encode_transfer_syntax(uid), "{uid}");
         }
         // RPCL Options: decode only (its profile needs PLT/TLM markers OpenHTJ2K doesn't write).
         let rpcl = entry("1.2.840.10008.1.2.4.202");
         assert!(rpcl.can_decode_pixel_data && !rpcl.can_encode_pixel_data);
-        assert_eq!(super::jpeg2000_engine_name_for("1.2.840.10008.1.2.4.201"), "openhtj2k");
+        assert_eq!(
+            super::jpeg2000_engine_name_for("1.2.840.10008.1.2.4.201"),
+            "openhtj2k"
+        );
     }
 }

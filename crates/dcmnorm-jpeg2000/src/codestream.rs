@@ -9,7 +9,9 @@
 //! nonsense as the component count or precision.
 
 /// The JP2 signature box: length 12, type `jP  `, content `0D0A870A`.
-pub const JP2_SIGNATURE: [u8; 12] = [0x00, 0x00, 0x00, 0x0C, 0x6A, 0x50, 0x20, 0x20, 0x0D, 0x0A, 0x87, 0x0A];
+pub const JP2_SIGNATURE: [u8; 12] = [
+    0x00, 0x00, 0x00, 0x0C, 0x6A, 0x50, 0x20, 0x20, 0x0D, 0x0A, 0x87, 0x0A,
+];
 const SOC: [u8; 2] = [0xFF, 0x4F];
 const SIZ: [u8; 2] = [0xFF, 0x51];
 const COD: u8 = 0x52;
@@ -39,7 +41,10 @@ pub struct Located<'a> {
 /// before `jp2c` or its payload does not start with SOC.
 pub fn locate(fragment: &[u8]) -> Option<Located<'_>> {
     if fragment.starts_with(&SOC) {
-        return Some(Located { container: Container::Codestream, codestream: fragment });
+        return Some(Located {
+            container: Container::Codestream,
+            codestream: fragment,
+        });
     }
     if !fragment.starts_with(&JP2_SIGNATURE) {
         return None;
@@ -65,11 +70,14 @@ pub fn locate(fragment: &[u8]) -> Option<Located<'_>> {
         let payload_start = pos + header as usize;
         if kind == b"jp2c" {
             // a fragment may hold only the start of the box
-            let end = (pos as u64).saturating_add(length).min(fragment.len() as u64) as usize;
+            let end = (pos as u64)
+                .saturating_add(length)
+                .min(fragment.len() as u64) as usize;
             let codestream = fragment.get(payload_start..end)?;
-            return codestream
-                .starts_with(&SOC)
-                .then_some(Located { container: Container::Jp2, codestream });
+            return codestream.starts_with(&SOC).then_some(Located {
+                container: Container::Jp2,
+                codestream,
+            });
         }
         pos = usize::try_from((pos as u64).checked_add(length)?).ok()?;
     }
@@ -108,7 +116,9 @@ pub fn read_siz(codestream: &[u8]) -> Option<Siz> {
     let segment = &codestream[4..];
     let lsiz = usize::from(u16::from_be_bytes(segment.get(0..2)?.try_into().ok()?));
     let u32_at = |offset: usize| -> Option<u32> {
-        Some(u32::from_be_bytes(segment.get(offset..offset + 4)?.try_into().ok()?))
+        Some(u32::from_be_bytes(
+            segment.get(offset..offset + 4)?.try_into().ok()?,
+        ))
     };
     let (xsiz, ysiz, xosiz, yosiz) = (u32_at(4)?, u32_at(8)?, u32_at(12)?, u32_at(16)?);
     let csiz = usize::from(u16::from_be_bytes(segment.get(36..38)?.try_into().ok()?));
@@ -116,7 +126,11 @@ pub fn read_siz(codestream: &[u8]) -> Option<Siz> {
         return None;
     }
     let components = segment.get(38..38 + 3 * csiz)?;
-    let ssiz = components.chunks_exact(3).map(|component| component[0]);
+    let ssiz = components
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .map(|component| component[0]);
     Some(Siz {
         width: xsiz - xosiz,
         height: ysiz - yosiz,
@@ -139,7 +153,9 @@ pub fn uses_mct(codestream: &[u8]) -> Option<bool> {
         if marker[0] != 0xFF || marker[1] == SOT || marker[1] == SOD {
             return None;
         }
-        let length = usize::from(u16::from_be_bytes(codestream.get(pos + 2..pos + 4)?.try_into().ok()?));
+        let length = usize::from(u16::from_be_bytes(
+            codestream.get(pos + 2..pos + 4)?.try_into().ok()?,
+        ));
         if length < 2 {
             return None;
         }
@@ -166,7 +182,22 @@ mod tests {
         for &s in ssiz {
             out.extend_from_slice(&[s, 1, 1]);
         }
-        out.extend_from_slice(&[0xFF, 0x52, 0x00, 0x0C, 0x00, 0x00, 0x00, 0x01, u8::from(mct), 5, 4, 4, 0, 1]);
+        out.extend_from_slice(&[
+            0xFF,
+            0x52,
+            0x00,
+            0x0C,
+            0x00,
+            0x00,
+            0x00,
+            0x01,
+            u8::from(mct),
+            5,
+            4,
+            4,
+            0,
+            1,
+        ]);
         out.extend_from_slice(&[0xFF, 0x90, 0x00, 0x0A, 0, 0, 0, 0, 0, 0, 0, 1]);
         out
     }
@@ -196,9 +227,9 @@ mod tests {
     fn decoy() -> Vec<u8> {
         let mut icc = vec![0x11u8; 64];
         icc.extend_from_slice(&[0xFF, 0x51]);
-        icc.extend(std::iter::repeat(0x22).take(38));
+        icc.extend(std::iter::repeat_n(0x22, 38));
         icc.push(0x97);
-        icc.extend(std::iter::repeat(0x33).take(64));
+        icc.extend(std::iter::repeat_n(0x33, 64));
         // and a decoy COD with MCT 0
         icc.extend_from_slice(&[0xFF, 0x52, 0, 12, 0, 0, 0, 1, 0]);
         icc
@@ -210,7 +241,10 @@ mod tests {
         let located = locate(&cs).unwrap();
         assert_eq!(located.container, Container::Codestream);
         let siz = read_siz(located.codestream).unwrap();
-        assert_eq!((siz.width, siz.height, siz.components(), siz.max_precision()), (64, 32, 3, 8));
+        assert_eq!(
+            (siz.width, siz.height, siz.components(), siz.max_precision()),
+            (64, 32, 3, 8)
+        );
         assert_eq!(siz.signed, vec![false; 3]);
         assert_eq!(uses_mct(located.codestream), Some(true));
     }

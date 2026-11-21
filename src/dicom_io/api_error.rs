@@ -280,7 +280,10 @@ impl From<super::types::DicomIoError> for ApiError {
 impl ApiError {
     /// Classify a boxed error from one of dcmnorm's `Box<dyn Error>` APIs (e.g.
     /// `dicom_file_to_json`) by its concrete type, falling back to `fallback`.
-    pub fn from_boxed(error: Box<dyn std::error::Error + Send + Sync>, fallback: ApiErrorKind) -> Self {
+    pub fn from_boxed(
+        error: Box<dyn std::error::Error + Send + Sync>,
+        fallback: ApiErrorKind,
+    ) -> Self {
         let error = match error.downcast::<ReadError>() {
             Ok(read) => return (*read).into(),
             Err(other) => other,

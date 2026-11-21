@@ -397,9 +397,20 @@ impl fmt::Debug for BulkDataUriBuilder<'_> {
 
 impl<'a> DicomJsonWriteOptions<'a> {
     /// The `BulkDataURI` for a value at `offset`/`length` of the source.
-    pub(crate) fn bulk_data_uri(&self, tag: Tag, vr: VR, offset: u64, length: Option<u64>) -> String {
+    pub(crate) fn bulk_data_uri(
+        &self,
+        tag: Tag,
+        vr: VR,
+        offset: u64,
+        length: Option<u64>,
+    ) -> String {
         if let Some(BulkDataUriBuilder(builder)) = self.bulk_data_uri_builder {
-            return builder(&BulkDataUriRequest { tag, vr, offset, length });
+            return builder(&BulkDataUriRequest {
+                tag,
+                vr,
+                offset,
+                length,
+            });
         }
         let base = self.bulk_data_uri_base.unwrap_or("");
         match length {
@@ -414,7 +425,9 @@ impl<'a> DicomJsonWriteOptions<'a> {
     /// enclosing level.
     pub(crate) fn for_sequence_item(self, tag: dcmnorm_core::Tag, index: usize) -> Self {
         Self {
-            deferred_bulk_data: self.deferred_bulk_data.and_then(|scope| scope.item(tag, index)),
+            deferred_bulk_data: self
+                .deferred_bulk_data
+                .and_then(|scope| scope.item(tag, index)),
             ..self
         }
     }

@@ -43,13 +43,18 @@ impl HighPrecisionWorker {
 
 impl Worker for HighPrecisionWorker {
     fn start(&mut self, data: RowData) -> Result<()> {
-        assert_eq!(data.index, 0, "HighPrecisionWorker only supports a single grayscale component");
+        assert_eq!(
+            data.index, 0,
+            "HighPrecisionWorker only supports a single grayscale component"
+        );
 
         if data.component.dct_scale != 8 {
             // Scaled-down (thumbnail-style) decode isn't implemented for this path - DICOM
             // rendering always wants the real image, so this should never actually be
             // requested, but fail cleanly rather than silently mis-decode if it ever is.
-            return Err(Error::Unsupported(UnsupportedFeature::SamplePrecision(self.precision)));
+            return Err(Error::Unsupported(UnsupportedFeature::SamplePrecision(
+                self.precision,
+            )));
         }
 
         self.offset = 0;
@@ -67,14 +72,21 @@ impl Worker for HighPrecisionWorker {
     }
 
     fn append_row(&mut self, (index, data): (usize, Vec<i16>)) -> Result<()> {
-        assert_eq!(index, 0, "HighPrecisionWorker only supports a single grayscale component");
+        assert_eq!(
+            index, 0,
+            "HighPrecisionWorker only supports a single grayscale component"
+        );
 
-        let component = self.component.as_ref().expect("start() must be called before append_row()");
+        let component = self
+            .component
+            .as_ref()
+            .expect("start() must be called before append_row()");
         let quantization_table = self
             .quantization_table
             .as_ref()
             .expect("start() must be called before append_row()");
-        let block_count = component.block_size.width as usize * component.vertical_sampling_factor as usize;
+        let block_count =
+            component.block_size.width as usize * component.vertical_sampling_factor as usize;
         let line_stride = component.block_size.width as usize * component.dct_scale;
 
         debug_assert_eq!(data.len(), block_count * 64);
@@ -100,9 +112,15 @@ impl Worker for HighPrecisionWorker {
     }
 
     fn get_result(&mut self, index: usize) -> Result<Vec<u8>> {
-        assert_eq!(index, 0, "HighPrecisionWorker only supports a single grayscale component");
+        assert_eq!(
+            index, 0,
+            "HighPrecisionWorker only supports a single grayscale component"
+        );
 
-        let component = self.component.as_ref().expect("start() must be called before get_result()");
+        let component = self
+            .component
+            .as_ref()
+            .expect("start() must be called before get_result()");
         let line_stride = component.block_size.width as usize * component.dct_scale;
         let cropped_width = component.size.width as usize;
         let cropped_height = component.size.height as usize;
@@ -116,6 +134,9 @@ impl Worker for HighPrecisionWorker {
 
         // Native-endian, matching compute_image_lossless's own established convention for
         // this crate's >8-bit output (see decoder/lossless.rs's convert_to_u8).
-        Ok(cropped.iter().flat_map(|sample| sample.to_ne_bytes()).collect())
+        Ok(cropped
+            .iter()
+            .flat_map(|sample| sample.to_ne_bytes())
+            .collect())
     }
 }
