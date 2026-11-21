@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::io::{self, ErrorKind};
+use std::io::{self};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -255,7 +255,7 @@ fn status_description(status: u16) -> &'static str {
 }
 
 fn other_error(message: impl Into<String>) -> Box<dyn std::error::Error> {
-    io::Error::new(ErrorKind::Other, message.into()).into()
+    io::Error::other(message.into()).into()
 }
 
 fn run_echoscu(args: EchoscuArgs) -> Result<(), Box<dyn std::error::Error>> {

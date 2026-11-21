@@ -682,7 +682,7 @@ fn dequantize_and_idct_block_1x1(
 
 // take a -128..127 value and stbi__clamp it and convert to 0..255
 fn stbi_clamp(x: Wrapping<i32>) -> u8 {
-    x.0.max(0).min(255) as u8
+    x.0.clamp(0, 255) as u8
 }
 
 fn stbi_f2f(x: f32) -> Wrapping<i32> {

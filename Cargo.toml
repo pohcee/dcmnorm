@@ -44,6 +44,21 @@ jpeg-ls-codec = ["dep:charls"]
 jpeg-xl-codec = ["dep:jxl-oxide", "dep:zune-jpegxl", "dep:zune-core"]
 jpeg2000-openjpeg-encode = ["dep:openjpeg-sys"]
 
+[lints.clippy]
+# Lints left off for this crate on purpose (everything else clippy warns about is fixed):
+# - chunks_exact_to_as_chunks: `as_chunks` needs Rust 1.88 and would churn the pixel loops.
+# - identity_op: tests spell out offsets as `1 * 4 * 2` to document the layout.
+# - neg_cmp_op_on_partial_ord: `!(a < b)` on floats is deliberate; it is true for NaN.
+# - large_enum_variant, result_large_err, too_many_arguments, needless_range_loop: style
+#   refactors with no correctness value.
+chunks_exact_to_as_chunks = "allow"
+identity_op = "allow"
+neg_cmp_op_on_partial_ord = "allow"
+large_enum_variant = "allow"
+result_large_err = "allow"
+too_many_arguments = "allow"
+needless_range_loop = "allow"
+
 [dependencies]
 base64 = "0.22"
 dcmnorm-core = { path = "crates/dcmnorm-core" }

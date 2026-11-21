@@ -313,7 +313,7 @@ pub fn fill_default_mjpeg_tables(
 ) {
     // Section K.3.3
 
-    if dc_huffman_tables[0].is_none() && scan.dc_table_indices.iter().any(|&i| i == 0) {
+    if dc_huffman_tables[0].is_none() && scan.dc_table_indices.contains(&0) {
         // Table K.3
         dc_huffman_tables[0] = Some(
             HuffmanTable::new(
@@ -329,7 +329,7 @@ pub fn fill_default_mjpeg_tables(
             .unwrap(),
         );
     }
-    if dc_huffman_tables[1].is_none() && scan.dc_table_indices.iter().any(|&i| i == 1) {
+    if dc_huffman_tables[1].is_none() && scan.dc_table_indices.contains(&1) {
         // Table K.4
         dc_huffman_tables[1] = Some(
             HuffmanTable::new(
@@ -345,7 +345,7 @@ pub fn fill_default_mjpeg_tables(
             .unwrap(),
         );
     }
-    if ac_huffman_tables[0].is_none() && scan.ac_table_indices.iter().any(|&i| i == 0) {
+    if ac_huffman_tables[0].is_none() && scan.ac_table_indices.contains(&0) {
         // Table K.5
         ac_huffman_tables[0] = Some(
             HuffmanTable::new(
@@ -373,7 +373,7 @@ pub fn fill_default_mjpeg_tables(
             .unwrap(),
         );
     }
-    if ac_huffman_tables[1].is_none() && scan.ac_table_indices.iter().any(|&i| i == 1) {
+    if ac_huffman_tables[1].is_none() && scan.ac_table_indices.contains(&1) {
         // Table K.6
         ac_huffman_tables[1] = Some(
             HuffmanTable::new(

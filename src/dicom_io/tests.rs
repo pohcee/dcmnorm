@@ -4804,7 +4804,7 @@ fn pack_dicom_frame_stack_texture_carries_each_layers_own_default_window_and_inv
     // A multi-image series can mix instances with different value ranges/photometrics (16-bit
     // fluoro frames plus an 8-bit dose-sheet secondary capture) - each layer must keep its own
     // window/invert instead of inheriting the first source's.
-    let tagged = read_dicom_bytes(&fixture_bytes(fixture_path("dx.dcm"))).unwrap();
+    let tagged = read_dicom_bytes(fixture_bytes(fixture_path("dx.dcm"))).unwrap();
     let mut untagged_inverted = tagged.clone();
     untagged_inverted.put(DataElement::new(
         tags::WINDOW_CENTER,
@@ -4860,8 +4860,8 @@ fn pack_dicom_frame_stack_texture_fails_closed_if_any_source_is_a_color_instance
     // A stack with one grayscale source and one RGB source (us.dcm, SamplesPerPixel=3) must
     // reject the WHOLE stack, not silently drop just the color frame - matching
     // pack_dicom_frame_texture's own single-frame rejection above.
-    let grayscale = read_dicom_bytes(&fixture_bytes(fixture_path("dx.dcm"))).unwrap();
-    let color = read_dicom_bytes(&fixture_bytes(fixture_path("us.dcm"))).unwrap();
+    let grayscale = read_dicom_bytes(fixture_bytes(fixture_path("dx.dcm"))).unwrap();
+    let color = read_dicom_bytes(fixture_bytes(fixture_path("us.dcm"))).unwrap();
     let sources = [(&grayscale, 0usize), (&color, 0usize)];
 
     let result = pack_dicom_frame_stack_texture(&sources, None, TextureCompression::None);
@@ -5754,7 +5754,7 @@ fn scp_stores_a_data_set_whose_first_fragment_shares_the_command_pdu() {
     )
     .unwrap();
 
-    let object = read_dicom_file(&fixture_path("sr.dcm")).unwrap();
+    let object = read_dicom_file(fixture_path("sr.dcm")).unwrap();
     let sop_class_uid = object
         .meta()
         .media_storage_sop_class_uid
@@ -6135,7 +6135,7 @@ fn scp_answers_a_worklist_find_with_sop_class_not_supported_and_keeps_serving_th
     )
     .unwrap();
 
-    let object = read_dicom_file(&fixture_path("sr.dcm")).unwrap();
+    let object = read_dicom_file(fixture_path("sr.dcm")).unwrap();
     let storage_sop_class = object
         .meta()
         .media_storage_sop_class_uid
@@ -6309,7 +6309,8 @@ fn scp_answers_a_worklist_find_with_sop_class_not_supported_and_keeps_serving_th
         "{lines:#?}"
     );
     assert!(
-        lines.iter().any(|line| line == &format!(
+        lines.iter().any(|line| line
+            == &format!(
             "received C-FIND-RQ (message id 3); query key(s): [PatientID]; SOP class {study_root}"
         )),
         "{lines:#?}"
@@ -7698,7 +7699,7 @@ fn jp2_wrapped_ybr_rct_fixture_with_marker_like_icc_bytes_renders_and_decodes() 
     );
 
     let native =
-        read_dicom_bytes(&transcode_dicom_bytes(bytes, uids::EXPLICIT_VR_LITTLE_ENDIAN).unwrap())
+        read_dicom_bytes(transcode_dicom_bytes(bytes, uids::EXPLICIT_VR_LITTLE_ENDIAN).unwrap())
             .unwrap();
     assert_eq!(
         native
@@ -7743,11 +7744,11 @@ fn issue_jp2_box(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {
 fn issue_jp2_with_marker_like_icc(codestream: &[u8], components: u16) -> Vec<u8> {
     let mut icc = vec![0x11u8; 128];
     icc.extend_from_slice(&[0xFF, 0x51]);
-    icc.extend(std::iter::repeat(0x22).take(38));
+    icc.extend(std::iter::repeat_n(0x22, 38));
     icc.push(0x97);
     // and a COD-like pair whose "MCT" byte is 0
     icc.extend_from_slice(&[0xFF, 0x52, 0x00, 0x0C, 0x00, 0x00, 0x00, 0x01, 0x00]);
-    icc.extend(std::iter::repeat(0x33).take(64));
+    icc.extend(std::iter::repeat_n(0x33, 64));
     let mut file = dcmnorm_jpeg2000::codestream::JP2_SIGNATURE.to_vec();
     file.extend(issue_jp2_box(b"ftyp", b"jp2 \0\0\0\0jp2 "));
     let mut ihdr = vec![0, 0, 0, 2, 0, 0, 0, 2];

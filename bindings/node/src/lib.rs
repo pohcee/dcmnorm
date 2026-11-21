@@ -2531,9 +2531,11 @@ fn registration_options(
         Some("centroid") => DcmInitialization::Centroid,
         Some("none") => DcmInitialization::None,
         Some("multi") => DcmInitialization::Multi,
-        Some(other) => return Err(Error::from_reason(format!(
+        Some(other) => {
+            return Err(Error::from_reason(format!(
             "invalid initialize '{other}'; expected 'translation', 'centroid', 'none' or 'multi'"
-        ))),
+        )))
+        }
     };
     let mask = match options.mask.as_deref() {
         None | Some("auto") => DcmMaskMode::Auto,

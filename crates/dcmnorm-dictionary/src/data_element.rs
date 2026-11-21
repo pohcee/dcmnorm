@@ -439,6 +439,7 @@ mod tests {
             assert_eq!(entry.vr, VR::LO.into());
             assert!(
                 dict.by_tag(Tag(group, 0x3000)).is_none(),
+                "{}",
                 "({group:04X},3000) is private data"
             );
         }

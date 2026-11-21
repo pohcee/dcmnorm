@@ -808,7 +808,9 @@ fn read_pixel_sequence(
     tokens: &mut impl Iterator<Item = Result<DataToken, dcmnorm_parser::dataset::read::Error>>,
 ) -> Result<Value<InMemDicomObject, InMemFragment>, ReadError> {
     let offset_table = match next_required(tokens)? {
-        DataToken::ItemStart { len } if len == dcmnorm_core::header::Length(0) => {
+        DataToken::ItemStart {
+            len: dcmnorm_core::header::Length(0),
+        } => {
             expect_item_end(tokens)?;
             Vec::new()
         }

@@ -2622,7 +2622,7 @@ mod tests {
             "an IMAGE has no lower-level entity"
         );
         // only leaves reference files
-        assert!(raw.records[0].elements.get(&(0x0004, 0x1500)).is_none());
+        assert!(!raw.records[0].elements.contains_key(&(0x0004, 0x1500)));
         assert!(report.synthesized.is_empty(), "{:?}", report.synthesized);
     }
 

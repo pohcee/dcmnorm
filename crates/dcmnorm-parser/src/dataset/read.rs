@@ -830,17 +830,17 @@ where
                 match end_of_sequence.cmp(&bytes_read) {
                     Ordering::Equal => {
                         // end of delimiter, as indicated by the element's length
-                        let token;
-                        match sd.typ {
+
+                        let token = match sd.typ {
                             SeqTokenType::Sequence => {
                                 self.in_sequence = false;
-                                token = DataToken::SequenceEnd;
+                                DataToken::SequenceEnd
                             }
                             SeqTokenType::Item => {
                                 self.in_sequence = true;
-                                token = DataToken::ItemEnd;
+                                DataToken::ItemEnd
                             }
-                        }
+                        };
                         self.pop_seq_token();
                         return Ok(Some(token));
                     }
@@ -1555,7 +1555,7 @@ mod tests {
             b'T', b'E', b'S', b'T', // value = "TEST"
         ];
 
-        let ground_truth = vec![
+        let ground_truth = [
             DataToken::SequenceStart {
                 tag: Tag(0x0018, 0x6011),
                 len: Length::UNDEFINED,

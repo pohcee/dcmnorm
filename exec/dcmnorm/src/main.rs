@@ -1178,7 +1178,7 @@ fn run_batch(cli: &Cli, paths: &[PathBuf]) -> Result<(), Box<dyn std::error::Err
         }
     }
     if any_error {
-        return Err(io::Error::new(ErrorKind::Other, "one or more inputs failed").into());
+        return Err(io::Error::other("one or more inputs failed").into());
     }
     Ok(())
 }
@@ -1658,14 +1658,13 @@ fn print_transfer_syntax_support() -> Result<(), Box<dyn std::error::Error>> {
 
     writeln!(
         stdout,
-        "{:<uid_width$}  {:<bool_width$}  {:<bool_width$}  {:<bool_width$}  {:<bool_width$}  {:<engine_width$}  {}",
+        "{:<uid_width$}  {:<bool_width$}  {:<bool_width$}  {:<bool_width$}  {:<bool_width$}  {:<engine_width$}  NAME",
         "UID",
         "DATASET_READ",
         "DATASET_WRITE",
         "PIXEL_DECODE",
         "PIXEL_ENCODE",
         "ENGINE",
-        "NAME",
         uid_width = uid_width,
         bool_width = bool_width,
         engine_width = engine_width,
@@ -2492,13 +2491,15 @@ fn run_mpr(
         None | Some("mip") => SlabProjection::MaximumIntensity,
         Some("minip") => SlabProjection::MinimumIntensity,
         Some("average") => SlabProjection::Average,
-        Some(other) => return Err(io::Error::new(
-            ErrorKind::InvalidInput,
-            format!(
+        Some(other) => {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                format!(
                 "invalid --mpr-projection value '{other}': expected 'mip', 'minip', or 'average'"
             ),
-        )
-        .into()),
+            )
+            .into())
+        }
     };
 
     let spacing_mm = cli.mpr_spacing.unwrap_or_else(|| volume.min_spacing_mm());
@@ -3447,7 +3448,7 @@ fn output_type_to_render_format(output_type: OutputType) -> Option<RenderFormat>
 fn validate_no_render_or_redaction_flags(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     let is_render_output = cli
         .output_type
-        .map_or(false, |ot| output_type_to_render_format(ot).is_some());
+        .is_some_and(|ot| output_type_to_render_format(ot).is_some());
 
     if is_render_output
         || cli.render_frame != 0
@@ -3591,7 +3592,7 @@ fn run_histogram(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
 fn validate_non_dicom_to_dicom_render_flags(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     let is_render_output = cli
         .output_type
-        .map_or(false, |ot| output_type_to_render_format(ot).is_some());
+        .is_some_and(|ot| output_type_to_render_format(ot).is_some());
 
     if is_render_output
         || cli.render_frame != 0

@@ -1150,7 +1150,7 @@ fn pixel_sequence_from_bytes(
 
         let item_bytes = &bytes[cursor..cursor + length];
         if first_item {
-            if item_bytes.len() % 4 != 0 {
+            if !item_bytes.len().is_multiple_of(4) {
                 return Err(DicomJsonError::InvalidBulkDataUri(
                     "basic offset table length is not divisible by 4".to_owned(),
                 ));
@@ -1314,7 +1314,7 @@ fn decode_fixed_width_values<T>(
     width: usize,
     convert: impl Fn(&[u8]) -> T,
 ) -> Result<Vec<T>, ()> {
-    if bytes.len() % width != 0 {
+    if !bytes.len().is_multiple_of(width) {
         return Err(());
     }
 

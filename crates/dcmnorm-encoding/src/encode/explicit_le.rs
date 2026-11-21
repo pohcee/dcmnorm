@@ -469,7 +469,7 @@ mod tests {
             let to = writer.position() as usize;
 
             // Compare the current slice
-            if &writer.get_ref()[from..to] != &RAW[from..to] {
+            if writer.get_ref()[from..to] != RAW[from..to] {
                 panic!(
                     "Failure on ({:04x},{:04x})  {:?}  {:02x?}\n\
                     Expected: {:02x?}",
@@ -618,7 +618,7 @@ mod tests {
         );
 
         // Final compare of the whole buffer
-        assert_eq!(&buf[..], &RAW[..]);
+        assert_eq!(&buf[..], RAW);
     }
 
     // manually crafting some DICOM sequence/item delimiters

@@ -905,7 +905,7 @@ fn render_single_frame(
 }
 
 fn apply_embedded_icc_profile(object: &DefaultDicomObject, rgb_bytes: &mut [u8]) {
-    if rgb_bytes.is_empty() || rgb_bytes.len() % 3 != 0 {
+    if rgb_bytes.is_empty() || !rgb_bytes.len().is_multiple_of(3) {
         return;
     }
 
@@ -1327,7 +1327,7 @@ fn maybe_repair_zeroed_lower_half_chroma(
     if !(is_ybr_full || is_ybr_rct) {
         return;
     }
-    if height < 2 || height % 2 != 0 || interleaved.len() < width * height * 3 {
+    if height < 2 || !height.is_multiple_of(2) || interleaved.len() < width * height * 3 {
         return;
     }
 
@@ -1583,7 +1583,7 @@ pub fn read_dicom_file_for_frame(
                 .map_err(|e| io_error(e, "reading frame"))?;
             PrimitiveValue::U8(bytes.into())
         }
-        VR::OW if start % 2 == 0 && frame_len % 2 == 0 => {
+        VR::OW if start.is_multiple_of(2) && frame_len % 2 == 0 => {
             let big_endian = normalize_transfer_syntax_uid(object.meta().transfer_syntax())
                 == "1.2.840.10008.1.2.2";
             let mut frame = vec![0u8; frame_len];
@@ -3783,7 +3783,7 @@ fn replace_with_native_frame_pixel_data(
     let value = match bits_allocated {
         1..=8 => PrimitiveValue::from(decoded),
         9..=16 => {
-            if decoded.len() % 2 != 0 {
+            if !decoded.len().is_multiple_of(2) {
                 return Err(RenderError::InvalidPixelDataLength {
                     expected: decoded.len() + 1,
                     actual: decoded.len(),

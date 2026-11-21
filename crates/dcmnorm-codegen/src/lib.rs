@@ -339,13 +339,7 @@ public enum VR {
     );
     let lines: Vec<String> = vrs
         .iter()
-        .map(|vr| {
-            format!(
-                "    {}(Kind.{})",
-                vr.to_string(),
-                vr_kind(*vr).to_ascii_uppercase()
-            )
-        })
+        .map(|vr| format!("    {}(Kind.{})", vr, vr_kind(*vr).to_ascii_uppercase()))
         .collect();
     out.push_str(&lines.join(",\n"));
     out.push_str(
@@ -597,7 +591,7 @@ fn node_js(tags: &[TagEntry], vrs: &[VR], syntaxes: &[TsEntry], sop: &[UidEntry]
     }
     out.push_str("});\n\n/** How values of each VR are held: string, int, float, tag, binary or sequence. */\nconst VR_KIND = Object.freeze({\n");
     for vr in vrs {
-        writeln!(out, "  {}: \"{}\",", vr.to_string(), vr_kind(*vr)).unwrap();
+        writeln!(out, "  {}: \"{}\",", vr, vr_kind(*vr)).unwrap();
     }
     out.push_str("});\n\n/** Transfer syntax UIDs by standard keyword. */\nconst TransferSyntax = Object.freeze({\n");
     for ts in syntaxes {
@@ -649,10 +643,7 @@ fn node_dts(tags: &[TagEntry], vrs: &[VR], syntaxes: &[TsEntry], sop: &[UidEntry
         )
         .unwrap();
     }
-    let vr_union: Vec<String> = vrs
-        .iter()
-        .map(|vr| format!("\"{}\"", vr.to_string()))
-        .collect();
+    let vr_union: Vec<String> = vrs.iter().map(|vr| format!("\"{}\"", vr)).collect();
     writeln!(
         out,
         "}};\n\n/** A DICOM Value Representation code. */\nexport type VR = {};\n",
@@ -768,7 +759,7 @@ _VR_KIND = {
 ",
     );
     for vr in vrs {
-        writeln!(out, "    \"{}\": \"{}\",", vr.to_string(), vr_kind(*vr)).unwrap();
+        writeln!(out, "    \"{}\": \"{}\",", vr, vr_kind(*vr)).unwrap();
     }
     out.push_str(
         "}

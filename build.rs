@@ -37,7 +37,7 @@ fn main() {
     for dir in &include_dirs {
         // Use -isystem instead of -I so GCC/Clang treats Kakadu headers as
         // system headers and suppresses warnings that originate inside them.
-        build.flag_if_supported(&format!("-isystem{}", dir.display()));
+        build.flag_if_supported(format!("-isystem{}", dir.display()));
     }
     build.compile("dcmnorm_kakadu_bridge");
 

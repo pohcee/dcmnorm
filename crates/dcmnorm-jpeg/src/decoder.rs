@@ -1556,5 +1556,5 @@ fn stbi_f2f(x: f32) -> i32 {
 }
 
 fn clamp_fixed_point(value: i32) -> u8 {
-    (value >> FIXED_POINT_OFFSET).min(255).max(0) as u8
+    (value >> FIXED_POINT_OFFSET).clamp(0, 255) as u8
 }

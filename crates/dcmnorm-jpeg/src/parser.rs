@@ -6,7 +6,7 @@ use crate::{read_u16_from_be, read_u8};
 use alloc::borrow::ToOwned;
 use alloc::vec::Vec;
 use alloc::{format, vec};
-use core::ops::{self, Range};
+use core::ops::Range;
 use std::io::{self, Read};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -481,7 +481,7 @@ pub fn parse_sos<R: Read>(reader: &mut R, frame: &FrameInfo) -> Result<ScanInfo>
             frame.components[i].horizontal_sampling_factor as u32
                 * frame.components[i].vertical_sampling_factor as u32
         })
-        .fold(0, ops::Add::add);
+        .sum::<u32>();
 
     if component_count > 1 && blocks_per_mcu > 10 {
         return Err(Error::Format(
@@ -648,7 +648,7 @@ pub fn parse_dqt<R: Read>(reader: &mut R) -> Result<[Option<[u16; 64]>; 4]> {
             };
         }
 
-        if table.iter().any(|&val| val == 0) {
+        if table.contains(&0) {
             return Err(Error::Format(
                 "quantization table contains element with a zero value".to_owned(),
             ));
@@ -695,10 +695,7 @@ pub fn parse_dht<R: Read>(
         let mut counts = [0u8; 16];
         reader.read_exact(&mut counts)?;
 
-        let size = counts
-            .iter()
-            .map(|&val| val as usize)
-            .fold(0, ops::Add::add);
+        let size = counts.iter().map(|&val| val as usize).sum::<usize>();
 
         if size == 0 {
             return Err(Error::Format(
@@ -830,27 +827,25 @@ pub fn parse_app<R: Read>(reader: &mut R, marker: Marker) -> Result<Option<AppDa
                 }
             }
         }
-        APP(14) => {
-            if length >= 12 {
-                let mut buffer = [0u8; 12];
-                reader.read_exact(&mut buffer)?;
-                bytes_read = buffer.len();
+        APP(14) if length >= 12 => {
+            let mut buffer = [0u8; 12];
+            reader.read_exact(&mut buffer)?;
+            bytes_read = buffer.len();
 
-                // http://www.sno.phy.queensu.ca/~phil/exiftool/TagNames/JPEG.html#Adobe
-                if buffer[0..6] == *b"Adobe\0" {
-                    let color_transform = match buffer[11] {
-                        0 => AdobeColorTransform::Unknown,
-                        1 => AdobeColorTransform::YCbCr,
-                        2 => AdobeColorTransform::YCCK,
-                        _ => {
-                            return Err(Error::Format(
-                                "invalid color transform in adobe app segment".to_owned(),
-                            ))
-                        }
-                    };
+            // http://www.sno.phy.queensu.ca/~phil/exiftool/TagNames/JPEG.html#Adobe
+            if buffer[0..6] == *b"Adobe\0" {
+                let color_transform = match buffer[11] {
+                    0 => AdobeColorTransform::Unknown,
+                    1 => AdobeColorTransform::YCbCr,
+                    2 => AdobeColorTransform::YCCK,
+                    _ => {
+                        return Err(Error::Format(
+                            "invalid color transform in adobe app segment".to_owned(),
+                        ))
+                    }
+                };
 
-                    result = Some(AppData::Adobe(color_transform));
-                }
+                result = Some(AppData::Adobe(color_transform));
             }
         }
         _ => {}

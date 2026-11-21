@@ -126,7 +126,11 @@ pub fn read_siz(codestream: &[u8]) -> Option<Siz> {
         return None;
     }
     let components = segment.get(38..38 + 3 * csiz)?;
-    let ssiz = components.chunks_exact(3).map(|component| component[0]);
+    let ssiz = components
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .map(|component| component[0]);
     Some(Siz {
         width: xsiz - xosiz,
         height: ysiz - yosiz,
@@ -223,9 +227,9 @@ mod tests {
     fn decoy() -> Vec<u8> {
         let mut icc = vec![0x11u8; 64];
         icc.extend_from_slice(&[0xFF, 0x51]);
-        icc.extend(std::iter::repeat(0x22).take(38));
+        icc.extend(std::iter::repeat_n(0x22, 38));
         icc.push(0x97);
-        icc.extend(std::iter::repeat(0x33).take(64));
+        icc.extend(std::iter::repeat_n(0x33, 64));
         // and a decoy COD with MCT 0
         icc.extend_from_slice(&[0xFF, 0x52, 0, 12, 0, 0, 0, 1, 0]);
         icc

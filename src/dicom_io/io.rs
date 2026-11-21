@@ -2203,7 +2203,7 @@ fn bytes_to_words<const N: usize, T>(
     convert: fn([u8; N]) -> T,
     bits_allocated: u16,
 ) -> Result<Vec<T>, TranscodeError> {
-    if bytes.len() % N != 0 {
+    if !bytes.len().is_multiple_of(N) {
         return Err(TranscodeError::InvalidDecodedPixelDataLength {
             bits_allocated,
             length: bytes.len(),

@@ -495,8 +495,8 @@ where
     /// would - a corrupt or malicious file whose true size is a few hundred bytes but which
     /// declares a multi-gigabyte element length would otherwise force an allocation attempt that
     /// large before a single byte is even read, and a failing allocation of that shape aborts the
-    /// process (`handle_alloc_error`) rather than returning a catchable error. Reading via `Take`
-    /// + `read_to_end` instead grows the buffer only in proportion to bytes actually available on
+    /// process (`handle_alloc_error`) rather than returning a catchable error. Reading via `Take` and
+    /// `read_to_end` instead grows the buffer only in proportion to bytes actually available on
     /// the stream, so a truncated/lying length surfaces as a clean `ReadValueData` error as soon
     /// as the real data runs out, never as a runaway allocation.
     fn read_into_buffer(&mut self, len: usize) -> Result<()> {
