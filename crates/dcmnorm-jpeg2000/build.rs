@@ -106,6 +106,7 @@ fn base_build(core: &Path, target_arch: &str) -> cc::Build {
         .flag_if_supported("-fexceptions")
         .flag_if_supported("-pthread")
         .define("OPENHTJ2K_THREAD", None)
+        .define("OHTJ2K_STATIC", None)
         .define("NDEBUG", None);
     for dir in INCLUDE_DIRS {
         build.include(core.join(dir));
