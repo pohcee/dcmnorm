@@ -27,6 +27,16 @@ use super::volume::Volume;
 
 type Vec3 = [f64; 3];
 
+/// The default options without the wall-clock time limit. These tests measure accuracy, and a
+/// time limit makes the result depend on machine load: a CPU-starved run (the whole suite in
+/// parallel) stops at the limit with an unconverged transform. The time-limit test sets its own.
+fn untimed() -> RegistrationOptions {
+    RegistrationOptions {
+        time_limit: None,
+        ..Default::default()
+    }
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum Modality {
     Ct,
@@ -354,12 +364,7 @@ fn run_pair_with(fixed: Modality, moving: Modality, truth: Mat4) -> (Registratio
     let identity = translation_matrix([0.0; 3]);
     let fixed_volume = synthetic_volume(fixed, &fixed_grid(fixed), &identity, 1);
     let moving_volume = synthetic_volume(moving, &moving_grid(moving), &truth, 2);
-    let result = register_rigid(
-        &fixed_volume,
-        &moving_volume,
-        &RegistrationOptions::default(),
-    )
-    .unwrap();
+    let result = register_rigid(&fixed_volume, &moving_volume, &untimed()).unwrap();
     let e = errors(&result.matrix, &truth);
     eprintln!(
         "{}->{}: metric {} {:.4} (start {:.4}) quality {:.2} {} | rotation error {:.3} deg, TRE mean {:.2} mm max {:.2} mm | init {} | {} iterations, {} evaluations, {:.0} ms, {:.0} MB working",
@@ -532,7 +537,7 @@ fn registration_is_deterministic_across_runs_and_thread_counts() {
     );
     let options = RegistrationOptions {
         levels_mm: vec![8.0, 4.0],
-        ..Default::default()
+        ..untimed()
     };
     let a = register_rigid(&f, &m, &options).unwrap();
     let b = rayon::ThreadPoolBuilder::new()
@@ -558,7 +563,7 @@ fn identical_volumes_register_to_identity() {
         &translation_matrix([0.0; 3]),
         7,
     );
-    let result = register_rigid(&f, &f, &RegistrationOptions::default()).unwrap();
+    let result = register_rigid(&f, &f, &untimed()).unwrap();
     let e = errors(&result.matrix, &translation_matrix([0.0; 3]));
     assert!(
         e.rotation_deg < 0.05 && e.tre_max < 0.2,
@@ -590,7 +595,7 @@ fn cancel_and_time_limit_stop_the_registration() {
         &m,
         &RegistrationOptions {
             cancel: Some(cancel),
-            ..Default::default()
+            ..untimed()
         },
     );
     assert!(matches!(cancelled, Err(RegistrationError::Cancelled)));
@@ -601,7 +606,7 @@ fn cancel_and_time_limit_stop_the_registration() {
         &RegistrationOptions {
             time_limit: Some(Duration::from_millis(1)),
             initialization: Initialization::None,
-            ..Default::default()
+            ..untimed()
         },
     )
     .unwrap();
@@ -636,7 +641,7 @@ fn an_initial_matrix_is_used_and_invalid_options_are_rejected() {
         &m,
         &RegistrationOptions {
             initial_matrix: Some(initial),
-            ..Default::default()
+            ..untimed()
         },
     )
     .unwrap();
@@ -646,15 +651,15 @@ fn an_initial_matrix_is_used_and_invalid_options_are_rejected() {
     for bad in [
         RegistrationOptions {
             levels_mm: vec![],
-            ..Default::default()
+            ..untimed()
         },
         RegistrationOptions {
             histogram_bins: 2,
-            ..Default::default()
+            ..untimed()
         },
         RegistrationOptions {
             initial_matrix: Some([0.0; 16]),
-            ..Default::default()
+            ..untimed()
         },
     ] {
         assert!(matches!(
@@ -668,7 +673,7 @@ fn an_initial_matrix_is_used_and_invalid_options_are_rejected() {
         &RegistrationOptions {
             metric: MetricChoice::Ncc,
             mask: super::registration::MaskMode::None,
-            ..Default::default()
+            ..untimed()
         }
     )
     .is_ok());
@@ -709,8 +714,7 @@ fn registration_benchmark_512x512x300_ct() {
             .num_threads(threads)
             .build()
             .unwrap();
-        let result =
-            pool.install(|| register_rigid(&f, &m, &RegistrationOptions::default()).unwrap());
+        let result = pool.install(|| register_rigid(&f, &m, &untimed()).unwrap());
         let e = errors(&result.matrix, &known_transform());
         eprintln!(
             "register_rigid threads={}: {:.0} ms, {} evaluations, levels {:?}, rotation error {:.3} deg, TRE max {:.2} mm, working {:.0} MB",
@@ -776,7 +780,7 @@ fn enhanced_multi_frame_volumes_register() {
         let moving = build_volume(&[&moving_path]).unwrap();
         std::fs::remove_dir_all(moving_path.parent().unwrap()).ok();
         assert_eq!(moving.modality.as_deref(), Some(code));
-        let result = register_rigid(&fixed, &moving, &RegistrationOptions::default()).unwrap();
+        let result = register_rigid(&fixed, &moving, &untimed()).unwrap();
         let e = errors(&result.matrix, &truth);
         eprintln!(
             "enhanced {code}->CT: rotation error {:.3} deg, TRE max {:.2} mm, {:.0} ms",
@@ -862,7 +866,7 @@ fn translation_estimate_survives_fov_truncation_and_a_cropped_end() {
 
     // The rigid registration from it is correct, and its quality says so: the anatomy the moving
     // scan never saw does not count against it.
-    let result = register_rigid(&fixed, &moving, &RegistrationOptions::default()).unwrap();
+    let result = register_rigid(&fixed, &moving, &untimed()).unwrap();
     let e = errors(&result.matrix, &truth);
     eprintln!("truncated + cropped CT rigid: TRE max {:.2} mm, quality {:.2} {} (body metric {:.3}, NCC {:.3})", e.tre_max, result.quality, result.quality_label, result.body_metric, result.normalized_metric);
     assert!(e.tre_max < 3.0, "TRE {}", e.tre_max);
@@ -965,7 +969,7 @@ fn multi_start_recovers_from_a_wrong_seed_and_reports_consistency() {
         &moving,
         &RegistrationOptions {
             initial_matrix: Some(seed),
-            ..Default::default()
+            ..untimed()
         },
     );
     if let Ok(single) = &single {
@@ -988,7 +992,7 @@ fn multi_start_recovers_from_a_wrong_seed_and_reports_consistency() {
         &RegistrationOptions {
             initial_matrix: Some(seed),
             initialization: Initialization::Multi,
-            ..Default::default()
+            ..untimed()
         },
     )
     .unwrap();
@@ -1018,7 +1022,7 @@ fn multi_start_recovers_from_a_wrong_seed_and_reports_consistency() {
         &moving,
         &RegistrationOptions {
             starts: vec![seed],
-            ..Default::default()
+            ..untimed()
         },
     )
     .unwrap();
@@ -1051,7 +1055,7 @@ fn implausible_rotations_are_flagged_poor() {
         &RegistrationOptions {
             initial_matrix: Some(flipped),
             max_iterations: 10,
-            ..Default::default()
+            ..untimed()
         },
     )
     .unwrap();
@@ -1070,7 +1074,7 @@ fn implausible_rotations_are_flagged_poor() {
             initial_matrix: Some(flipped),
             max_iterations: 10,
             max_rotation_deg: None,
-            ..Default::default()
+            ..untimed()
         },
     )
     .unwrap();
@@ -1080,7 +1084,7 @@ fn implausible_rotations_are_flagged_poor() {
         &moving,
         &RegistrationOptions {
             max_rotation_deg: Some(-1.0),
-            ..Default::default()
+            ..untimed()
         }
     )
     .is_err());
