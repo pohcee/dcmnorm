@@ -633,9 +633,9 @@ pub(super) fn try_transcode_dicom_file_streaming(
                             )?;
                             if matches!(target_mode, TargetMode::Htj2k) {
                                 // Decode the bounded batch in parallel (when source supports it),
-                                // then encode each decoded frame sequentially into OpenHTJ2K
-                                // (which parallelizes internally per frame behind a mutex),
-                                // reusing one plane buffer and dropping each frame immediately.
+                                // then encode each decoded frame into OpenHTJ2K (which parallelizes
+                                // internally per frame), reusing one plane buffer and dropping each
+                                // frame immediately.
                                 let decoded_frames = decode_batch(
                                     inputs,
                                     &source_mode,
@@ -871,13 +871,11 @@ fn choose_batch_size(
     if nr_frames <= 1 {
         return 1;
     }
-    // OpenHTJ2K already parallelizes internally per frame behind a mutex, so only batch when the
-    // *other* side (parallel-decodable source or parallel-encodable target) benefits from Rayon.
+    // OpenHTJ2K already parallelizes internally per frame on encode, so only batch when the source
+    // is parallel-decodable or the target is parallel-encodable on Rayon.
     let source_can_parallel = match source_mode {
         SourceMode::Encapsulated { .. } => {
-            !is_htj2k_transfer_syntax(source_uid)
-                && (is_parallel_decode_transfer_syntax(source_uid)
-                    || is_jpeg_xl_transfer_syntax(source_uid))
+            is_parallel_decode_transfer_syntax(source_uid) || is_jpeg_xl_transfer_syntax(source_uid)
         }
         SourceMode::Native { .. } => false,
     };

@@ -36,6 +36,8 @@
 #endif
 #include "coding_units.hpp"
 
+namespace open_htj2k {
+
 // ─────────────────────────────────────────────────────────────────────────────
 // j2k_subband_row_buf — lazy per-strip codeblock decoder for one subband
 //
@@ -154,6 +156,10 @@ struct j2k_subband_row_buf {
     std::vector<CachedBlock> blocks;
   };
   std::vector<StripCacheEntry> strip_cache_;
+  // A strip cache entry (block == nullptr) for the rows [y0, y1) of a precinct-subband
+  // that has no code-blocks yet, whose samples are zero.
+  static CachedBlock unbuilt_region(const j2k_precinct_subband *cpb, int32_t y0, int32_t y1, int32_t sb_x0,
+                                    ptrdiff_t stride);
 #endif
 
   // Initialise. cb_h is the maximum codeblock height for this resolution level.
@@ -202,3 +208,4 @@ struct j2k_subband_row_buf {
   void run_par_group(uint64_t packed);
 #endif
 };
+}  // namespace open_htj2k

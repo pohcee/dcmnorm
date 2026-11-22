@@ -35,6 +35,9 @@
 #include <vector>
 #include <memory>
 #include "utils.hpp"
+#include "message_internal.hpp"
+
+namespace open_htj2k {
 
 class j2c_src_memory {
  private:
@@ -73,6 +76,9 @@ class j2c_src_memory {
   int rewind_2bytes();
   int forward_Nbytes(uint32_t N);
   uint32_t get_remaining() const { return len - pos; }
+  // The read position, and a return to one get_pos() gave (clamped to the end).
+  uint32_t get_pos() const { return pos; }
+  void set_pos(uint32_t p) { pos = (p < len) ? p : len; }
 };
 
 class j2c_dst_memory {
@@ -134,21 +140,20 @@ class j2c_dst_memory {
   int32_t flush(std::ofstream &dst);
   int32_t flush(std::vector<uint8_t> *obuf);
   OPENHTJ2K_NODISCARD size_t get_length() const;
-  OPENHTJ2K_MAYBE_UNUSED void print_bytes();
 };
 
 class buf_chain {
  private:
-  size_t node_pos;
-  size_t pos;
-  uint32_t total_length;
+  size_t node_pos       = 0;
+  size_t pos            = 0;
+  uint32_t total_length = 0;
 
   std::vector<uint8_t *> node_buf;
   std::vector<uint32_t> node_length;
-  uint32_t num_nodes;
+  uint32_t num_nodes = 0;
 
-  uint8_t *current_buf;
-  uint32_t current_length;
+  uint8_t *current_buf    = nullptr;
+  uint32_t current_length = 0;
   // Default-initialised so a default-constructed buf_chain (e.g. the PPT
   // packet_header chain) never bit-reads from uninitialised state.
   uint8_t tmp_byte  = 0;
@@ -160,6 +165,9 @@ class buf_chain {
   // (the packet-header tag trees) must be able to tell padding from data --
   // otherwise it spins forever.  Cleared by activate()/reset().
   bool past_end = false;
+  // The last node is a tile-part the codestream ends inside (j2k_tile_part::is_cut_short):
+  // its data stops where the codestream does.  Cleared by reset().
+  bool cut_short = false;
 
  public:
   buf_chain() = default;
@@ -203,6 +211,7 @@ class buf_chain {
       this->last_byte      = bc.last_byte;
       this->bits           = bc.bits;
       this->past_end       = bc.past_end;
+      this->cut_short      = bc.cut_short;
       this->node_buf.reserve(bc.node_buf.size());
       for (size_t i = 0; i < bc.node_buf.size(); ++i) {
         this->node_buf.push_back(bc.node_buf[i]);
@@ -224,6 +233,7 @@ class buf_chain {
     last_byte      = 0;
     bits           = 0;
     past_end       = false;
+    cut_short      = false;
     node_buf.resize(num);
     node_length.resize(num);
     for (uint32_t i = 0; i < num; ++i) {
@@ -243,20 +253,53 @@ class buf_chain {
     node_buf[index]    = buf;
     node_length[index] = len;
   }
+  // Positions the reader at the first byte of the chain.  A chain without nodes reads
+  // as past its end (get_byte() returns the 0x00 padding) instead of indexing node 0.
   void activate() {
     pos            = 0;
     node_pos       = 0;
-    current_buf    = node_buf[0];
-    current_length = node_length[0];
+    current_buf    = node_buf.empty() ? nullptr : node_buf[0];
+    current_length = node_buf.empty() ? 0 : node_length[0];
     reset_bit_state();
   }
+  // Positions the reader at the first byte of node n, which must exist.
   void activate(size_t n) {
-    assert(n < this->node_buf.size());
+    if (n >= this->node_buf.size()) {
+      open_htj2k::detail::fail("buffer chain has %zu nodes; node %zu does not exist.", node_buf.size(), n);
+    }
     pos            = 0;
     node_pos       = n;
     current_buf    = node_buf[node_pos];
     current_length = node_length[node_pos];
     reset_bit_state();
+  }
+  OPENHTJ2K_NODISCARD size_t get_num_nodes() const { return node_buf.size(); }
+  OPENHTJ2K_NODISCARD uint8_t *get_node_buf(size_t n) const { return node_buf[n]; }
+  OPENHTJ2K_NODISCARD uint32_t get_node_length(size_t n) const { return node_length[n]; }
+  // Moves the reader to the start of the next node once the current one has been read to
+  // its end, as the next get_byte() would.  A reader that takes whole spans of the current
+  // node (borrow_N_bytes) calls it first when the bytes it wants begin a node.
+  void skip_exhausted_node() {
+    while (pos >= current_length && node_pos + 1 < num_nodes) {
+      node_pos++;
+      current_buf    = node_buf[node_pos];
+      current_length = node_length[node_pos];
+      pos            = 0;
+    }
+  }
+  // The next two bytes, without consuming them; 0 past the end of the chain.
+  OPENHTJ2K_NODISCARD uint16_t peek_word() const {
+    size_t np = node_pos, p = pos;
+    uint16_t word = 0;
+    for (int i = 0; i < 2; ++i) {
+      while (np < num_nodes && p >= node_length[np]) {
+        np++;
+        p = 0;
+      }
+      const uint8_t byte = (np < num_nodes) ? node_buf[np][p++] : 0;
+      word               = static_cast<uint16_t>((word << 8) | byte);
+    }
+    return word;
   }
   // Reset the bit-reader accumulator.  activate() begins a fresh read at a byte
   // boundary, so any partial-byte / 0xFF-stuffing state left over from a
@@ -301,6 +344,19 @@ class buf_chain {
     return (pos < current_length) ? (current_length - static_cast<uint32_t>(pos)) : 0;
   }
 
+  void set_cut_short(bool v) { cut_short = v; }
+  // True when the codestream ends with the current node's bytes: the chain's last node
+  // is a tile-part cut short and no node after the current one holds data.  A read that
+  // runs out of the current node then runs out of the codestream (it was truncated),
+  // rather than over a tile-part boundary (a malformed length).
+  OPENHTJ2K_NODISCARD bool data_ends_in_current_node() const {
+    if (!cut_short) return false;
+    for (size_t n = node_pos + 1; n < num_nodes; ++n) {
+      if (node_length[n] != 0) return false;
+    }
+    return true;
+  }
+
   // True once a read has run off the end of the last node, i.e. the padding
   // below has been handed out at least once.  Readers whose loop terminates
   // only on a set bit must consult this: the padding is all zeros, so such a
@@ -309,8 +365,11 @@ class buf_chain {
 
   uint8_t get_byte() {
     // `pos >= current_length` rather than `pos > current_length - 1`: the
-    // latter wraps for a zero-length node and reads past its buffer.
-    if (pos >= current_length) {
+    // latter wraps for a zero-length node and reads past its buffer.  A loop,
+    // not a single step: the next node can be empty as well (a tile-part with
+    // no body leaves a node of length 0 and no buffer), and reading it
+    // dereferenced a null pointer.
+    while (pos >= current_length) {
       if (node_pos + 1 >= num_nodes) {
         // Truncated codestream: return 0x00 as safe padding.
         past_end = true;
@@ -325,7 +384,8 @@ class buf_chain {
   }
 
   OPENHTJ2K_MAYBE_UNUSED uint8_t *get_current_address() {
-    if (pos >= current_length) {
+    // A loop, as in get_byte(): the next node can be empty too.
+    while (pos >= current_length) {
       if (node_pos + 1 >= num_nodes) {
         // Truncated codestream: return pointer to zero byte (safe read-only sentinel).
         static const uint8_t zero = 0;
@@ -482,8 +542,7 @@ class tagtree_node {
   }
   void set_node(uint32_t l, int32_t i, int32_t pi) {
     if (l > 255) {
-      printf("ERROR: Specified level for tagtree node is too large.\n");
-      throw std::exception();
+      open_htj2k::detail::fail("Specified level for tagtree node is too large.");
     }
     level        = static_cast<uint8_t>(l);
     index        = i;
@@ -621,3 +680,4 @@ class tagtree {
   //   return *this;
   // }
 };
+}  // namespace open_htj2k

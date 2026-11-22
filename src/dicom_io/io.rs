@@ -2043,10 +2043,13 @@ pub(super) fn is_parallel_decode_transfer_syntax(uid: &str) -> bool {
             // JPEG-LS
             | "1.2.840.10008.1.2.4.80"
             | "1.2.840.10008.1.2.4.81"
-            // JPEG 2000 (not HTJ2K: OpenHTJ2K serializes its calls and spreads each frame across its
-            // own pool, so frame-parallel workers would only block on its lock)
+            // JPEG 2000 and HTJ2K (per_call_threads() passes 1 inside Rayon workers so each
+            // frame decodes on its worker thread without nested pool oversubscription)
             | "1.2.840.10008.1.2.4.90"
             | "1.2.840.10008.1.2.4.91"
+            | "1.2.840.10008.1.2.4.201"
+            | "1.2.840.10008.1.2.4.202"
+            | "1.2.840.10008.1.2.4.203"
             // RLE Lossless
             | "1.2.840.10008.1.2.5"
     )
@@ -2824,6 +2827,51 @@ mod tests {
                 assert_eq!(bytes.as_ref(), raw_bytes.as_slice(), "{label}");
             }
         }
+    }
+
+    #[test]
+    fn htj2k_parallel_decode_preserves_fragmented_frames() {
+        use dcmnorm_core::PrimitiveValue;
+        use dcmnorm_dictionary::{tags, uids};
+        use dcmnorm_encoding::transfer_syntax::TransferSyntaxIndex;
+        use dcmnorm_transcode::TransferSyntaxRegistry;
+
+        let target = "1.2.840.10008.1.2.4.201";
+        let pixels = [vec![13u8; 32 * 32], vec![37u8; 32 * 32]].concat();
+        let native = htj2k_test_object(
+            uids::EXPLICIT_VR_LITTLE_ENDIAN,
+            32,
+            32,
+            1,
+            8,
+            8,
+            false,
+            2,
+            PrimitiveValue::from(pixels.clone()).into(),
+        );
+        let mut encoded = super::transcode_dcmnorm_object(&native, target).unwrap();
+        let frames = encoded
+            .element(tags::PIXEL_DATA)
+            .unwrap()
+            .fragments()
+            .unwrap();
+        let second_offset = (frames[0].len() + 16) as u32;
+        let fragments: Vec<Vec<u8>> = frames
+            .iter()
+            .flat_map(|frame| [frame[..32].to_vec(), frame[32..].to_vec()])
+            .collect();
+        super::replace_with_encapsulated_pixel_data(
+            &mut encoded,
+            vec![0, second_offset],
+            fragments,
+        );
+
+        assert!(super::should_parallel_frame_decode(&encoded, target, 2));
+        let syntax = TransferSyntaxRegistry.get(target).unwrap();
+        let reader = syntax.pixel_data_reader().unwrap();
+        let decoded =
+            super::decode_pixel_data_parallel_frames(reader.as_ref(), &encoded, 2).unwrap();
+        assert_eq!(decoded, pixels);
     }
 
     #[test]

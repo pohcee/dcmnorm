@@ -32,11 +32,15 @@
   #include "dec_CxtVLC_tables.hpp"
   #include "ht_block_decoding.hpp"
   #include "block_decoding.hpp"
+  #include "block_dequant.hpp"
   #include "coding_local.hpp"
   #include "utils.hpp"
+  #include "message_internal.hpp"
 
   #define Q0 0
   #define Q1 1
+
+namespace open_htj2k {
 
 uint8_t j2k_codeblock::calc_mbr(const uint32_t i, const uint32_t j, const uint8_t causal_cond) const {
   uint8_t *state_p0 = block_states + static_cast<size_t>(i) * blkstate_stride + j;
@@ -47,31 +51,128 @@ uint8_t j2k_codeblock::calc_mbr(const uint32_t i, const uint32_t j, const uint8_
   uint8_t mbr1 = state_p1[0] | state_p1[2];
   uint8_t mbr2 = state_p2[0] | state_p2[1] | state_p2[2];
   uint8_t mbr  = mbr0 | mbr1 | (mbr2 & causal_cond);
-  mbr |= (mbr0 >> SHIFT_REF) & (mbr0 >> SHIFT_SCAN);
-  mbr |= (mbr1 >> SHIFT_REF) & (mbr1 >> SHIFT_SCAN);
-  mbr |= (mbr2 >> SHIFT_REF) & (mbr2 >> SHIFT_SCAN) & causal_cond;
+  mbr |= static_cast<uint8_t>((mbr0 >> SHIFT_REF) & (mbr0 >> SHIFT_SCAN));
+  mbr |= static_cast<uint8_t>((mbr1 >> SHIFT_REF) & (mbr1 >> SHIFT_SCAN));
+  mbr |= static_cast<uint8_t>((mbr2 >> SHIFT_REF) & (mbr2 >> SHIFT_SCAN) & causal_cond);
   return mbr & 1;
 }
 
 // Scalar fused dequantize-and-store: convert sign-magnitude int32 to dequantized float.
+// Branchless in the sign, which is as good as random: the negation is (x ^ s) - s for an
+// integer and a sign-bit flip for a float (the same bits as -f, also for f == 0).
 template <bool StoreI32 = false>
 static FORCE_INLINE void dequant_store_scalar(void *dst, int32_t val, uint8_t transformation,
                                               int32_t pLSB_dq, float fscale_direct) {
   if (transformation == 1) {
-    int32_t sign = val & INT32_MIN;
-    val &= INT32_MAX;
-    val >>= pLSB_dq;
-    if (sign) val = -(val & INT32_MAX);
-    if constexpr (StoreI32)
-      *reinterpret_cast<int32_t *>(dst) = val;
-    else
-      *reinterpret_cast<float *>(dst) = static_cast<float>(val);
+    const int32_t s   = val >> 31;  // 0 or -1
+    const int32_t mag = (val & INT32_MAX) >> pLSB_dq;
+    const int32_t v   = (mag ^ s) - s;
+    OPENHTJ2K_IF_CONSTEXPR (StoreI32)
+      memcpy(dst, &v, sizeof(v));
+    else {
+      const float f = static_cast<float>(v);
+      memcpy(dst, &f, sizeof(f));
+    }
   } else {
-    int32_t sign = val & INT32_MIN;
-    float f      = static_cast<float>(val & INT32_MAX) * fscale_direct;
-    if (sign) f = -f;
-    *reinterpret_cast<float *>(dst) = f;
+    const float f = static_cast<float>(val & INT32_MAX) * fscale_direct;
+    uint32_t bits;
+    memcpy(&bits, &f, sizeof(bits));
+    bits |= static_cast<uint32_t>(val) & 0x80000000U;
+    memcpy(dst, &bits, sizeof(bits));
   }
+}
+
+// MagSgn decoding of sample i (0..3) of a quad, branchless: an insignificant sample
+// consumes no bits and decodes to 0, and so does its v_n (for E of the next line-pair).
+static FORCE_INLINE uint32_t ms_decode_sample(fwd_buf<0xFF> &MagSgn, const uint32_t inf, const uint32_t U_q,
+                                              const uint32_t i, const uint8_t pLSB, uint32_t &v_n) {
+  const uint32_t sig    = 0U - ((inf >> (4 + i)) & 1U);            // all ones when significant
+  const uint32_t m_n    = (U_q - ((inf >> (12 + i)) & 1U)) & sig;  // remove e_k
+  const uint32_t ms_val = MagSgn.fetch();                          // 32 bits of MagSgn data
+  MagSgn.advance(m_n);                                             // consume m_n
+  uint32_t v = ms_val & ((1U << m_n) - 1U);                        // keep only m_n bits
+  v |= ((inf >> (8 + i)) & 1U) << m_n;                             // add EMB e_1 as MSB
+  v |= 1;                                                          // add center of bin
+  v_n = v & sig;
+  // v is 2 * (mu - 1) + 0.5 with the sign bit in its LSB; add 2 to make it 2 * mu + 0.5,
+  // shift it up to the missing MSBs and put the sign at bit 31
+  return ((ms_val << 31) | ((v + 2) << (pLSB - 1))) & sig;
+}
+
+  #if defined(OPENHTJ2K_ENABLE_SSE2)
+// The four ms_decode_sample calls of a quad in SSE2 lanes (x86-64 builds without AVX2):
+// significance, m_n and the bit offsets in vectors, the four 32-bit windows read with
+// scalar loads (SSE2 has no byte shuffle to gather them from one fetch), then the value
+// assembly in vectors.  Lane i is sample i.  Same arithmetic as ms_decode_sample, so the
+// output is bit-identical.
+static FORCE_INLINE __m128i ms_decode_quad_sse2(fwd_buf<0xFF> &MagSgn, const uint32_t inf,
+                                                const uint32_t U_q, const __m128i shift_pLSB,
+                                                __m128i &v_n) {
+  const __m128i one = _mm_set1_epi32(1);
+  // lane i: inf bits 4+i (rho), 8+i (e_1), 12+i (e_k), moved to bits 7, 11, 15
+  const __m128i flags = _mm_mullo_epi16(_mm_and_si128(_mm_set1_epi32(static_cast<int32_t>(inf)),
+                                                      _mm_set_epi32(0x8880, 0x4440, 0x2220, 0x1110)),
+                                        _mm_set_epi16(0, 1, 0, 2, 0, 4, 0, 8));
+  const __m128i insig = _mm_cmpeq_epi32(_mm_and_si128(flags, _mm_set1_epi32(0x80)), _mm_setzero_si128());
+  const __m128i emb_k = _mm_srli_epi32(flags, 15);
+  const __m128i emb_1 = _mm_and_si128(_mm_srli_epi32(flags, 11), one);
+  const __m128i m_n =
+      _mm_andnot_si128(insig, _mm_sub_epi32(_mm_set1_epi32(static_cast<int32_t>(U_q)), emb_k));
+  // bit offset of each sample from the current position: exclusive prefix sum of m_n
+  __m128i inc = _mm_add_epi32(m_n, _mm_slli_si128(m_n, 4));
+  inc         = _mm_add_epi32(inc, _mm_slli_si128(inc, 8));
+  alignas(16) uint32_t ex[4];
+  _mm_store_si128(reinterpret_cast<__m128i *>(ex), _mm_slli_si128(inc, 4));
+  const uint32_t pos   = MagSgn.position();
+  const uint32_t total = static_cast<uint32_t>(_mm_cvtsi128_si32(_mm_shuffle_epi32(inc, 0xFF)));
+  uint32_t ms0, ms1, ms2, ms3;
+  if (total <= 56) {
+    // one fetch holds all four: sample i needs bits ex[i] .. ex[i] + max(m_n, 1) - 1
+    const uint64_t win = MagSgn.fetch64_at(pos);
+    ms0                = static_cast<uint32_t>(win);
+    ms1                = static_cast<uint32_t>(win >> ex[1]);
+    ms2                = static_cast<uint32_t>(win >> ex[2]);
+    ms3                = static_cast<uint32_t>(win >> ex[3]);
+  } else {
+    ms0 = MagSgn.fetch_at(pos);
+    ms1 = MagSgn.fetch_at(pos + ex[1]);
+    ms2 = MagSgn.fetch_at(pos + ex[2]);
+    ms3 = MagSgn.fetch_at(pos + ex[3]);
+  }
+  const __m128i ms = _mm_unpacklo_epi64(_mm_unpacklo_epi32(_mm_cvtsi32_si128(static_cast<int32_t>(ms0)),
+                                                           _mm_cvtsi32_si128(static_cast<int32_t>(ms1))),
+                                        _mm_unpacklo_epi32(_mm_cvtsi32_si128(static_cast<int32_t>(ms2)),
+                                                           _mm_cvtsi32_si128(static_cast<int32_t>(ms3))));
+  MagSgn.advance(total);
+  // 2^m_n through the float exponent (the float 2^31 converts to 0x80000000 = 1 << 31)
+  const __m128i pow2 =
+      _mm_cvttps_epi32(_mm_castsi128_ps(_mm_add_epi32(_mm_slli_epi32(m_n, 23), _mm_set1_epi32(127 << 23))));
+  __m128i v = _mm_and_si128(ms, _mm_sub_epi32(pow2, one));                                // keep m_n bits
+  v   = _mm_or_si128(v, _mm_and_si128(pow2, _mm_sub_epi32(_mm_setzero_si128(), emb_1)));  // e_1 as MSB
+  v   = _mm_or_si128(v, one);                                                             // center of bin
+  v_n = _mm_andnot_si128(insig, v);
+  const __m128i val =
+      _mm_or_si128(_mm_slli_epi32(ms, 31), _mm_sll_epi32(_mm_add_epi32(v, _mm_set1_epi32(2)), shift_pLSB));
+  return _mm_andnot_si128(insig, val);
+}
+  #endif
+
+// A quad whose U_q exceeds the code-block precision (malformed input).  Refuses a quad of
+// 128 or more MagSgn bits as the SIMD readers do (fwd_buf::advance); otherwise warns and
+// returns U_q clamped to the precision, so that m_n stays below 32 for the shifts in
+// ms_decode_sample.  Out of line: the common path pays only the compare at the call.
+static OPENHTJ2K_NOINLINE uint32_t malformed_U_q(uint32_t U_q, uint32_t inf, bool two_columns,
+                                                 uint8_t pLSB) {
+  uint32_t total = 0;
+  for (uint32_t i = 0; i < (two_columns ? 4U : 2U); ++i) {
+    if ((inf >> (4 + i)) & 1U) total += U_q - ((inf >> (12 + i)) & 1U);
+  }
+  if (total >= 128) {
+    open_htj2k::detail::fail("Value of numbits = %u is out of range.", total);
+  }
+  open_htj2k::detail::warn("HT cleanup pass: U_q %u exceeds the code-block precision — malformed input.",
+                           U_q);
+  return (30U - pLSB) + 2U;
 }
 
 // Step-2 of the HT cleanup pass: MagSgn decoding over the (tv, u) scratch
@@ -79,261 +180,125 @@ static FORCE_INLINE void dequant_store_scalar(void *dst, int32_t val, uint8_t tr
 // Kept per-block: the fwd_buf destuff scratch is thread-local (constructing a
 // second fwd_buf on the same thread invalidates the first), and step-2 is
 // throughput-bound — there is nothing to gain from interleaving it.
+// Significance is data-dependent, so a quad decodes its samples without branching
+// on it (ms_decode_sample); only a quad with no significant sample is skipped.
 template <bool fuse_dequant = false, bool store_i32 = false>
 static void ht_cleanup_step2(j2k_codeblock *block, const uint8_t pLSB, const int32_t Pcup,
                              uint16_t *scratch, const int32_t sstr) {
   uint8_t *compressed_data = block->get_compressed_data();
-  /*******************************************************************************************************************/
-  // MagSgn decoding
-  /*******************************************************************************************************************/
-  {
-    // Fused dequantize setup
-    int32_t pLSB_dq     = 0;
-    float fscale_direct = 0.0f;
-    uint32_t out_stride = block->blksampl_stride;
-    if constexpr (fuse_dequant) {
-      const int32_t M_b_val = block->get_Mb();
-      pLSB_dq               = 31 - M_b_val;
-      out_stride            = block->band_stride;
-      if (block->transformation != 1) {
-        // lossy path (transformation==0 for irrev97, transformation>=2 for ATK irrev)
-        fscale_direct = block->stepsize;
-        fscale_direct *= static_cast<float>(1 << FRACBITS);
-        if (M_b_val <= 31)
-          fscale_direct /= static_cast<float>(1 << (31 - M_b_val));
-        else
-          fscale_direct *= static_cast<float>(1 << (M_b_val - 31));
-      }
+  // Fused dequantize setup
+  int32_t pLSB_dq     = 0;
+  float fscale_direct = 0.0f;
+  uint32_t out_stride = static_cast<uint32_t>(block->blksampl_stride);
+  OPENHTJ2K_IF_CONSTEXPR (fuse_dequant) {
+    const int32_t M_b_val = block->get_Mb();
+    pLSB_dq               = 31 - M_b_val;
+    out_stride            = block->band_stride;
+    if (block->transformation != 1) {
+      // lossy path (transformation==0 for irrev97, transformation>=2 for ATK irrev)
+      fscale_direct = block->stepsize;
+      fscale_direct *= static_cast<float>(1 << FRACBITS);
+      if (M_b_val <= 31)
+        fscale_direct /= static_cast<float>(1 << (31 - M_b_val));
+      else
+        fscale_direct *= static_cast<float>(1 << (M_b_val - 31));
     }
+  }
+  const uint8_t transformation = block->transformation;
+  auto store_sample            = [&](int32_t *dst, uint32_t ival) {
+    OPENHTJ2K_IF_CONSTEXPR (fuse_dequant) {
+      dequant_store_scalar<store_i32>(dst, static_cast<int32_t>(ival), transformation, pLSB_dq,
+                                                 fscale_direct);
+    } else {
+      *dst = static_cast<int32_t>(ival);
+    }
+  };
 
-    // We allocate a scratch row for storing v_n values.
-    // We have 512 quads horizontally.
-    // We need an extra entry to handle the case of vp[1]
-    // when vp is at the last column.
-    // Here, we allocate 4 instead of 1 to make the buffer size
-    // a multipled of 16 bytes.
-    const int v_n_size             = 512 + 4;
-    uint32_t v_n_scratch[v_n_size] = {0};  // 2+ kB
+  // v_n of the row-1 samples of the previous line-pair, one entry per quad:
+  // v_n_scratch[q] = v_n(column 2q) | v_n(column 2q - 1).  512 quads at most, plus one
+  // for vp[1] at the last quad; 4 extra keep the size a multiple of 16 bytes.
+  const int v_n_size             = 512 + 4;
+  uint32_t v_n_scratch[v_n_size] = {0};  // 2+ kB
 
-    fwd_buf<0xFF> MagSgn(compressed_data, Pcup);
+  fwd_buf<0xFF> MagSgn(compressed_data, Pcup);
+  #if defined(OPENHTJ2K_ENABLE_SSE2)
+  const __m128i shift_pLSB = _mm_cvtsi32_si128(pLSB - 1);
+  const __m128i shift_dq   = _mm_cvtsi32_si128(pLSB_dq);
+  const __m128i vmag       = _mm_set1_epi32(INT32_MAX);
+  const __m128 vfscale     = _mm_set1_ps(fscale_direct);
+  #endif
 
-    // Helper to store a decoded sample, optionally fusing dequantize.
-    auto store_sample = [&](int32_t *dst, int32_t ival) {
-      if constexpr (fuse_dequant) {
-        dequant_store_scalar<store_i32>(dst, ival, block->transformation, pLSB_dq, fscale_direct);
-      } else {
-        *dst = ival;
-      }
-    };
-
-    uint16_t *sp = scratch;
-    uint32_t *vp = v_n_scratch;
-    int32_t *dp  = fuse_dequant ? reinterpret_cast<int32_t *>(block->band_buf) : block->sample_buf;
-
+  const uint32_t width = block->size.x;
+  for (uint32_t y = 0; y < block->size.y; y += 2) {
+    const uint16_t *sp = scratch + (y >> 1) * static_cast<uint32_t>(sstr);
+    uint32_t *vp       = v_n_scratch;
+    int32_t *dp       = fuse_dequant ? reinterpret_cast<int32_t *>(block->band_buf) + y * block->band_stride
+                                     : block->sample_buf + y * block->blksampl_stride;
     uint32_t prev_v_n = 0;
-    for (uint32_t x = 0; x < block->size.x; sp += 2, ++vp) {
-      uint32_t inf = sp[0];
-      uint32_t U_q = sp[1];
-      if (U_q > ((30U - pLSB) + 2U)) {
-        printf("ERROR\n");
-      }
-
-      uint32_t v_n;
-      uint32_t val = 0;
-      uint32_t bit = 0;
-      if (inf & (1 << (4 + bit))) {
-        // get 32 bits of magsgn data
-        uint32_t ms_val = MagSgn.fetch();
-        uint32_t m_n    = U_q - ((inf >> (12 + bit)) & 1);  // remove e_k
-        MagSgn.advance(m_n);                                // consume m_n
-
-        val = ms_val << 31;                      // get sign bit
-        v_n = ms_val & ((1U << m_n) - 1U);       // keep only m_n bits
-        v_n |= ((inf >> (8 + bit)) & 1) << m_n;  // add EMB e_1 as MSB
-        v_n |= 1;                                // add center of bin
-        // v_n now has 2 * (\mu - 1) + 0.5 with correct sign bit
-        // add 2 to make it 2*\mu+0.5, shift it up to missing MSBs
-        val |= (v_n + 2) << (pLSB - 1);
-      }
-      store_sample(&dp[0], static_cast<int32_t>(val));
-
-      v_n = 0;
-      val = 0;
-      bit = 1;
-      if (inf & (1 << (4 + bit))) {
-        // get 32 bits of magsgn data
-        uint32_t ms_val = MagSgn.fetch();
-        uint32_t m_n    = U_q - ((inf >> (12 + bit)) & 1);  // remove e_k
-        MagSgn.advance(m_n);                                // consume m_n
-
-        val = ms_val << 31;                      // get sign bit
-        v_n = ms_val & ((1U << m_n) - 1U);       // keep only m_n bits
-        v_n |= ((inf >> (8 + bit)) & 1) << m_n;  // add EMB e_1 as MSB
-        v_n |= 1;                                // add center of bin
-        // v_n now has 2 * (\mu - 1) + 0.5 with correct sign bit
-        // add 2 to make it 2*\mu+0.5, shift it up to missing MSBs
-        val |= (v_n + 2) << (pLSB - 1);
-      }
-      store_sample(&dp[out_stride], static_cast<int32_t>(val));
-      vp[0]    = prev_v_n | v_n;
-      prev_v_n = 0;
-      ++dp;
-      if (++x >= block->size.x) {
-        ++vp;
-        break;
-      }
-
-      val = 0;
-      bit = 2;
-      if (inf & (1 << (4 + bit))) {
-        // get 32 bits of magsgn data
-        uint32_t ms_val = MagSgn.fetch();
-        uint32_t m_n    = U_q - ((inf >> (12 + bit)) & 1);  // remove e_k
-        MagSgn.advance(m_n);                                // consume m_n
-
-        val = ms_val << 31;                      // get sign bit
-        v_n = ms_val & ((1U << m_n) - 1U);       // keep only m_n bits
-        v_n |= ((inf >> (8 + bit)) & 1) << m_n;  // add EMB e_1 as MSB
-        v_n |= 1;                                // add center of bin
-        // v_n now has 2 * (\mu - 1) + 0.5 with correct sign bit
-        // add 2 to make it 2*\mu+0.5, shift it up to missing MSBs
-        val |= (v_n + 2) << (pLSB - 1);
-      }
-      store_sample(&dp[0], static_cast<int32_t>(val));
-
-      v_n = 0;
-      val = 0;
-      bit = 3;
-      if (inf & (1 << (4 + bit))) {
-        // get 32 bits of magsgn data
-        uint32_t ms_val = MagSgn.fetch();
-        uint32_t m_n    = U_q - ((inf >> (12 + bit)) & 1);  // remove e_k
-        MagSgn.advance(m_n);                                // consume m_n
-
-        val = ms_val << 31;                      // get sign bit
-        v_n = ms_val & ((1U << m_n) - 1U);       // keep only m_n bits
-        v_n |= ((inf >> (8 + bit)) & 1) << m_n;  // add EMB e_1 as MSB
-        v_n |= 1;                                // add center of bin
-        // v_n now has 2 * (\mu - 1) + 0.5 with correct sign bit
-        // add 2 to make it 2*\mu+0.5, shift it up to missing MSBs
-        val |= (v_n + 2) << (pLSB - 1);
-      }
-      store_sample(&dp[out_stride], static_cast<int32_t>(val));
-      prev_v_n = v_n;
-      ++dp;
-      ++x;
-    }
-    vp[0] = prev_v_n;
-
-    for (uint32_t y = 2; y < block->size.y; y += 2) {
-      uint16_t *sp = scratch + (y >> 1) * static_cast<uint32_t>(sstr);
-      uint32_t *vp = v_n_scratch;
-      int32_t *dp  = fuse_dequant ? reinterpret_cast<int32_t *>(block->band_buf) + y * block->band_stride
-                                  : block->sample_buf + y * block->blksampl_stride;
-
-      prev_v_n = 0;
-      for (uint32_t x = 0; x < block->size.x; sp += 2, ++vp) {
-        uint32_t inf = sp[0];
-        uint32_t u_q = sp[1];
-
+    for (uint32_t x = 0; x < width; x += 2, sp += 2, ++vp, dp += 2) {
+      const uint32_t inf = sp[0];
+      uint32_t U_q       = sp[1];
+      if (y > 0) {
         uint32_t gamma = inf & 0xF0;
         gamma &= gamma - 0x10;  // is gamma_q 1?
-        uint32_t emax  = vp[0] | vp[1];
-        emax           = 31 - count_leading_zeros(emax | 2);  // emax - 1
-        uint32_t kappa = gamma ? emax : 1;
-
-        uint32_t U_q = u_q + kappa;
-        if (U_q > ((30U - pLSB) + 2U)) {
-          printf("ERROR\n");
-        }
-
-        uint32_t v_n;
-        uint32_t val = 0;
-        uint32_t bit = 0;
-        if (inf & (1 << (4 + bit))) {
-          // get 32 bits of magsgn data
-          uint32_t ms_val = MagSgn.fetch();
-          uint32_t m_n    = U_q - ((inf >> (12 + bit)) & 1);  // remove e_k
-          MagSgn.advance(m_n);                                // consume m_n
-
-          val = ms_val << 31;                      // get sign bit
-          v_n = ms_val & ((1U << m_n) - 1U);       // keep only m_n bits
-          v_n |= ((inf >> (8 + bit)) & 1) << m_n;  // add EMB e_1 as MSB
-          v_n |= 1;                                // add center of bin
-          // v_n now has 2 * (\mu - 1) + 0.5 with correct sign bit
-          // add 2 to make it 2*\mu+0.5, shift it up to missing MSBs
-          val |= (v_n + 2) << (pLSB - 1);
-        }
-        store_sample(&dp[0], static_cast<int32_t>(val));
-
-        v_n = 0;
-        val = 0;
-        bit = 1;
-        if (inf & (1 << (4 + bit))) {
-          // get 32 bits of magsgn data
-          uint32_t ms_val = MagSgn.fetch();
-          uint32_t m_n    = U_q - ((inf >> (12 + bit)) & 1);  // remove e_k
-          MagSgn.advance(m_n);                                // consume m_n
-
-          val = ms_val << 31;                      // get sign bit
-          v_n = ms_val & ((1U << m_n) - 1U);       // keep only m_n bits
-          v_n |= ((inf >> (8 + bit)) & 1) << m_n;  // add EMB e_1 as MSB
-          v_n |= 1;                                // add center of bin
-          // v_n now has 2 * (\mu - 1) + 0.5 with correct sign bit
-          // add 2 to make it 2*\mu+0.5, shift it up to missing MSBs
-          val |= (v_n + 2) << (pLSB - 1);
-        }
-        store_sample(&dp[out_stride], static_cast<int32_t>(val));
-        vp[0]    = prev_v_n | v_n;
-        prev_v_n = 0;
-        ++dp;
-        if (++x >= block->size.x) {
-          ++vp;
-          break;
-        }
-
-        val = 0;
-        bit = 2;
-        if (inf & (1 << (4 + bit))) {
-          // get 32 bits of magsgn data
-          uint32_t ms_val = MagSgn.fetch();
-          uint32_t m_n    = U_q - ((inf >> (12 + bit)) & 1);  // remove e_k
-          MagSgn.advance(m_n);                                // consume m_n
-
-          val = ms_val << 31;                      // get sign bit
-          v_n = ms_val & ((1U << m_n) - 1U);       // keep only m_n bits
-          v_n |= ((inf >> (8 + bit)) & 1) << m_n;  // add EMB e_1 as MSB
-          v_n |= 1;                                // add center of bin
-          // v_n now has 2 * (\mu - 1) + 0.5 with correct sign bit
-          // add 2 to make it 2*\mu+0.5, shift it up to missing MSBs
-          val |= (v_n + 2) << (pLSB - 1);
-        }
-        store_sample(&dp[0], static_cast<int32_t>(val));
-
-        v_n = 0;
-        val = 0;
-        bit = 3;
-        if (inf & (1 << (4 + bit))) {
-          // get 32 bits of magsgn data
-          uint32_t ms_val = MagSgn.fetch();
-          uint32_t m_n    = U_q - ((inf >> (12 + bit)) & 1);  // remove e_k
-          MagSgn.advance(m_n);                                // consume m_n
-
-          val = ms_val << 31;                      // get sign bit
-          v_n = ms_val & ((1U << m_n) - 1U);       // keep only m_n bits
-          v_n |= ((inf >> (8 + bit)) & 1) << m_n;  // add EMB e_1 as MSB
-          v_n |= 1;                                // add center of bin
-          // v_n now has 2 * (\mu - 1) + 0.5 with correct sign bit
-          // add 2 to make it 2*\mu+0.5, shift it up to missing MSBs
-          val |= (v_n + 2) << (pLSB - 1);
-        }
-        store_sample(&dp[out_stride], static_cast<int32_t>(val));
-        prev_v_n = v_n;
-        ++dp;
-        ++x;
+        uint32_t emax = vp[0] | vp[1];
+        emax          = 31 - count_leading_zeros(emax | 2);  // emax - 1
+        U_q += gamma ? emax : 1;                             // kappa
       }
-      vp[0] = prev_v_n;
+      const bool two_columns = x + 1 < width;
+      if (U_q > ((30U - pLSB) + 2U)) U_q = malformed_U_q(U_q, inf, two_columns, pLSB);
+      uint32_t v1 = 0, v3 = 0;
+  #if defined(OPENHTJ2K_ENABLE_SSE2)
+      if (inf & 0xF0) {
+        __m128i vn;
+        // a one-column quad decodes only samples 0 and 1
+        const __m128i val =
+            ms_decode_quad_sse2(MagSgn, two_columns ? inf : (inf & 0x3333U), U_q, shift_pLSB, vn);
+        __m128i res = val;
+        OPENHTJ2K_IF_CONSTEXPR (fuse_dequant) {
+          if (transformation == 1) {
+            const __m128i s   = _mm_srai_epi32(val, 31);
+            const __m128i mag = _mm_srl_epi32(_mm_and_si128(val, vmag), shift_dq);
+            res               = _mm_sub_epi32(_mm_xor_si128(mag, s), s);
+            OPENHTJ2K_IF_CONSTEXPR (!store_i32) res = _mm_castps_si128(_mm_cvtepi32_ps(res));
+          } else {
+            const __m128 f = _mm_mul_ps(_mm_cvtepi32_ps(_mm_and_si128(val, vmag)), vfscale);
+            res            = _mm_or_si128(_mm_castps_si128(f), _mm_andnot_si128(vmag, val));
+          }
+        }
+        if (two_columns) {
+          const __m128i o = _mm_shuffle_epi32(res, _MM_SHUFFLE(3, 1, 2, 0));  // row 0, then row 1
+          _mm_storel_epi64(reinterpret_cast<__m128i *>(dp), o);
+          _mm_storel_epi64(reinterpret_cast<__m128i *>(dp + out_stride), _mm_unpackhi_epi64(o, o));
+          v3 = static_cast<uint32_t>(_mm_cvtsi128_si32(_mm_shuffle_epi32(vn, 0xFF)));
+        } else {
+          dp[0]          = _mm_cvtsi128_si32(res);
+          dp[out_stride] = _mm_cvtsi128_si32(_mm_shuffle_epi32(res, 0x55));
+        }
+        v1 = static_cast<uint32_t>(_mm_cvtsi128_si32(_mm_shuffle_epi32(vn, 0x55)));
+      } else {
+  #else
+      uint32_t vx;
+      if (inf & 0xF0) {
+        store_sample(&dp[0], ms_decode_sample(MagSgn, inf, U_q, 0, pLSB, vx));
+        store_sample(&dp[out_stride], ms_decode_sample(MagSgn, inf, U_q, 1, pLSB, v1));
+        if (two_columns) {
+          store_sample(&dp[1], ms_decode_sample(MagSgn, inf, U_q, 2, pLSB, vx));
+          store_sample(&dp[1 + out_stride], ms_decode_sample(MagSgn, inf, U_q, 3, pLSB, v3));
+        }
+      } else {
+  #endif
+        store_sample(&dp[0], 0);
+        store_sample(&dp[out_stride], 0);
+        if (two_columns) {
+          store_sample(&dp[1], 0);
+          store_sample(&dp[1 + out_stride], 0);
+        }
+      }
+      vp[0]    = prev_v_n | v1;
+      prev_v_n = v3;
     }
+    vp[0] = prev_v_n;
   }
 }
 
@@ -716,7 +681,7 @@ auto process_stripes_block_dec = [](SP_dec &SigProp, j2k_codeblock *block, const
         state_p[0] |= 1 << SHIFT_PI_;
         bit = SigProp.importSigPropBit();
         //        block->modify_state(refinement_value, bit, i, j);
-        state_p[0] |= bit << SHIFT_REF;
+        state_p[0] |= static_cast<uint8_t>(bit << SHIFT_REF);
         *sp |= bit << pLSB;
         *sp |= bit << (pLSB - 1);  // new bin center ( = 0.5)
       }
@@ -822,6 +787,35 @@ void ht_magref_decode(j2k_codeblock *block, uint8_t *HT_magref_segment, uint32_t
   }
 }
 
+// Reversible-path dequantization: undo the ROI up-shift and the binary point,
+// restore the sign, and write each sample through the store callables (int32
+// for the integer 5/3 IDWT, float otherwise).  A function template rather than
+// a generic lambda so that the library builds as C++11.
+template <class Store>
+static inline void rev_dequant_scalar(const j2k_codeblock *cb, uint8_t ROIshift, int32_t pLSB,
+                                      uint32_t mask, Store store_fn) {
+  for (size_t i = 0; i < static_cast<size_t>(cb->size.y); i++) {
+    int32_t *val = cb->sample_buf + i * cb->blksampl_stride;
+    sprec_t *dst = cb->band_buf + i * cb->band_stride;
+    size_t len   = cb->size.x;
+    for (; len > 0; --len) {
+      int32_t sign = *val & INT32_MIN;
+      *val &= INT32_MAX;
+      if (ROIshift && (((uint32_t)*val & ~mask) == 0)) {
+        *val = roi_upshift(*val, ROIshift);
+      }
+      *val >>= pLSB;
+      if (sign) {
+        *val = -(*val & INT32_MAX);
+      }
+      assert(pLSB >= 0);
+      store_fn(dst, *val);
+      val++;
+      dst++;
+    }
+  }
+}
+
 void j2k_codeblock::dequantize(uint8_t ROIshift) const {
   /* ready for ROI adjustment and dequantization */
 
@@ -842,32 +836,12 @@ void j2k_codeblock::dequantize(uint8_t ROIshift) const {
     fscale_direct *= (static_cast<float>(1 << (M_b - 31)));
   }
   if (this->transformation == 1) {
-    auto rev_loop = [&](auto store_fn) {
-      for (size_t i = 0; i < static_cast<size_t>(this->size.y); i++) {
-        int32_t *val = this->sample_buf + i * this->blksampl_stride;
-        sprec_t *dst = this->band_buf + i * this->band_stride;
-        size_t len   = this->size.x;
-        for (; len > 0; --len) {
-          int32_t sign = *val & INT32_MIN;
-          *val &= INT32_MAX;
-          if (ROIshift && (((uint32_t)*val & ~mask) == 0)) {
-            *val <<= ROIshift;
-          }
-          *val >>= pLSB;
-          if (sign) {
-            *val = -(*val & INT32_MAX);
-          }
-          assert(pLSB >= 0);
-          store_fn(dst, *val);
-          val++;
-          dst++;
-        }
-      }
-    };
     if (this->dequant_i32)
-      rev_loop([](sprec_t *d, int32_t v) { *reinterpret_cast<int32_t *>(d) = v; });
+      rev_dequant_scalar(this, ROIshift, pLSB, mask,
+                         [](sprec_t *d, int32_t v) { *reinterpret_cast<int32_t *>(d) = v; });
     else
-      rev_loop([](sprec_t *d, int32_t v) { *d = static_cast<sprec_t>(v); });
+      rev_dequant_scalar(this, ROIshift, pLSB, mask,
+                         [](sprec_t *d, int32_t v) { *d = static_cast<sprec_t>(v); });
   } else if (ROIshift == 0) {
     // Lossy, no ROI (common case): direct float multiply, matching the fused
     // dequant path (dequant_store_scalar) and the AVX2/NEON/WASM variants of
@@ -894,7 +868,7 @@ void j2k_codeblock::dequantize(uint8_t ROIshift) const {
     constexpr int32_t downshift = 15;
     float fscale                = fscale_direct;
     fscale *= static_cast<float>(1 << 16) * static_cast<float>(1 << downshift);
-    const auto scale = static_cast<int32_t>(fscale + 0.5f);
+    const int32_t scale = roi_scale_to_i32(fscale + 0.5f);
     for (size_t i = 0; i < static_cast<size_t>(this->size.y); i++) {
       int32_t *val = this->sample_buf + i * this->blksampl_stride;
       sprec_t *dst = this->band_buf + i * this->band_stride;
@@ -905,14 +879,14 @@ void j2k_codeblock::dequantize(uint8_t ROIshift) const {
         *val &= INT32_MAX;
         // detect background region and upshift it
         if (((uint32_t)*val & ~mask) == 0) {
-          *val <<= ROIshift;
+          *val = roi_upshift(*val, ROIshift);
         }
         // to prevent overflow, truncate to int16_t
-        *val = (*val + (1 << 15)) >> 16;
+        *val = wrap_add(*val, 1 << 15) >> 16;
         //  dequantization
-        *val *= scale;
+        *val = wrap_mul(*val, scale);
         // downshift
-        *val = (int32_t)((*val + (1 << (downshift - 1))) >> downshift);
+        *val = wrap_add(*val, 1 << (downshift - 1)) >> downshift;
         // convert sign-magnitude to two's complement form
         if (sign) {
           *val = -(*val & INT32_MAX);
@@ -969,8 +943,8 @@ static ht_dec_setup htj2k_dec_setup(j2k_codeblock *block) {
   }
   const uint8_t empty_passes = static_cast<uint8_t>(P0 * 3);
   if (block->num_passes < empty_passes) {
-    printf("WARNING: number of passes %d exceeds number of empty passes %d", block->num_passes,
-           empty_passes);
+    open_htj2k::detail::warn("number of passes %d exceeds number of empty passes %d", block->num_passes,
+                             empty_passes);
     return su;
   }
   // number of ht coding pass (Z_blk in the spec)
@@ -992,26 +966,26 @@ static ht_dec_setup htj2k_dec_setup(j2k_codeblock *block) {
   for (uint32_t i = 0; i < block->pass_length_count; i++) {
     if (block->pass_length[i] != 0) {
       if (num_segments >= 4) {
-        printf("WARNING: too many HT coding-pass segments (>4) — malformed input.\n");
+        open_htj2k::detail::warn("too many HT coding-pass segments (>4) — malformed input.");
         return su;
       }
       all_segments[num_segments++] = static_cast<uint8_t>(i);
     }
   }
   if (num_segments == 0) {
-    printf("WARNING: no non-empty HT coding-pass segments.\n");
+    open_htj2k::detail::warn("no non-empty HT coding-pass segments.");
     return su;
   }
   su.Lcup += static_cast<int32_t>(block->pass_length[all_segments[0]]);
   if (su.Lcup < 2) {
-    printf("WARNING: Cleanup pass length must be at least 2 bytes in length.\n");
+    open_htj2k::detail::warn("Cleanup pass length must be at least 2 bytes in length.");
     return su;
   }
   // Bound the attacker-controlled cleanup length by the (already clamped)
   // codeblock byte count before any Dcup[Lcup-1] access / modDcup write.
   if (static_cast<uint32_t>(su.Lcup) > block->length) {
-    printf("WARNING: HT cleanup pass length %d exceeds codeblock bytes %u — malformed input.\n", su.Lcup,
-           block->length);
+    open_htj2k::detail::warn("HT cleanup pass length %d exceeds codeblock bytes %u — malformed input.",
+                             su.Lcup, block->length);
     return su;
   }
   for (uint32_t i = 1; i < num_segments; i++) {
@@ -1019,8 +993,8 @@ static ht_dec_setup htj2k_dec_setup(j2k_codeblock *block) {
   }
   // The refinement segments are read from Dcup + Lcup; keep them in the buffer.
   if (static_cast<uint32_t>(su.Lref) > block->length - static_cast<uint32_t>(su.Lcup)) {
-    printf("WARNING: HT refinement length exceeds remaining codeblock bytes %u — malformed input.\n",
-           block->length - static_cast<uint32_t>(su.Lcup));
+    open_htj2k::detail::warn("HT refinement length exceeds remaining codeblock bytes %u — malformed input.",
+                             block->length - static_cast<uint32_t>(su.Lcup));
     return su;
   }
   uint8_t *Dcup = block->get_compressed_data();
@@ -1033,13 +1007,13 @@ static ht_dec_setup htj2k_dec_setup(j2k_codeblock *block) {
   // number of (skipped) magnitude bitplanes
   su.S_blk = static_cast<uint8_t>(P0 + block->num_ZBP + S_skip);
   if (su.S_blk >= 30) {
-    printf("WARNING: Number of skipped mag bitplanes %d is too large.\n", su.S_blk);
+    open_htj2k::detail::warn("Number of skipped mag bitplanes %d is too large.", su.S_blk);
     return su;
   }
   // Suffix length (=MEL + VLC) of HT Cleanup pass
   su.Scup = static_cast<int32_t>((Dcup[su.Lcup - 1] << 4) + (Dcup[su.Lcup - 2] & 0x0F));
   if (su.Scup < 2 || su.Scup > su.Lcup || su.Scup > 4079) {
-    printf("WARNING: cleanup pass suffix length %d is invalid.\n", su.Scup);
+    open_htj2k::detail::warn("cleanup pass suffix length %d is invalid.", su.Scup);
     return su;
   }
   // modDcup (shall be done before the creation of state_VLC instance)
@@ -1102,7 +1076,11 @@ static bool htj2k_dec_finish(j2k_codeblock *block, const ht_dec_setup &su, const
 // corrupted Scup) — every setup must be consumed by exactly one decode.
 static bool htj2k_decode_su(j2k_codeblock *block, const ht_dec_setup &su, const uint8_t ROIshift) {
   if (!su.ok) return false;
-  if (su.empty) return true;
+  if (su.empty) {
+    // Only placeholder passes: every sample is zero, and dequantize does not run.
+    zero_codeblock_band(block);
+    return true;
+  }
 
   const uint16_t QW  = static_cast<uint16_t>(ceil_int(static_cast<int16_t>(block->size.x), 2));
   const uint16_t QH  = static_cast<uint16_t>(ceil_int(static_cast<int16_t>(block->size.y), 2));
@@ -1127,6 +1105,28 @@ static bool htj2k_decode_su(j2k_codeblock *block, const ht_dec_setup &su, const 
 
 bool htj2k_decode(j2k_codeblock *block, const uint8_t ROIshift) {
   return htj2k_decode_su(block, htj2k_dec_setup(block), ROIshift);
+}
+
+bool htj2k_decode_cleanup_raw(j2k_codeblock *block) {
+  const ht_dec_setup su = htj2k_dec_setup(block);
+  if (!su.ok) return false;
+  if (su.empty) return true;
+
+  const uint16_t QW  = static_cast<uint16_t>(ceil_int(static_cast<int16_t>(block->size.x), 2));
+  const uint16_t QH  = static_cast<uint16_t>(ceil_int(static_cast<int16_t>(block->size.y), 2));
+  const int32_t sstr = static_cast<int32_t>(((block->size.x + 2) + 7u) & ~7u);  // multiples of 8
+
+  uint16_t scratch[8 * 513];
+  ht_step1_lane ln;
+  ln.Dcup            = block->get_compressed_data();
+  ln.Lcup            = su.Lcup;
+  ln.Scup            = su.Scup;
+  ln.scratch         = scratch;
+  ln.block_states    = block->block_states;
+  ln.blkstate_stride = block->blkstate_stride;
+  ht_cleanup_step1_nway<1, true>(&ln, QW, QH, sstr);
+  ht_cleanup_step2<>(block, static_cast<uint8_t>(30 - su.S_blk), su.Pcup, scratch, sstr);
+  return true;
 }
 
 // Number of codeblocks whose step-1 chains are decoded in lockstep.
@@ -1229,4 +1229,5 @@ bool htj2k_decode_batch(j2k_codeblock *const *blocks, uint32_t n, uint8_t ROIshi
 }
 
 const uint32_t htj2k_dec_batch_lanes = OPENHTJ2K_HT_DEC_BATCH_N;
+}  // namespace open_htj2k
 #endif

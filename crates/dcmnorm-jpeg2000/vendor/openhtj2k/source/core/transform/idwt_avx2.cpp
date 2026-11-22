@@ -37,6 +37,8 @@
  * horizontal transforms
  *******************************************************************************/
 // irreversible IDWT
+namespace open_htj2k {
+
 auto idwt_irrev97_fixed_avx2_hor_step = [](const int32_t init_pos, const int32_t simdlen, float *const X,
                                             const int32_t n0, const int32_t n1, const float fV) {
   auto vcoeff = _mm256_set1_ps(fV);
@@ -719,9 +721,9 @@ void idwt_1d_filtr_irrev97_planar_sr_avx2(sprec_t *out, const sprec_t *lp, const
   const int32_t M    = (J1 + 2) - base + 1;
   thread_local std::vector<float> s1v, s2v, s3v;
   if (static_cast<int32_t>(s1v.size()) < M) {
-    s1v.resize(M);
-    s2v.resize(M);
-    s3v.resize(M);
+    s1v.resize(static_cast<size_t>(M));
+    s2v.resize(static_cast<size_t>(M));
+    s3v.resize(static_cast<size_t>(M));
   }
   float *const s1 = s1v.data() - base;  // valid for j in [base, J1+2]
   float *const s2 = s2v.data() - base;
@@ -802,7 +804,7 @@ void idwt_1d_filtr_rev53_planar_i32_avx2(int32_t *out, const int32_t *lp, const 
         _mm256_sub_epi32(_mm256_loadu_si256(reinterpret_cast<const __m256i *>(lp + j)),
                          _mm256_srai_epi32(_mm256_add_epi32(_mm256_add_epi32(Ojm1, Ob), vtwo), 2));
     // S1[j+8] from raw memory (those positions are not yet written this pass)
-    const int32_t s1_next = lp[j + 8] - ((hp[j + 7] + hp[j + 8] + 2) >> 2);
+    const int32_t s1_next = rev53_undo_update(lp[j + 8], hp[j + 7], hp[j + 8]);
     __m256i S1n           = avx2_shl1_epi32(S1b, _mm256_set1_epi32(s1_next));  // S1[j+1..j+8]
     __m256i S2b           = _mm256_add_epi32(Ob, _mm256_srai_epi32(_mm256_add_epi32(S1b, S1n), 1));
     __m256i lo            = _mm256_unpacklo_epi32(S1b, S2b);
@@ -813,15 +815,15 @@ void idwt_1d_filtr_rev53_planar_i32_avx2(int32_t *out, const int32_t *lp, const 
   }
   // Scalar tail (at most 9 S1 values: loop exits with N - j <= 8).
   {
-    int32_t s1t[12];
+    int32_t s1t[12]{};
     int32_t o_prev = O(j - 1);
     for (int32_t t = j; t <= N; ++t) {
       const int32_t o = O(t);
-      s1t[t - j]      = E(t) - ((o_prev + o + 2) >> 2);
+      s1t[t - j]      = rev53_undo_update(E(t), o_prev, o);
       o_prev          = o;
     }
     for (int32_t t = j; t <= N; ++t) out[2 * t] = s1t[t - j];
-    for (int32_t t = j; t < N; ++t) out[2 * t + 1] = O(t) + ((s1t[t - j] + s1t[t - j + 1]) >> 1);
+    for (int32_t t = j; t < N; ++t) out[2 * t + 1] = rev53_undo_predict(O(t), s1t[t - j], s1t[t - j + 1]);
   }
 }
 
@@ -836,7 +838,7 @@ void idwt_rev_ver_lp_step_i32_avx2(int32_t n, const int32_t *prev, const int32_t
         _mm256_srai_epi32(_mm256_add_epi32(_mm256_add_epi32(a, b), vtwo), 2));
     _mm256_storeu_si256(reinterpret_cast<__m256i *>(tgt + i), t);
   }
-  for (; i < n; ++i) tgt[i] -= (prev[i] + next[i] + 2) >> 2;
+  for (; i < n; ++i) tgt[i] = rev53_undo_update(tgt[i], prev[i], next[i]);
 }
 
 void idwt_rev_ver_hp_step_i32_avx2(int32_t n, const int32_t *prev, const int32_t *next, int32_t *tgt) {
@@ -848,6 +850,7 @@ void idwt_rev_ver_hp_step_i32_avx2(int32_t n, const int32_t *prev, const int32_t
     t = _mm256_add_epi32(t, _mm256_srai_epi32(_mm256_add_epi32(a, b), 1));
     _mm256_storeu_si256(reinterpret_cast<__m256i *>(tgt + i), t);
   }
-  for (; i < n; ++i) tgt[i] += (prev[i] + next[i]) >> 1;
+  for (; i < n; ++i) tgt[i] = rev53_undo_predict(tgt[i], prev[i], next[i]);
 }
+}  // namespace open_htj2k
 #endif

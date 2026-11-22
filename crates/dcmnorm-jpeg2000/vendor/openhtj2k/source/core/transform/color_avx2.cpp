@@ -34,6 +34,8 @@
   #endif
   #include "color.hpp"
 
+namespace open_htj2k {
+
 // lossless: forward RCT
 void cvt_rgb_to_ycbcr_rev_avx2(int32_t *sp0, int32_t *sp1, int32_t *sp2, uint32_t width, uint32_t height) {
   for (uint32_t y = 0; y < height; ++y) {
@@ -42,15 +44,15 @@ void cvt_rgb_to_ycbcr_rev_avx2(int32_t *sp0, int32_t *sp1, int32_t *sp2, uint32_
     int32_t *p2 = sp2 + y * round_up(width, 32U);
     int32_t len = static_cast<int32_t>(width);
     for (; len > 0; len -= 8) {
-      __m256i mR       = *((__m256i *)p0);
-      __m256i mG       = *((__m256i *)p1);
-      __m256i mB       = *((__m256i *)p2);
+      __m256i mR       = _mm256_loadu_si256((const __m256i *)p0);
+      __m256i mG       = _mm256_loadu_si256((const __m256i *)p1);
+      __m256i mB       = _mm256_loadu_si256((const __m256i *)p2);
       __m256i mY       = _mm256_add_epi32(mR, mB);
       mY               = _mm256_add_epi32(mG, mY);
       mY               = _mm256_add_epi32(mG, mY);  // Y = R + 2 * G + B;
-      *((__m256i *)p1) = _mm256_sub_epi32(mB, mG);
-      *((__m256i *)p2) = _mm256_sub_epi32(mR, mG);
-      *((__m256i *)p0) = _mm256_srai_epi32(mY, 2);  // Y = (R + 2 * G + B) >> 2;
+      _mm256_storeu_si256((__m256i *)p1, _mm256_sub_epi32(mB, mG));
+      _mm256_storeu_si256((__m256i *)p2, _mm256_sub_epi32(mR, mG));
+      _mm256_storeu_si256((__m256i *)p0, _mm256_srai_epi32(mY, 2));  // Y = (R + 2 * G + B) >> 2;
       p0 += 8;
       p1 += 8;
       p2 += 8;
@@ -72,17 +74,17 @@ void cvt_rgb_to_ycbcr_irrev_avx2(int32_t *sp0, int32_t *sp1, int32_t *sp2, uint3
     int32_t *p2 = sp2 + y * round_up(width, 32U);
     int32_t len = static_cast<int32_t>(width);
     for (; len > 0; len -= 8) {
-      __m256 mR        = _mm256_cvtepi32_ps(*((__m256i *)p0));
-      __m256 mG        = _mm256_cvtepi32_ps(*((__m256i *)p1));
-      __m256 mB        = _mm256_cvtepi32_ps(*((__m256i *)p2));
+      __m256 mR        = _mm256_cvtepi32_ps(_mm256_loadu_si256((const __m256i *)p0));
+      __m256 mG        = _mm256_cvtepi32_ps(_mm256_loadu_si256((const __m256i *)p1));
+      __m256 mB        = _mm256_cvtepi32_ps(_mm256_loadu_si256((const __m256i *)p2));
       __m256 mY        = _mm256_mul_ps(mG, mALPHA_G);
       mY               = _mm256_fmadd_ps(mR, mALPHA_R, mY);
       mY               = _mm256_fmadd_ps(mB, mALPHA_B, mY);
       __m256 mCb       = _mm256_mul_ps(mCB_FACT, _mm256_sub_ps(mB, mY));
       __m256 mCr       = _mm256_mul_ps(mCR_FACT, _mm256_sub_ps(mR, mY));
-      *((__m256i *)p0) = _mm256_cvtps_epi32(_mm256_round_ps(mY, 0));
-      *((__m256i *)p1) = _mm256_cvtps_epi32(_mm256_round_ps(mCb, 0));
-      *((__m256i *)p2) = _mm256_cvtps_epi32(_mm256_round_ps(mCr, 0));
+      _mm256_storeu_si256((__m256i *)p0, _mm256_cvtps_epi32(_mm256_round_ps(mY, 0)));
+      _mm256_storeu_si256((__m256i *)p1, _mm256_cvtps_epi32(_mm256_round_ps(mCb, 0)));
+      _mm256_storeu_si256((__m256i *)p2, _mm256_cvtps_epi32(_mm256_round_ps(mCr, 0)));
       p0 += 8;
       p1 += 8;
       p2 += 8;
@@ -298,7 +300,7 @@ void cvt_rgb_to_ycbcr_irrev_float_avx2(const int32_t *sp0, const int32_t *sp1, c
 
 // Fused inverse ICT (lossy, float-domain) + float→int32 finalize.
 // Reads Y/Cb/Cr from ring buffer (read-only), applies ICT coefficients, then applies per-component
-// finalize (rounding right-shift + DC_OFFSET + clamp), writing R/G/B as int32.
+// finalize (round to the nearest output LSB + DC_OFFSET + clamp), writing R/G/B as int32.
 // fp[3]: FinalizeParams for component 0 (R), 1 (G), 2 (B).
 void fused_ycbcr_irrev_to_rgb_i32_avx2(const float *y, const float *cb, const float *cr,
                                         int32_t *r, int32_t *g, int32_t *b, uint32_t width,
@@ -308,70 +310,43 @@ void fused_ycbcr_irrev_to_rgb_i32_avx2(const float *y, const float *cb, const fl
   const __m256 mCB_FACT_B = _mm256_set1_ps(static_cast<float>(CB_FACT_B));
   const __m256 mCB_FACT_G = _mm256_set1_ps(static_cast<float>(CB_FACT_G));
 
-  const __m256i vrnd0 = _mm256_set1_epi32(fp[0].rnd);
-  const __m256i vdc0  = _mm256_set1_epi32(fp[0].dc);
-  const __m256i vmx0  = _mm256_set1_epi32(fp[0].maxval);
-  const __m256i vmn0  = _mm256_set1_epi32(fp[0].minval);
-  const __m256i vrnd1 = _mm256_set1_epi32(fp[1].rnd);
-  const __m256i vdc1  = _mm256_set1_epi32(fp[1].dc);
-  const __m256i vmx1  = _mm256_set1_epi32(fp[1].maxval);
-  const __m256i vmn1  = _mm256_set1_epi32(fp[1].minval);
-  const __m256i vrnd2 = _mm256_set1_epi32(fp[2].rnd);
-  const __m256i vdc2  = _mm256_set1_epi32(fp[2].dc);
-  const __m256i vmx2  = _mm256_set1_epi32(fp[2].maxval);
-  const __m256i vmn2  = _mm256_set1_epi32(fp[2].minval);
+  const __m256 vhalf = _mm256_set1_ps(0.5f);
+  const __m256 vsc0  = _mm256_set1_ps(fp[0].scale);
+  const __m256 vsc1  = _mm256_set1_ps(fp[1].scale);
+  const __m256 vsc2  = _mm256_set1_ps(fp[2].scale);
+  const __m256i vdc0 = _mm256_set1_epi32(fp[0].dc);
+  const __m256i vmx0 = _mm256_set1_epi32(fp[0].maxval);
+  const __m256i vmn0 = _mm256_set1_epi32(fp[0].minval);
+  const __m256i vdc1 = _mm256_set1_epi32(fp[1].dc);
+  const __m256i vmx1 = _mm256_set1_epi32(fp[1].maxval);
+  const __m256i vmn1 = _mm256_set1_epi32(fp[1].minval);
+  const __m256i vdc2 = _mm256_set1_epi32(fp[2].dc);
+  const __m256i vmx2 = _mm256_set1_epi32(fp[2].maxval);
+  const __m256i vmn2 = _mm256_set1_epi32(fp[2].minval);
 
+  // One loop for every bit depth: finalize_round_avx2 scales by 2^-ds and rounds half
+  // up, so the sign of ds no longer selects a code path (finalize_round, color.hpp).
   uint32_t n = 0;
-  // Common case: all three components have a positive downshift (standard lossy decode).
-  if (fp[0].ds > 0 && fp[1].ds > 0 && fp[2].ds > 0) {
-    const __m128i vsh0 = _mm_cvtsi32_si128(fp[0].ds);
-    const __m128i vsh1 = _mm_cvtsi32_si128(fp[1].ds);
-    const __m128i vsh2 = _mm_cvtsi32_si128(fp[2].ds);
-    for (; n + 8 <= width; n += 8) {
-      __m256 mY  = _mm256_loadu_ps(y + n);
-      __m256 mCb = _mm256_loadu_ps(cb + n);
-      __m256 mCr = _mm256_loadu_ps(cr + n);
-      __m256 mR  = _mm256_fmadd_ps(mCr, mCR_FACT_R, mY);
-      __m256 mB  = _mm256_fmadd_ps(mCb, mCB_FACT_B, mY);
-      __m256 mG  = _mm256_fnmadd_ps(mCr, mCR_FACT_G, mY);
-      mG         = _mm256_fnmadd_ps(mCb, mCB_FACT_G, mG);
-      __m256i vR = _mm256_sra_epi32(_mm256_add_epi32(_mm256_cvttps_epi32(mR), vrnd0), vsh0);
-      __m256i vG = _mm256_sra_epi32(_mm256_add_epi32(_mm256_cvttps_epi32(mG), vrnd1), vsh1);
-      __m256i vB = _mm256_sra_epi32(_mm256_add_epi32(_mm256_cvttps_epi32(mB), vrnd2), vsh2);
-      vR = _mm256_min_epi32(_mm256_max_epi32(_mm256_add_epi32(vR, vdc0), vmn0), vmx0);
-      vG = _mm256_min_epi32(_mm256_max_epi32(_mm256_add_epi32(vG, vdc1), vmn1), vmx1);
-      vB = _mm256_min_epi32(_mm256_max_epi32(_mm256_add_epi32(vB, vdc2), vmn2), vmx2);
-      _mm256_storeu_si256((__m256i *)(r + n), vR);
-      _mm256_storeu_si256((__m256i *)(g + n), vG);
-      _mm256_storeu_si256((__m256i *)(b + n), vB);
-    }
-  } else if (fp[0].ds == 0 && fp[1].ds == 0 && fp[2].ds == 0) {
-    // Lossless-like path: no shift (ds == 0 for all components).
-    for (; n + 8 <= width; n += 8) {
-      __m256 mY  = _mm256_loadu_ps(y + n);
-      __m256 mCb = _mm256_loadu_ps(cb + n);
-      __m256 mCr = _mm256_loadu_ps(cr + n);
-      __m256 mR  = _mm256_fmadd_ps(mCr, mCR_FACT_R, mY);
-      __m256 mB  = _mm256_fmadd_ps(mCb, mCB_FACT_B, mY);
-      __m256 mG  = _mm256_fnmadd_ps(mCr, mCR_FACT_G, mY);
-      mG         = _mm256_fnmadd_ps(mCb, mCB_FACT_G, mG);
-      __m256i vR = _mm256_cvttps_epi32(mR);
-      __m256i vG = _mm256_cvttps_epi32(mG);
-      __m256i vB = _mm256_cvttps_epi32(mB);
-      vR = _mm256_min_epi32(_mm256_max_epi32(_mm256_add_epi32(vR, vdc0), vmn0), vmx0);
-      vG = _mm256_min_epi32(_mm256_max_epi32(_mm256_add_epi32(vG, vdc1), vmn1), vmx1);
-      vB = _mm256_min_epi32(_mm256_max_epi32(_mm256_add_epi32(vB, vdc2), vmn2), vmx2);
-      _mm256_storeu_si256((__m256i *)(r + n), vR);
-      _mm256_storeu_si256((__m256i *)(g + n), vG);
-      _mm256_storeu_si256((__m256i *)(b + n), vB);
-    }
+  for (; n + 8 <= width; n += 8) {
+    __m256 mY  = _mm256_loadu_ps(y + n);
+    __m256 mCb = _mm256_loadu_ps(cb + n);
+    __m256 mCr = _mm256_loadu_ps(cr + n);
+    __m256 mR  = _mm256_fmadd_ps(mCr, mCR_FACT_R, mY);
+    __m256 mB  = _mm256_fmadd_ps(mCb, mCB_FACT_B, mY);
+    __m256 mG  = _mm256_fnmadd_ps(mCr, mCR_FACT_G, mY);
+    mG         = _mm256_fnmadd_ps(mCb, mCB_FACT_G, mG);
+    __m256i vR = finalize_round_avx2(mR, vsc0, vhalf);
+    __m256i vG = finalize_round_avx2(mG, vsc1, vhalf);
+    __m256i vB = finalize_round_avx2(mB, vsc2, vhalf);
+    vR         = _mm256_min_epi32(_mm256_max_epi32(_mm256_add_epi32(vR, vdc0), vmn0), vmx0);
+    vG         = _mm256_min_epi32(_mm256_max_epi32(_mm256_add_epi32(vG, vdc1), vmn1), vmx1);
+    vB         = _mm256_min_epi32(_mm256_max_epi32(_mm256_add_epi32(vB, vdc2), vmn2), vmx2);
+    _mm256_storeu_si256((__m256i *)(r + n), vR);
+    _mm256_storeu_si256((__m256i *)(g + n), vG);
+    _mm256_storeu_si256((__m256i *)(b + n), vB);
   }
-  // Scalar tail (also handles ds < 0 edge case for high-bitdepth images).
   auto finalize_scalar = [](float v, const FinalizeParams &p) -> int32_t {
-    int32_t x = static_cast<int32_t>(v);
-    if (p.ds > 0) x = (x + p.rnd) >> p.ds;
-    else if (p.ds < 0) x <<= -p.ds;
-    x += p.dc;
+    int32_t x = finalize_round(v, p.scale) + p.dc;
     if (x > p.maxval) x = p.maxval;
     if (x < p.minval) x = p.minval;
     return x;
@@ -434,4 +409,5 @@ void fused_ycbcr_rev_to_rgb_i32_avx2(const float *y, const float *cb, const floa
     b[n] = clamp(Cb + G, fp[2]);
   }
 }
+}  // namespace open_htj2k
 #endif

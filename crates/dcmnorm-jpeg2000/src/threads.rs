@@ -34,8 +34,9 @@ pub fn configured_threads() -> u32 {
     })
 }
 
-/// Threads for a call that's about to create its own per-call thread pool (OpenJPEG): one when
-/// already running on a rayon worker, otherwise [`configured_threads`].
+/// Threads for a codec call: one when already running on a rayon worker (OpenJPEG avoids spawning
+/// a nested pool, and OpenHTJ2K runs on the calling thread via `num_threads == 1`), otherwise
+/// [`configured_threads`].
 pub fn per_call_threads() -> u32 {
     if rayon::current_thread_index().is_some() {
         1

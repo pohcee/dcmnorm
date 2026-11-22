@@ -11,12 +11,13 @@
 //! - `v3`: `-march=x86-64-v3` (AVX2/FMA/BMI2/...), roughly 1.7-2x faster decode/encode.
 //!
 //! and src/htj2k.rs picks one at runtime from the CPU's actual feature set. The two copies can't
-//! just be linked side by side: OpenHTJ2K exports hundreds of symbols outside its namespace
-//! (marker classes, free functions, a `ThreadPool` singleton). Each variant is therefore compiled
-//! with `-fvisibility=hidden`, partially linked into a single relocatable object (`c++ -r`, with
-//! COMDAT groups dissolved), and run through `objcopy --keep-global-symbols`, which leaves only the
-//! bridge's variant-named `extern "C"` entry points global. Any other target - or a toolchain without `objcopy` - falls back to a
-//! single `base` build (NEON is part of the aarch64 baseline, so that variant is already fast).
+//! just be linked side by side: both variants compile the same `open_htj2k` symbols (including
+//! its `ThreadPool` singleton). Each variant is therefore compiled with `-fvisibility=hidden`,
+//! partially linked into a single relocatable object (`c++ -r`, with COMDAT groups dissolved),
+//! and run through `objcopy --keep-global-symbols`, which leaves only the bridge's variant-named
+//! `extern "C"` entry points global. Any other target - or a toolchain without `objcopy` - falls
+//! back to a single `base` build (NEON is part of the aarch64 baseline, so that variant is already
+//! fast).
 
 use std::env;
 use std::fs;
@@ -105,6 +106,7 @@ fn base_build(core: &Path, target_arch: &str) -> cc::Build {
         .flag_if_supported("-fexceptions")
         .flag_if_supported("-pthread")
         .define("OPENHTJ2K_THREAD", None)
+        .define("OHTJ2K_STATIC", None)
         .define("NDEBUG", None);
     for dir in INCLUDE_DIRS {
         build.include(core.join(dir));

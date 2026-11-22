@@ -43,6 +43,8 @@
 // Same slli_epi64(32) trick as AVX2: within each 64-bit lane the sum of the two
 // neighbouring samples is shifted to the odd (update-target) slot, zeroing the even
 // (pass-through) slot, so fnmadd updates only the target slot in one fused instruction.
+namespace open_htj2k {
+
 auto idwt_irrev97_fixed_avx512_hor_step = [](const int32_t init_pos, const int32_t simdlen,
                                               float *const X, const int32_t n0, const int32_t n1,
                                               const float fV) {
@@ -422,7 +424,7 @@ void idwt_rev_ver_sr_fixed_avx512(sprec_t *in, const int32_t u0, const int32_t u
       const int32_t tail      = ce - cs - simdlen_s;
       const __m512 xtwo = _mm512_set1_ps(2.0f);
       const __m512 x025 = _mm512_set1_ps(0.25f);
-      const __mmask16 tmask = tail > 0 ? static_cast<__mmask16>((1U << tail) - 1U) : 0;
+      const __mmask16 tmask = static_cast<__mmask16>(tail > 0 ? (1U << tail) - 1U : 0U);
       for (int32_t n = 0 + offset, i = start; i < stop + 1; ++i, n += 2) {
         for (int32_t col = 0; col < simdlen_s; col += 16) {
           __m512 x0     = _mm512_loadu_ps(buf[n - 1] + cs + col);
@@ -766,9 +768,9 @@ void idwt_1d_filtr_irrev97_planar_sr_avx512(sprec_t *out, const sprec_t *lp, con
   const int32_t M    = (J1 + 2) - base + 1;
   thread_local std::vector<float> s1v, s2v, s3v;
   if (static_cast<int32_t>(s1v.size()) < M) {
-    s1v.resize(M);
-    s2v.resize(M);
-    s3v.resize(M);
+    s1v.resize(static_cast<size_t>(M));
+    s2v.resize(static_cast<size_t>(M));
+    s3v.resize(static_cast<size_t>(M));
   }
   float *const s1 = s1v.data() - base;
   float *const s2 = s2v.data() - base;
@@ -847,7 +849,7 @@ void idwt_1d_filtr_rev53_planar_i32_avx512(int32_t *out, const int32_t *lp, cons
         _mm512_sub_epi32(_mm512_loadu_si512(reinterpret_cast<const __m512i *>(lp + j)),
                          _mm512_srai_epi32(_mm512_add_epi32(_mm512_add_epi32(Ojm1, Ob), vtwo), 2));
     // S1[j+16] from raw memory (those positions are not yet written this pass)
-    const int32_t s1_next = lp[j + 16] - ((hp[j + 15] + hp[j + 16] + 2) >> 2);
+    const int32_t s1_next = rev53_undo_update(lp[j + 16], hp[j + 15], hp[j + 16]);
     __m512i S1n           = _mm512_alignr_epi32(_mm512_set1_epi32(s1_next), S1b, 1);  // S1[j+1..j+16]
     __m512i S2b           = _mm512_add_epi32(Ob, _mm512_srai_epi32(_mm512_add_epi32(S1b, S1n), 1));
     _mm512_storeu_si512(reinterpret_cast<__m512i *>(out + 2 * j),
@@ -861,12 +863,13 @@ void idwt_1d_filtr_rev53_planar_i32_avx512(int32_t *out, const int32_t *lp, cons
     int32_t o_prev = O(j - 1);
     for (int32_t t = j; t <= N; ++t) {
       const int32_t o = O(t);
-      s1t[t - j]      = E(t) - ((o_prev + o + 2) >> 2);
+      s1t[t - j]      = rev53_undo_update(E(t), o_prev, o);
       o_prev          = o;
     }
     for (int32_t t = j; t <= N; ++t) out[2 * t] = s1t[t - j];
-    for (int32_t t = j; t < N; ++t) out[2 * t + 1] = O(t) + ((s1t[t - j] + s1t[t - j + 1]) >> 1);
+    for (int32_t t = j; t < N; ++t) out[2 * t + 1] = rev53_undo_predict(O(t), s1t[t - j], s1t[t - j + 1]);
   }
 }
 
+}  // namespace open_htj2k
 #endif  // OPENHTJ2K_TRY_AVX2 && __AVX512F__

@@ -15,21 +15,25 @@ chosen and for the integration details. In short:
 - **Two variants.** `build.rs` compiles OpenHTJ2K twice on x86-64 Linux (portable and
   `x86-64-v3`/AVX2) and keeps the copies apart by localizing every symbol except the bridge's
   entry points. The variant is chosen at runtime from CPU features.
-- **No concurrent calls.** OpenHTJ2K calls are serialized with a process-wide lock, because the
-  library isn't safe for concurrent decodes or encodes.
+- **Concurrent calls.** OpenHTJ2K supports multiple concurrent decoder/encoder instances across
+  threads natively (no process-wide lock). Calls from inside Rayon workers pass `num_threads = 1`
+  via `per_call_threads()` so they run on the calling thread without contending on the shared pool.
+- **Truncation rejection.** OpenHTJ2K 0.27.0+ decodes truncated codestreams partially and flags
+  them via `is_truncated()`. The bridge checks `is_truncated()` and returns an error so truncated
+  DICOM frames are never accepted silently.
 
 ## Vendored OpenHTJ2K
 
 `vendor/openhtj2k` contains `source/core/{common,codestream,coding,transform,interface,jph}` and
-`LICENSE` (BSD-3-Clause) from commit `dacb452ecb21f50e88a74bf860c60f4aafa8a602` (2026-09-16), with
-no modifications. `*_wasm.cpp` sources, JPIP, the apps and the third-party directories are left
-out.
+`LICENSE` (BSD-3-Clause) from release `v0.28.1` (`fe40d158db03bcfe2e80443347c3e606acd06424`,
+2026-11-16), with no modifications. `*_wasm.*` sources, `CMakeLists.txt`, JPIP, the apps and the
+third-party directories are left out.
 
 To update it:
-1. Copy the same directories from a newer commit and update the commit hash above.
+1. Copy the same directories from a newer release/commit and update the version and commit hash above.
 2. Run `cargo test -p dcmnorm-jpeg2000 --release` and dcmnorm's `htj2k` tests.
-3. Re-check the two workarounds in `src/htj2k_bridge.cpp`: the streaming encode path, and
-   decomposition-level clamping for small images.
+3. Re-check `src/htj2k_bridge.cpp` (especially `is_truncated()` handling and decomposition-level
+   clamping for small images).
 
 ## Build knobs
 

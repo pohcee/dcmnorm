@@ -36,6 +36,19 @@
 #include "marker_def.hpp"
 #include "visual_weighting.hpp"
 
+namespace open_htj2k {
+// FNV-1a over bytes, continuing from h (start from kFnv1aBasis): the decoder's single-tile
+// reuse fingerprint of the marker segments that shape a tile (see
+// j2k_main_header::structure_fingerprint).
+constexpr uint64_t kFnv1aBasis = 14695981039346656037ull;
+inline uint64_t fnv1a_bytes(uint64_t h, const uint8_t *p, size_t n) {
+  for (size_t i = 0; i < n; ++i) {
+    h ^= p[i];
+    h *= 1099511628211ull;
+  }
+  return h;
+}
+
 /********************************************************************************
  * j2k_marker_io_base
  *******************************************************************************/
@@ -286,6 +299,8 @@ class ATK_marker : public j2k_marker_io_base {
  * QCD_marker
  *******************************************************************************/
 class QCD_marker : public j2k_marker_io_base {
+  friend class QCC_marker;  // QCC_marker(Csiz, c, qcd) copies the quantization parameters
+
  private:
   uint8_t Sqcd;
   std::vector<uint16_t> SPqcd;
@@ -302,9 +317,10 @@ class QCD_marker : public j2k_marker_io_base {
   uint16_t get_mantissas(uint8_t nb);
   uint8_t get_number_of_guardbits() const;
   // return the actual number of SPqcd entries as parsed from the marker body
-  uint8_t get_num_entries() const { return static_cast<uint8_t>(SPqcd.size()); }
-  // return MAGB value for CAP
-  uint8_t get_MAGB();
+  uint16_t get_num_entries() const { return static_cast<uint16_t>(SPqcd.size()); }
+  // An upper bound on the HT cleanup magnitude parameter B (CAP marker, Ccap15) that the
+  // quantization parameters allow, for NL decomposition levels.
+  uint8_t get_MAGB(uint8_t NL) const;
 };
 
 /********************************************************************************
@@ -326,15 +342,20 @@ class QCC_marker : public j2k_marker_io_base {
              uint8_t transformation, bool is_derived, uint8_t RI, uint8_t use_ycc, uint8_t qfactor,
              uint8_t chroma_format, const open_htj2k::visual_weighting_params &vp = {}, uint8_t sub_x = 0,
              uint8_t sub_y = 0);
+  // The quantization parameters of qcd, for component c: used for a component whose bit depth
+  // differs from component 0's, from which the QCD marker is derived.
+  QCC_marker(uint16_t Csiz, uint16_t c, const QCD_marker &qcd);
   QCC_marker(j2c_src_memory &in, uint16_t Csiz);
   int write(j2c_dst_memory &dst);
+  // MAGB for the CAP marker, as QCD_marker::get_MAGB()
+  uint8_t get_MAGB(uint8_t NL) const;
   uint16_t get_component_index() const;
   uint8_t get_quantization_style() const;
   uint8_t get_exponents(uint8_t nb);
   uint16_t get_mantissas(uint8_t nb);
   uint8_t get_number_of_guardbits() const;
   // return the actual number of SPqcc entries as parsed from the marker body
-  uint8_t get_num_entries() const { return static_cast<uint8_t>(SPqcc.size()); }
+  uint16_t get_num_entries() const { return static_cast<uint16_t>(SPqcc.size()); }
 };
 
 /********************************************************************************
@@ -373,7 +394,11 @@ class TLM_marker : public j2k_marker_io_base {
   explicit TLM_marker(j2c_src_memory &in);
   TLM_marker(uint8_t ztlm, const std::vector<uint16_t> &tile_indices,
              const std::vector<uint32_t> &tile_part_lengths);
+  // Writes the entries in one marker segment, or in several of consecutive Ztlm when they do
+  // not fit the 16-bit Ltlm.
   void write(j2c_dst_memory &buf) const;
+  // Most entries one marker segment holds.
+  size_t entries_per_segment() const;
 
   uint8_t index() const { return Ztlm; }
   size_t num_entries() const { return Ptlm.size(); }
@@ -408,6 +433,7 @@ class PPM_marker : public j2k_marker_io_base {
   uint16_t ppmlen;
   PPM_marker();
   explicit PPM_marker(j2c_src_memory &in);
+  uint8_t get_index() const { return Zppm; }
 };
 
 /********************************************************************************
@@ -486,6 +512,7 @@ class PPT_marker : public j2k_marker_io_base {
   uint16_t pptlen;
   PPT_marker();
   explicit PPT_marker(j2c_src_memory &in);
+  uint8_t get_index() const { return Zppt; }
 };
 
 /********************************************************************************
@@ -511,8 +538,33 @@ class j2k_main_header {
   // Part 2 extensions
   std::vector<std::unique_ptr<DFS_marker>> DFS;
   std::vector<std::unique_ptr<ATK_marker>> ATK;
+  // The packet-header records of the PPM markers: node k holds the packet headers of the
+  // k-th tile-part in the codestream (ISO/IEC 15444-1, A.7.4).
   std::unique_ptr<buf_chain> ppm_header;
   std::unique_ptr<uint8_t[]> ppm_buf;
+  // Tile-parts read so far, in codestream order: j2k_tile::add_tile_part() takes the next
+  // number for each, which is also the index of its PPM record.  Reset by read().
+  uint32_t num_tile_parts_read = 0;
+  // Packets the tiles of the codestream may still declare (see read()); each tile's
+  // create_tile_buf() subtracts its packets.  Unlimited unless set by read().
+  uint64_t packet_budget = UINT64_MAX;
+  // Bytes of the codestream from its SOC marker on (set by read()), and the decoder's
+  // budget for the tile, precinct and code-block state of this codestream (0 until the
+  // first tile computes it) with the bytes of it the tiles have taken so far
+  // (j2k_tile::charge_structure() in coding_units.cpp).
+  uint64_t codestream_bytes = 0;
+  uint64_t structure_budget = 0;
+  uint64_t structure_bytes  = 0;
+  // Work the decoder has done setting up the tiles of this codestream, which header
+  // values alone can make huge: tile-components set up, and steps of the packet
+  // progressions (j2k_tile::create_tile_buf() keeps both under a bound).
+  uint64_t tile_components_set_up = 0;
+  uint64_t progression_steps      = 0;
+  // FNV-1a hash of the bytes of every marker segment read() parsed except TLM, PLM, PPM
+  // and COM (lengths, packet headers and comments, which change from frame to frame
+  // without changing the tiles' structure).  The single-tile reuse path keeps a tile's
+  // structure only while this, and the tile-part headers' structure_fingerprint, match.
+  uint64_t structure_fingerprint = kFnv1aBasis;
 
  public:
   j2k_main_header();
@@ -546,8 +598,12 @@ class j2k_tilepart_header {
   std::vector<std::unique_ptr<PPT_marker>> PPT;
   std::vector<std::unique_ptr<PLT_marker>> PLT;
   std::vector<std::unique_ptr<COM_marker>> COM;
+  // FNV-1a hash of the bytes of the COD, COC, QCD, QCC, RGN and POC segments read() parsed
+  // (kFnv1aBasis when there are none); see j2k_main_header::structure_fingerprint.
+  uint64_t structure_fingerprint = kFnv1aBasis;
 
  public:
   explicit j2k_tilepart_header(uint16_t nc);
   uint32_t read(j2c_src_memory &in);
 };
+}  // namespace open_htj2k

@@ -41,6 +41,7 @@
   #include "ThreadPool.hpp"
   #if defined(__x86_64__) || defined(_M_X64)
     #include <immintrin.h>
+    #include "message_internal.hpp"
     #define HW_PAUSE() _mm_pause()
   #elif defined(__aarch64__) || defined(_M_ARM64)
     #if defined(_MSC_VER)
@@ -52,6 +53,8 @@
     #define HW_PAUSE() ((void)0)
   #endif
 #endif
+
+namespace open_htj2k {
 
 #ifdef OPENHTJ2K_THREAD
 // Spin-wait with hardware pause hints before falling back to OS yield.
@@ -170,9 +173,10 @@ void j2k_subband_row_buf::init(j2k_resolution *resolution, uint8_t b_idx, int32_
     const int32_t sb_w = static_cast<int32_t>(sb->get_pos1().x - sb->get_pos0().x);
     const int32_t sb_h = static_cast<int32_t>(sb->get_pos1().y - sb->get_pos0().y);
     if (sb_w > 0 && sb_h > 0) {
-      // +1 padding row: the fused dequantize path writes mp1 (second row of a
-      // line-pair) one row past the codeblock height when the height is odd.
-      const size_t ring_rows  = static_cast<size_t>(codeblock_height) + 1;
+      // A strip is at most a code-block high and lies within the subband.  +1 padding
+      // row: the fused dequantize path writes mp1 (second row of a line-pair) one row
+      // past the codeblock height when the height is odd.
+      const size_t ring_rows  = static_cast<size_t>(std::min(codeblock_height, sb_h)) + 1;
       const size_t buf_floats = ring_rows * static_cast<size_t>(sb->stride);
       const size_t buf_bytes  = sizeof(sprec_t) * buf_floats;
 #ifdef OPENHTJ2K_THREAD
@@ -190,15 +194,14 @@ void j2k_subband_row_buf::init(j2k_resolution *resolution, uint8_t b_idx, int32_
     }
   }
 
-  // Pre-allocate scratch for a 64×64 codeblock (grow-on-demand).
-  // 32-byte alignment allows _mm256_load_si256 in the dequantize hot path.
-  cb_sample_cap = static_cast<size_t>(round_up(64, 8) * round_up(64, 8));
-  cb_state_cap  = static_cast<size_t>((round_up(64, 8) + 2) * (round_up(64, 8) + 2));
-  // block_contexts worst-case per codeblock: 1024×4 shape ⇒ (8/4+2)×(1024+2)=4104 uint32_t.
-  cb_ctx_cap    = 4104u;
-  cb_sample_buf = static_cast<int32_t *>(aligned_mem_alloc(cb_sample_cap * sizeof(int32_t), 32));
-  cb_state_buf  = static_cast<uint8_t *>(aligned_mem_alloc(cb_state_cap, 16));
-  cb_ctx_buf    = static_cast<uint32_t *>(aligned_mem_alloc(cb_ctx_cap * sizeof(uint32_t), 32));
+  // Serial-path code-block scratch, allocated by the first code-block decoded serially
+  // and grown on demand to what the code-blocks need, so that a subband holds none until
+  // it decodes one, and no more than its code-blocks use (37 KB per subband up front used
+  // to add up, with thousands of small components).
+  cb_sample_cap = cb_state_cap = cb_ctx_cap = 0;
+  cb_sample_buf                             = nullptr;
+  cb_state_buf                              = nullptr;
+  cb_ctx_buf                                = nullptr;
 
 #ifdef OPENHTJ2K_THREAD
   // par_spool / par_stpool start at zero capacity; decode_strip_core will
@@ -210,11 +213,14 @@ void j2k_subband_row_buf::init(j2k_resolution *resolution, uint8_t b_idx, int32_
   // trigger_prefetch() that touches a given strip fills its entry once and
   // every subsequent frame reuses it.
   strip_cache_.clear();
-  if (sb != nullptr && codeblock_height > 0) {
+  // A subband without columns has no code-blocks and nothing to cache (and its height
+  // alone may be 2^31 rows).
+  if (sb != nullptr && codeblock_height > 0 && sb->get_pos1().x > sb->get_pos0().x) {
     const int32_t sb_y0 = static_cast<int32_t>(sb->get_pos0().y);
     const int32_t sb_y1 = static_cast<int32_t>(sb->get_pos1().y);
     if (sb_y1 > sb_y0) {
-      const int32_t num_strips = (sb_y1 - sb_y0 + codeblock_height - 1) / codeblock_height;
+      // Strips follow the code-block grid (see decode_strip), so the first may be short.
+      const int32_t num_strips = (sb_y1 - 1) / codeblock_height - sb_y0 / codeblock_height + 1;
       if (num_strips > 0) {
         strip_cache_.resize(static_cast<size_t>(num_strips));
       }
@@ -272,6 +278,45 @@ void j2k_subband_row_buf::free_resources() {
   strip_y0 = strip_y1 = -1;
 }
 
+// A precinct-subband whose precinct has had no packet that is not empty has no
+// code-blocks (j2k_precinct_subband::build_codeblocks()): its samples are zero.  Zeroes
+// its rows in [y0, y1) in target, the strip buffer holding rows y0.. of the subband
+// (stride floats, column 0 at sb_x0), as the empty-block path does for each code-block.
+// Kept out of line: the precinct loops it is called from are hot, the call rare (inlined,
+// it cost those loops 1.4% more instructions on a 4K decode).
+#if defined(_MSC_VER)
+  #define ROWBUF_NOINLINE __declspec(noinline)
+#else
+  #define ROWBUF_NOINLINE __attribute__((noinline))
+#endif
+static ROWBUF_NOINLINE void zero_unbuilt_pband(sprec_t *target, ptrdiff_t stride, int32_t sb_x0,
+                                               const j2k_precinct_subband *cpb, int32_t y0, int32_t y1) {
+  const int32_t ry0 = std::max(y0, static_cast<int32_t>(cpb->get_pos0().y));
+  const int32_t ry1 = std::min(y1, static_cast<int32_t>(cpb->get_pos1().y));
+  const size_t w    = cpb->get_pos1().x - cpb->get_pos0().x;
+  sprec_t *dst      = target + static_cast<ptrdiff_t>(cpb->get_pos0().x) - sb_x0;
+  for (int32_t row = ry0; row < ry1; ++row)
+    std::memset(dst + static_cast<ptrdiff_t>(row - y0) * stride, 0, w * sizeof(sprec_t));
+}
+
+// The precincts that may hold rows [y0, y1) of the subband, in raster order, start at the
+// one this returns and end before the first whose precinct-subband starts at y1 or below:
+// the precincts of a precinct row share their rows of the subband, which grow from row to
+// row.  Found by bisection, so that a strip does not visit every precinct of the
+// resolution (millions with 2 x 2 precincts, for each of thousands of strips).
+static uint32_t first_precinct_for_rows(j2k_resolution *res, uint8_t band_idx, int32_t y0) {
+  uint32_t lo = 0, hi = res->nph;
+  while (lo < hi) {
+    const uint32_t mid              = lo + (hi - lo) / 2;
+    const j2k_precinct_subband *cpb = res->access_precinct(mid * res->npw)->access_pband(band_idx);
+    if (static_cast<int32_t>(cpb->get_pos1().y) <= y0)
+      lo = mid + 1;
+    else
+      hi = mid;
+  }
+  return lo * res->npw;
+}
+
 // ─── decode_strip_core ────────────────────────────────────────────────────────
 // Decodes all non-empty codeblocks whose rows intersect [y0, y1) and writes
 // their samples into target_buf (ring/prefetch mode) or directly into
@@ -297,16 +342,21 @@ void j2k_subband_row_buf::decode_strip_core(sprec_t *target_buf, int32_t y0, int
       par_tasks.clear();
       size_t total_s = 0, total_st = 0, total_ctx = 0;
 
-      for (uint32_t p = 0; p < np; ++p) {
+      for (uint32_t p = (np != 0) ? first_precinct_for_rows(res, band_idx, y0) : 0; p < np; ++p) {
         j2k_precinct *cp          = res->access_precinct(p);
         j2k_precinct_subband *cpb = cp->access_pband(band_idx);
-        const uint32_t ncx        = cpb->num_codeblock_x;
-        const uint32_t ncy        = cpb->num_codeblock_y;
+        if (static_cast<int32_t>(cpb->get_pos0().y) >= y1) break;  // and so do the rest
+        const uint32_t ncx = cpb->num_codeblock_x;
+        const uint32_t ncy = cpb->num_codeblock_y;
         if (ncx == 0 || ncy == 0) continue;
         // Skip precincts that don't overlap with [y0, y1).
         const int32_t cpb_y0_i = static_cast<int32_t>(cpb->get_pos0().y);
         const int32_t cpb_y1_i = static_cast<int32_t>(cpb->get_pos1().y);
         if (cpb_y1_i <= y0 || cpb_y0_i >= y1) continue;
+        if (!cpb->is_built()) {
+          if (ring_mode && target_buf) zero_unbuilt_pband(target_buf, stride, sb_x0, cpb, y0, y1);
+          continue;
+        }
         // Jump directly to the first potentially-overlapping codeblock row.
         const uint32_t r0 =
             (y0 > cpb_y0_i) ? static_cast<uint32_t>((y0 - cpb_y0_i) / static_cast<int32_t>(cb_h)) : 0u;
@@ -371,10 +421,10 @@ void j2k_subband_row_buf::decode_strip_core(sprec_t *target_buf, int32_t y0, int
         }
         // Setup pass: assign scratch pointers and selectively zero buffers.
         // ht_cleanup_decode writes every sample_buf/block_states position before
-        // reading, so HT single-pass blocks need no pre-zeroing. EBCOT and HT
-        // multi-pass blocks still require it (EBCOT reads before writing; HT
-        // multi-pass sigprop/magref read the block_states border written only by
-        // the cleanup interior pass, leaving the border uninitialised).
+        // reading, so HT single-pass blocks need no pre-zeroing. EBCOT blocks need
+        // zeroed samples and context words (block_states is unused by EBCOT); HT
+        // multi-pass blocks need zeroed block_states (sigprop/magref read the border
+        // written only by the cleanup interior pass, leaving it uninitialised).
         par_error.store(false, std::memory_order_relaxed);
         for (auto &bt : par_tasks) {
           bt.block->sample_buf            = par_spool + bt.sample_off;
@@ -387,7 +437,6 @@ void j2k_subband_row_buf::decode_strip_core(sprec_t *target_buf, int32_t y0, int
           const bool is_ht = (bt.block->Cmodes & HT) >> 6;
           if (!is_ht) {
             std::memset(bt.block->sample_buf, 0, static_cast<size_t>(bt.QWx2) * bt.QHx2 * sizeof(int32_t));
-            std::memset(bt.block->block_states, 0, static_cast<size_t>(bt.QWx2 + 2) * (bt.QHx2 + 2));
             std::memset(bt.block->block_contexts, 0,
                         static_cast<size_t>(bt.QHx2 / 4 + 2) * (bt.QWx2 + 2) * sizeof(uint32_t));
           } else if (bt.block->num_passes > 1) {
@@ -406,8 +455,7 @@ void j2k_subband_row_buf::decode_strip_core(sprec_t *target_buf, int32_t y0, int
         });
         spin_wait(par_cnt);
         if (par_error.load(std::memory_order_relaxed)) {
-          printf("WARNING: a code-block decode task failed — malformed input.\n");
-          throw std::exception();
+          open_htj2k::detail::fail("a code-block decode task failed — malformed input.");
         }
       }
       return;
@@ -416,17 +464,22 @@ void j2k_subband_row_buf::decode_strip_core(sprec_t *target_buf, int32_t y0, int
 #endif
 
   // ── Serial path ────────────────────────────────────────────────────────────
-  for (uint32_t p = 0; p < np; ++p) {
+  for (uint32_t p = (np != 0) ? first_precinct_for_rows(res, band_idx, y0) : 0; p < np; ++p) {
     j2k_precinct *cp          = res->access_precinct(p);
     j2k_precinct_subband *cpb = cp->access_pband(band_idx);
-    const uint32_t ncx        = cpb->num_codeblock_x;
-    const uint32_t ncy        = cpb->num_codeblock_y;
+    if (static_cast<int32_t>(cpb->get_pos0().y) >= y1) break;  // and so do the rest
+    const uint32_t ncx = cpb->num_codeblock_x;
+    const uint32_t ncy = cpb->num_codeblock_y;
     if (ncx == 0 || ncy == 0) continue;
 
     // Skip precincts that don't overlap with [y0, y1).
     const int32_t cpb_y0_i = static_cast<int32_t>(cpb->get_pos0().y);
     const int32_t cpb_y1_i = static_cast<int32_t>(cpb->get_pos1().y);
     if (cpb_y1_i <= y0 || cpb_y0_i >= y1) continue;
+    if (!cpb->is_built()) {
+      if (ring_mode && target_buf) zero_unbuilt_pband(target_buf, stride, sb_x0, cpb, y0, y1);
+      continue;
+    }
     // Jump directly to the first potentially-overlapping codeblock row.
     const uint32_t r0 =
         (y0 > cpb_y0_i) ? static_cast<uint32_t>((y0 - cpb_y0_i) / static_cast<int32_t>(cb_h)) : 0u;
@@ -478,20 +531,21 @@ void j2k_subband_row_buf::decode_strip_core(sprec_t *target_buf, int32_t y0, int
         const size_t need_st  = static_cast<size_t>((QWx2 + 2) * (QHx2 + 2));
         const size_t need_ctx = static_cast<size_t>((QHx2 / 4 + 2) * (QWx2 + 2));
 
+        // 32-byte alignment allows _mm256_load_si256 in the dequantize hot path.
         if (need_s * run > cb_sample_cap) {
           aligned_mem_free(cb_sample_buf);
-          cb_sample_buf = static_cast<int32_t *>(aligned_mem_alloc(need_s * run * sizeof(int32_t), 32));
           cb_sample_cap = need_s * run;
+          cb_sample_buf = static_cast<int32_t *>(aligned_mem_alloc(cb_sample_cap * sizeof(int32_t), 32));
         }
         if (need_st * run > cb_state_cap) {
           aligned_mem_free(cb_state_buf);
-          cb_state_buf = static_cast<uint8_t *>(aligned_mem_alloc(need_st * run, 16));
           cb_state_cap = need_st * run;
+          cb_state_buf = static_cast<uint8_t *>(aligned_mem_alloc(cb_state_cap, 16));
         }
         if (need_ctx * run > cb_ctx_cap) {
           aligned_mem_free(cb_ctx_buf);
-          cb_ctx_buf = static_cast<uint32_t *>(aligned_mem_alloc(need_ctx * run * sizeof(uint32_t), 32));
           cb_ctx_cap = need_ctx * run;
+          cb_ctx_buf = static_cast<uint32_t *>(aligned_mem_alloc(cb_ctx_cap * sizeof(uint32_t), 32));
         }
 
         j2k_codeblock *grp[8];  // run ≤ htj2k_dec_batch_lanes ≤ 8
@@ -504,7 +558,6 @@ void j2k_subband_row_buf::decode_strip_core(sprec_t *target_buf, int32_t y0, int
           // multi-pass HT blocks, zero the necessary regions.
           if (!is_ht) {
             std::memset(cb_sample_buf, 0, need_s * sizeof(int32_t));
-            std::memset(cb_state_buf, 0, need_st);
             std::memset(cb_ctx_buf, 0, need_ctx * sizeof(uint32_t));
           } else if (bk->num_passes > 1) {
             std::memset(cb_state_buf + k * need_st, 0, need_st);
@@ -534,8 +587,7 @@ void j2k_subband_row_buf::decode_strip_core(sprec_t *target_buf, int32_t y0, int
           htj2k_decode_batch(grp, run, ROIshift, results);
           for (uint32_t k = 0; k < run; ++k) {
             if (!results[k]) {
-              printf("ERROR: HT code-block decoding reported failure — malformed input.\n");
-              throw std::exception();
+              open_htj2k::detail::fail("HT code-block decoding reported failure — malformed input.");
             }
           }
         } else {
@@ -552,9 +604,12 @@ void j2k_subband_row_buf::decode_strip_core(sprec_t *target_buf, int32_t y0, int
 void j2k_subband_row_buf::decode_strip(int32_t abs_row) {
   const int32_t sb_y0 = static_cast<int32_t>(sb->get_pos0().y);
   const int32_t sb_y1 = static_cast<int32_t>(sb->get_pos1().y);
-  const int32_t rel   = abs_row - sb_y0;
-  const int32_t s_y0  = sb_y0 + (rel / cb_h) * cb_h;
-  const int32_t s_y1  = std::min(s_y0 + cb_h, sb_y1);
+  // A strip is one row of the code-block grid, which starts at row 0 of the subband
+  // coordinates, not at the subband's first row: a subband that starts between grid
+  // rows (tiles or image offsets) has a short first strip.  Every code-block then lies
+  // within one strip (precincts only split the grid further).
+  const int32_t s_y0 = std::max(sb_y0, (abs_row / cb_h) * cb_h);
+  const int32_t s_y1 = std::min((abs_row / cb_h + 1) * cb_h, sb_y1);
 
   strip_y0 = s_y0;
   strip_y1 = s_y1;
@@ -591,6 +646,24 @@ void j2k_subband_row_buf::decode_strip(int32_t abs_row) {
 // packet stream, so the hot path must branch on num_passes per block.  That
 // branch is cheap relative to the tree walk it replaces.
 
+// The rows [y0, y1) of a precinct-subband without code-blocks (zero_unbuilt_pband()), as
+// a strip cache entry with no block.
+j2k_subband_row_buf::CachedBlock j2k_subband_row_buf::unbuilt_region(const j2k_precinct_subband *cpb,
+                                                                     int32_t y0, int32_t y1, int32_t sb_x0,
+                                                                     ptrdiff_t stride) {
+  const int32_t ry0 = std::max(y0, static_cast<int32_t>(cpb->get_pos0().y));
+  const int32_t ry1 = std::min(y1, static_cast<int32_t>(cpb->get_pos1().y));
+  CachedBlock ce;
+  ce.block   = nullptr;
+  ce.QWx2    = 0;
+  ce.QHx2    = 0;
+  ce.row_off = static_cast<ptrdiff_t>(ry0 - y0) * stride;
+  ce.col_off = static_cast<int32_t>(cpb->get_pos0().x) - sb_x0;
+  ce.size_x  = cpb->get_pos1().x - cpb->get_pos0().x;
+  ce.size_y  = static_cast<uint32_t>(ry1 - ry0);
+  return ce;
+}
+
 void j2k_subband_row_buf::trigger_prefetch(int32_t next_y0) {
   if (prefetch_buf == nullptr || prefetch_y0 != -1) return;  // no buf or already pending
 
@@ -601,10 +674,10 @@ void j2k_subband_row_buf::trigger_prefetch(int32_t next_y0) {
   if (!pool || pool->num_threads() <= 1) return;
 
   prefetch_y0 = next_y0;
-  prefetch_y1 = std::min(next_y0 + cb_h, sb_y1);
+  prefetch_y1 = std::min((next_y0 / cb_h + 1) * cb_h, sb_y1);  // one code-block grid row (decode_strip)
 
   const int32_t sb_y0     = static_cast<int32_t>(sb->get_pos0().y);
-  const int32_t strip_idx = (prefetch_y0 - sb_y0) / cb_h;
+  const int32_t strip_idx = next_y0 / cb_h - sb_y0 / cb_h;
   StripCacheEntry *entry  = (strip_idx >= 0 && static_cast<size_t>(strip_idx) < strip_cache_.size())
                                 ? &strip_cache_[static_cast<size_t>(strip_idx)]
                                 : nullptr;
@@ -616,16 +689,25 @@ void j2k_subband_row_buf::trigger_prefetch(int32_t next_y0) {
     const auto stride_cold = static_cast<ptrdiff_t>(sb->stride);
 
     entry->blocks.clear();
+    // A precinct-subband without code-blocks may get them in a later frame (single-tile
+    // reuse), so a strip holding one is walked again next time.
+    bool all_built = true;
 
-    for (uint32_t p = 0; p < np; ++p) {
+    for (uint32_t p = (np != 0) ? first_precinct_for_rows(res, band_idx, prefetch_y0) : 0; p < np; ++p) {
       j2k_precinct *cp          = res->access_precinct(p);
       j2k_precinct_subband *cpb = cp->access_pband(band_idx);
-      const uint32_t ncx        = cpb->num_codeblock_x;
-      const uint32_t ncy        = cpb->num_codeblock_y;
+      if (static_cast<int32_t>(cpb->get_pos0().y) >= prefetch_y1) break;  // and so do the rest
+      const uint32_t ncx = cpb->num_codeblock_x;
+      const uint32_t ncy = cpb->num_codeblock_y;
       if (ncx == 0 || ncy == 0) continue;
       const int32_t cpb_y0_i = static_cast<int32_t>(cpb->get_pos0().y);
       const int32_t cpb_y1_i = static_cast<int32_t>(cpb->get_pos1().y);
       if (cpb_y1_i <= prefetch_y0 || cpb_y0_i >= prefetch_y1) continue;
+      if (!cpb->is_built()) {
+        entry->blocks.push_back(unbuilt_region(cpb, prefetch_y0, prefetch_y1, sb_x0, stride_cold));
+        all_built = false;
+        continue;
+      }
       const uint32_t r0 = (prefetch_y0 > cpb_y0_i)
                               ? static_cast<uint32_t>((prefetch_y0 - cpb_y0_i) / static_cast<int32_t>(cb_h))
                               : 0u;
@@ -647,7 +729,7 @@ void j2k_subband_row_buf::trigger_prefetch(int32_t next_y0) {
         }
       }
     }
-    entry->built = true;
+    entry->built = all_built;
   }
 
   // ── Hot path: iterate the cached block list, branching on num_passes ────
@@ -662,7 +744,7 @@ void j2k_subband_row_buf::trigger_prefetch(int32_t next_y0) {
     // Same JPIP-masked / empty-block handling as the walking path: if the
     // codeblock has no data to decode, zero the output region (when using a
     // ring prefetch buffer) and skip the decode task.
-    if (!ce.block->num_passes || ce.block->get_compressed_data() == nullptr) {
+    if (ce.block == nullptr || !ce.block->num_passes || ce.block->get_compressed_data() == nullptr) {
       if (prefetch_buf != nullptr) {
         sprec_t *dst = prefetch_buf + ce.row_off + ce.col_off;
         for (uint32_t row = 0; row < ce.size_y; ++row) {
@@ -694,15 +776,20 @@ void j2k_subband_row_buf::trigger_prefetch(int32_t next_y0) {
     fb_blocks.clear();
     const uint32_t np   = res->npw * res->nph;
     const int32_t sb_x0 = static_cast<int32_t>(sb->get_pos0().x);
-    for (uint32_t p = 0; p < np; ++p) {
+    for (uint32_t p = (np != 0) ? first_precinct_for_rows(res, band_idx, prefetch_y0) : 0; p < np; ++p) {
       j2k_precinct *cp          = res->access_precinct(p);
       j2k_precinct_subband *cpb = cp->access_pband(band_idx);
-      const uint32_t ncx        = cpb->num_codeblock_x;
-      const uint32_t ncy        = cpb->num_codeblock_y;
+      if (static_cast<int32_t>(cpb->get_pos0().y) >= prefetch_y1) break;  // and so do the rest
+      const uint32_t ncx = cpb->num_codeblock_x;
+      const uint32_t ncy = cpb->num_codeblock_y;
       if (ncx == 0 || ncy == 0) continue;
       const int32_t cpb_y0_i = static_cast<int32_t>(cpb->get_pos0().y);
       const int32_t cpb_y1_i = static_cast<int32_t>(cpb->get_pos1().y);
       if (cpb_y1_i <= prefetch_y0 || cpb_y0_i >= prefetch_y1) continue;
+      if (!cpb->is_built()) {
+        fb_blocks.push_back(unbuilt_region(cpb, prefetch_y0, prefetch_y1, sb_x0, stride));
+        continue;
+      }
       const uint32_t r0 = (prefetch_y0 > cpb_y0_i)
                               ? static_cast<uint32_t>((prefetch_y0 - cpb_y0_i) / static_cast<int32_t>(cb_h))
                               : 0u;
@@ -766,7 +853,6 @@ void j2k_subband_row_buf::trigger_prefetch(int32_t next_y0) {
     const bool is_ht                = (pb.block->Cmodes & HT) >> 6;
     if (!is_ht) {
       std::memset(pb.block->sample_buf, 0, static_cast<size_t>(pb.QWx2) * pb.QHx2 * sizeof(int32_t));
-      std::memset(pb.block->block_states, 0, static_cast<size_t>(pb.QWx2 + 2) * (pb.QHx2 + 2));
       std::memset(pb.block->block_contexts, 0,
                   static_cast<size_t>(pb.QHx2 / 4 + 2) * (pb.QWx2 + 2) * sizeof(uint32_t));
     } else if (pb.block->num_passes > 1) {
@@ -799,8 +885,7 @@ const sprec_t *j2k_subband_row_buf::row_ptr(int32_t abs_row) {
         // Prefetch hit: wait for all in-flight tasks to finish, then swap buffers.
         spin_wait(par_cnt);
         if (par_error.load(std::memory_order_relaxed)) {
-          printf("WARNING: a prefetched code-block decode task failed — malformed input.\n");
-          throw std::exception();
+          open_htj2k::detail::fail("a prefetched code-block decode task failed — malformed input.");
         }
         std::swap(ring_buf, prefetch_buf);
         strip_y0 = ring_y0 = prefetch_y0;
@@ -846,3 +931,4 @@ void j2k_subband_row_buf::get_row(int32_t abs_row, sprec_t *out) {
   const sprec_t *p = row_ptr(abs_row);
   std::memcpy(out, p, sizeof(sprec_t) * static_cast<size_t>(width));
 }
+}  // namespace open_htj2k

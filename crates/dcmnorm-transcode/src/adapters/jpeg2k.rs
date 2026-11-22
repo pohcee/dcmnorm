@@ -90,10 +90,8 @@ fn frame_codestream(
     frame: u32,
     nr_frames: usize,
 ) -> DecodeResult<Cow<'_, [u8]>> {
-    // Common case first, checked without ever fetching the full `raw_pixel_data()` (which
-    // clones every fragment) - see `jpeg.rs`'s `decode_frame` for the full rationale (called
-    // once per frame for a multi-frame series, so this matters).
-    let number_of_fragments = src.number_of_fragments().unwrap_or(0) as usize;
+    // Native pixel data, if supplied, is exposed by the fragment API at index zero.
+    let number_of_fragments = src.number_of_fragments().unwrap_or(1) as usize;
     if number_of_fragments == 1 || number_of_fragments == nr_frames {
         // assuming 1:1 frame-to-fragment mapping
         return src.fragment(frame as usize).with_whatever_context(|| {
@@ -101,29 +99,26 @@ fn frame_codestream(
         });
     }
 
-    // Some embedded codestreams span multiple fragments. This is the rare path (most real
-    // encoders keep a 1:1 mapping), so the extra clone cost of `raw_pixel_data()` here is
-    // acceptable - it's genuinely needed to look up the basic offset table and gather all of the
-    // frame's fragments in a single vector.
-    let raw = src
-        .raw_pixel_data()
-        .whatever_context("Expected to have raw pixel data available")?;
-
-    let base_offset = raw.offset_table.get(frame as usize).copied();
+    // Read fragment lengths through borrowed slices and copy only the requested frame.
+    // Cloning the whole pixel sequence here would give each parallel worker its own copy.
+    let offset_table = src.offset_table().unwrap_or_default();
+    let base_offset = offset_table.get(frame as usize).copied();
     let base_offset = if frame == 0 {
         base_offset.unwrap_or(0) as usize
     } else {
         base_offset.with_whatever_context(|| format!("Missing offset for frame #{}", frame))?
             as usize
     };
-    let next_offset = raw.offset_table.get(frame as usize + 1);
+    let next_offset = offset_table.get(frame as usize + 1);
 
     let mut offset = 0;
     let mut fragments = Vec::new();
-    for fragment in &raw.fragments {
-        // include it
+    for index in 0..number_of_fragments {
+        let fragment = src.fragment(index).with_whatever_context(|| {
+            format!("Missing fragment #{} for the frame requested", index)
+        })?;
         if offset >= base_offset {
-            fragments.extend_from_slice(fragment);
+            fragments.extend_from_slice(&fragment);
         }
         offset += fragment.len() + 8;
         if let Some(&next_offset) = next_offset {

@@ -3,14 +3,15 @@
 // build.rs compiles the whole library plus this file once per CPU variant. Every entry point's
 // name carries the variant (DCMNORM_HTJ2K_VARIANT, e.g. dcmnorm_htj2k_base_decode /
 // dcmnorm_htj2k_v3_decode) and is the only symbol left with default visibility, so two copies
-// of OpenHTJ2K can live in one binary without their (largely un-namespaced) symbols colliding -
-// see build.rs. No C++ exception may cross this boundary: every entry point catches everything
-// and reports it through `error_message` instead.
+// of OpenHTJ2K can live in one binary without colliding - see build.rs. No C++ exception may
+// cross this boundary: every entry point catches everything and reports it through `error_message`
+// instead.
 
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <exception>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -91,6 +92,9 @@ DCMNORM_HTJ2K_API int DCMNORM_HTJ2K_FN(decode)(const uint8_t *codestream, size_t
     std::vector<uint8_t> depths;
     std::vector<bool> is_signed;
     decoder.invoke_line_based(planes, widths, heights, depths, is_signed);
+    if (decoder.is_truncated()) {
+      throw std::runtime_error("truncated HTJ2K codestream");
+    }
 
     const size_t nc     = planes.size();
     out->num_components = static_cast<uint16_t>(nc);
@@ -118,12 +122,9 @@ DCMNORM_HTJ2K_API int DCMNORM_HTJ2K_FN(decode)(const uint8_t *codestream, size_t
     std::free(out->depths);
     std::free(out->is_signed);
     std::memset(out, 0, sizeof(*out));
-    // OpenHTJ2K signals many failures with a bare std::exception (its message lands on stdout).
     const char *what = error.what();
     set_error(error_message, std::string("OpenHTJ2K decode failed: ") +
-                                 (what && *what && std::strcmp(what, "std::exception") != 0
-                                      ? what
-                                      : "invalid or unsupported codestream"));
+                                 (what && *what ? what : "invalid or unsupported codestream"));
     return 1;
   } catch (...) {
     for (int32_t *plane : planes) delete[] plane;
@@ -208,13 +209,14 @@ DCMNORM_HTJ2K_API int DCMNORM_HTJ2K_FN(decode_into)(const uint8_t *codestream, s
           }
         },
         widths, heights, depths, is_signed);
+    if (decoder.is_truncated()) {
+      throw std::runtime_error("truncated HTJ2K codestream");
+    }
     return 0;
   } catch (const std::exception &error) {
     const char *what = error.what();
     set_error(error_message, std::string("OpenHTJ2K decode failed: ") +
-                                 (what && *what && std::strcmp(what, "std::exception") != 0
-                                      ? what
-                                      : "invalid or unsupported codestream"));
+                                 (what && *what ? what : "invalid or unsupported codestream"));
     return 1;
   } catch (...) {
     set_error(error_message, "OpenHTJ2K decode failed: unknown error");
@@ -287,9 +289,8 @@ DCMNORM_HTJ2K_API int DCMNORM_HTJ2K_FN(encode)(const int32_t *const *planes, uin
     qcd.number_of_guardbits = 1;
     qcd.base_step           = 1.0 / static_cast<double>(1u << bit_depth);
 
-    // Row-streaming encode (the path the reference CLI uses for PNM/PGX input). The buffered
-    // invoke_line_based() path dereferences unallocated subband buffers in this OpenHTJ2K version
-    // (null memcpy in fdwt_level_sink_planes_fn, reproduced under ASan for any image size).
+    // Row-streaming encode reads directly from the caller's const planes row by row without
+    // mutating or duplicating full component buffers.
     std::vector<uint8_t> output;
     std::vector<int32_t *> no_buffered_input;
     open_htj2k::openhtj2k_encoder encoder("", no_buffered_input, siz, cod, qcd, kNoQfactor, false, 0,
@@ -313,9 +314,7 @@ DCMNORM_HTJ2K_API int DCMNORM_HTJ2K_FN(encode)(const int32_t *const *planes, uin
   } catch (const std::exception &error) {
     const char *what = error.what();
     set_error(error_message, std::string("OpenHTJ2K encode failed: ") +
-                                 (what && *what && std::strcmp(what, "std::exception") != 0
-                                      ? what
-                                      : "encoder rejected the input"));
+                                 (what && *what ? what : "encoder rejected the input"));
     return 1;
   } catch (...) {
     set_error(error_message, "OpenHTJ2K encode failed: unknown error");

@@ -37,6 +37,39 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <new>
+
+namespace open_htj2k {
+
+// HT encoder sample form of a quantized coefficient t: 0 when t == 0,
+// otherwise ((|t| - 1) << 1) + sign with bit 31 set as the significance flag.
+// ORs |t| into or_acc.  Branchless, so the scalar loops calling it vectorize.
+// INT32_MIN (what an out-of-range float converts to) becomes 0, as in the
+// SIMD versions.
+static inline int32_t htj2k_magsgn(int32_t t, uint32_t &or_acc) {
+  const uint32_t neg = static_cast<uint32_t>(t) >> 31;
+  const uint32_t mag = (neg ? 0U - static_cast<uint32_t>(t) : static_cast<uint32_t>(t)) & 0x7FFFFFFFU;
+  or_acc |= mag;
+  const uint32_t nz = (mag != 0) ? 0xFFFFFFFFU : 0U;
+  return static_cast<int32_t>(((((mag - 1U) << 1) + neg) | 0x80000000U) & nz);
+}
+#if defined(OPENHTJ2K_ENABLE_SSE2)
+// htj2k_magsgn() in the four lanes of an SSE2 register (utils.hpp); ORs the magnitudes
+// into vor.
+static inline __m128i htj2k_magsgn_sse2(__m128i t, __m128i &vor) {
+  const __m128i s = _mm_srai_epi32(t, 31);
+  const __m128i m = _mm_and_si128(_mm_sub_epi32(_mm_xor_si128(t, s), s), _mm_set1_epi32(0x7FFFFFFF));
+  vor             = _mm_or_si128(vor, m);
+  const __m128i v =
+      _mm_add_epi32(_mm_slli_epi32(_mm_sub_epi32(m, _mm_set1_epi32(1)), 1), _mm_srli_epi32(t, 31));
+  return _mm_andnot_si128(_mm_cmpeq_epi32(m, _mm_setzero_si128()),
+                          _mm_or_si128(v, _mm_set1_epi32(INT32_MIN)));
+}
+// Whether a lane of v is not zero.
+static inline bool any_nonzero_sse2(__m128i v) {
+  return _mm_movemask_epi8(_mm_cmpeq_epi32(v, _mm_setzero_si128())) != 0xFFFF;
+}
+#endif
 
 /********************************************************************************
  * cblk_data_pool — monotonic bump allocator for HTJ2K codeblock bitstreams
@@ -47,16 +80,22 @@
  * Replaces ~11,520 individual malloc() calls per 4K tile with a handful of 2 MB slabs.
  *******************************************************************************/
 class cblk_data_pool {
-  static constexpr size_t SLAB_BYTES = 2u << 20;  // 2 MB per slab
+  // Slabs start small and double up to 2 MB.  A tile keeps its pools (one per thread that
+  // codes its code-blocks) until the codestream is written, so a fixed 2 MB first slab
+  // reserved up to (threads + 1) x 2 MB per tile: about 88 GB for 11008 tiles with 4
+  // threads, which exhausted the commit limit on Windows.
+  static constexpr size_t SLAB_BYTES     = 2u << 20;   // largest slab
+  static constexpr size_t MIN_SLAB_BYTES = 16u << 10;  // first slab
   struct Slab {
     uint8_t *ptr;
     size_t used;
     size_t cap;
   };
   std::vector<Slab> slabs;
+  size_t next_cap = MIN_SLAB_BYTES;
 
  public:
-  cblk_data_pool() { slabs.reserve(8); }
+  cblk_data_pool() { slabs.reserve(16); }
   cblk_data_pool(const cblk_data_pool &)            = delete;
   cblk_data_pool &operator=(const cblk_data_pool &) = delete;
 
@@ -68,8 +107,11 @@ class cblk_data_pool {
   uint8_t *bump(size_t n) {
     n = (n + 7u) & ~7u;
     if (slabs.empty() || slabs.back().used + n > slabs.back().cap) {
-      const size_t cap = (n > SLAB_BYTES) ? n : SLAB_BYTES;
-      slabs.push_back({static_cast<uint8_t *>(malloc(cap)), 0u, cap});
+      const size_t cap = (n > next_cap) ? n : next_cap;
+      auto *ptr        = static_cast<uint8_t *>(malloc(cap));
+      if (ptr == nullptr) throw std::bad_alloc();
+      slabs.push_back({ptr, 0u, cap});
+      if (next_cap < SLAB_BYTES) next_cap *= 2;
     }
     uint8_t *p = slabs.back().ptr + slabs.back().used;
     slabs.back().used += n;
@@ -84,12 +126,17 @@ class cblk_data_pool {
   // Reset all slabs to empty, keeping the allocated pages so they are already
   // faulted-in for the next tile encode (avoids repeated mmap/munmap overhead).
   void reset() noexcept {
-    for (auto &s : slabs) s.used = 0;
-    // Collapse to one slab to bound long-term memory footprint.
-    while (slabs.size() > 1) {
-      free(slabs.back().ptr);
-      slabs.pop_back();
+    // Collapse to one slab, the largest, to bound long-term memory footprint.
+    if (slabs.size() > 1) {
+      size_t keep = 0;
+      for (size_t i = 1; i < slabs.size(); ++i)
+        if (slabs[i].cap > slabs[keep].cap) keep = i;
+      for (size_t i = 0; i < slabs.size(); ++i)
+        if (i != keep) free(slabs[i].ptr);
+      slabs[0] = slabs[keep];
+      slabs.resize(1);
     }
+    for (auto &s : slabs) s.used = 0;
   }
 };
 
@@ -122,6 +169,86 @@ class j2k_region {
   j2k_region(element_siz p0, element_siz p1) : pos0(p0), pos1(p1), stride(round_up(pos1.x - pos0.x, 32U)) {}
 };
 
+class ht_rc_state;
+
+/********************************************************************************
+ * Rate control (EXPERIMENTAL): measurements and coded set of an HT code-block
+ *******************************************************************************/
+// One bit-plane j of an HT code-block, over the magnitudes m of its samples (in steps of
+// the code-block's base step): C counts the samples with m >= 2^j and CQ the quads (2 x 2)
+// holding one; E2 sums (2m + 1)^2 over the samples with 0 < m < 2^j (twice their error when
+// left out); R2 sums the square of 2(m mod 2^j) + 1 - 2^j (twice the error after a cleanup
+// pass at plane j) over the samples with m >= 2^j, and R2up the same over m >= 2^(j + 1).
+// For the HT set at cleanup plane j (j >= 1), Nsp counts the samples its SigProp pass codes
+// a bit for and Nnew the samples it makes significant.
+struct ht_rd_plane {
+  uint32_t C, CQ;
+  uint32_t Nsp, Nnew;
+  double E2, R2, R2up;
+};
+
+// An HT set coded at cleanup plane p has three truncation points: the cleanup pass alone,
+// with the SigProp pass of plane p - 1, and with SigProp and MagRef.  The rate control
+// keeps their exact lengths and distortions, and the measurements that model the sets at
+// the planes above (ht_rate_control.cpp).  Distortions are sums of squared errors in steps.
+// A truncation point of a Part 1 (EBCOT) code-block: the end of one coding pass.  Cut
+// there, the code-block keeps the first `keep` bytes of its codeword segments and ends
+// the last one with the tail_len bytes in tail, which terminate it at that pass;
+// ends_segment tells whether the encoder terminated a segment there (keep is then the
+// segment's end).  D is the squared error left after the pass, in the units of
+// ht_rd_plane (doubled errors).  With quality layers, a cut that later layers continue
+// cannot be terminated: `pre` is the length of the shortest prefix of the coded data that
+// decodes every pass up to this one (keep when the pass ends a segment).
+struct p1_rd_pass {
+  uint32_t keep     = 0;
+  uint32_t pre      = 0;
+  double D          = 0;
+  uint8_t tail_len  = 0;
+  bool ends_segment = false;
+  uint8_t tail[6]   = {};
+};
+
+struct ht_rd_info {
+  // Set when the code-blocks are registered.
+  double w     = 0;  // weight of a squared error in the image
+  uint16_t cls = 0;  // subband class of the threshold estimate
+  // A Part 1 code-block: its truncation points, one per coding pass (ebcot_encode), and
+  // D2zero holds the squared error left with none.  Its passes are coded down to the
+  // cleanup pass of bit-plane p_coded; p1_zbp is its number of missing bit-planes.
+  std::unique_ptr<p1_rd_pass[]> p1;
+  uint8_t p1_passes = 0;
+  uint8_t p1_zbp    = 0;
+  bool p1_prefix    = false;  // record the prefix lengths (quality layers)
+  // Measurement (ht_rd_stats).
+  uint8_t msb     = 0;  // magnitude bit-planes (0: nothing significant)
+  uint8_t j0      = 0;  // first plane measured; planes[j - j0] for j0 <= j < msb
+  uint32_t nquads = 0;
+  double D2zero   = 0;  // sum of (2m + 1)^2 over the samples with m > 0
+  std::unique_ptr<ht_rd_plane[]> planes;
+  // The model's convex hull for the threshold estimate: (slope bin, rate) of each step.
+  std::unique_ptr<std::pair<uint16_t, double>[]> steps;
+  uint8_t nsteps = 0;
+  // The coded set (ht_rd_code; replaced when the set is transcoded).
+  double lambda   = 0;  // threshold the set is coded for
+  uint8_t p_coded = 0;
+  uint8_t sp_tail = 0;      // last byte of the refinement segment cut after SigProp
+  bool refined    = false;  // the coded set has its SigProp and MagRef passes
+  bool skipped    = false;  // not coded at all: left out at any threshold near the estimate
+  uint32_t Lcup = 0, Lsp = 0, Lref = 0;
+  double Dcup = 0, Dsp = 0, Dmr = 0;
+  // Scheduling: counters the coding of the code-block decrements (nullptr: none), and
+  // whether its measuring is done.
+  std::atomic<int> *slot_cnt = nullptr, *done_cnt = nullptr;
+  std::atomic<bool> measured{false};
+};
+
+// Lengths an HT set's refinement passes report to the rate control.
+struct ht_refinement_info {
+  uint32_t Lsp    = 0;        // refinement segment cut after SigProp
+  uint8_t sp_tail = 0;        // its last byte, which differs from the full segment's
+  uint64_t *newly = nullptr;  // optional: per stripe word, the samples SigProp made significant
+};
+
 /********************************************************************************
  * j2k_codeblock
  *******************************************************************************/
@@ -142,12 +269,14 @@ class j2k_codeblock : public j2k_region {
  public:
   int32_t *sample_buf;
   size_t blksampl_stride;
+  // Per-sample state of the HT block decoder and encoder.  Part 1 (EBCOT) decoding
+  // does not use it; its state lives in block_contexts.
   uint8_t *block_states;
   size_t blkstate_stride;
   // Part 1 EBCOT: packed 32-bit context word per stripe column (book §17.1.2).
   // One uint32_t per stripe column (4 rows × 1 col) of σ/χ̂/μ/π state, with a
-  // 1-stripe border above/below and a 1-column border left/right. Used only by
-  // j2k_decode (HT decode leaves it nullptr).
+  // 1-stripe border above/below and a 1-column border left/right; see
+  // ebcot_context.hpp. Used only by j2k_decode (HT decode leaves it nullptr).
   uint32_t *block_contexts;
   size_t block_contexts_stride;
   sprec_t *band_buf;
@@ -169,13 +298,32 @@ class j2k_codeblock : public j2k_region {
   uint32_t pass_length_store[PASS_LEN_INLINE];
   uint32_t *pass_length = pass_length_store;
   uint8_t pass_length_count;
-  // non-owning: pooled by the owning j2k_precinct_subband
+  // Decoder: the coding passes the packet being read adds (parse_packet_header), until
+  // create_compressed_buffer() or skip_compressed_buffer() takes them.  The decoder keeps
+  // no per-layer state: a layer's passes start at num_passes minus these.
+  uint8_t dec_layer_passes = 0;
+  // Decoder: the passes whose data the codestream holds, when a packet's data for this
+  // code-block was cut short (create_compressed_buffer() returned true); otherwise
+  // ALL_PASSES_HAVE_DATA.  The passes after them are dropped once the tile's packets are
+  // read (drop_passes_without_data()); until then num_passes keeps counting them, as the
+  // packet headers that follow are read with it.
+  static constexpr uint8_t ALL_PASSES_HAVE_DATA = 0xFF;  // above any pass count (at most 164)
+  uint8_t dec_passes_with_data                  = ALL_PASSES_HAVE_DATA;
+  // Encoder: the passes of each quality layer and the pass each starts at.  Non-owning:
+  // pooled by the owning j2k_precinct_subband.  nullptr in the decoder.
   uint8_t *layer_start;
   uint8_t *layer_passes;
   bool already_included;
   bool refsegment;
-  bool pre_quantized  = false;
-  uint32_t pre_or_val = 0;
+  bool pre_quantized = false;
+  // HT only: code the cleanup pass this many bit-planes above the LSB and refine
+  // the plane below it with the HT SigProp and MagRef passes (0 = cleanup only).
+  // Clamped per block so that the cleanup pass keeps a significant sample.
+  uint8_t ht_refine_planes = 0;
+  uint32_t pre_or_val      = 0;
+  // Rate control (EXPERIMENTAL): the truncation points of this HT code-block, or nullptr
+  // when the encoder does not truncate to a target size.
+  ht_rd_info *rd = nullptr;
 
   j2k_codeblock(const uint32_t &idx, uint8_t orientation, uint8_t M_b, uint8_t R_b, uint8_t transformation,
                 float stepsize, uint32_t band_stride, sprec_t *ibuf, uint32_t offset,
@@ -187,6 +335,10 @@ class j2k_codeblock : public j2k_region {
     }
     if (pass_length != pass_length_store) delete[] pass_length;
   }
+
+  // Encoder: the bytes of the compressed data that quality layer l carries, from the
+  // passes of each layer (layer_passes[]) and the lengths in pass_length[].
+  void layer_bytes(uint16_t l, uint32_t &start, uint32_t &len) const;
 
   void ensure_pass_capacity(uint8_t n) {
     if (n <= PASS_LEN_INLINE || pass_length != pass_length_store) return;
@@ -211,8 +363,33 @@ class j2k_codeblock : public j2k_region {
   //  OPENHTJ2K_NODISCARD uint8_t get_signLUT_index(const uint32_t &j1, const uint32_t &j2) const;
   OPENHTJ2K_NODISCARD uint8_t get_Mb() const;
   uint8_t *get_compressed_data();
+  // Rate control: take the compressed data out of the code-block (pooled: owned by a
+  // cblk_data_pool, otherwise malloc'ed and now the caller's), or put data in.
+  uint8_t *detach_compressed_data(bool &pooled) {
+    uint8_t *p           = compressed_data;
+    pooled               = compressed_is_pooled;
+    compressed_data      = nullptr;
+    current_address      = nullptr;
+    compressed_is_pooled = false;
+    return p;
+  }
+  void attach_compressed_data(uint8_t *buf, bool pooled) {
+    compressed_data      = buf;
+    current_address      = buf;
+    compressed_is_pooled = pooled;
+  }
   void set_compressed_data(uint8_t *buf, uint16_t size, uint16_t Lref = 0);
-  void create_compressed_buffer(buf_chain *tile_buf, int32_t buf_limit, const uint16_t &layer);
+  // Copies an HT refinement segment of Lref bytes after the cleanup segment of
+  // `length` bytes, into the space set_compressed_data() reserved for it, and
+  // returns the unused part of that reservation to the code-block data pool.
+  void append_refinement_segment(const uint8_t *buf, uint32_t Lref, uint32_t reserved);
+  // Attaches the data of the passes the packet just read added.  Returns true when that
+  // data runs past the bytes left (a truncated codestream, or a malformed length): the
+  // code-block then keeps only the passes before them, those of the earlier packets, and
+  // the caller has drop_passes_without_data() called once the tile's packets are read.
+  bool create_compressed_buffer(buf_chain *tile_buf, const uint16_t &layer);
+  // Lowers num_passes to the passes whose data create_compressed_buffer() attached.
+  void drop_passes_without_data();
   // JPIP precinct-mask path: consume the packet body bytes belonging to this
   // layer from tile_buf (keeping the byte stream in sync with the next
   // packet) without attaching them to the codeblock.  Leaves compressed_data
@@ -270,30 +447,46 @@ class j2k_subband : public j2k_region {
 class j2k_precinct_subband : public j2k_region {
  private:
   OPENHTJ2K_MAYBE_UNUSED const uint8_t orientation;
+  // Whether the code-blocks and tag trees exist (build_codeblocks()).
+  bool built;
   // Embedded directly (was previously raw `tagtree *` with `new`/`delete`).
-  // Default-constructed when num_codeblocks==0 (stays empty); otherwise move-assigned in ctor.
+  // Default-constructed when num_codeblocks==0 (stays empty); otherwise move-assigned by
+  // build_codeblocks().
   tagtree inclusion_info;
   tagtree ZBP_info;
   // Flat array of codeblock objects (placement-new'd into a single allocation)
   j2k_codeblock *codeblocks;
-  // Single slab backing layer_start[] and layer_passes[] for all codeblocks
+  // Encoder: single slab backing layer_start[] and layer_passes[] for all codeblocks
   std::unique_ptr<uint8_t[]> cb_layer_pool;
 
  public:
   uint32_t num_codeblock_x;
   uint32_t num_codeblock_y;
-  j2k_precinct_subband(uint8_t orientation, uint8_t M_b, uint8_t R_b, uint8_t transformation,
-                       float stepsize, sprec_t *ibuf, const element_siz &bp0, const element_siz &p0,
-                       const element_siz &p1, const uint32_t stride, const uint16_t &num_layers,
-                       const element_siz &codeblock_size, const uint8_t &Cmodes);
+  // The precinct-subband [p0, p1) of subband sb.  The encoder builds its code-blocks here;
+  // the decoder (decoder = true) leaves that to build_codeblocks(), when the first packet
+  // of the precinct that is not empty arrives, so precincts without coded data cost no
+  // code-block state.
+  j2k_precinct_subband(const j2k_subband &sb, const element_siz &p0, const element_siz &p1,
+                       uint16_t num_layers, const element_siz &codeblock_size, uint8_t Cmodes,
+                       bool decoder);
   ~j2k_precinct_subband() {
-    const uint32_t N = num_codeblock_x * num_codeblock_y;
+    const uint32_t N = (codeblocks != nullptr) ? num_codeblock_x * num_codeblock_y : 0;
     for (uint32_t i = 0; i < N; ++i) {
       codeblocks[i].~j2k_codeblock();
     }
     operator delete[](codeblocks);
     // tagtree members and cb_layer_pool unique_ptr destruct automatically.
   }
+  // Disable copy/move — owns raw pointer with manual destruction.
+  j2k_precinct_subband(const j2k_precinct_subband &)            = delete;
+  j2k_precinct_subband &operator=(const j2k_precinct_subband &) = delete;
+  OPENHTJ2K_NODISCARD bool is_built() const { return built; }
+  // Creates the code-blocks and the tag trees, with per-layer pass arrays when
+  // layer_state is set (the encoder's).  Idempotent.
+  void build_codeblocks(const j2k_subband &sb, uint16_t num_layers, const element_siz &codeblock_size,
+                        uint8_t Cmodes, bool layer_state);
+  // Bytes build_codeblocks() allocates, for the decoder's memory budget.
+  OPENHTJ2K_NODISCARD uint64_t codeblock_state_bytes(uint16_t num_layers, bool layer_state) const;
   //  void destroy_codeblocks() {
   //    for (uint32_t i = 0; i < num_codeblock_x * num_codeblock_y; ++i) {
   //      delete codeblocks[i];
@@ -334,11 +527,16 @@ class j2k_precinct : public j2k_region {
   std::unique_ptr<uint8_t[]> packet_header;
   // length of packet header
   uint32_t packet_header_length;
+  // With more than one quality layer, packet_header holds the headers of all the layers'
+  // packets, in order; layer_header_end[l] is where layer l's ends.
+  std::vector<uint32_t> layer_header_end;
 
  public:
+  // decoder: leave building the code-blocks of the precinct-subbands to the decoder
+  // (j2k_precinct_subband::build_codeblocks()).
   j2k_precinct(const uint8_t &r, const uint32_t &idx, const element_siz &p0, const element_siz &p1,
                const j2k_subband *subband, const uint16_t &num_layers, const element_siz &codeblock_size,
-               const uint8_t &Cmodes, uint8_t nb = 0, dwt_type dfs_dir = DWT_BIDIR);
+               const uint8_t &Cmodes, uint8_t nb = 0, dwt_type dfs_dir = DWT_BIDIR, bool decoder = false);
   ~j2k_precinct() {
     for (uint8_t i = 0; i < num_bands; ++i) {
       pband[i].~j2k_precinct_subband();
@@ -421,7 +619,8 @@ class j2k_resolution : public j2k_region {
                        std::vector<uint8_t> &exponents, std::vector<uint16_t> &mantissas,
                        uint8_t num_guard_bits, uint8_t qstyle, uint8_t bitdepth, bool line_based = false,
                        const DFS_marker *dfs = nullptr);
-  void create_precincts(element_siz PP, uint16_t num_layers, element_siz codeblock_size, uint8_t Cmodes);
+  void create_precincts(element_siz PP, uint16_t num_layers, element_siz codeblock_size, uint8_t Cmodes,
+                        bool decoder = false);
 
   j2k_precinct *access_precinct(uint32_t p);
   j2k_subband *access_subband(uint8_t b);
@@ -460,16 +659,25 @@ class j2k_tile_part {
   uint8_t *body;
   // length of tile-part
   uint32_t length;
+  // The codestream ends inside this tile-part's body (read()).
+  bool cut_short = false;
 
  public:
   // pointer to tile-part header
   std::unique_ptr<j2k_tilepart_header> header;
+  // position of this tile-part among all tile-parts of the codestream (0 for the first),
+  // which is also the index of its packet-header record in the PPM markers
+  uint32_t codestream_index = 0;
   explicit j2k_tile_part(uint16_t num_components);
   void set_SOT(SOT_marker &tmpSOT);
   int read(j2c_src_memory &);
   OPENHTJ2K_MAYBE_UNUSED OPENHTJ2K_NODISCARD uint16_t get_tile_index() const;
   OPENHTJ2K_MAYBE_UNUSED OPENHTJ2K_NODISCARD uint8_t get_tile_part_index() const;
   OPENHTJ2K_NODISCARD uint32_t get_length() const;
+  // True when the codestream ends before this tile-part's body does (Psot reaches past
+  // the end of the data, or Psot is 0 and no EOC marker follows): the body holds the
+  // bytes there are.
+  OPENHTJ2K_NODISCARD bool is_cut_short() const { return cut_short; }
   uint8_t *get_buf();
   void set_tile_index(uint16_t t);
   void set_tile_part_index(uint8_t tp);
@@ -519,6 +727,12 @@ class j2k_tile_component : public j2k_tile_base {
   // Flat array of j2k_resolution objects (placement-new'd, single allocation per tile component).
   j2k_resolution *resolution;
   uint8_t num_resolutions;  // == NL + 1 when allocated, else 0
+  // The code-block size and style create_resolutions() laid the code-blocks out with.  The
+  // decoder builds code-blocks as packets arrive, with these rather than the current
+  // codeblock_size and Cmodes, which on the single-tile reuse path a later frame's
+  // tile-part header could change.
+  element_siz built_cb_size{};
+  uint8_t built_Cmodes = 0;
   // opaque line-decode state (allocated by init_line_decode, freed by finalize_line_decode)
   std::unique_ptr<struct j2k_tcomp_line_dec> line_dec;
   // opaque line-encode state (allocated by init_line_encode, freed by finalize_line_encode)
@@ -545,6 +759,10 @@ class j2k_tile_component : public j2k_tile_base {
   int32_t lb_dc_offset      = 0;
   int32_t lb_dc_shiftup     = 0;
   bool lb_enc_mode          = false;  // true in any LB encode path (streaming or buffered)
+  // Streaming encode: the subbands above the lowest resolution have no sample buffers,
+  // because the strip pipeline quantises the wavelet output straight into the
+  // code-blocks.  Set by create_resolutions() only where that pipeline applies.
+  bool enc_no_subband_buffers = false;
   // default constructor
   j2k_tile_component();
   // destructor
@@ -566,7 +784,13 @@ class j2k_tile_component : public j2k_tile_base {
   OPENHTJ2K_MAYBE_UNUSED element_siz get_codeblock_size();
   OPENHTJ2K_MAYBE_UNUSED OPENHTJ2K_NODISCARD uint8_t get_ROIshift() const;
   j2k_resolution *access_resolution(uint8_t r);
-  void create_resolutions(uint16_t numlayers, bool line_based = false, bool enc_lb = false);
+  OPENHTJ2K_NODISCARD uint8_t get_num_resolutions() const { return num_resolutions; }
+  OPENHTJ2K_NODISCARD const element_siz &get_built_cb_size() const { return built_cb_size; }
+  OPENHTJ2K_NODISCARD uint8_t get_built_Cmodes() const { return built_Cmodes; }
+  // decoder: the precincts leave building their code-blocks to the packet reader
+  // (j2k_tile::read_packet()).
+  void create_resolutions(uint16_t numlayers, bool line_based = false, bool enc_lb = false,
+                          bool decoder = false);
   // DFS/ATK pointers resolved during init; nullptr = not active for this component.
   const DFS_marker *dfs_info = nullptr;
   const ATK_marker *atk_info = nullptr;
@@ -619,17 +843,25 @@ class j2k_tile_component : public j2k_tile_base {
   // before calling finalize_line_decode to guarantee cleanup.
   void set_line_decode_persistent(bool on) { line_dec_persistent_ = on; }
   // Apply a column range to this component's IDWT level chain.  col_lo / col_hi
-  // are in finest-active-level tile-component coords.  Each coarser level's
-  // range is derived by halving + widening for the 9/7 filter support.
-  // Must be called after init_line_decode() (states must exist).  Defaults
-  // (col_lo == 0, col_hi == UINT32_MAX) behave exactly like pre-patch code.
+  // are finest-active-level columns of this tile-component, relative to its
+  // origin (0 = first column; values past the width clamp to it).  Each
+  // coarser level's range is derived by halving + widening for the 9/7 filter
+  // support.  Must be called after init_line_decode() (states must exist; it
+  // resets the window to full width).  Defaults (col_lo == 0, col_hi ==
+  // UINT32_MAX) select the full width.  Only the persistent (single-tile
+  // reuse) line decoder narrows; on the per-frame path this is a no-op and the
+  // full width is decoded, as it always has been there.  Narrowing that path
+  // too is a separate change: MSVC rounds the sub-range IDWT kernels 1 LSB
+  // differently from the full-width ones, so its windowed output would no
+  // longer match a full decode (tests/col_range_validation.cmake).
   void set_line_decode_col_range(uint32_t col_lo, uint32_t col_hi);
 
   // Apply a row range to this component's IDWT level chain.  row_lo / row_hi
-  // are in finest-active-level tile-component coords.  Each coarser level's
-  // range is derived by halving + widening for the 9/7 filter support,
-  // symmetric to set_line_decode_col_range.  Must be called after
-  // init_line_decode() and before the first pull_line on the frame.
+  // are finest-active-level rows of this tile-component, relative to its
+  // origin.  Each coarser level's range is derived by halving + widening for
+  // the 9/7 filter support, symmetric to set_line_decode_col_range.  Must be
+  // called after init_line_decode() and before the first pull_line on the
+  // frame.
   void set_line_decode_row_range(uint32_t row_lo, uint32_t row_hi);
 
   // ── Line-based encode API ─────────────────────────────────────────────────
@@ -642,10 +874,12 @@ class j2k_tile_component : public j2k_tile_base {
   //                            is false, this overload promotes the int32 row
   //                            back to float before pushing.
   // finalize_line_encode():    flushes states, fills subband buffers, frees state.
+  // release_line_encode():     frees state without flushing (destructor, errors).
   void init_line_encode();
   void push_line_enc(const sprec_t *in);
   void push_line_enc_i32(const int32_t *in);
   void finalize_line_encode();
+  void release_line_encode();
   struct j2k_tcomp_line_enc *get_line_enc() { return line_enc.get(); }
 
   void destroy() {
@@ -676,6 +910,8 @@ class j2k_tile : public j2k_tile_base {
   uint8_t progression_order;
   // number of layers (Table A.14)
   uint16_t numlayers;
+  // Encoder: bytes of each quality layer's packets (build_packet_headers()).
+  std::vector<uint32_t> layer_length;
   // multiple component transform (Table A.17)
   uint8_t MCT;
 
@@ -687,17 +923,18 @@ class j2k_tile : public j2k_tile_base {
   buf_chain *packet_header;
   // buffer for PPM marker segments
   buf_chain sbst_packet_header;
-  // number of tile-parts
-  uint8_t num_tile_part;
+  // number of tile-parts; wider than the 255 the spec allows, so that a malformed
+  // codestream with more cannot wrap it
+  uint32_t num_tile_part;
   // position of current tile-part
   int current_tile_part_pos;
   // unique pointer to tile-components
   std::unique_ptr<j2k_tile_component[]> tcomp;
   // pointer to packet header in PPT marker segments
   std::unique_ptr<buf_chain> ppt_header;
-  // number_of_packets (for encoder only)
+  // number_of_packets
   uint32_t num_packets;
-  // unique pointer to packets
+  // unique pointer to packets (for encoder only)
   std::unique_ptr<j2c_packet[]> packet;
   // value of Ccap15 parameter in CAP marker segment
   uint16_t Ccap15;
@@ -715,13 +952,22 @@ class j2k_tile : public j2k_tile_base {
   // and is_packet_read 4D vector are skipped entirely — the cached_crp_
   // vector is replayed with a flat loop calling read_packet() directly.
   struct CRP {
-    uint8_t c;   // component index
-    uint8_t r;   // resolution level
-    uint16_t p;  // precinct index
+    uint32_t p;  // precinct index (a resolution can have more than 65535)
+    uint16_t c;  // component index (up to 16384)
     uint16_t l;  // quality layer (packets of the same precinct differ by layer)
+    uint8_t r;   // resolution level
   };
   std::vector<CRP> cached_crp_;
   bool crp_cached_ = false;
+
+  // Decoder: the codestream lacks data of this tile (is_data_missing()), and the
+  // code-blocks whose data a packet cut short, trimmed once the packets are read.
+  bool data_missing_ = false;
+  std::vector<j2k_codeblock *> cut_blocks_;
+  // In a tile the codestream lacks data of, an HT code-block can hold placeholder passes
+  // alone, without data (its HT cleanup pass was to come in a packet that is missing): it
+  // has nothing to decode, and its pass count is set to 0 once the packets are read.
+  void drop_ht_placeholder_blocks();
 
   // JPIP precinct filter: when set, read_packet() still parses the packet
   // header (so tagtrees and the header bit stream stay in sync), but drops
@@ -745,7 +991,7 @@ class j2k_tile : public j2k_tile_base {
   // Bump-allocator pool for HTJ2K encode compressed bitstreams (one pool per thread).
   struct EncodePoolCtx {
     std::vector<std::unique_ptr<cblk_data_pool>> pools;
-    uint32_t gen = 0;
+    uint64_t gen = 0;  // process-wide unique per tile encode (see claim_cblk_pool)
     std::atomic<int> slot_cnt{0};
     // Per-encode tile-wide in-flight cblk counter; set by encode_line_based_stream
     // at the start of an encode and consulted by its end-of-encode barrier wait.
@@ -754,6 +1000,16 @@ class j2k_tile : public j2k_tile_base {
     // every byte counts because InlineTask only holds 32 bytes of captures
     // and we also need to capture the per-strip slot_remaining pointer.
     std::atomic<int> *tile_remaining = nullptr;
+    // Rate control (EXPERIMENTAL): the threshold estimate and the code-blocks measured but
+    // not coded yet, in the order measured (rc_flush()).
+    struct RcPending {
+      j2k_codeblock *block;
+      const void *strip;  // the strip pipeline level that measured it (nullptr: a precinct)
+      int32_t br;         // and the strip
+      uint8_t ROIshift;
+    };
+    ht_rc_state *rc = nullptr;
+    std::vector<RcPending> rc_pending;
     // Grow-only scratch buffer for codeblock sample data during HT block encoding.
     // Allocated once per tile (sized to the largest resolution's codeblock count) and
     // reused across all resolution levels and precincts.
@@ -783,25 +1039,43 @@ class j2k_tile : public j2k_tile_base {
   void setCODparams(COD_marker *COD);
   // set members related to QCD marker
   void setQCDparams(QCD_marker *QCD);
+  // Sets the tile's geometry, coding parameters and tile-components from the header of its
+  // first tile-part, or from the main header alone when that tile-part is missing.
+  void init_from_first_tile_part(j2k_main_header &main_header, j2k_tilepart_header *tphdr);
   // read packets; when skip_body is true the packet header is still parsed
   // (advancing tagtrees and the header bit stream) but the body bytes are
   // dropped without attaching to any codeblock — see §M.4.1.  The JPIP
   // precinct filter decides this per-precinct; callers that don't use the
   // mask path can leave skip_body at its default.
-  void read_packet(j2k_precinct *current_precint, uint16_t layer, uint8_t num_band, bool skip_body = false);
+  // The precinct belongs to resolution cr of component c; its code-blocks are built when
+  // its first packet that is not empty arrives.
+  void read_packet(j2k_precinct *current_precint, j2k_resolution *cr, uint16_t c, uint16_t layer,
+                   bool skip_body = false);
+  // Decoder memory budget: charges bytes of tile, precinct or code-block state (what) to
+  // be allocated against the budget of the codestream (j2k_main_header::structure_budget),
+  // or rejects the codestream as not supported.  persistent: the state lives as long as
+  // the tile's structure (structure_bytes_), which the single-tile reuse path keeps from
+  // frame to frame.  destroy() gives the tile's charges back.
+  void charge_structure(uint64_t bytes, const char *what, bool persistent = true);
+  // The main header the decoder charges this tile's state to (set by dec_init()).
+  j2k_main_header *budget_header_ = nullptr;
+  // Bytes of persistent state charged for this tile, and of all its state.
+  uint64_t structure_bytes_ = 0;
+  uint64_t charged_bytes_   = 0;
   // function to retrieve greatest common divisor of precinct size among resolution levels
   void find_gcd_of_precinct_size(element_siz &out);
+  // Whether the tile is small enough to set up and decode without the thread pool.
+  OPENHTJ2K_NODISCARD bool decode_inline() const;
 
  public:
   // When true, j2k_subband constructors skip large non-LL buffer allocation.
   // Set this before calling create_tile_buf() to enable ring-mode decoder RSS savings.
   bool line_based_decode = false;
   j2k_tile();
-  void destroy() {
-    for (uint16_t c = 0; c < this->num_components; ++c) {
-      tcomp[c].destroy();
-    }
-  }
+  // Decoder: frees the tile's state once it is decoded (or failed to decode), so that a
+  // codestream of many tiles holds the resolutions, precincts and code-blocks of one tile
+  // at a time.  The tile cannot be decoded again afterwards.
+  void destroy();
   // Decoding
   // Initialization with tile-index
   void dec_init(uint16_t idx, j2k_main_header &main_header, uint8_t reduce_levels);
@@ -809,6 +1083,10 @@ class j2k_tile : public j2k_tile_base {
   void add_tile_part(SOT_marker &tmpSOT, j2c_src_memory &in, j2k_main_header &main_header);
   // create buffer to store compressed data for decoding
   void create_tile_buf(j2k_main_header &main_header);
+  // After create_tile_buf(): the codestream lacks data of this tile.  It has no tile-part,
+  // ends inside one, or a packet header or a code-block's data runs past the bytes there
+  // are; the tile decodes from the data it has.
+  OPENHTJ2K_NODISCARD bool is_data_missing() const { return data_missing_; }
   // Single-tile reuse: clear every piece of mutable per-frame state while
   // keeping the tile/component/resolution/precinct/codeblock allocations
   // (and their sub-allocations — ring buffers, compressed buffers, tagtrees,
@@ -821,6 +1099,10 @@ class j2k_tile : public j2k_tile_base {
   // cached tile is in "tree is allocated" state (= reuse path) or not (=
   // still a fresh j2k_tile that has never seen a codestream).
   OPENHTJ2K_NODISCARD bool is_structure_built() const { return structure_built_; }
+  // Single-tile reuse: a hash of the structure-shaping marker segments of the tile-part
+  // headers read so far (j2k_tilepart_header::structure_fingerprint, of those that have
+  // any, in order); kFnv1aBasis when none has.
+  OPENHTJ2K_NODISCARD uint64_t header_fingerprint() const;
   // Install (or clear, via an empty std::function) a JPIP precinct filter.
   // The filter is consulted once per packet in read_packet(); a false
   // return causes the body bytes to be dropped via skip_compressed_buffer
@@ -851,12 +1133,23 @@ class j2k_tile : public j2k_tile_base {
   void decode_line_based(j2k_main_header &main_header, uint8_t reduce_NL, std::vector<int32_t *> &dst);
   // Streaming variant: same as decode_line_based() but outputs one row at a time via
   // a callback instead of writing to a pre-allocated full-image buffer.
-  // The callback receives (y, row_ptrs[NC], NC) where row_ptrs[c] points to one
-  // decoded int32_t row for component c.  Allocates only per-row scratch buffers.
+  // The callback receives (y, row_ptrs[NC], NC): y is an output row of the whole image
+  // (stream_row_map.hpp) that starts in this tile, and row_ptrs[c] points to the
+  // decoded int32_t row of component c covering it (this tile's columns).  Only
+  // output rows in [row_lo, row_limit) are delivered; with emit_all_rows, also the
+  // ones above row_lo that this tile decodes because a component row covering row_lo
+  // or later starts in them (the rows of the other components are then indeterminate).
+  // rows: optional per-component row buffers that keep the last row of each component
+  // from one tile row to the next (for a tile spanning the image width); a component
+  // row that started in an earlier tile is then left in place.  Without it, such rows
+  // and the rows above a component's first one are zeros.  Allocates only per-row
+  // scratch buffers.
   void decode_line_based_stream(j2k_main_header &main_header, uint8_t reduce_NL,
                                 const std::function<void(uint32_t y, int32_t *const *, uint16_t nc)> &cb,
                                 uint32_t row_limit = UINT32_MAX, uint32_t row_lo = 0, uint32_t col_lo = 0,
-                                uint32_t col_hi = UINT32_MAX, bool skip_mct = false);
+                                uint32_t col_hi = UINT32_MAX, bool skip_mct = false,
+                                std::vector<std::vector<int32_t>> *rows = nullptr,
+                                bool emit_all_rows                      = false);
   // Direct-to-planar streaming decode.  Reads float from IDWT ring buffers and
   // writes uint8/uint16 directly to caller-provided plane buffers, bypassing
   // the strip scratch, out_rows int32 intermediate, and callback overhead.
@@ -866,6 +1159,26 @@ class j2k_tile : public j2k_tile_base {
                                        open_htj2k::PlanarOutputDesc *descs, uint16_t nc);
 
   // Encoding
+  // HT code-blocks of this tile code their cleanup pass this many bit-planes above
+  // the LSB, followed by HT SigProp and MagRef passes (j2k_codeblock::
+  // ht_refine_planes).  Set before enc_init(); 0 = cleanup pass only.
+  uint8_t enc_ht_refine = 0;
+  // Streaming encode: the image origin in each component's coordinates (enc_img_x0) and
+  // in component 0's rows (enc_img_y0), which the row source counts from.
+  std::vector<uint32_t> enc_img_x0;
+  uint32_t enc_img_y0 = 0;
+  // Streaming encode: YRsiz of each component over component 0's.  A component takes a row
+  // where component 0's row (counted from the reference grid's top) is a multiple of it.
+  std::vector<uint32_t> enc_row_ratio;
+  // Whether component c has a sample row at component 0's row a0 (reference-grid count).
+  bool enc_takes_row(uint16_t c, uint32_t a0) const { return a0 % enc_row_ratio[c] == 0; }
+  // Rate control (EXPERIMENTAL): when enc_rate_control is set before enc_init(), every HT
+  // code-block keeps its measurements and coded set in enc_rd, the encode codes them for
+  // the threshold estimate in enc_rc (set before the encode), and leaves the packet headers
+  // to the rate control, which truncates the code-blocks first (ht_rate_control.hpp).
+  bool enc_rate_control = false;
+  std::vector<ht_rd_info> enc_rd;
+  ht_rc_state *enc_rc = nullptr;
   // Initialization with tile-index
   void enc_init(uint16_t idx, j2k_main_header &main_header, std::vector<int32_t *> img,
                 bool line_based = false, bool streaming = false);
@@ -878,6 +1191,13 @@ class j2k_tile : public j2k_tile_base {
   // streaming line-based encoding: pulls rows via callback instead of pre-allocated buffer
   uint8_t *encode_line_based_stream(std::function<void(uint32_t y, int32_t **rows, uint16_t nc)> src_fn,
                                     const std::vector<uint32_t> &img_comp_widths);
+  // Builds the packet headers of every precinct, one per quality layer, from its
+  // code-blocks' passes and lengths, and sets the tile length and the length of each
+  // layer's packets.  Can be called again after the code-blocks change.
+  void build_packet_headers();
+  // Tile-part bytes (SOT and SOD markers, SOP markers and packets) of quality layers 0 to
+  // last; the tile-part size for the last layer.  After build_packet_headers().
+  OPENHTJ2K_NODISCARD uint64_t get_layers_size(uint16_t last) const;
   // create packets in encoding
   void construct_packets(j2k_main_header &main_header);
   // write packets into destination
@@ -893,6 +1213,8 @@ class j2k_tile : public j2k_tile_base {
   // getters
   OPENHTJ2K_MAYBE_UNUSED OPENHTJ2K_NODISCARD uint16_t get_numlayers() const { return this->numlayers; }
   j2k_tile_component *get_tile_component(uint16_t c);
+  OPENHTJ2K_NODISCARD uint16_t get_num_components() const { return this->num_components; }
+  OPENHTJ2K_NODISCARD bool uses_MCT() const { return this->MCT != 0; }
 
   OPENHTJ2K_MAYBE_UNUSED OPENHTJ2K_MAYBE_UNUSED uint8_t get_byte_from_tile_buf();
   OPENHTJ2K_MAYBE_UNUSED uint8_t get_bit_from_tile_buf();
@@ -901,4 +1223,24 @@ class j2k_tile : public j2k_tile_base {
   OPENHTJ2K_MAYBE_UNUSED uint32_t get_buf_length();
 };
 
+// Largest HT refinement segment (ISO/IEC 15444-15 B.2: Lref < 2047).  The HT
+// cleanup coders reserve this much after the cleanup segment when refsegment is set.
+constexpr uint32_t HT_MAX_LREF = 2046;
+
+// Sets the code-block data pool of the calling thread (nullptr: code-block data is
+// malloc'ed) and returns the previous one.
+cblk_data_pool *swap_thread_cblk_pool(cblk_data_pool *pool);
+
+int32_t htj2k_cleanup_encode(j2k_codeblock *block, uint8_t ROIshift) noexcept;
 int32_t htj2k_encode(j2k_codeblock *block, uint8_t ROIshift) noexcept;
+// info, when given, receives the lengths needed to cut the refinement segment after SigProp.
+int32_t htj2k_encode_refined(j2k_codeblock *block, uint8_t ROIshift,
+                             ht_refinement_info *info = nullptr) noexcept;
+int32_t ebcot_encode(j2k_codeblock *block, uint8_t ROIshift) noexcept;
+// Block-coder dispatch on the code-block style: HT (Part 15) or EBCOT (Part 1).
+inline int32_t encode_codeblock(j2k_codeblock *block, uint8_t ROIshift) noexcept {
+  if (block->Cmodes & HT)
+    return block->ht_refine_planes ? htj2k_encode_refined(block, ROIshift) : htj2k_encode(block, ROIshift);
+  return ebcot_encode(block, ROIshift);
+}
+}  // namespace open_htj2k

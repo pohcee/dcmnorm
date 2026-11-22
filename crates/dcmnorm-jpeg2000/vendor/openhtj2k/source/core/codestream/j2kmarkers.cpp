@@ -28,9 +28,13 @@
 
 #include "j2kmarkers.hpp"
 
+#include <algorithm>
 #include <cstdio>
 #include <cmath>
 #include <string>
+#include "message_internal.hpp"
+
+namespace open_htj2k {
 
 constexpr uint8_t YCC444 = 0;
 constexpr uint8_t YCC420 = 1;
@@ -53,10 +57,12 @@ uint8_t j2k_marker_io_base::get_byte() {
   // field count underflows — e.g. Lmar smaller than the fixed fields, so a
   // `for (i < Lmar - len)` loop wraps to a huge count — would otherwise spin
   // get_byte past the end of the buffer.  get_word()/get_dword() read through
-  // get_byte(), so bounding here bounds every marker read.
-  if (pos >= Lmar) {
-    printf("ERROR: marker field read past its declared length — malformed input.\n");
-    throw std::exception();
+  // get_byte(), so bounding here bounds every marker read.  `buf` starts after
+  // the 2-byte length field that Lmar counts, so the segment body holds Lmar - 2
+  // bytes; a body field read past them (e.g. a 1-byte field in a marker with
+  // Lmar = 2) would otherwise turn a later `Lmar - len` into a wrapped length.
+  if (static_cast<uint32_t>(pos) + 2U >= Lmar) {
+    open_htj2k::detail::fail("marker field read past its declared length — malformed input.");
   }
   uint8_t out = buf[pos];
   pos++;
@@ -79,6 +85,43 @@ uint32_t j2k_marker_io_base::get_dword() {
  * SIZ_marker
  *******************************************************************************/
 
+// Checks one axis of the SIZ reference grid: image extent `siz`, image origin `osiz`,
+// tile size `tsiz` and tile origin `tosiz`.  The first four rules are the constraints of
+// ISO/IEC 15444-1, A.5.1; every later tile, tile-component and resolution computation
+// assumes them (a zero tile size divides by zero, and a tile origin past the image
+// origin, or a first tile ending before the image starts, yields tiles that end before
+// they begin).  The last two are limits of this decoder: sample coordinates are held in
+// int32_t, and the tile grid end, origin + n * size for n tiles, in uint32_t.
+static void validate_siz_geometry(uint32_t siz, uint32_t osiz, uint32_t tsiz, uint32_t tosiz, char axis) {
+  if (tsiz == 0) {
+    open_htj2k::detail::fail("SIZ tile size %cTsiz is zero.", axis);
+  }
+  if (osiz >= siz) {
+    open_htj2k::detail::fail("SIZ image origin %cOsiz=%u is not less than the image extent %csiz=%u.", axis,
+                             osiz, axis, siz);
+  }
+  if (tosiz > osiz) {
+    open_htj2k::detail::fail("SIZ tile origin %cTOsiz=%u lies after the image origin %cOsiz=%u.", axis,
+                             tosiz, axis, osiz);
+  }
+  if (static_cast<uint64_t>(tosiz) + tsiz <= osiz) {
+    open_htj2k::detail::fail(
+        "SIZ first tile (%cTOsiz=%u, %cTsiz=%u) ends before the image origin %cOsiz=%u.", axis, tosiz, axis,
+        tsiz, axis, osiz);
+  }
+  if (siz > static_cast<uint32_t>(INT32_MAX)) {
+    open_htj2k::detail::fail("SIZ image extent %csiz=%u exceeds 2147483647: not supported by this decoder.",
+                             axis, siz);
+  }
+  const uint64_t num_tiles = (static_cast<uint64_t>(siz) - tosiz + tsiz - 1) / tsiz;
+  if (tosiz + num_tiles * tsiz > UINT32_MAX) {
+    open_htj2k::detail::fail(
+        "SIZ tile grid along %c (origin %u, %llu tiles of %u) ends past 4294967295: not supported by this "
+        "decoder.",
+        axis, tosiz, static_cast<unsigned long long>(num_tiles), tsiz);
+  }
+}
+
 SIZ_marker::SIZ_marker(j2c_src_memory &in) : j2k_marker_io_base(_SIZ) {
   Lmar = in.get_word();
   this->set_buf(in.get_buf_pos());
@@ -97,23 +140,39 @@ SIZ_marker::SIZ_marker(j2c_src_memory &in) : j2k_marker_io_base(_SIZ) {
   // out-of-range component count cannot drive an over-read of the marker buffer
   // or oversized downstream allocations.
   if (Csiz < 1 || Csiz > 16384) {
-    printf("ERROR: SIZ number of components %u is out of range [1, 16384].\n", static_cast<unsigned>(Csiz));
-    throw std::exception();
+    open_htj2k::detail::fail("SIZ number of components %u is out of range [1, 16384].",
+                             static_cast<unsigned>(Csiz));
   }
   if (Lmar < static_cast<uint16_t>(38 + 3 * Csiz)) {
-    printf("ERROR: SIZ marker length %u is too short for %u components.\n", static_cast<unsigned>(Lmar),
-           static_cast<unsigned>(Csiz));
-    throw std::exception();
+    open_htj2k::detail::fail("SIZ marker length %u is too short for %u components.",
+                             static_cast<unsigned>(Lmar), static_cast<unsigned>(Csiz));
+  }
+  validate_siz_geometry(Xsiz, XOsiz, XTsiz, XTOsiz, 'X');
+  validate_siz_geometry(Ysiz, YOsiz, YTsiz, YTOsiz, 'Y');
+  {
+    // Isot is 16 bits: a codestream has at most 65535 tiles (ISO/IEC 15444-1, A.4.2).
+    const uint64_t tiles_x = (static_cast<uint64_t>(Xsiz) - XTOsiz + XTsiz - 1) / XTsiz;
+    const uint64_t tiles_y = (static_cast<uint64_t>(Ysiz) - YTOsiz + YTsiz - 1) / YTsiz;
+    if (tiles_x * tiles_y > 65535) {
+      open_htj2k::detail::fail("SIZ tiling has %llu x %llu tiles, more than the 65535 allowed.",
+                               static_cast<unsigned long long>(tiles_x),
+                               static_cast<unsigned long long>(tiles_y));
+    }
   }
   for (unsigned long i = 0; i < Csiz; ++i) {
-    Ssiz.push_back(get_byte());
+    const uint8_t s = get_byte();
+    // The low 7 bits of Ssiz are the bit depth minus one; 1 to 38 bits are allowed
+    // (ISO/IEC 15444-1, Table A.11).
+    if ((s & 0x7F) > 37) {
+      open_htj2k::detail::fail("SIZ bit depth of component %lu exceeds 38 bits.", i);
+    }
+    Ssiz.push_back(s);
     const uint8_t xr = get_byte();
     const uint8_t yr = get_byte();
     // Subsampling factors are used as divisors (e.g. Xsiz / XRsiz); a zero would
     // later trigger a division-by-zero (SIGFPE).
     if (xr == 0 || yr == 0) {
-      printf("ERROR: SIZ subsampling factor must be non-zero (component %lu).\n", i);
-      throw std::exception();
+      open_htj2k::detail::fail("SIZ subsampling factor must be non-zero (component %lu).", i);
     }
     XRsiz.push_back(xr);
     YRsiz.push_back(yr);
@@ -146,8 +205,7 @@ SIZ_marker::SIZ_marker(uint16_t R, uint32_t X, uint32_t Y, uint32_t XO, uint32_t
 
 int SIZ_marker::write(j2c_dst_memory &dst) {
   if (!is_set) {
-    printf("ERROR: illegal attempt to call write() for SIZ_marker not yet set.\n");
-    throw std::exception();
+    open_htj2k::detail::fail("illegal attempt to call write() for SIZ_marker not yet set.");
   }
   dst.put_word(code);
   dst.put_word(Lmar);
@@ -190,10 +248,11 @@ void SIZ_marker::get_image_size(element_siz &siz) const {
 
 uint32_t SIZ_marker::get_component_stride(uint16_t c) const {
   if (c >= Csiz) {
-    printf("ERROR: invalid component index\n");
-    throw std::exception();
+    open_htj2k::detail::fail("invalid component index");
   }
-  return Xsiz / XRsiz[c] - XOsiz;
+  // Width of the component: ceil(Xsiz / XRsiz) - ceil(XOsiz / XRsiz) (B-1, ISO/IEC 15444-1).
+  const uint64_t xr = XRsiz[c];
+  return static_cast<uint32_t>((Xsiz + xr - 1) / xr - (XOsiz + xr - 1) / xr);
 }
 
 void SIZ_marker::get_image_origin(element_siz &siz) const {
@@ -220,8 +279,8 @@ uint16_t SIZ_marker::get_num_components() const { return Csiz; }
 
 uint8_t SIZ_marker::get_chroma_format() const {
   uint8_t chroma_format = YCC444;
-  // determine type of chroma subsampling
-  if (Csiz != 3) {
+  // determine type of chroma subsampling of components 1 and 2 (a fourth component is alpha)
+  if (Csiz < 3) {
     return chroma_format;
   } else {
     if (XRsiz[1] == 2 && XRsiz[2] == 2) {
@@ -261,8 +320,7 @@ CAP_marker::CAP_marker(j2c_src_memory &in) : j2k_marker_io_base(_CAP), Ccap{0} {
     //    }
   }
   if (n != 0) {
-    printf("ERROR: Lcap and number of Ccap does not match\n");
-    throw std::exception();
+    open_htj2k::detail::fail("Lcap and number of Ccap does not match");
   }
   is_set = true;
 }
@@ -280,10 +338,12 @@ void CAP_marker::set_Ccap(uint16_t val, uint8_t part) {
   set_Pcap(part);
 }
 void CAP_marker::set_Pcap(uint8_t part) {
-  // implemented only for Part 15
-  Pcap |= static_cast<uint32_t>(1 << (32 - part));
-  Lmar++;
-  Lmar++;
+  // A Ccap field is written for each Pcap bit set: setting one again only changes its value.
+  const uint32_t bit = static_cast<uint32_t>(1) << (32 - part);
+  if ((Pcap & bit) == 0) {
+    Pcap |= bit;
+    Lmar = static_cast<uint16_t>(Lmar + 2);
+  }
   is_set = true;
 }
 
@@ -357,6 +417,11 @@ COD_marker::COD_marker(j2c_src_memory &in)
   len++;
   SGcod = get_dword();
   len   = static_cast<uint16_t>(len + 4);
+  // SPcod holds at least the level count, the two code-block size exponents, the
+  // code-block style and the transformation: Lcod >= 12 (ISO/IEC 15444-1, Table A.12).
+  if (Lmar < 12) {
+    open_htj2k::detail::fail("COD marker length %u is less than 12.", static_cast<unsigned>(Lmar));
+  }
   {
     const size_t splen = static_cast<size_t>(Lmar - len);
     if (splen > SPcod.size()) SPcod.resize(splen);
@@ -369,8 +434,8 @@ COD_marker::COD_marker(j2c_src_memory &in)
   // precinct loop — NL = 255 never terminates for the uint8_t counter and grows
   // precinct_size without bound — and indexes SPcod[5 + r] out of range.
   if (SPcod[0] > 32) {
-    printf("ERROR: COD number of decomposition levels %u exceeds 32.\n", static_cast<unsigned>(SPcod[0]));
-    throw std::exception();
+    open_htj2k::detail::fail("COD number of decomposition levels %u exceeds 32.",
+                             static_cast<unsigned>(SPcod[0]));
   }
   is_set = true;
 }
@@ -404,10 +469,9 @@ COD_marker::COD_marker(bool is_max_precincts, bool use_SOP, bool use_EPH, uint8_
   SPcod[4] = reversible_flag;
 
   if (PPx.size() != PPy.size()) {
-    printf(
-        "ERROR: Length of parameters to specify horizontal and vertical precinct size shall be the "
-        "same.\n");
-    throw std::exception();
+    open_htj2k::detail::fail(
+        "Length of parameters to specify horizontal and vertical precinct size shall be the "
+        "same.");
   }
   size_t PPlength  = PPx.size();
   uint8_t last_PPx = '\0', last_PPy = '\0';
@@ -461,9 +525,8 @@ void COD_marker::get_codeblock_size(element_siz &out) {
   // 1 << (x + 2) undefined and can size a code-block past the HT decoder's
   // fixed-size stack scratch buffers.
   if (SPcod[1] > 8 || SPcod[2] > 8 || (SPcod[1] + SPcod[2]) > 8) {
-    printf("ERROR: COD code-block size exponents (%u,%u) are out of range.\n",
-           static_cast<unsigned>(SPcod[1]), static_cast<unsigned>(SPcod[2]));
-    throw std::exception();
+    open_htj2k::detail::fail("COD code-block size exponents (%u,%u) are out of range.",
+                             static_cast<unsigned>(SPcod[1]), static_cast<unsigned>(SPcod[2]));
   }
   out.x = static_cast<uint32_t>(1 << (SPcod[1] + 2));
   out.y = static_cast<uint32_t>(1 << (SPcod[2] + 2));
@@ -478,9 +541,8 @@ void COD_marker::get_precinct_size(element_siz &out, uint8_t resolution) {
     // fixed SPcod bytes.  Reject a resolution beyond what the (possibly
     // truncated) marker actually holds instead of reading out of bounds.
     if (static_cast<size_t>(5U) + resolution >= SPcod.size()) {
-      printf("ERROR: COD precinct-size index for resolution %u is out of range.\n",
-             static_cast<unsigned>(resolution));
-      throw std::exception();
+      open_htj2k::detail::fail("COD precinct-size index for resolution %u is out of range.",
+                               static_cast<unsigned>(resolution));
     }
     out.x = (SPcod[5U + resolution] & 0x0F);
     out.y = (SPcod[5U + resolution] & 0xF0) >> 4;
@@ -515,6 +577,13 @@ COC_marker::COC_marker(j2c_src_memory &in, uint16_t Csiz) : j2k_marker_io_base(_
   }
   Scoc = get_byte();
   len++;
+  // SPcoc holds at least the level count, the two code-block size exponents, the
+  // code-block style and the transformation (ISO/IEC 15444-1, Table A.21); every one of
+  // them is read when the marker is applied to a component.
+  if (Lmar < len + 5U) {
+    open_htj2k::detail::fail("COC marker length %u is less than %u.", static_cast<unsigned>(Lmar),
+                             static_cast<unsigned>(len + 5U));
+  }
 
   for (size_t i = 0; i < static_cast<size_t>(Lmar - len); ++i) {
     if (i < SPcoc.size()) {
@@ -522,6 +591,12 @@ COC_marker::COC_marker(j2c_src_memory &in, uint16_t Csiz) : j2k_marker_io_base(_
     } else {
       SPcoc.push_back(get_byte());
     }
+  }
+  // SPcoc[0] is the decomposition-level count, 0 to 32 (ISO/IEC 15444-1, Table A.13), unless
+  // bit 7 signals a DFS index (ISO/IEC 15444-2).  See COD_marker for what a larger count does.
+  if (!is_dfs_defined() && SPcoc[0] > 32) {
+    open_htj2k::detail::fail("COC number of decomposition levels %u exceeds 32.",
+                             static_cast<unsigned>(SPcoc[0]));
   }
   is_set = true;
 }
@@ -535,15 +610,15 @@ bool COC_marker::is_dfs_defined() const { return (SPcoc[0] & 0x80) != 0; }
 uint8_t COC_marker::get_dfs_index() const { return SPcoc[0] & 0x0F; }
 
 // When DFS is active, SPcoc[0] encodes the DFS index rather than the level count.
-// Callers must check is_dfs_defined() and use COD's level count instead.
-uint8_t COC_marker::get_dwt_levels() { return SPcoc[0] & 0x1F; }
+// Callers must check is_dfs_defined() and use COD's level count instead.  Otherwise it is
+// the level count itself, 0 to 32: masking it to 5 bits read 32 levels as none.
+uint8_t COC_marker::get_dwt_levels() { return SPcoc[0]; }
 
 void COC_marker::get_codeblock_size(element_siz &out) {
   // See COD_marker::get_codeblock_size — same spec bound on the size exponents.
   if (SPcoc[1] > 8 || SPcoc[2] > 8 || (SPcoc[1] + SPcoc[2]) > 8) {
-    printf("ERROR: COC code-block size exponents (%u,%u) are out of range.\n",
-           static_cast<unsigned>(SPcoc[1]), static_cast<unsigned>(SPcoc[2]));
-    throw std::exception();
+    open_htj2k::detail::fail("COC code-block size exponents (%u,%u) are out of range.",
+                             static_cast<unsigned>(SPcoc[1]), static_cast<unsigned>(SPcoc[2]));
   }
   out.x = static_cast<uint32_t>(1 << (SPcoc[1] + 2));
   out.y = static_cast<uint32_t>(1 << (SPcoc[2] + 2));
@@ -557,9 +632,8 @@ void COC_marker::get_precinct_size(element_siz &out, uint8_t resolution) {
     // See COD_marker::get_precinct_size — bound the per-resolution index to the
     // bytes the marker actually carries.
     if (static_cast<size_t>(5U) + resolution >= SPcoc.size()) {
-      printf("ERROR: COC precinct-size index for resolution %u is out of range.\n",
-             static_cast<unsigned>(resolution));
-      throw std::exception();
+      open_htj2k::detail::fail("COC precinct-size index for resolution %u is out of range.",
+                               static_cast<unsigned>(resolution));
     }
     out.x = (SPcoc[5U + resolution] & 0x0F);
     out.y = (SPcoc[5U + resolution] & 0xF0) >> 4;
@@ -596,8 +670,19 @@ RGN_marker::RGN_marker(j2c_src_memory &in, uint16_t Csiz) : j2k_marker_io_base(_
     // TODO: generate Length error (Lrgn shall be 5 or 6).
   }
   Srgn = get_byte();
-  assert(Srgn == 0);
-  SPrgn  = get_byte();
+  // Srgn = 0 (implicit, "Maxshift") is the only ROI style of ISO/IEC 15444-1.
+  if (Srgn != 0) {
+    open_htj2k::detail::fail("RGN region-of-interest style %u is not supported.",
+                             static_cast<unsigned>(Srgn));
+  }
+  SPrgn = get_byte();
+  // The decoder holds a code-block sample in 32 bits (sign plus 31 magnitude bits) and
+  // scales background samples up with `<< SPrgn`, a shift that is only defined below 32.
+  // j2k_tile_component::init() further requires SPrgn plus the magnitude bit-planes of
+  // the component to fit the 31 bits.
+  if (SPrgn > 31) {
+    open_htj2k::detail::fail("RGN region-of-interest shift %u exceeds 31.", static_cast<unsigned>(SPrgn));
+  }
   is_set = true;
 }
 
@@ -617,8 +702,7 @@ DFS_marker::DFS_marker(j2c_src_memory &in) : j2k_marker_io_base(_DFS) {
   // Ids bounds the writes into the fixed-size members hor_depth[33]/ver_depth[33]/
   // qcd_offset[33] below; a value > 32 (the maximum DWT level count) overflows them.
   if (Ids > 32) {
-    printf("ERROR: DFS number of levels %u exceeds maximum 32.\n", static_cast<unsigned>(Ids));
-    throw std::exception();
+    open_htj2k::detail::fail("DFS number of levels %u exceeds maximum 32.", static_cast<unsigned>(Ids));
   }
   // Ddfs: 2 bits per level, packed MSB-first, ceil(Ids/4) bytes
   const uint8_t nbytes = static_cast<uint8_t>((Ids + 3) / 4);
@@ -698,7 +782,7 @@ ATK_marker::ATK_marker(j2c_src_memory &in) : j2k_marker_io_base(_ATK), Katk(1.0f
   }
   Natk = get_byte();
   if (is_reversible()) {
-    printf("WARNING: ATK reversible kernels are not supported\n");
+    open_htj2k::detail::warn("ATK reversible kernels are not supported");
   } else {
     steps.resize(Natk);
     for (uint8_t k = 0; k < Natk; ++k) {
@@ -722,11 +806,20 @@ const atk_step &ATK_marker::get_step(uint8_t k) const { return steps[k]; }
 
 // Quantise a floating-point subband step size into the JPEG 2000 (epsilon, mu)
 // pair of Eq. E-3 (ISO/IEC 15444-1 Annex E): Δ = 2^{-epsilon} · (1 + mu/2^11),
-// clamped to epsilon ∈ [0,31] and mu ∈ [0,2047]. Shared by the QCD and QCC
-// marker builders so the clamp/rounding logic lives in exactly one place.
-static void pack_quant_step(double fval, uint8_t &epsilon_out, uint16_t &mu_out) {
+// clamped to epsilon ∈ [0,max_exponent] and mu ∈ [0,2047]. Shared by the QCD and
+// QCC marker builders so the clamp/rounding logic lives in exactly one place.
+static void pack_quant_step(double fval, int32_t max_exponent, uint8_t &epsilon_out, uint16_t &mu_out) {
+  // From 2 up the result is the largest step, 2^0 * (1 + 2047/2^11); return before the
+  // mantissa below can overflow.  Not a number is taken as the largest step as well.
+  if (!(fval < 2.0)) {
+    epsilon_out = 0;
+    mu_out      = (1 << 11) - 1;
+    return;
+  }
   int32_t exponent, mantissa;
-  for (exponent = 0; fval < 1.0; exponent++) {
+  // Past max_exponent + 1 doublings the step is clamped below anyway; stopping there keeps
+  // a zero, negative or denormal step from looping without end.
+  for (exponent = 0; fval < 1.0 && exponent <= max_exponent; exponent++) {
     fval *= 2.0;
   }
   mantissa = static_cast<int32_t>(floor((fval - 1.0) * static_cast<double>(1 << 11) + 0.5));
@@ -734,8 +827,8 @@ static void pack_quant_step(double fval, uint8_t &epsilon_out, uint16_t &mu_out)
     mantissa = 0;
     exponent--;
   }
-  if (exponent > 31) {
-    exponent = 31;
+  if (exponent > max_exponent) {
+    exponent = max_exponent;
     mantissa = 0;
   }
   if (exponent < 0) {
@@ -751,16 +844,18 @@ static void pack_quant_step(double fval, uint8_t &epsilon_out, uint16_t &mu_out)
 // the reversible transform, weighted-MSE for the irreversible one) and the
 // (epsilon, mu) packing per ISO/IEC 15444-1 Annex E are identical between the
 // two markers; the only per-component-class inputs are the visual-weight table
-// `W_b` and the {delta_ref, G_c, qfactor_power} triple, which each caller derives
-// from its own luma/chroma weights and gain (and, for QCD, the basestep-vs-Qfactor
-// reference step). `have_qfactor` is false only on the QCD plain-basestep path,
-// where every w_b collapses to 1.0. Subbands are stored in reverse order (LL
-// first) and the caller has already downgraded `is_derived` when a Qfactor is set.
+// `W_b`, the weight `w_tail` of the bands the table does not list (the LL band and
+// any level past the table), and the {delta_ref, G_c, qfactor_power} triple, which
+// each caller derives from its own luma/chroma weights and gain (and, for QCD, the
+// basestep-vs-Qfactor reference step). `have_qfactor` is false only on the QCD
+// plain-basestep path, where every w_b collapses to 1.0. Subbands are stored in
+// reverse order (LL first) and the caller has already downgraded `is_derived` when
+// a Qfactor is set.
 static std::vector<uint16_t> build_quant_steps(uint8_t number_of_guardbits, uint8_t dwt_levels,
                                                bool is_reversible, bool is_derived, uint8_t RI,
                                                uint8_t use_ycc, const std::vector<double> &W_b,
-                                               bool have_qfactor, double delta_ref, double G_c,
-                                               double qfactor_power) {
+                                               double w_tail, bool have_qfactor, double delta_ref,
+                                               double G_c, double qfactor_power) {
   const size_t num_bands = static_cast<size_t>(3 * dwt_levels + 1);
   std::vector<double> wmse_or_BIBO;
   wmse_or_BIBO.reserve(num_bands);
@@ -788,47 +883,52 @@ static std::vector<uint16_t> build_quant_steps(uint8_t number_of_guardbits, uint
 
   // derive BIBO gain for lossless, or
   // derive weighted mse for lossy
+  //
+  // The basis functions double in length every level, so building them for all
+  // levels needs O(2^NL) memory (about 90 GB was reached before NL = 32 ran out of
+  // memory). By level 14 the gains have converged: the 5/3 BIBO gains approach
+  // constants, and the 9/7 energy gains double per level to within 1e-7. Deeper
+  // levels continue those trends instead of growing the basis functions.
+  constexpr uint8_t exact_levels = 14;
   if (dwt_levels == 0) {
     wmse_or_BIBO.push_back(1.0);
   } else {
     for (uint8_t level = 0; level < dwt_levels; ++level) {
-      gain_low  = 0.0;
-      gain_high = 0.0;
-      for (const auto &e : outL) {
-        gain_low += (is_reversible) ? fabs(e) : e * e;
-      }
-      for (const auto &e : outH) {
-        gain_high += (is_reversible) ? fabs(e) : e * e;
+      if (level < exact_levels) {
+        gain_low  = 0.0;
+        gain_high = 0.0;
+        for (const auto &e : outL) {
+          gain_low += (is_reversible) ? fabs(e) : e * e;
+        }
+        for (const auto &e : outH) {
+          gain_high += (is_reversible) ? fabs(e) : e * e;
+        }
+      } else if (!is_reversible) {
+        gain_low *= 2.0;
+        gain_high *= 2.0;
       }
 
       wmse_or_BIBO.push_back(gain_high * gain_high);  // HH
       wmse_or_BIBO.push_back(gain_low * gain_high);   // LH
       wmse_or_BIBO.push_back(gain_high * gain_low);   // HL
 
-      std::vector<double> L2, H2;
-      // upsampling
-      for (auto &i : outL) {
-        L2.push_back(i);
-        L2.push_back(0.0);
-      }
-      for (auto &i : outH) {
-        H2.push_back(i);
-        H2.push_back(0.0);
-      }
-      std::vector<double> tmpL(L.size() + L2.size() - 1, 0.0);
+      if (level + 1 >= dwt_levels || level + 1 >= exact_levels) continue;
+      // Next level: convolve L with the basis upsampled by 2. The zero samples of
+      // the upsampled signal are skipped; they add nothing to the sums.
+      std::vector<double> tmpL(L.size() + 2 * outL.size() - 1, 0.0);
       for (size_t i = 0; i < L.size(); ++i) {
-        for (size_t j = 0; j < L2.size(); ++j) {
-          tmpL[i + j] += L[i] * L2[j];
+        for (size_t j = 0; j < outL.size(); ++j) {
+          tmpL[i + 2 * j] += L[i] * outL[j];
         }
       }
-      std::vector<double> tmpH(L.size() + H2.size() - 1, 0.0);
+      std::vector<double> tmpH(L.size() + 2 * outH.size() - 1, 0.0);
       for (size_t i = 0; i < L.size(); ++i) {
-        for (size_t j = 0; j < H2.size(); ++j) {
-          tmpH[i + j] += L[i] * H2[j];
+        for (size_t j = 0; j < outH.size(); ++j) {
+          tmpH[i + 2 * j] += L[i] * outH[j];
         }
       }
-      outL = tmpL;
-      outH = tmpH;
+      outL.swap(tmpL);
+      outH.swap(tmpH);
     }
     wmse_or_BIBO.push_back(gain_low * gain_low);
   }
@@ -836,12 +936,21 @@ static std::vector<uint16_t> build_quant_steps(uint8_t number_of_guardbits, uint
   // construct epsilon and mu
   if (is_reversible) {
     // lossless
+    // The BIBO gains bound the linear transform, with 10% to spare (0.9 below) for the
+    // rounding of the integer lifting steps.  1-bit samples span [-1, 0] after the DC shift,
+    // so the rounding offsets are as large as the range itself: their subbands get one more
+    // bit-plane, or the coarsest ones can overflow (seen at 6 levels).
+    const int extra_bit = (RI == 1) ? 1 : 0;
     for (size_t i = 0; i < epsilon.size(); ++i) {
-      epsilon[epsilon.size() - i - 1] = static_cast<uint8_t>(RI - number_of_guardbits + use_ycc);
+      // M_b = G + epsilon_b - 1 does not depend on the guard bits; with more guard bits than
+      // that leaves room for, epsilon_b would be negative (it wrapped around as uint8_t):
+      // 0 then gives the subband G - 1 bit-planes, more than it needs.
+      int eps = static_cast<int>(RI) - number_of_guardbits + use_ycc + extra_bit;
       while (wmse_or_BIBO[i] > 0.9) {
-        epsilon[epsilon.size() - i - 1]++;
+        eps++;
         wmse_or_BIBO[i] *= 0.5;
       }
+      epsilon[epsilon.size() - i - 1] = static_cast<uint8_t>(std::max(eps, 0));
     }
   } else {
     // Lossy quantization step-size computation (ISO/IEC 15444-1 Annex E):
@@ -849,15 +958,20 @@ static std::vector<uint16_t> build_quant_steps(uint8_t number_of_guardbits, uint
     //   Delta_b = delta_ref / (sqrt(G_b) * w_b * G_c)
     //
     // where G_b is the precomputed synthesis basis-energy gain (wmse_or_BIBO[]),
-    // w_b is the perceptual weight raised to qfactor_power (1.0 for the LL band,
-    // any band beyond the weight table, or when no Qfactor is active), and G_c is
-    // the colour-component gain. The float step is packed into (epsilon, mu) per
-    // Eq. E-3, with clamping epsilon in [0,31], mu in [0,2047].
+    // w_b is the perceptual weight raised to qfactor_power (w_tail for the LL band
+    // and any band beyond the weight table; 1.0 when no Qfactor is active), and G_c
+    // is the colour-component gain. The float step is packed into (epsilon, mu) per
+    // Eq. E-3, with mu in [0,2047] and epsilon in [0, 31 - guard bits]: a subband
+    // then has M_b = epsilon + guard bits - 1 <= 30 magnitude bit-planes (E-2), as
+    // many as the block coders hold. A step too small for that (a tiny base step,
+    // or the coarsest levels of a deep transform) becomes 2^-(31 - guard bits);
+    // larger exponents gave codestreams that could not be decoded.
+    const int32_t max_exponent = 31 - static_cast<int32_t>(number_of_guardbits);
     for (size_t i = 0; i < epsilon.size(); ++i) {
-      double w_b =
-          (!have_qfactor || i == epsilon.size() - 1 || i >= W_b.size()) ? 1.0 : pow(W_b[i], qfactor_power);
-      double fval = delta_ref / (sqrt(wmse_or_BIBO[i]) * w_b * G_c);
-      pack_quant_step(fval, epsilon[epsilon.size() - i - 1], mu[epsilon.size() - i - 1]);
+      const bool tail = (i == epsilon.size() - 1 || i >= W_b.size());
+      double w_b      = !have_qfactor ? 1.0 : pow(tail ? w_tail : W_b[i], qfactor_power);
+      double fval     = delta_ref / (sqrt(wmse_or_BIBO[i]) * w_b * G_c);
+      pack_quant_step(fval, max_exponent, epsilon[epsilon.size() - i - 1], mu[epsilon.size() - i - 1]);
     }
   }
 
@@ -865,10 +979,22 @@ static std::vector<uint16_t> build_quant_steps(uint8_t number_of_guardbits, uint
   std::vector<uint16_t> SP;
   if (is_derived) {
     if (is_reversible) {
-      printf("ERROR: Derived quantization stepsize is not valid for reversible transform.\n");
-      throw std::exception();
+      open_htj2k::detail::fail("Derived quantization stepsize is not valid for reversible transform.");
     }
-    // Quantization style -> Scalar derived (values signalled for LL subband only)
+    // Quantization style -> Scalar derived (values signalled for LL subband only).  The
+    // subbands n levels below the image get epsilon_0 - NL + n (E-5), down to epsilon_0 - NL + 1
+    // for the finest: epsilon_0 shall be at least NL - 1, a finer LL step than asked if need be.
+    const int min_eps0 = static_cast<int>(dwt_levels) - 1;
+    if (min_eps0 > 31 - static_cast<int>(number_of_guardbits)) {
+      open_htj2k::detail::fail(
+          "derived quantization supports at most %d DWT levels with %u guard bits (%u requested).",
+          32 - static_cast<int>(number_of_guardbits), static_cast<unsigned>(number_of_guardbits),
+          static_cast<unsigned>(dwt_levels));
+    }
+    if (epsilon[0] < min_eps0) {
+      epsilon[0] = static_cast<uint8_t>(min_eps0);
+      mu[0]      = (1 << 11) - 1;
+    }
     SP.push_back(static_cast<uint16_t>((epsilon[0] << 11) + mu[0]));
   } else {
     for (size_t i = 0; i < num_bands; ++i) {
@@ -883,6 +1009,26 @@ static std::vector<uint16_t> build_quant_steps(uint8_t number_of_guardbits, uint
   return SP;
 }
 
+// Checks the quantization style byte (Sqcd / Sqcc) of a QCD or QCC marker and the
+// number of bytes left for its step sizes (ISO/IEC 15444-1, Tables A.28 to A.30): the
+// style is 0 (no quantization, one byte per subband), 1 (scalar derived, one 16-bit value
+// for the LL subband) or 2 (scalar expounded, one 16-bit value per subband).  Any other
+// style leaves the step sizes undefined, and a marker without a single step size, or with
+// half of a 16-bit one, is malformed.  Whether there are enough step sizes for the
+// decomposition levels of a component is checked when the marker is applied to one
+// (j2k_tile_component::init()), because the level count may come from a COC marker.
+static void check_quantization_style(const char *marker, uint8_t style_byte, int body_bytes) {
+  const uint8_t style = style_byte & 0x1F;
+  if (style > 2) {
+    open_htj2k::detail::fail("%s quantization style %u is invalid.", marker, static_cast<unsigned>(style));
+  }
+  const int entry_bytes = (style == 0) ? 1 : 2;
+  if (body_bytes < entry_bytes || body_bytes % entry_bytes != 0) {
+    open_htj2k::detail::fail("%s marker has %d bytes of step sizes, not a whole number of %d-byte entries.",
+                             marker, body_bytes, entry_bytes);
+  }
+}
+
 QCD_marker::QCD_marker(j2c_src_memory &in) : j2k_marker_io_base(_QCD), Sqcd(0) {
   Lmar = in.get_word();
   this->set_buf(in.get_buf_pos());
@@ -890,6 +1036,7 @@ QCD_marker::QCD_marker(j2c_src_memory &in) : j2k_marker_io_base(_QCD), Sqcd(0) {
   uint16_t len = 2;  // tmp length including Lqcd
   Sqcd         = get_byte();
   len++;
+  check_quantization_style("QCD", Sqcd, Lmar - len);
   if ((Sqcd & 0x1F) == 0) {
     // reversible transform
     const size_t splen = static_cast<size_t>(Lmar - len);
@@ -899,7 +1046,6 @@ QCD_marker::QCD_marker(j2c_src_memory &in) : j2k_marker_io_base(_QCD), Sqcd(0) {
     }
   } else {
     // irreversible transformation
-    assert((Lmar - len) % 2 == 0);
     const size_t splen = static_cast<size_t>(Lmar - len) / 2U;
     if (splen > SPqcd.size()) SPqcd.resize(splen);
     for (size_t i = 0; i < splen; ++i) {
@@ -943,15 +1089,15 @@ QCD_marker::QCD_marker(uint8_t number_of_guardbits, uint8_t dwt_levels, uint8_t 
   const bool have_qfactor       = (qfactor != 0xFF);
   double qfactor_power = 0.0, delta_ref = basestep, G_c = 1.0;
   if (!is_reversible && have_qfactor) {
-    const open_htj2k::q_scaling qs       = open_htj2k::q_to_delta(qfactor, RI);
+    const open_htj2k::q_scaling qs       = open_htj2k::q_to_delta(qfactor, RI, vp.precision_scaled);
     const open_htj2k::color_transform ct = open_htj2k::resolve_color_transform(vp, use_ycc != 0);
-    qfactor_power                        = qs.qfactor_power;
+    qfactor_power                        = open_htj2k::weight_exponent(qs, vp);
     delta_ref                            = qs.delta_Q * open_htj2k::color_gain(ct, 0);
     G_c                                  = open_htj2k::color_gain(ct, 0);
   }
 
   SPqcd  = build_quant_steps(number_of_guardbits, dwt_levels, is_reversible, is_derived, RI, use_ycc, W_b,
-                             have_qfactor, delta_ref, G_c, qfactor_power);
+                             /*w_tail=*/1.0, have_qfactor, delta_ref, G_c, qfactor_power);
   is_set = true;
 }
 
@@ -992,29 +1138,43 @@ uint8_t QCD_marker::get_exponents(uint8_t nb) {
 
 uint16_t QCD_marker::get_mantissas(uint8_t nb) {
   uint8_t qstyle = get_quantization_style();
-  if (qstyle == 1) {
-    // lossy derived
-    return (SPqcd[0] & 0x7FF);
-  } else {
-    // lossy expounded
-    assert(qstyle == 2);
-    return (SPqcd[nb] & 0x7FF);
-  }
+  if (qstyle == 1) return (SPqcd[0] & 0x7FF);   // lossy derived
+  if (qstyle == 2) return (SPqcd[nb] & 0x7FF);  // lossy expounded
+  // No quantization (style 0): there is no mantissa.
+  return 0;
 }
 
 uint8_t QCD_marker::get_number_of_guardbits() const { return static_cast<uint8_t>(Sqcd >> 5); }
 
-uint8_t QCD_marker::get_MAGB() {
-  uint8_t qstyle = get_quantization_style();
-  uint8_t tmp    = (qstyle > 0) ? 0xFF : 0;
-  for (uint16_t &val : SPqcd) {
-    if (qstyle == 0) {
-      tmp = (tmp < (val >> 3)) ? static_cast<uint8_t>(val >> 3) : tmp;
+// An upper bound on the parameter B of the HT cleanup magnitudes (ISO/IEC 15444-15, 8.7.3 and
+// the NOTE of A.3.7) from the quantization parameters: a sub-band with exponent epsilon_b has
+// M_b = epsilon_b + G - 1 magnitude bit-planes (ISO/IEC 15444-1, E-2), so its magnitudes are
+// below 2^M_b.  With the reversible transform that is the bound; with an irreversible one the
+// bound of a sub-band at decomposition level n_b is 2^(B + n_b - 1), so B = M_b - n_b + 1.
+// Step sizes are stored LL first, then HL, LH and HH from the coarsest level (n_b = NL) to the
+// finest (n_b = 1); the derived style signals the LL one, from which epsilon_b = epsilon_LL -
+// NL + n_b (E-5).  The encoder signals the bound of the coded data instead (encoder.cpp); this
+// one holds whatever the code-blocks carry.
+static uint8_t quantization_MAGB(uint8_t qstyle, uint8_t guard_bits, const std::vector<uint16_t> &SP,
+                                 uint8_t NL, bool reversible) {
+  int32_t B = 0;
+  for (size_t i = 0; i < SP.size(); ++i) {
+    const int32_t eps = (qstyle == 0) ? (SP[i] >> 3) : (SP[i] >> 11);
+    const int32_t Mb  = eps + guard_bits - 1;
+    if (reversible) {
+      B = std::max(B, Mb);
+    } else if (qstyle == 1) {
+      B = std::max(B, Mb - NL + 1);  // the same for every sub-band
     } else {
-      tmp = (tmp > (val >> 11)) ? static_cast<uint8_t>(val >> 11) : tmp;
+      const int32_t nb = (i == 0) ? NL : NL - static_cast<int32_t>((i - 1) / 3);
+      B                = std::max(B, Mb - nb + 1);
     }
   }
-  return tmp;
+  return static_cast<uint8_t>(std::max(B, 0));
+}
+
+uint8_t QCD_marker::get_MAGB(uint8_t NL) const {
+  return quantization_MAGB(get_quantization_style(), get_number_of_guardbits(), SPqcd, NL, is_reversible);
 }
 
 /********************************************************************************
@@ -1046,8 +1206,7 @@ QCC_marker::QCC_marker(uint16_t Csiz, uint16_t c, uint8_t number_of_guardbits, u
   Sqcc = static_cast<uint8_t>(Sqcc + (number_of_guardbits << 5));
 
   if (chroma_format != YCC444 && chroma_format != YCC420 && chroma_format != YCC422) {
-    printf("ERROR: chroma format for QCC_marker is invalid.\n");
-    throw std::exception();
+    open_htj2k::detail::fail("chroma format for QCC_marker is invalid.");
   }
   // Effective color transform: legacy mode assumes ICT (historical behavior);
   // analytic modes honor the real MCT, so an undecorrelated (no-MCT) component
@@ -1055,11 +1214,12 @@ QCC_marker::QCC_marker(uint16_t Csiz, uint16_t c, uint8_t number_of_guardbits, u
   const open_htj2k::color_transform ct = open_htj2k::resolve_color_transform(vp, use_ycc != 0);
 
   // Square-root-domain chroma visual weights for this component. Default
-  // (legacy_table) returns the historical 4:4:4/4:2:0/4:2:2 QCC table verbatim
-  // (bit-identical); an analytic CSF model in `vp` instead follows the viewing
+  // (legacy_table) returns the 4:4:4/4:2:0/4:2:2 table row of WG1N101553 v2
+  // verbatim; an analytic CSF model in `vp` instead follows the viewing
   // distance / zoom, deriving 4:2:0 & 4:2:2 from one chroma CSF via the
-  // component's SIZ sub-sampling factors (sub_x, sub_y). Without an MCT the
-  // channel role comes from vp.ctype_hint (default generic = luminance CSF).
+  // component's SIZ sub-sampling factors (sub_x, sub_y) and the display
+  // upsampling gain. Without an MCT the channel role comes from vp.ctype_hint
+  // (default generic = luminance CSF).
   // delta_ref / qfactor_power follow the Q->step mapping (q_to_delta(), shared with
   // QCD and estimate_qfactor; HTJ2K white paper); G_c is this component's synthesis
   // gain. The basis-gain derivation and (epsilon, mu) packing are shared with QCD
@@ -1071,13 +1231,17 @@ QCC_marker::QCC_marker(uint16_t Csiz, uint16_t c, uint8_t number_of_guardbits, u
       open_htj2k::chroma_visual_weights(dwt_levels, vp, Cqcc, chroma_format, ct, ctype, sub_x, sub_y);
   double qfactor_power = 0.0, delta_ref = 0.0, G_c = 1.0;
   if (!is_reversible) {
-    const open_htj2k::q_scaling qs = open_htj2k::q_to_delta(qfactor, RI);
-    qfactor_power                  = qs.qfactor_power;
+    const open_htj2k::q_scaling qs = open_htj2k::q_to_delta(qfactor, RI, vp.precision_scaled);
+    qfactor_power                  = open_htj2k::weight_exponent(qs, vp);
     delta_ref                      = qs.delta_Q * open_htj2k::color_gain(ct, 0);
     G_c                            = open_htj2k::color_gain(ct, Cqcc);  // component synthesis gain
   }
 
+  // The LL band (and, for the 5-level legacy tables, any deeper level) of a
+  // sub-sampled component carries the display upsampling gain (WG1N101553 v2).
+  const double w_tail = open_htj2k::chroma_tail_weight(vp, chroma_format, sub_x, sub_y);
   SPqcc  = build_quant_steps(number_of_guardbits, dwt_levels, is_reversible, is_derived, RI, use_ycc, W_b,
+                             w_tail,
                              /*have_qfactor=*/true, delta_ref, G_c, qfactor_power);
   is_set = true;
 }
@@ -1097,6 +1261,7 @@ QCC_marker::QCC_marker(j2c_src_memory &in, uint16_t Csiz) : j2k_marker_io_base(_
   }
   Sqcc = get_byte();
   len++;
+  check_quantization_style("QCC", Sqcc, Lmar - len);
   if ((Sqcc & 0x1F) == 0) {
     // reversible transform
     for (size_t i = 0; i < static_cast<size_t>(Lmar - len); ++i) {
@@ -1108,7 +1273,6 @@ QCC_marker::QCC_marker(j2c_src_memory &in, uint16_t Csiz) : j2k_marker_io_base(_
     }
   } else {
     // irreversible transformation
-    assert((Lmar - len) % 2 == 0);
     for (size_t i = 0; i < static_cast<size_t>((Lmar - len) / 2); ++i) {
       if (i < SPqcc.size()) {
         SPqcc[i] = get_word();
@@ -1118,6 +1282,22 @@ QCC_marker::QCC_marker(j2c_src_memory &in, uint16_t Csiz) : j2k_marker_io_base(_
     }
   }
   is_set = true;
+}
+
+QCC_marker::QCC_marker(uint16_t Csiz, uint16_t c, const QCD_marker &qcd)
+    : j2k_marker_io_base(_QCC),
+      max_components(Csiz),
+      Cqcc(c),
+      Sqcc(qcd.Sqcd),
+      SPqcc(qcd.SPqcd),
+      is_reversible(qcd.is_reversible) {
+  // Lqcc is Lqcd plus the component index: one byte, or two with 257 or more components.
+  Lmar   = static_cast<uint16_t>(qcd.Lmar + 1 + (max_components >= 257 ? 1 : 0));
+  is_set = true;
+}
+
+uint8_t QCC_marker::get_MAGB(uint8_t NL) const {
+  return quantization_MAGB(get_quantization_style(), get_number_of_guardbits(), SPqcc, NL, is_reversible);
 }
 
 int QCC_marker::write(j2c_dst_memory &dst) {
@@ -1163,14 +1343,10 @@ uint8_t QCC_marker::get_exponents(uint8_t nb) {
 
 uint16_t QCC_marker::get_mantissas(uint8_t nb) {
   uint8_t qstyle = get_quantization_style();
-  if (qstyle == 1) {
-    // lossy derived
-    return (SPqcc[0] & 0x7FF);
-  } else {
-    // lossy expounded
-    assert(qstyle == 2);
-    return (SPqcc[nb] & 0x7FF);
-  }
+  if (qstyle == 1) return (SPqcc[0] & 0x7FF);   // lossy derived
+  if (qstyle == 2) return (SPqcc[nb] & 0x7FF);  // lossy expounded
+  // No quantization (style 0): there is no mantissa.
+  return 0;
 }
 
 uint8_t QCC_marker::get_number_of_guardbits() const { return static_cast<uint8_t>(Sqcc >> 5); }
@@ -1249,6 +1425,11 @@ POC_marker::POC_marker(j2c_src_memory &in, uint16_t Csiz) : j2k_marker_io_base(_
       Ppoc[i] = get_byte();
     } else {
       Ppoc.push_back(get_byte());
+    }
+    // CEpoc is exclusive and 0 stands for 256 (one-byte field) or 16384 (two-byte field):
+    // every component from CSpoc on (ISO/IEC 15444-1, Table A.32).
+    if (CEpoc[i] == 0) {
+      CEpoc[i] = (Csiz < 257) ? 256 : 16384;
     }
   }
   is_set = true;
@@ -1349,25 +1530,38 @@ TLM_marker::TLM_marker(uint8_t ztlm, const std::vector<uint16_t> &tile_indices,
   is_set     = true;
 }
 
+size_t TLM_marker::entries_per_segment() const {
+  const uint8_t ST = (Stlm >> 4) & 0x03;
+  const uint8_t SP = ((Stlm >> 4) & 0x0C) >> 2;
+  return (65535U - 4U) / static_cast<size_t>((ST == 0 ? 0 : (ST == 1 ? 1 : 2)) + (SP == 0 ? 2 : 4));
+}
+
 void TLM_marker::write(j2c_dst_memory &buf) const {
   uint8_t ST        = (Stlm >> 4) & 0x03;
   uint8_t SP        = ((Stlm >> 4) & 0x0C) >> 2;
   size_t entry_size = static_cast<size_t>((ST == 0 ? 0 : (ST == 1 ? 1 : 2)) + (SP == 0 ? 2 : 4));
-  uint16_t Ltlm     = static_cast<uint16_t>(4 + Ptlm.size() * entry_size);
-  buf.put_word(_TLM);
-  buf.put_word(Ltlm);
-  buf.put_byte(Ztlm);
-  buf.put_byte(Stlm);
-  for (size_t i = 0; i < Ptlm.size(); ++i) {
-    if (ST == 1)
-      buf.put_byte(static_cast<uint8_t>(Ttlm[i]));
-    else if (ST == 2)
-      buf.put_word(Ttlm[i]);
-    if (SP == 0)
-      buf.put_word(static_cast<uint16_t>(Ptlm[i]));
-    else
-      buf.put_dword(Ptlm[i]);
-  }
+  // Ltlm is 16 bits: the entries go in as many marker segments as they need, of consecutive
+  // Ztlm, which a reader concatenates in increasing Ztlm (ISO/IEC 15444-1, A.7.1).
+  const size_t per_segment = entries_per_segment();
+  size_t i                 = 0;
+  uint8_t z                = Ztlm;
+  do {
+    const size_t n = std::min(per_segment, Ptlm.size() - i);
+    buf.put_word(_TLM);
+    buf.put_word(static_cast<uint16_t>(4 + n * entry_size));
+    buf.put_byte(z++);
+    buf.put_byte(Stlm);
+    for (const size_t end = i + n; i < end; ++i) {
+      if (ST == 1)
+        buf.put_byte(static_cast<uint8_t>(Ttlm[i]));
+      else if (ST == 2)
+        buf.put_word(Ttlm[i]);
+      if (SP == 0)
+        buf.put_word(static_cast<uint16_t>(Ptlm[i]));
+      else
+        buf.put_dword(Ptlm[i]);
+    }
+  } while (i < Ptlm.size());
 }
 
 /********************************************************************************
@@ -1491,8 +1685,7 @@ SOT_marker::SOT_marker() : j2k_marker_io_base(_SOT) {
 SOT_marker::SOT_marker(j2c_src_memory &in) : j2k_marker_io_base(_SOT) {
   Lmar = in.get_word();
   if (Lmar != 10) {
-    printf("ERROR: Lsot value is invalid.\n");
-    throw std::exception();
+    open_htj2k::detail::fail("Lsot value is invalid.");
   }
   this->set_buf(in.get_buf_pos());
   in.get_N_byte(this->get_buf(), Lmar - 2U);
@@ -1591,19 +1784,30 @@ j2k_main_header::j2k_main_header(SIZ_marker *siz, COD_marker *cod, QCD_marker *q
   SIZ = MAKE_UNIQUE<SIZ_marker>(*siz);
   COD = MAKE_UNIQUE<COD_marker>(*cod);
   QCD = MAKE_UNIQUE<QCD_marker>(*qcd);
-  // Qfactor, if any
+  // Qfactor, if any: gray (1 component), gray + alpha (2), colour (3) or colour + alpha (4).
   if (qfactor != 0xFF) {
-    if (siz->get_num_components() != 3 && siz->get_num_components() != 1) {
-      printf("feature Qfactor is only available for gray-scale or color images.\n");
-      throw std::exception();
+    const uint16_t nc = siz->get_num_components();
+    if (nc < 1 || nc > 4) {
+      open_htj2k::detail::fail(
+          "Qfactor is only available for gray-scale or color images, with or without an alpha channel.");
     }
-    for (uint16_t c = 1; c < siz->get_num_components(); ++c) {
-      element_siz sub;
-      siz->get_subsampling_factor(sub, c);
-      QCC.push_back(MAKE_UNIQUE<QCC_marker>(
-          siz->get_num_components(), c, qcd->get_number_of_guardbits(), cod->get_dwt_levels(),
-          cod->get_transformation(), false, siz->get_bitdepth(c), cod->use_color_trafo(), qfactor,
-          SIZ->get_chroma_format(), vw, static_cast<uint8_t>(sub.x), static_cast<uint8_t>(sub.y)));
+    const uint16_t colour_components = (nc >= 3) ? 3 : 1;
+    for (uint16_t c = 1; c < nc; ++c) {
+      if (c < colour_components) {
+        element_siz sub;
+        siz->get_subsampling_factor(sub, c);
+        QCC.push_back(MAKE_UNIQUE<QCC_marker>(nc, c, qcd->get_number_of_guardbits(), cod->get_dwt_levels(),
+                                              cod->get_transformation(), false, siz->get_bitdepth(c),
+                                              cod->use_color_trafo(), qfactor, SIZ->get_chroma_format(), vw,
+                                              static_cast<uint8_t>(sub.x), static_cast<uint8_t>(sub.y)));
+      } else {
+        // The alpha channel is quantized like a gray-scale plane of its own bit depth: the luminance
+        // weights, and no colour-transform gain (the colour transform covers components 0-2 only).
+        QCD_marker alpha_QCD(qcd->get_number_of_guardbits(), cod->get_dwt_levels(),
+                             cod->get_transformation(), false, siz->get_bitdepth(c), 0, 1.0 / 256.0,
+                             qfactor, vw);
+        QCC.push_back(MAKE_UNIQUE<QCC_marker>(nc, c, alpha_QCD));
+      }
     }
   }
 
@@ -1674,9 +1878,16 @@ int j2k_main_header::read(j2c_src_memory &in) {
   // instance (the openhtj2k_decoder::init() + parse() reuse pattern used
   // by rtp_recv and v4 single-tile cache) sees a clean slate rather than
   // the previous frame's entries concatenated to the current frame's.
-  // The unique_ptr markers (SIZ, CAP, COD, QCD, POC, CPF, CRG) are
-  // overwritten below via MAKE_UNIQUE assignment and do not need to be
-  // cleared explicitly.
+  // The single markers are dropped too, so that a codestream lacking one
+  // cannot inherit it from the previous parse.
+  SIZ.reset();
+  CAP.reset();
+  PRF.reset();
+  COD.reset();
+  CPF.reset();
+  QCD.reset();
+  POC.reset();
+  CRG.reset();
   COC.clear();
   TLM.clear();
   PLM.clear();
@@ -1688,11 +1899,32 @@ int j2k_main_header::read(j2c_src_memory &in) {
   ATK.clear();
   ppm_buf.reset();
   ppm_header.reset();
+  num_tile_parts_read = 0;
+
+  // Every packet of a complete codestream takes at least one byte (its header is at
+  // least one byte, in the tile-part body or in a PPM/PPT marker), so the codestream
+  // length bounds the number of packets.  j2k_tile::create_tile_buf() charges each
+  // tile's packets against this budget before allocating per-packet state.  The floor
+  // keeps a truncated codestream, which has fewer bytes than packets, decodable in part
+  // as before, while capping what a short input can make the decoder allocate (about
+  // 60 bytes per packet) and iterate over.
+  constexpr uint64_t min_packet_budget = static_cast<uint64_t>(1) << 20;
+  codestream_bytes                     = in.get_remaining();
+  packet_budget    = (codestream_bytes > min_packet_budget) ? codestream_bytes : min_packet_budget;
+  structure_budget = 0;
+  structure_bytes  = 0;
+  tile_components_set_up = 0;
+  progression_steps      = 0;
+  structure_fingerprint  = kFnv1aBasis;
 
   uint16_t word = in.get_word();
-  assert(word == _SOC);  // check SOC
+  if (word != _SOC) {
+    open_htj2k::detail::fail("codestream does not begin with an SOC marker (found %04X).", word);
+  }
 
   while ((word = in.get_word()) != _SOT) {
+    const uint8_t *const segment = in.get_buf_pos() - 2;  // from the marker code on
+    bool shapes_tiles            = true;
     switch (word) {
       case _SIZ:
         SIZ = MAKE_UNIQUE<SIZ_marker>(in);
@@ -1708,16 +1940,17 @@ int j2k_main_header::read(j2c_src_memory &in) {
         break;
       case _COC:
         if (SIZ == nullptr) {
-          printf("ERROR: COC marker encountered before SIZ.\n");
-          throw std::exception();
+          open_htj2k::detail::fail("COC marker encountered before SIZ.");
         }
         COC.push_back(MAKE_UNIQUE<COC_marker>(in, SIZ->get_num_components()));
         break;
       case _TLM:
         TLM.push_back(MAKE_UNIQUE<TLM_marker>(in));
+        shapes_tiles = false;
         break;
       case _PLM:
         PLM.push_back(MAKE_UNIQUE<PLM_marker>(in));
+        shapes_tiles = false;
         break;
       case _CPF:
         CPF = MAKE_UNIQUE<CPF_marker>(in);
@@ -1727,33 +1960,32 @@ int j2k_main_header::read(j2c_src_memory &in) {
         break;
       case _QCC:
         if (SIZ == nullptr) {
-          printf("ERROR: QCC marker encountered before SIZ.\n");
-          throw std::exception();
+          open_htj2k::detail::fail("QCC marker encountered before SIZ.");
         }
         QCC.push_back(MAKE_UNIQUE<QCC_marker>(in, SIZ->get_num_components()));
         break;
       case _RGN:
         if (SIZ == nullptr) {
-          printf("ERROR: RGN marker encountered before SIZ.\n");
-          throw std::exception();
+          open_htj2k::detail::fail("RGN marker encountered before SIZ.");
         }
         RGN.push_back(MAKE_UNIQUE<RGN_marker>(in, SIZ->get_num_components()));
         break;
       case _POC:
         if (SIZ == nullptr) {
-          printf("ERROR: POC marker encountered before SIZ.\n");
-          throw std::exception();
+          open_htj2k::detail::fail("POC marker encountered before SIZ.");
         }
         POC = MAKE_UNIQUE<POC_marker>(in, SIZ->get_num_components());
         break;
       case _PPM:
         PPM.push_back(MAKE_UNIQUE<PPM_marker>(in));
+        shapes_tiles = false;
         break;
       case _CRG:
         CRG = MAKE_UNIQUE<CRG_marker>(in);
         break;
       case _COM:
         COM.push_back(MAKE_UNIQUE<COM_marker>(in));
+        shapes_tiles = false;
         break;
       case _DFS:
         DFS.push_back(MAKE_UNIQUE<DFS_marker>(in));
@@ -1762,7 +1994,8 @@ int j2k_main_header::read(j2c_src_memory &in) {
         ATK.push_back(MAKE_UNIQUE<ATK_marker>(in));
         break;
       default:
-        printf("WARNING: unknown marker %04X is found in main header\n", word);
+        shapes_tiles = false;
+        open_htj2k::detail::warn("unknown marker %04X is found in main header", word);
         // Skip the marker segment by its length (Lmar) so parsing resumes at
         // the next marker instead of scanning byte-by-byte.  Reserved
         // delimiting markers 0xFF30-0xFF3F carry no segment (Rec. ITU-T T.800
@@ -1773,8 +2006,28 @@ int j2k_main_header::read(j2c_src_memory &in) {
         }
         break;
     }
+    if (shapes_tiles) {
+      structure_fingerprint =
+          fnv1a_bytes(structure_fingerprint, segment, static_cast<size_t>(in.get_buf_pos() - segment));
+    }
+  }
+  // SIZ, COD and QCD are required in the main header (ISO/IEC 15444-1, Table A.2).
+  if (SIZ == nullptr) {
+    open_htj2k::detail::fail("main header has no SIZ marker.");
+  }
+  if (COD == nullptr) {
+    open_htj2k::detail::fail("main header has no COD marker.");
+  }
+  if (QCD == nullptr) {
+    open_htj2k::detail::fail("main header has no QCD marker.");
   }
   if (!PPM.empty()) {
+    // The records continue from one PPM marker to the next in increasing Zppm, which need
+    // not be the order the markers appear in (ISO/IEC 15444-1, A.7.4).
+    std::stable_sort(PPM.begin(), PPM.end(),
+                     [](const std::unique_ptr<PPM_marker> &a, const std::unique_ptr<PPM_marker> &b) {
+                       return a->get_index() < b->get_index();
+                     });
     uint32_t len = 0;
     for (auto &i : PPM) {
       len += i->ppmlen;
@@ -1797,18 +2050,27 @@ int j2k_main_header::read(j2c_src_memory &in) {
       // Nppm is attacker-controlled; without this bound `len -= Nppm` underflows
       // (unsigned) and `p += Nppm` walks past ppm_buf on malformed input.
       if (Nppm > len) {
-        printf("ERROR: PPM packet-header length %u exceeds %u remaining bytes — malformed input.\n",
-               static_cast<unsigned>(Nppm), static_cast<unsigned>(len));
-        throw std::exception();
+        open_htj2k::detail::fail(
+            "PPM packet-header length %u exceeds %u remaining bytes — malformed input.",
+            static_cast<unsigned>(Nppm), static_cast<unsigned>(len));
       }
       ppm_header->add_buf_node(p, Nppm);
       len -= Nppm;
       p += Nppm;
       Nppm = 0;
     }
+    // Each record is a 4-byte Nppm followed by Nppm bytes of packet headers.  There must
+    // be at least one; j2k_tile::create_tile_buf() checks that each tile has one.  Stray
+    // bytes after the last record are ignored, as before.
+    if (ppm_header->get_num_nodes() == 0) {
+      open_htj2k::detail::fail("PPM markers hold no packet-header record.");
+    }
+    if (len != 0) {
+      open_htj2k::detail::warn("PPM markers end with %u bytes that do not form a packet-header record.",
+                               static_cast<unsigned>(len));
+    }
     ppm_header->activate();
   }
-  assert(word == _SOT);
   return EXIT_SUCCESS;
 }
 
@@ -1818,8 +2080,12 @@ void j2k_main_header::get_number_of_tiles(uint32_t &xsize, uint32_t &ysize) cons
   SIZ->get_image_origin(osiz);
   SIZ->get_tile_size(tsiz);
   SIZ->get_tile_origin(tosiz);
-  xsize = ceil_int(imsiz.x - tosiz.x, tsiz.x);
-  ysize = ceil_int(imsiz.y - tosiz.y, tsiz.y);
+  // In 64 bits: with a tile size near 2^32, `extent + tile size - 1` wraps in 32 bits.
+  // Each count fits in 32 bits (a parsed SIZ marker allows at most 65535 tiles).
+  const uint64_t ext_x = static_cast<uint64_t>(imsiz.x) - tosiz.x;
+  const uint64_t ext_y = static_cast<uint64_t>(imsiz.y) - tosiz.y;
+  xsize                = static_cast<uint32_t>(ceil_int(ext_x, static_cast<uint64_t>(tsiz.x)));
+  ysize                = static_cast<uint32_t>(ceil_int(ext_y, static_cast<uint64_t>(tsiz.y)));
 }
 
 const DFS_marker *j2k_main_header::get_dfs_marker(uint8_t dfs_index) const {
@@ -1850,7 +2116,10 @@ j2k_tilepart_header::j2k_tilepart_header(uint16_t nc) {
 uint32_t j2k_tilepart_header::read(j2c_src_memory &in) {
   uint16_t word;
   uint32_t length_of_tilepart_markers = 2U + this->SOT.get_length() + 2U;  // SOT + Lsot + SOD;
+  structure_fingerprint               = kFnv1aBasis;
   while ((word = in.get_word()) != _SOD) {
+    const uint8_t *const segment = in.get_buf_pos() - 2;  // from the marker code on
+    bool shapes_tile             = true;
     switch (word) {
       case _COD:
         this->COD = MAKE_UNIQUE<COD_marker>(in);
@@ -1863,6 +2132,7 @@ uint32_t j2k_tilepart_header::read(j2c_src_memory &in) {
       case _PLT:
         this->PLT.push_back(MAKE_UNIQUE<PLT_marker>(in));
         length_of_tilepart_markers += this->PLT[this->PLT.size() - 1]->get_length() + 2U;
+        shapes_tile = false;
         break;
       case _QCD:
         this->QCD = MAKE_UNIQUE<QCD_marker>(in);
@@ -1883,14 +2153,18 @@ uint32_t j2k_tilepart_header::read(j2c_src_memory &in) {
       case _PPT:
         this->PPT.push_back(MAKE_UNIQUE<PPT_marker>(in));
         length_of_tilepart_markers += this->PPT[this->PPT.size() - 1]->get_length() + 2U;
+        shapes_tile = false;
         break;
       case _COM:
         this->COM.push_back(MAKE_UNIQUE<COM_marker>(in));
         length_of_tilepart_markers += this->COM[this->COM.size() - 1]->get_length() + 2U;
+        shapes_tile = false;
         break;
       default:
-        printf("WARNING: unknown marker %04X is found in tile-part header of tile %d and tile-part %d.\n",
-               word, this->SOT.get_tile_index(), this->SOT.get_tile_part_index());
+        shapes_tile = false;
+        open_htj2k::detail::warn(
+            "unknown marker %04X is found in tile-part header of tile %d and tile-part %d.", word,
+            this->SOT.get_tile_index(), this->SOT.get_tile_part_index());
         // Skip the marker segment by its length (Lmar), accounting for the
         // bytes consumed; reserved delimiting markers 0xFF30-0xFF3F carry no
         // segment (Rec. ITU-T T.800 | ISO/IEC 15444-1, Annex A).
@@ -1902,6 +2176,11 @@ uint32_t j2k_tilepart_header::read(j2c_src_memory &in) {
         }
         break;
     }
+    if (shapes_tile) {
+      structure_fingerprint =
+          fnv1a_bytes(structure_fingerprint, segment, static_cast<size_t>(in.get_buf_pos() - segment));
+    }
   }
   return length_of_tilepart_markers;
 }
+}  // namespace open_htj2k
