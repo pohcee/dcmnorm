@@ -51,6 +51,14 @@ else works without it.
 
 ### From source with Cargo
 
+From crates.io (needs a C/C++ toolchain and CMake; the binaries are named `dcmnorm` and `dcmtalk`):
+
+```bash
+cargo install dcmnorm-cli dcmtalk
+```
+
+Or from a checkout:
+
 ```bash
 cargo install --path exec/dcmnorm
 ```

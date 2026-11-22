@@ -17,7 +17,7 @@ extension module and carries these same binaries (packaging/stage_cli.py); insta
 one where that one doesn't fit (CPython 3.8, free-threaded builds). Only the standard library is
 used, so this runs on any runner's Python 3.8+.
 
-The version comes from exec/dcmnorm/Cargo.toml. When GITHUB_REF is a tag, it must match.
+The version comes from the workspace Cargo.toml ([workspace.package], which every crate inherits). When GITHUB_REF is a tag, it must match.
 """
 
 import argparse
@@ -53,17 +53,17 @@ TAR_MTIME = 1577836800  # 2020-01-01T00:00:00Z
 
 
 def cargo_version() -> str:
-    manifest = (REPO_ROOT / "exec" / "dcmnorm" / "Cargo.toml").read_text(encoding="utf-8")
+    manifest = (REPO_ROOT / "Cargo.toml").read_text(encoding="utf-8")
     in_package = False
     for line in manifest.splitlines():
         stripped = line.strip()
         if stripped.startswith("["):
-            in_package = stripped == "[package]"
+            in_package = stripped == "[workspace.package]"
             continue
         match = re.match(r'version\s*=\s*"([^"]+)"', stripped)
         if in_package and match:
             return match.group(1)
-    sys.exit("could not read the version from exec/dcmnorm/Cargo.toml")
+    sys.exit("could not read the [workspace.package] version from Cargo.toml")
 
 
 def pep440_version(semver: str) -> str:
@@ -185,7 +185,7 @@ def main() -> None:
     version = cargo_version()
     ref = os.environ.get("GITHUB_REF", "")
     if ref.startswith("refs/tags/") and ref != f"refs/tags/v{version}":
-        sys.exit(f"tag {ref[len('refs/tags/'):]} does not match exec/dcmnorm/Cargo.toml version {version}")
+        sys.exit(f"tag {ref[len('refs/tags/'):]} does not match the Cargo.toml version {version}")
     tag = f"v{version}"
 
     windows = args.platform.startswith("windows-")

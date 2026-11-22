@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
 """Keeps the plugin, skill and binding package versions in step with the CLI version.
 
-    scripts/check-versions.py            check: exit 1 if any pin differs from exec/dcmnorm/Cargo.toml
+    scripts/check-versions.py            check: exit 1 if any pin differs from the Cargo.toml version
     scripts/check-versions.py --set X    write X into every pin (scripts/release-tag.sh does this)
+
+The version is the workspace's ([workspace.package] in the root Cargo.toml), which every crate
+published to crates.io inherits. Each of those crates pins the others it depends on exactly
+(`dcmnorm-core = { path = "...", version = "=X" }`), since crates.io needs a version next to every
+path dependency and the crates release together; those pins are checked and set here too.
 
 The pins: the plugin's version in each of its manifests (Claude: plugin/.claude-plugin/plugin.json
 and its marketplace entry in .claude-plugin/marketplace.json; Gemini CLI:
@@ -25,7 +30,14 @@ import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-CARGO_TOML = REPO_ROOT / "exec" / "dcmnorm" / "Cargo.toml"
+CARGO_TOML = REPO_ROOT / "Cargo.toml"
+# The manifests of the crates published to crates.io (the bindings and dcmnorm-codegen are not).
+CRATE_MANIFESTS = [CARGO_TOML] + sorted(
+    path
+    for pattern in ("crates/*/Cargo.toml", "exec/*/Cargo.toml")
+    for path in REPO_ROOT.glob(pattern)
+    if path.parent.name != "dcmnorm-codegen"
+)
 PLUGIN_JSON = REPO_ROOT / "plugin" / ".claude-plugin" / "plugin.json"
 MARKETPLACE_JSON = REPO_ROOT / ".claude-plugin" / "marketplace.json"
 SKILL_MD = REPO_ROOT / "plugin" / "skills" / "dcmnorm" / "SKILL.md"
@@ -77,12 +89,42 @@ def cargo_version() -> str:
     for line in CARGO_TOML.read_text(encoding="utf-8").splitlines():
         stripped = line.strip()
         if stripped.startswith("["):
-            in_package = stripped == "[package]"
+            in_package = stripped == "[workspace.package]"
             continue
         match = re.match(r'version\s*=\s*"([^"]+)"', stripped)
         if in_package and match:
             return match.group(1)
-    sys.exit(f"no [package] version in {CARGO_TOML}")
+    sys.exit(f"no [workspace.package] version in {CARGO_TOML}")
+
+
+# The workspace version, and each internal dependency's exact pin: `dcmnorm-x = { path = "..", version = "=X"`.
+WORKSPACE_VERSION = re.compile(rf'(?m)(^\[workspace\.package\]\n(?:[^\[].*?\n)*?version = ")({VERSION})(")')
+INTERNAL_DEP = re.compile(rf'(?m)^(dcmnorm(?:-[a-z0-9]+)? = \{{ path = "[^"]+", version = "=)({VERSION})(")')
+# An internal path dependency with no version (crates.io refuses to publish it).
+UNPINNED_DEP = re.compile(r'(?m)^dcmnorm(?:-[a-z0-9]+)? = \{ path = "[^"]+"(?!, version = "=)')
+
+
+def crate_pins() -> list:
+    """(path, found) for every internal dependency pin; exits on one without a version."""
+    pins = []
+    for path in CRATE_MANIFESTS:
+        text = path.read_text(encoding="utf-8")
+        unpinned = UNPINNED_DEP.search(text)
+        if unpinned:
+            sys.exit(f"{path}: internal dependency without an exact version pin: {unpinned.group(0)}")
+        pins.extend((path, m.group(2)) for m in INTERNAL_DEP.finditer(text))
+    return pins
+
+
+def set_crate_versions(version: str) -> None:
+    text = CARGO_TOML.read_text(encoding="utf-8")
+    text, count = WORKSPACE_VERSION.subn(rf"\g<1>{version}\g<3>", text, count=1)
+    if count != 1:
+        sys.exit(f"no [workspace.package] version in {CARGO_TOML}")
+    CARGO_TOML.write_text(text, encoding="utf-8")
+    for path in CRATE_MANIFESTS:
+        text = path.read_text(encoding="utf-8")
+        path.write_text(INTERNAL_DEP.sub(rf"\g<1>{version}\g<3>", text), encoding="utf-8")
 
 
 def pypi_version(semver: str) -> str:
@@ -169,6 +211,7 @@ def set_versions(version: str) -> None:
     ROOT_SKILL_MD.parent.mkdir(parents=True, exist_ok=True)
     ROOT_SKILL_MD.write_text(text, encoding="utf-8")
     set_binding_versions(version)
+    set_crate_versions(version)
 
 
 def main() -> None:
@@ -188,6 +231,9 @@ def main() -> None:
     for found in skill_pins(SKILL_MD.read_text(encoding="utf-8")):
         if found != expected_skill:
             problems.append(f"{SKILL_MD.relative_to(REPO_ROOT)}: pins {found}, expected {expected_skill}")
+    for path, found in crate_pins():
+        if found != version:
+            problems.append(f"{path.relative_to(REPO_ROOT)}: pins a dcmnorm crate at ={found}, expected ={version}")
     for path, found, kind in binding_pins():
         expected = expected_skill if kind == "pypi" else version
         if found.split(" ")[0] != expected:
@@ -199,7 +245,7 @@ def main() -> None:
         )
     if problems:
         print("\n".join(problems), file=sys.stderr)
-        sys.exit("version pins are out of step with exec/dcmnorm/Cargo.toml"
+        sys.exit("version pins are out of step with the Cargo.toml version"
                  " (scripts/check-versions.py --set <version> fixes them)")
     print(f"version pins match {version}")
 

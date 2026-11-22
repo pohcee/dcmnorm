@@ -1,9 +1,14 @@
 [package]
 name = "dcmnorm-jpeg2000"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
 description = "JPEG 2000 codecs for dcmnorm: OpenHTJ2K (HTJ2K, vendored) and OpenJPEG (classic), with an explicit threading policy."
 license = "MIT OR Apache-2.0"
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords = ["jpeg2000", "htj2k", "dicom", "codec"]
+include = ["/src/**", "/vendor/**", "/build.rs", "/README.md"]
 build = "build.rs"
 links = "dcmnorm_openhtj2k"
 

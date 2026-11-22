@@ -1,19 +1,24 @@
 [package]
 name = "dcmnorm-object"
-version = "0.1.0"
+version.workspace = true
 edition = "2021"
 description = "In-house DICOM in-memory object model and Part 10 file I/O, replacing dicom-object. See README.md."
 license = "MIT OR Apache-2.0"
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords = ["dicom"]
+include = ["/src/**", "/README.md"]
 
 [lib]
 name = "dcmnorm_object"
 path = "src/lib.rs"
 
 [dependencies]
-dcmnorm-core = { path = "../dcmnorm-core" }
-dcmnorm-dictionary = { path = "../dcmnorm-dictionary" }
-dcmnorm-encoding = { path = "../dcmnorm-encoding" }
-dcmnorm-parser = { path = "../dcmnorm-parser" }
-dcmnorm-transcode = { path = "../dcmnorm-transcode", default-features = false }
+dcmnorm-core = { path = "../dcmnorm-core", version = "=0.19.0" }
+dcmnorm-dictionary = { path = "../dcmnorm-dictionary", version = "=0.19.0" }
+dcmnorm-encoding = { path = "../dcmnorm-encoding", version = "=0.19.0" }
+dcmnorm-parser = { path = "../dcmnorm-parser", version = "=0.19.0" }
+dcmnorm-transcode = { path = "../dcmnorm-transcode", version = "=0.19.0", default-features = false }
 smallvec = "1.6.1"
 snafu = "0.8"

@@ -15,15 +15,16 @@ Examples:
 This script:
   0) Fast-forwards onto origin
   1) Computes the next SemVer tag from existing v* tags
-  2) Updates the crate versions in the Cargo.toml files, the Claude plugin/skill version pins
-     and the binding package versions (npm package.json + loader, pyproject.toml, the Maven
-     poms and relocation poms) via scripts/check-versions.py --set
+  2) Updates the crate versions (the workspace version in Cargo.toml and the crates' exact pins
+     on each other), the Claude plugin/skill version pins and the binding package versions (npm
+     package.json + loader, pyproject.toml, the Maven poms and relocation poms) via
+     scripts/check-versions.py --set
     3) Commits the version bump
     4) Creates an annotated tag on that commit
     5) Pushes the commit and tag to origin
 
 Pushing the tag triggers .github/workflows/release.yml (tests and every build, then the GitHub
-release and the npm, PyPI and Maven Central packages).
+release and the crates.io, npm, PyPI and Maven Central packages).
 EOF
 }
 
@@ -44,7 +45,7 @@ current_manifest_version() {
         BEGIN {
             in_package = 0
         }
-        /^\[package\]$/ {
+        /^\[workspace\.package\]$/ {
             in_package = 1
             next
         }
@@ -96,43 +97,6 @@ compute_next_version() {
     fi
 
     echo "$next"
-}
-
-update_manifest_version() {
-    local manifest="$1"
-    local version="$2"
-    local tmp
-
-    tmp="$(mktemp)"
-    awk -v version="$version" '
-        BEGIN {
-            in_package = 0
-            updated = 0
-        }
-        /^\[package\]$/ {
-            in_package = 1
-            print
-            next
-        }
-        /^\[/ {
-            in_package = 0
-        }
-        in_package && /^version[[:space:]]*=/ && updated == 0 {
-            print "version = \"" version "\""
-            updated = 1
-            next
-        }
-        {
-            print
-        }
-        END {
-            if (updated == 0) {
-                exit 2
-            }
-        }
-    ' "$manifest" > "$tmp"
-
-    mv "$tmp" "$manifest"
 }
 
 bump_type=""
@@ -233,11 +197,9 @@ if [[ "$dry_run" -eq 1 ]]; then
     exit 0
 fi
 
-update_manifest_version "Cargo.toml" "$next_version"
-update_manifest_version "exec/dcmnorm/Cargo.toml" "$next_version"
-update_manifest_version "exec/dcmtalk/Cargo.toml" "$next_version"
-# The Claude plugin's version and the version its skill installs from PyPI, and the binding
-# packages (npm, PyPI, Maven), which publish with the release version.
+# The crates' version and their pins on each other, the Claude plugin's version and the version
+# its skill installs from PyPI, and the binding packages (npm, PyPI, Maven), which all publish
+# with the release version.
 python3 scripts/check-versions.py --set "$next_version"
 
 # Only the workspace's own version entries: `cargo generate-lockfile` would re-resolve every
