@@ -107,17 +107,19 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
+          cache: maven
+          cache-dependency-path: 'bindings/java/**/pom.xml'
 
       - name: Maven artifacts (no natives, unsigned)
         # The API jar with its sources and javadoc jars, as Central gets them, and the natives POM.
         run: |
           set -euo pipefail
-          mvn -B -q -f bindings/java/pom.xml -Prelease -Dgpg.skip package
+          mvn -B -e -f bindings/java/pom.xml -Prelease -Dgpg.skip package
           ls -l bindings/java/target/*.jar
           if unzip -l bindings/java/target/dcmnorm-*[0-9].jar | grep -q ' native/'; then
             echo "the API jar must not contain native libraries" >&2; exit 1
           fi
-          mvn -B -q -f bindings/java/natives/pom.xml package
+          mvn -B -e -f bindings/java/natives/pom.xml package
 
       - name: Maven Central bundle (placeholder natives, unsigned)
         # The bundle the maven job uploads, built with this runner's Maven and checked against the
@@ -140,7 +142,7 @@ jobs:
           done
           printf '%s' '<settings><servers><server><id>central</id><username>x</username><password>x</password></server></servers></settings>' > "$RUNNER_TEMP/settings.xml"
           mvn -v | head -1
-          mvn -B -q -s "$RUNNER_TEMP/settings.xml" -f bindings/java/natives/pom.xml -Prelease -Dgpg.skip -DskipUpload=true deploy
+          mvn -B -e -s "$RUNNER_TEMP/settings.xml" -f bindings/java/natives/pom.xml -Prelease -Dgpg.skip -DskipUpload=true deploy
           python3 bindings/java/check-bundle.py bindings/java/target/central-publishing/central-bundle.zip --unsigned
           rm -rf bindings/java/natives/target bindings/java/target bindings/java/relocation/*/target
 
