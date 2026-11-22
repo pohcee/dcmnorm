@@ -9,6 +9,7 @@ Ships as a CLI, a Rust library, and Node.js/Python/Java bindings.
 [![Latest release](https://img.shields.io/github/v/release/pohcee/dcmnorm)](https://github.com/pohcee/dcmnorm/releases/latest)
 [![PyPI](https://img.shields.io/pypi/v/dcmnorm?label=pypi)](https://pypi.org/project/dcmnorm/)
 [![npm](https://img.shields.io/npm/v/dcmnorm?label=npm)](https://www.npmjs.com/package/dcmnorm)
+[![crates.io](https://img.shields.io/crates/v/dcmnorm?label=crates.io)](https://crates.io/crates/dcmnorm)
 [![Maven Central](https://img.shields.io/maven-central/v/com.pohcee/dcmnorm?label=maven%20central)](https://central.sonatype.com/artifact/com.pohcee/dcmnorm)
 [![Live demo](https://img.shields.io/badge/live%20demo-try%20it-brightgreen)](https://dcmnorm-test-website-spzcbrdjlq-uc.a.run.app)
 
@@ -23,11 +24,11 @@ sample) and see its JSON metadata, a JPEG of every frame, and per-step timings.
 
 | | |
 |---|---|
-| CLIs (`dcmnorm`, `dcmtalk`) | `uv tool install dcmnorm` or `pipx install dcmnorm`; `curl -sSL pohcee.com/dcmnorm \| sh` (Linux, macOS); [release archives and `.deb`](https://github.com/pohcee/dcmnorm/releases/latest); `cargo install --path exec/dcmnorm` from a checkout |
+| CLIs (`dcmnorm`, `dcmtalk`) | `uv tool install dcmnorm` or `pipx install dcmnorm`; `curl -sSL pohcee.com/dcmnorm \| sh` (Linux, macOS); [release archives and `.deb`](https://github.com/pohcee/dcmnorm/releases/latest); `cargo install dcmnorm-cli dcmtalk` (builds from source) |
 | Python | `pip install dcmnorm` (CPython 3.9+ for `import dcmnorm`; the wheel also carries the CLIs) |
 | Node.js | `npm install dcmnorm` (Node 18+) |
 | Java | `com.pohcee:dcmnorm` plus `com.pohcee:dcmnorm-natives` for your platform (Java 11+), below |
-| Rust | the `dcmnorm` library crate from this repository (a git dependency) |
+| Rust | `cargo add dcmnorm` ([crates.io](https://crates.io/crates/dcmnorm)) |
 
 Java, Maven (`linux-x86_64` shown; also `linux-aarch_64`, `osx-aarch_64`, `osx-x86_64`,
 `windows-x86_64`, or `${os.detected.classifier}` with the os-maven-plugin):

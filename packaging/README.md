@@ -1,16 +1,16 @@
 # Packaging
 
 How the release artifacts are built and published: the `dcmnorm` and `dcmtalk` CLIs (archives,
-`.deb`, PyPI) and the three bindings (npm, PyPI, Maven Central). The
+`.deb`, PyPI), the Rust crates (crates.io) and the three bindings (npm, PyPI, Maven Central). The
 [Build and release workflow](../.github/workflows/release.yml) runs all of it.
 
 | Event | What runs |
 |---|---|
-| pull request, push to `main` | tests, version pins, binding package metadata (`packages` job), every CLI build + smoke test. Nothing is published. |
-| `v*.*.*` tag | all of the above plus the binding builds (FFmpeg from source, slow), then the GitHub release, PyPI, npm, Maven Central and the `claude-plugin` branch |
+| pull request, push to `main` | tests, version pins, binding package metadata (`packages` job), the crates.io packages (`crates` job), every CLI build + smoke test. Nothing is published. |
+| `v*.*.*` tag | all of the above plus the binding builds (FFmpeg from source, slow), then the GitHub release, crates.io, PyPI, npm, Maven Central and the `claude-plugin` branch |
 | manual run (`workflow_dispatch`) | everything a tag runs; publishing only when the ref is a tag |
 
-Every publishing job needs `test`, `packages`, every `cli` build and every `build-node`,
+Every publishing job needs `test`, `packages`, `crates`, every `cli` build and every `build-node`,
 `build-python` and `build-java` build to pass. Each registry is switched on by a repository
 variable once its one-time setup below is done; until then a tag publishes everything else.
 
@@ -75,6 +75,9 @@ the repository; the builds' outputs are `.gitignore`d.
   code for the CI runner's CPU and can crash (SIGILL) on older CPUs. FFmpeg's assembly picks its
   SIMD level at run time either way.
 - `check-windows-deps.ps1 <file>` fails if a Windows binary imports an FFmpeg DLL.
+- `publish-crates.sh [--dry-run]` publishes every workspace crate whose version crates.io lacks
+  (the `crates-io` job); `--dry-run` packages and builds every one of them from its `.crate` file instead
+  (the `crates` job). Needs a clean, committed tree.
 - `pypi-README.md` is the PyPI project description (both wheels).
 - `make-brand-images.py` draws the dcmnorm icon and everything made from it: the plugin's listing icon
   (`plugin/.claude-plugin/icon.png`), the same icon for the README and PyPI (`docs/images/dcmnorm-icon.png`),
@@ -89,6 +92,26 @@ the repository; the builds' outputs are `.gitignore`d.
 All packages carry the release version (`scripts/release-tag.sh` sets it through
 `scripts/check-versions.py --set`; CI fails if one drifts). Sizes are from the v0.11.2 Linux
 x86_64 build.
+
+### crates.io: `dcmnorm`, `dcmnorm-cli`, `dcmtalk` + the `dcmnorm-*` library crates
+
+| Crate | What it is |
+|---|---|
+| `dcmnorm` | the library (default features: JPEG-LS, JPEG XL, OpenJPEG encode; `ffmpeg-codec` / `ffmpeg-codec-linked` link FFmpeg in) |
+| `dcmnorm-cli` | the `dcmnorm` binary: `cargo install dcmnorm-cli` |
+| `dcmtalk` | the `dcmtalk` binary: `cargo install dcmtalk` |
+| `dcmnorm-core`, `-dictionary`, `-encoding`, `-parser`, `-object`, `-transcode`, `-jpeg`, `-jpeg2000`, `-dimse` | the crates `dcmnorm` is built from (the dicom-rs and jpeg-decoder forks keep their MIT OR Apache-2.0 licence and authors) |
+
+All twelve have the workspace version (`[workspace.package]` in the root `Cargo.toml`) and pin
+each other exactly (`version = "=<v>"` next to each path dependency, which crates.io requires), so
+a release publishes all of them and a `dcmnorm` version only ever builds against the internal
+crates it was released with; their APIs are dcmnorm's internals, not stable interfaces of their
+own. The bindings and `dcmnorm-codegen` have `publish = false`. Each crate's `include` list keeps
+the test data, bindings and docs out of the package (the largest, `dcmnorm` and
+`dcmnorm-jpeg2000` with its vendored OpenHTJ2K, are about 440 kB compressed). Building any of
+them needs a C/C++ toolchain and CMake, as a checkout does; nothing is prebuilt. `cargo publish`
+orders the crates by dependency and verifies each before uploading it; a version already on
+crates.io is skipped.
 
 ### PyPI: `dcmnorm`
 
@@ -189,6 +212,27 @@ Do each registry's setup, then set its repository variable to `true` (Settings >
 variables > Actions > Variables). The next tag publishes to it. A tag that already ran without it
 can be published by re-running the workflow for that tag from the Actions tab (PyPI and npm skip
 what is already there; Maven Central rejects a version it already has).
+
+### crates.io (`CRATES_PUBLISH`)
+
+crates.io's [Trusted Publishing](https://crates.io/docs/trusted-publishing) (OIDC, no stored
+token) is configured per crate, and only on a crate that already exists, so the first release
+publishes with an API token:
+
+1. On crates.io (signed in with GitHub, verified email), create an API token with the
+   `publish-new` and `publish-update` scopes, and add it to this repository as the
+   `CARGO_REGISTRY_TOKEN` secret (Settings > Secrets and variables > Actions). Or publish the
+   first version from a checkout of its tag with `CARGO_REGISTRY_TOKEN=... packaging/publish-crates.sh`.
+2. On GitHub, create the `crates-io` environment (Settings > Environments). Optionally limit it
+   to `v*` tags.
+3. Set `CRATES_PUBLISH` to `true` and release (or re-run the workflow for the current tag). The
+   job publishes all twelve crates.
+4. For each of the twelve crates, add a trusted publisher on crates.io (crate Settings > Trusted
+   Publishing): owner `pohcee`, repository `dcmnorm`, workflow `release.yml`, environment
+   `crates-io`.
+5. Delete the `CARGO_REGISTRY_TOKEN` secret and revoke the token. From then on the job
+   authenticates with `rust-lang/crates-io-auth-action` (a short-lived token per run). A new
+   crate added to the workspace later needs the token once more, for its first version.
 
 ### PyPI (`PYPI_PUBLISH`)
 

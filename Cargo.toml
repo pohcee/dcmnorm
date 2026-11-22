@@ -1,8 +1,18 @@
 [package]
 name = "dcmnorm"
-version = "0.19.0"
+version.workspace = true
 edition = "2021"
 build = "build.rs"
+license = "Apache-2.0"
+description = "Fast DICOM toolkit: parse, render, transcode, reformat, de-identify and network (DIMSE) DICOM medical images."
+readme = "README.md"
+repository.workspace = true
+homepage.workspace = true
+keywords = ["dicom", "medical-imaging", "jpeg2000", "transcode", "pacs"]
+categories = ["multimedia::images", "parser-implementations", "science"]
+# What crates.io gets: the library sources and build script. The test data, bindings, docs and
+# packaging stay in the repository.
+include = ["/src/**", "/build.rs", "/LICENSE", "/README.md"]
 
 [workspace]
 members = [
@@ -23,6 +33,15 @@ members = [
 	"bindings/java",
 ]
 resolver = "2"
+
+# Shared by every crate published to crates.io (all but the bindings and dcmnorm-codegen). They
+# release together at one version: scripts/check-versions.py --set writes it here and into each
+# internal dependency's `version = "=<v>"` (an exact pin, as the internal crates' APIs follow
+# dcmnorm's needs rather than SemVer of their own). packaging/README.md, "crates.io".
+[workspace.package]
+version = "0.19.0"
+repository = "https://github.com/pohcee/dcmnorm"
+homepage = "https://github.com/pohcee/dcmnorm"
 
 [features]
 default = ["jpeg-ls-codec", "jpeg-xl-codec", "jpeg2000-openjpeg-encode"]
@@ -61,13 +80,13 @@ needless_range_loop = "allow"
 
 [dependencies]
 base64 = "0.22"
-dcmnorm-core = { path = "crates/dcmnorm-core" }
-dcmnorm-dictionary = { path = "crates/dcmnorm-dictionary" }
-dcmnorm-encoding = { path = "crates/dcmnorm-encoding" }
-dcmnorm-object = { path = "crates/dcmnorm-object" }
-dcmnorm-transcode = { path = "crates/dcmnorm-transcode", default-features = false, features = ["native", "deflate", "jpeg2000"] }
-dcmnorm-dimse = { path = "crates/dcmnorm-dimse" }
-dcmnorm-jpeg2000 = { path = "crates/dcmnorm-jpeg2000" }
+dcmnorm-core = { path = "crates/dcmnorm-core", version = "=0.19.0" }
+dcmnorm-dictionary = { path = "crates/dcmnorm-dictionary", version = "=0.19.0" }
+dcmnorm-encoding = { path = "crates/dcmnorm-encoding", version = "=0.19.0" }
+dcmnorm-object = { path = "crates/dcmnorm-object", version = "=0.19.0" }
+dcmnorm-transcode = { path = "crates/dcmnorm-transcode", version = "=0.19.0", default-features = false, features = ["native", "deflate", "jpeg2000"] }
+dcmnorm-dimse = { path = "crates/dcmnorm-dimse", version = "=0.19.0" }
+dcmnorm-jpeg2000 = { path = "crates/dcmnorm-jpeg2000", version = "=0.19.0" }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 lcms2 = "6"
 serde_json = "1.0"
