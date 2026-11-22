@@ -30,13 +30,28 @@
 
 #include <cstdint>
 
+namespace open_htj2k {
+
 // Portability macros for C++17 attributes — expand to nothing in C++14/11.
 #if ((defined(_MSVC_LANG) && _MSVC_LANG >= 201703L) || __cplusplus >= 201703L)
   #define OPENHTJ2K_NODISCARD [[nodiscard]]
   #define OPENHTJ2K_MAYBE_UNUSED [[maybe_unused]]
 #else
   #define OPENHTJ2K_NODISCARD
-  #define OPENHTJ2K_MAYBE_UNUSED
+  #if defined(__GNUC__) || defined(__clang__)
+    #define OPENHTJ2K_MAYBE_UNUSED __attribute__((unused))
+  #else
+    #define OPENHTJ2K_MAYBE_UNUSED
+  #endif
+#endif
+
+// `if constexpr` in C++17; a plain `if` before that.  Use it only for
+// conditions on template parameters where both branches compile for every
+// instantiation: the optimizer then removes the dead branch either way.
+#if ((defined(_MSVC_LANG) && _MSVC_LANG >= 201703L) || __cplusplus >= 201703L)
+  #define OPENHTJ2K_IF_CONSTEXPR if constexpr
+#else
+  #define OPENHTJ2K_IF_CONSTEXPR if
 #endif
 
 // calc BIBO gain? if not, LUT is used
@@ -78,3 +93,4 @@ class element_siz {
     y = y0;
   }
 };
+}  // namespace open_htj2k

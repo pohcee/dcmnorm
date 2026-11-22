@@ -32,11 +32,19 @@
 #include <memory>
 #include <vector>
 #include "planar_output_desc.hpp"
+// Windows DLL linkage: export while building the library (CMake defines
+// open_htj2k_EXPORTS for its sources), import in code that uses it, and
+// nothing when linking the static library (OHTJ2K_STATIC).
 #if defined(_MSC_VER) && !defined(OHTJ2K_STATIC)
-  #define OPENHTJ2K_EXPORT __declspec(dllexport)
+  #if defined(open_htj2k_EXPORTS)
+    #define OPENHTJ2K_EXPORT __declspec(dllexport)
+  #else
+    #define OPENHTJ2K_EXPORT __declspec(dllimport)
+  #endif
 #else
   #define OPENHTJ2K_EXPORT
 #endif
+#include "openhtj2k_message.hpp"
 namespace open_htj2k {
 // EnumCS values from the JPH/JP2 colour specification box (ISO/IEC 15444-1 Annex I).
 // get_colorspace() returns one of these; 0 means the input was a raw codestream.
@@ -49,6 +57,14 @@ class openhtj2k_decoder {
   std::unique_ptr<class openhtj2k_decoder_impl> impl;
 
  public:
+  // num_threads: 1 decodes on the calling thread only.  Any other value uses the
+  // worker pool that all decoders and encoders in the process share: 0 asks for
+  // one thread per hardware thread, n for n threads; either way at most 1024
+  // (a larger count gets 1024).  The pool is created by the
+  // first instance that needs it, with that instance's count, and is kept until
+  // the last instance using it is destroyed; while it exists, other instances
+  // use it as it is.  Instances may be used from several threads at once, each
+  // instance from one thread at a time.
   OPENHTJ2K_EXPORT openhtj2k_decoder();
   OPENHTJ2K_EXPORT openhtj2k_decoder(const char *, uint8_t reduce_NL, uint32_t num_threads);
   OPENHTJ2K_EXPORT openhtj2k_decoder(const uint8_t *, size_t, uint8_t reduce_NL, uint32_t num_threads);
@@ -72,6 +88,15 @@ class openhtj2k_decoder {
   // Returns the MCT byte from the COD marker (0 = no transform, 1 = ICT/RCT).
   // Valid after parse().
   OPENHTJ2K_EXPORT uint8_t get_mct();
+  // After an invoke*() call: whether the codestream lacked data of the image, so that the
+  // image decoded holds only the data there was.  True when the codestream ends before its
+  // EOC marker (a truncated file or download), or when a tile has no data or a packet or a
+  // code-block's data runs past the bytes there are.  The decode does not fail for that:
+  // the data missing decodes as if it had not been coded (in a lossy image, the detail it
+  // carries is gone; where nothing of a tile arrived, the tile is flat), and a warning
+  // reports it.  A codestream that ends before the marker code of its first SOT marker
+  // segment, where its main header ends, still fails in parse().
+  OPENHTJ2K_EXPORT bool is_truncated();
   // Line-based decode: uses stateful row-pull instead of full-tile IDWT.
   // Peak memory proportional to DWT ring depth rather than image size.
   OPENHTJ2K_EXPORT void invoke_line_based(std::vector<int32_t *> &, std::vector<uint32_t> &,
@@ -82,26 +107,51 @@ class openhtj2k_decoder {
   // output buffers entirely — only per-row scratch is needed.  width/height/depth/is_signed
   // are populated before the first callback invocation so the callback can use them.
   // The callback receives (y, row_ptrs[NC], NC) and must copy the data if needed.
+  //
+  // Rows.  The callback is called for the output rows y = 0, 1, ...,
+  // get_stream_row_count() - 1, in order, and row_ptrs[c] then points at width[c]
+  // samples: row get_stream_component_row(c, y) of component c, counted from 0 like
+  // height[c].  When the vertical subsampling factor (SIZ YRsiz) of every component is
+  // a multiple of component 0's (4:4:4, 4:2:2, 4:2:0, all factors equal, ...), the
+  // output rows are the rows of component 0: there are height[0] of them, and
+  // row_ptrs[0] holds row y.  In general the output rows divide the image's rows of
+  // the reference grid (reduced by 2^reduce_NL) into runs of g rows, g being the
+  // greatest common divisor of the YRsiz, starting at the first grid row any
+  // component samples; row k of a component (k counted from the grid origin) covers
+  // grid rows [k * YRsiz, (k + 1) * YRsiz), so it is handed over at each of the one
+  // or more consecutive output rows it covers, starting at the first.  A component
+  // whose first row starts below output row y covers none of the rows above it:
+  // there row_ptrs[c] points at zeros and get_stream_component_row() returns
+  // UINT32_MAX.  To write each component's rows once, write row_ptrs[c] whenever
+  // get_stream_component_row(c, y) changes to a valid row.
   OPENHTJ2K_EXPORT void invoke_line_based_stream(
       std::function<void(uint32_t y, int32_t *const *, uint16_t nc)> cb,
       std::vector<uint32_t> &width, std::vector<uint32_t> &height, std::vector<uint8_t> &depth,
       std::vector<bool> &is_signed);
+  // The row layout of the streaming entry points described above (valid after parse()):
+  // the number of output rows, and the row of component c that row_ptrs[c] holds at
+  // output row y (UINT32_MAX when none of its rows covers y, or y is out of range).
+  OPENHTJ2K_EXPORT uint32_t get_stream_row_count();
+  OPENHTJ2K_EXPORT uint32_t get_stream_component_row(uint16_t c, uint32_t y);
   // Opt-in single-tile streaming variant: when enable_single_tile_reuse(true)
   // has been set, consecutive calls reuse the decoded tile tree (codeblock
   // allocations, precinct tagtrees, line-decode ring buffers) so per-frame
   // init cost is proportional to the new bitstream's packet headers instead
-  // of to a full tile rebuild.  Only valid for codestreams whose main-header
-  // bytes (SIZ/COD/COC/QCD/QCC/RGN) are byte-identical across calls — a
-  // fingerprint check invalidates the cache automatically when that changes.
-  // Falls through to invoke_line_based_stream() for the first call after a
-  // cache invalidation or when reuse is disabled.
+  // of to a full tile rebuild.  Frames may differ in their coding parameters:
+  // the tree is rebuilt for a frame whose main-header or tile-part-header marker
+  // segments (all but TLM, PLM, PPM, PLT, PPT and COM) or resolution reduction
+  // differ from those of the last frame decoded.  Multi-tile codestreams, and
+  // calls with reuse disabled, go through invoke_line_based_stream().
   OPENHTJ2K_EXPORT void invoke_line_based_stream_reuse(
       std::function<void(uint32_t y, int32_t *const *, uint16_t nc)> cb,
       std::vector<uint32_t> &width, std::vector<uint32_t> &height, std::vector<uint8_t> &depth,
       std::vector<bool> &is_signed);
   // Direct-to-planar streaming decode.  Reads float from IDWT ring and
   // writes uint8/uint16 directly to caller-provided plane buffers, bypassing
-  // the callback and int32 scratch entirely.  Respects enable_single_tile_reuse().
+  // the callback and int32 scratch entirely: row j of component c goes to
+  // descs[c].base + j * descs[c].stride, for rows below descs[c].height, with at
+  // most descs[c].width samples (and no more than the component has); descs[c].yr
+  // is not used.  Respects enable_single_tile_reuse().
   // Falls back to invoke_line_based_stream_reuse() + callback for MCT (4:4:4)
   // or multi-tile codestreams.  PlanarOutputDesc is defined in coding_units.hpp.
   OPENHTJ2K_EXPORT void invoke_line_based_direct(
@@ -114,11 +164,13 @@ class openhtj2k_decoder {
   // any cached state and returns the decoder to the legacy per-frame path.
   OPENHTJ2K_EXPORT void enable_single_tile_reuse(bool on);
   // Phase 4B spatial-region early exit.  Stops line-based decode after
-  // this many luma rows.  Default = UINT32_MAX (no limit).
+  // this many output rows (see invoke_line_based_stream; the rows of component 0
+  // in the common case).  Default = UINT32_MAX (no limit).
   OPENHTJ2K_EXPORT void set_row_limit(uint32_t limit);
 
-  // Spatial-region vertical viewport.  Restricts line-based decode to rows
-  // [row_lo, row_hi) in the finest active-level output coord space.  Default
+  // Spatial-region vertical viewport.  Restricts line-based decode to output
+  // rows [row_lo, row_hi) (the y of the row callback, see invoke_line_based_stream;
+  // the rows of component 0 in the common case).  Default
   // = [0, UINT32_MAX) → full-height decode (same cost as before).  Coarser
   // DWT levels automatically receive a halved range widened by the 9/7 filter
   // support, mirroring set_col_range.  Rows outside [row_lo, row_hi) are not
@@ -131,13 +183,20 @@ class openhtj2k_decoder {
   // fragment shader applies the YCbCr→RGB matrix.  Default: false.
   OPENHTJ2K_EXPORT void set_skip_mct(bool skip);
 
-  // Phase 4B spatial-region column range (horizontal viewport clipping).
-  // Restricts the vertical-IDWT lifting work to columns [col_lo, col_hi) in
-  // the finest-resolution output coordinates (after reduce_NL).  Coarser
-  // levels automatically receive a halved range widened by the filter
-  // support.  Default = [0, UINT32_MAX) → full-width lifting (same cost as
-  // before this API existed).  Columns outside the range produce
-  // indeterminate output; the caller must only read within [col_lo, col_hi).
+  // Spatial-region column range (horizontal viewport clipping).
+  // Restricts the IDWT lifting work to output columns [col_lo, col_hi) in the
+  // finest-resolution output coordinates (after reduce_NL; column 0 is the
+  // first output column whatever the image origin).  col_hi may exceed the
+  // width (UINT32_MAX = to the right edge).  The range is given in the
+  // coordinates of a component without horizontal subsampling; a component
+  // with SIZ XRsiz > 1 is valid over [col_lo / XRsiz, ceil(col_hi / XRsiz)).
+  // Coarser levels automatically receive a halved range widened by the
+  // filter support.  Default = [0, UINT32_MAX) → full width.  Columns outside
+  // the range produce indeterminate output; the caller must only read within
+  // the window.  Honoured by invoke_line_based_stream_reuse (every frame,
+  // including the first); the other entry points decode full width.  The
+  // window stays in effect for later frames until changed;
+  // set_col_range(0, UINT32_MAX) restores full width.
   OPENHTJ2K_EXPORT void set_col_range(uint32_t col_lo, uint32_t col_hi);
 
   // JPIP partial-decode hook.  When set, every subsequent invoke*() call

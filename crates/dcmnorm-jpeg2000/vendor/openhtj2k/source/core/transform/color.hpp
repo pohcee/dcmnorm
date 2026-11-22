@@ -41,6 +41,8 @@
 #define CR_FACT_G (2 * ALPHA_R * (1 - ALPHA_R) / ALPHA_G)
 #define CB_FACT_G (2 * ALPHA_B * (1 - ALPHA_B) / ALPHA_G)
 
+namespace open_htj2k {
+
 typedef void (*cvt_color_func)(int32_t *, int32_t *, int32_t *, uint32_t, uint32_t);
 // Float-domain inverse color transform (used in decode to avoid float→int32 intermediate copy).
 // sp0/sp1/sp2 point to float sample buffers; stride = row stride in floats.
@@ -52,12 +54,79 @@ typedef void (*cvt_color_i32_to_f_func)(const int32_t *, const int32_t *, const 
 
 // Per-component parameters for the float→int32 finalization step.
 struct FinalizeParams {
-  int16_t ds;      // downshift: > 0 → right shift, < 0 → left shift, 0 → no shift
-  int16_t rnd;     // rounding offset added before right shift (= (1<<ds)>>1); 0 when ds <= 0
-  int32_t dc;      // DC offset added after shift (e.g. 128 for 8-bit unsigned)
+  int16_t ds;      // FRACBITS - bit depth for an irreversible transform, 0 for a reversible one
+  float scale;     // 2^-ds, one output LSB in Q(FRACBITS) units (finalize_scale(ds))
+  int32_t dc;      // DC offset added after rounding (e.g. 128 for 8-bit unsigned)
   int32_t maxval;  // clamp upper bound
   int32_t minval;  // clamp lower bound
 };
+
+// Lossy finalize rounding.  An irreversible sample v is in Q(FRACBITS) units, so one
+// output LSB is 2^ds of them, ds = FRACBITS - bit depth (negative above 13 bits).  The
+// output is the nearest integer with ties rounded up, floor(v * 2^-ds + 0.5): for an
+// integer v and ds > 0 that is exactly (v + 2^(ds-1)) >> ds, the fixed-point
+// convention, and the same formula serves every sign of ds, so one loop covers every
+// bit depth.  A reversible transform leaves integer-valued floats, which scale 1
+// reproduces exactly.  The vector forms below compute the same thing (multiply, add
+// 0.5, floor, convert); keep every variant identical.
+inline float finalize_scale(int32_t ds) { return std::ldexp(1.0f, -ds); }
+inline int32_t finalize_round(float v, float scale) {
+  return static_cast<int32_t>(std::floor(v * scale + 0.5f));
+}
+#if defined(OPENHTJ2K_TRY_AVX2) && defined(__AVX512F__)
+static inline __m512i finalize_round_avx512(__m512 v, __m512 vscale, __m512 vhalf) {
+  return _mm512_cvt_roundps_epi32(_mm512_fmadd_ps(v, vscale, vhalf),
+                                  _MM_FROUND_TO_NEG_INF | _MM_FROUND_NO_EXC);
+}
+#endif
+#if defined(OPENHTJ2K_TRY_AVX2) && defined(__AVX2__)
+static inline __m256i finalize_round_avx2(__m256 v, __m256 vscale, __m256 vhalf) {
+  return _mm256_cvttps_epi32(_mm256_floor_ps(_mm256_add_ps(_mm256_mul_ps(v, vscale), vhalf)));
+}
+#endif
+#if defined(OPENHTJ2K_ENABLE_ARM_NEON) || defined(__ARM_NEON) || defined(__ARM_NEON__)
+}  // namespace open_htj2k (headers are included at global scope)
+  #include <arm_neon.h>
+namespace open_htj2k {
+static inline int32x4_t finalize_round_neon(float32x4_t v, float32x4_t vscale, float32x4_t vhalf) {
+  #if defined(__aarch64__) || defined(_M_ARM64)
+  return vcvtmq_s32_f32(vfmaq_f32(vhalf, v, vscale));
+  #else
+  // 32-bit ARM NEON (ARMv7) has neither FMA nor a round-down conversion.  vscale is
+  // a power of two, so v * vscale is exact and a separate multiply-add rounds like
+  // the FMA; floor() is the truncation minus 1 wherever it lies above the value.
+  const float32x4_t x = vmlaq_f32(vhalf, v, vscale);
+  const int32x4_t t   = vcvtq_s32_f32(x);
+  return vaddq_s32(t, vreinterpretq_s32_u32(vcgtq_f32(vcvtq_f32_s32(t), x)));
+  #endif
+}
+#endif
+#if defined(OPENHTJ2K_ENABLE_WASM_SIMD)
+}  // namespace open_htj2k (headers are included at global scope)
+  #include <wasm_simd128.h>
+namespace open_htj2k {
+static inline v128_t finalize_round_wasm(v128_t v, v128_t vscale, v128_t vhalf) {
+  return wasm_i32x4_trunc_sat_f32x4(wasm_f32x4_floor(wasm_f32x4_add(wasm_f32x4_mul(v, vscale), vhalf)));
+}
+#endif
+#if defined(OPENHTJ2K_ENABLE_SSE2)
+// SSE2 has no floor: truncate, convert back and step down where that went up.  Raising
+// the input to -2^31 first keeps every result out of int32 range (and NaN, for which
+// maxps returns its second operand) at INT32_MIN, which the scalar conversion
+// (cvttss2si) gives too, instead of stepping it down to INT32_MAX.
+static inline __m128i finalize_round_sse2(__m128 v, __m128 vscale, __m128 vhalf) {
+  const __m128 x  = _mm_max_ps(_mm_add_ps(_mm_mul_ps(v, vscale), vhalf), _mm_set1_ps(-2147483648.0f));
+  const __m128i t = _mm_cvttps_epi32(x);
+  return _mm_add_epi32(t, _mm_castps_si128(_mm_cmpgt_ps(_mm_cvtepi32_ps(t), x)));
+}
+// min(max(x, lo), hi) per int32 lane; SSE2 has no pmaxsd/pminsd, so select by mask.
+static inline __m128i clamp_epi32_sse2(__m128i x, __m128i lo, __m128i hi) {
+  __m128i m = _mm_cmplt_epi32(x, lo);
+  x         = _mm_or_si128(_mm_and_si128(m, lo), _mm_andnot_si128(m, x));
+  m         = _mm_cmpgt_epi32(x, hi);
+  return _mm_or_si128(_mm_and_si128(m, hi), _mm_andnot_si128(m, x));
+}
+#endif
 
 // Fused inverse color transform (float-domain) + float→int32 finalize.
 // Reads Y/Cb/Cr from ring buffer (read-only), applies inverse MCT, applies per-component
@@ -228,6 +297,10 @@ void fused_ycbcr_irrev_to_rgb_i32(const float *y, const float *cb, const float *
 void fused_ycbcr_rev_to_rgb_i32(const float *y, const float *cb, const float *cr,
                                  int32_t *r, int32_t *g, int32_t *b, uint32_t width,
                                  const FinalizeParams *fp);
+  #if defined(OPENHTJ2K_ENABLE_SSE2)
+void fused_ycbcr_irrev_to_rgb_i32_sse2(const float *y, const float *cb, const float *cr, int32_t *r,
+                                       int32_t *g, int32_t *b, uint32_t width, const FinalizeParams *fp);
+  #endif
 #endif
 
 inline int32_t round_d(double val) {
@@ -237,3 +310,4 @@ inline int32_t round_d(double val) {
     return static_cast<int32_t>(val + ((val > 0) ? 0.5 : -0.5));
   }
 }
+}  // namespace open_htj2k

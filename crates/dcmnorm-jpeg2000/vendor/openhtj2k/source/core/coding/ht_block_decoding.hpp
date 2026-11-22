@@ -35,8 +35,10 @@
 #include <vector>
 
 #include "dec_CxtVLC_tables.hpp"
+#include "utils.hpp"
+#include "message_internal.hpp"
 
-#if __GNUC__ || __has_attribute(always_inline)
+#if defined(__GNUC__) || defined(__clang__)
   #define FORCE_INLINE inline __attribute__((always_inline))
   #define openhtj2k_arm_clzll(x) __builtin_clzll((x))
 #elif defined(_MSC_VER)
@@ -60,6 +62,14 @@
 #else
   #define OPENHTJ2K_NOINLINE __attribute__((noinline))
 #endif
+
+// Entries in the nibble-packed significance array of the HT SigProp and MagRef
+// decoders: (ceil(H/4) + 1) rows of round_up_8(ceil(W/4) + 2) entries.  Code-block
+// sides are 4..1024 samples with at most 4096 samples (checked when COD/COC are
+// read), so the largest need is a 4-wide, 1024-tall block: 257 rows x 8 entries.
+namespace open_htj2k {
+
+constexpr uint32_t HT_SIGMA_BUF_SIZE = (1024 / 4 + 1) * 8;
 
 // LUT for UVLC decoding in initial line-pair
 //   index (8bits) : [bit   7] u_off_1 (1bit)
@@ -181,7 +191,7 @@ class MEL_dec {
 
     uint32_t val = 0xFFFFFFFF;  // feed in 0xFF if buffer is exhausted
     if (length > 4) {           // if there is data in the MEL segment
-      val = *reinterpret_cast<uint32_t *>(const_cast<uint8_t *>(buf));  // read 32 bits from MEL data
+      val = load_u32_unaligned(buf);                                    // read 32 bits from MEL data
       buf += 4;                                                         // advance pointer
       length -= 4;                                                      // reduce counter
     } else if (length > 0) {
@@ -330,7 +340,7 @@ class rev_buf {
     }
     uint32_t val = 0;
     if (length > 3) {  // Common case; we have at least 4 bytes available
-      val = *reinterpret_cast<uint32_t *>(buf - 3);
+      val = load_u32_unaligned(buf - 3);
       buf -= 4;
       length -= 4;
     } else if (length > 0) {  // we have less than 4 bytes
@@ -384,8 +394,7 @@ class rev_buf {
 
   inline uint32_t advance(uint32_t num_bits) {
     if (num_bits > bits) {
-      printf("ERROR: VLC require %d bits but there are %d bits left\n", num_bits, bits);
-      throw std::exception();
+      open_htj2k::detail::fail("VLC require %d bits but there are %d bits left", num_bits, bits);
     }
     Creg >>= num_bits;
     bits -= num_bits;
@@ -728,7 +737,9 @@ static inline uint32_t destuff_fwd_portable(const uint8_t *src, int size, uint8_
 }
 
 #if defined(OPENHTJ2K_ENABLE_ARM_NEON)
+}  // namespace open_htj2k (headers are included at global scope)
   #include <arm_neon.h>
+namespace open_htj2k {
 // NEON does not provide a version of this function, here is an article about
 // some ways to repro the results.
 // http://stackoverflow.com/questions/11870910/sse-mm-movemask-epi8-equivalent-method-for-arm-neon
@@ -890,8 +901,7 @@ class fwd_buf {
    */
   FORCE_INLINE void advance(uint32_t num_bits) {
     if (num_bits >= 128) {
-      printf("Value of numbits = %d is out of range.\n", num_bits);
-      throw std::exception();
+      open_htj2k::detail::fail("Value of numbits = %d is out of range.", num_bits);
     }
     this->pos += num_bits;
   }
@@ -904,7 +914,8 @@ class fwd_buf {
   FORCE_INLINE int32x4_t fetch(const int32x4_t &m) {
     auto t = fetch_raw();
   #if defined(_MSC_VER)
-    int32x4_t msvec, c, v;
+    int32x4_t msvec = vdupq_n_s32(0);  // all four lanes are set below
+    int32x4_t c, v;
     msvec = vsetq_lane_s32(vgetq_lane_s32(t, 0) & 0xFFFFFFFF, msvec, 0);
     c     = aarch64_srl_epi64(t, static_cast<uint8_t>(vgetq_lane_s32(m, 0)));
     v     = vreinterpretq_s32_s8(vextq_s8(vreinterpretq_s8_s32(t), vdupq_n_s8(0), 8));
@@ -1113,7 +1124,9 @@ class fwd_buf {
   }
 };
 #elif defined(OPENHTJ2K_ENABLE_WASM_SIMD)
+}  // namespace open_htj2k (headers are included at global scope)
   #include <wasm_simd128.h>
+namespace open_htj2k {
 
 template <int X>
 class fwd_buf {
@@ -1153,8 +1166,7 @@ class fwd_buf {
    */
   FORCE_INLINE void advance(uint32_t num_bits) {
     if (num_bits >= 128) {
-      printf("Value of numbits = %d is out of range.\n", num_bits);
-      throw std::exception();
+      open_htj2k::detail::fail("Value of numbits = %d is out of range.", num_bits);
     }
     this->pos += num_bits;
   }
@@ -1451,8 +1463,7 @@ class fwd_buf {
    */
   FORCE_INLINE void advance(uint32_t num_bits) {
     if (num_bits >= 128) {
-      printf("Value of numbits = %d is out of range.\n", num_bits);
-      throw std::exception();
+      open_htj2k::detail::fail("Value of numbits = %d is out of range.", num_bits);
     }
     this->pos += num_bits;
   }
@@ -1790,107 +1801,101 @@ class fwd_buf {
   #endif  // defined(__AVX2__)
 };
 #else
+// Scalar MagSgn reader: the segment is destuffed once into a per-thread scratch buffer
+// (as the SIMD readers do), so fetch() is a load and a shift at an absolute bit
+// position, with no refill branches.  Byte order is little-endian, as everywhere in
+// the scalar decoder.
 template <int X>
 class fwd_buf {
  private:
-  const uint8_t *buf;
-  uint64_t Creg;
-  uint32_t bits;
-  uint32_t unstuff;
-  int32_t length;
-  uint32_t pos;
+  const uint8_t *dbuf;  //!< pointer to the destuffed bitstream
+  uint32_t limit;       //!< clamp offset; bytes at or beyond it hold no stream bits (read as X)
+  uint32_t pos;         //!< absolute bit position of the next unread bit
+
+  static uint8_t *destuff_scratch(size_t need) {
+    static thread_local std::vector<uint8_t> buf;
+    if (buf.size() < need) buf.resize(need);
+    return buf.data();
+  }
+  static uint64_t load_u64(const uint8_t *p) {
+    uint64_t v;
+    memcpy(&v, p, sizeof(v));
+    return v;
+  }
 
  public:
-  fwd_buf(const uint8_t *Dcup, int32_t Pcup)
-      : buf(Dcup), Creg(0), bits(0), unstuff(0), length(Pcup), pos(0) {
-    // for alignment
-    auto p = reinterpret_cast<intptr_t>(buf);
-    p &= 0x03;
-    auto num = 4 - p;
-    for (auto i = 0; i < num; ++i) {
-      uint64_t d;
-      if (length-- > 0) {
-        d = *buf++;
-        pos++;
-      } else {
-        d = (uint64_t)X;
+  //  Whenever 0xFF is coded, the MSB of the following byte is a stuffing bit (sequences
+  //  greater than 0xFF7F cannot appear in the segment); it is dropped here.
+  fwd_buf(const uint8_t *data, int size) {
+    if (size < 0) size = 0;
+    uint8_t *dst               = destuff_scratch(static_cast<size_t>(size) + 80);
+    uint8_t *o                 = dst;
+    uint8_t *const o_end       = dst + size;  // destuffing only removes bits: out <= size bytes
+    const uint8_t *s           = data;
+    const uint8_t *const s_end = data + size;
+    uint64_t acc               = 0;  // partial output byte; low nb bits are valid
+    uint32_t nb                = 0;  // number of valid bits in acc; always < 8
+    bool prev_ff               = false;
+
+    // fast path: 8 source bytes at a time when they contain no 0xFF
+    while (s + 8 <= s_end && o + 16 <= o_end) {
+      const uint64_t v = load_u64(s);
+      const uint64_t z = ~v;  // a 0xFF byte becomes a zero byte
+      if (((z - 0x0101010101010101ULL) & ~z & 0x8080808080808080ULL) != 0 || prev_ff) {
+        for (int i = 0; i < 8; ++i) {
+          const uint8_t b = *s++;
+          acc |= static_cast<uint64_t>(b & (prev_ff ? 0x7FU : 0xFFU)) << nb;
+          nb += prev_ff ? 7U : 8U;
+          prev_ff = (b == 0xFFU);
+          if (nb >= 8) {
+            *o++ = static_cast<uint8_t>(acc);
+            acc >>= 8;
+            nb -= 8;
+          }
+        }
+        continue;
       }
-      Creg |= (d << bits);
-      bits += 8 - unstuff;
-      unstuff = ((d & 0xFF) == 0xFF);  // bit-unstuffing for next byte
+      const uint64_t w = acc | (v << nb);
+      memcpy(o, &w, 8);
+      acc = nb ? (v >> (64 - nb)) : 0;
+      o += 8;
+      s += 8;
     }
-    read();
-  }
-
-  inline void read() {
-    if (bits > 32) {
-      printf("ERROR: in MagSgn reading\n");
-      throw std::exception();
-    }
-
-    uint32_t val = 0;
-    if (length > 3) {
-      val = *(uint32_t *)(buf);
-      buf += 4;
-      pos += 4;
-      length -= 4;
-    } else if (length > 0) {
-      int i = 0;
-      val   = (X != 0) ? 0xFFFFFFFFU : 0;
-      while (length > 0) {
-        uint32_t v = *buf++;
-        pos++;
-        uint32_t m = ~(0xFFU << i);
-        val        = (val & m) | (v << i);  // put one byte in its correct location
-        --length;
-        i += 8;
+    // tail: one byte at a time
+    while (s < s_end && o < o_end) {
+      const uint8_t b = *s++;
+      acc |= static_cast<uint64_t>(b & (prev_ff ? 0x7FU : 0xFFU)) << nb;
+      nb += prev_ff ? 7U : 8U;
+      prev_ff = (b == 0xFFU);
+      if (nb >= 8) {
+        *o++ = static_cast<uint8_t>(acc);
+        acc >>= 8;
+        nb -= 8;
       }
-    } else {
-      val = (X != 0) ? 0xFFFFFFFFU : 0;
     }
-
-    // we accumulate in t and keep a count of the number of bits_local in bits_local
-    uint32_t bits_local   = 8 - unstuff;
-    uint32_t t            = val & 0xFF;
-    uint32_t unstuff_flag = ((val & 0xFF) == 0xFF);  // Do we need unstuffing next?
-
-    t |= ((val >> 8) & 0xFF) << bits_local;
-    bits_local += 8 - unstuff_flag;
-    unstuff_flag = (((val >> 8) & 0xFF) == 0xFF);
-
-    t |= ((val >> 16) & 0xFF) << bits_local;
-    bits_local += 8 - unstuff_flag;
-    unstuff_flag = (((val >> 16) & 0xFF) == 0xFF);
-
-    t |= ((val >> 24) & 0xFF) << bits_local;
-    bits_local += 8 - unstuff_flag;
-    unstuff = (((val >> 24) & 0xFF) == 0xFF);  // for next byte
-
-    Creg |= ((uint64_t)t) << bits;  // move data to this->tmp
-    bits += bits_local;
+    // fill the bits above nb with X and pad with X bytes so reads past the end of the
+    // stream see the exhaustion fill value
+    const uint32_t fill = (X == 0xFF) ? (0xFFU << nb) : 0U;
+    *o                  = static_cast<uint8_t>(static_cast<uint32_t>(acc) | fill);
+    memset(o + 1, X, 64);
+    this->dbuf  = dst;
+    this->limit = static_cast<uint32_t>(o - dst) + 1;
+    this->pos   = 0;
   }
 
-  inline void advance(uint32_t n) {
-    if (n > bits) {
-      printf("ERROR: illegal attempt to advance %d bits but there are %d bits left in MagSgn advance\n", n,
-             bits);
-  #if defined(__clang__)
-      // the following code might be problem with GCC, TODO: to be investigated
-      throw std::exception();
-  #endif
-    }
-    Creg >>= n;  // consume n bits
-    bits -= n;
-  }
+  inline void advance(uint32_t n) { this->pos += n; }
+  inline uint32_t position() const { return this->pos; }
 
-  inline uint32_t fetch() {
-    if (bits < 32) {
-      read();
-      if (bits < 32)  // need to test
-        read();
-    }
-    return (uint32_t)Creg;
+  //  The 32 bits starting at bit position p.  The byte offset is clamped to limit, so
+  //  positions past the end of the stream read as X without leaving the buffer.
+  //  The 57 or more bits starting at bit position p (in the low bits of the result).
+  inline uint64_t fetch64_at(uint32_t p) const {
+    uint32_t off = p >> 3;
+    off          = off < this->limit ? off : this->limit;
+    return load_u64(this->dbuf + off) >> (p & 7);
   }
+  inline uint32_t fetch_at(uint32_t p) const { return static_cast<uint32_t>(fetch64_at(p)); }
+  inline uint32_t fetch() const { return fetch_at(this->pos); }
 };
 #endif
 
@@ -2409,3 +2414,4 @@ FORCE_INLINE uint8_t MR_dec::importMagRefBit() {
 //   VLC_dec.advance(len);
 //   //  VLC_dec.decodeCxtVLC(context, u_off, rho, emb_k, emb_1, first_or_second, dec_CxtVLC_table);
 // };
+}  // namespace open_htj2k

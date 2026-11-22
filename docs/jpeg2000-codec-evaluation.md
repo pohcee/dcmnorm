@@ -154,21 +154,20 @@ bridge, and the OpenJPEG decoder.
 - `DCMNORM_HTJ2K_SIMD=base` at run time forces the portable variant.
 
 **Concurrency.**
-- OpenHTJ2K is not safe for concurrent calls in one process: threads blocked in one call's barrier
-  run other calls' pool tasks on shared per-thread scratch, and concurrent decodes segfault.
-- dcmnorm serializes OpenHTJ2K calls with a process-wide lock.
-- Each call already spreads one image across OpenHTJ2K's own pool, so this costs little
-  throughput.
+- OpenHTJ2K 0.25.0+ supports multiple concurrent decoder/encoder instances across threads natively
+  (the earlier 0.19.0 snapshot required a process-wide lock, which has been removed).
+- Calls from inside Rayon frame-parallel workers pass `num_threads = 1` via `per_call_threads()`,
+  running directly on the calling thread without contending on the shared OpenHTJ2K pool.
 
 **API paths.**
-- The buffered `invoke_line_based()` encoder path dereferences an unallocated buffer in this
-  OpenHTJ2K version, for any image size. dcmnorm uses the row-streaming encode path that the
-  reference CLI uses.
-- Decode streams rows straight into the DICOM sample layout, which is about 2x faster than
-  decoding to full `int32` planes.
+- Encode uses `invoke_line_based_stream()`, streaming rows directly from `const int32_t` planes
+  without mutating or duplicating full component buffers.
+- Decode streams rows straight into the DICOM sample layout (`decode_into`), which is about 2x
+  faster than decoding to full `int32` planes, and checks `decoder.is_truncated()` so partial
+  codestreams are rejected instead of silently decoded.
 
-**Small images.** The library doesn't clamp decomposition levels: a 16x16 image at 5 levels
-crashes the reference encoder. The bridge clamps levels to what the image supports.
+**Small images.** The bridge clamps decomposition levels (`decomposition_levels_for`) to what the
+image dimensions support (up to 5).
 
 **Threads.**
 - `DCMNORM_JPEG2000_THREADS` sets threads per codec call; the default is min(CPUs, 8).

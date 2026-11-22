@@ -30,6 +30,8 @@
 #include <cstring>
 #include <cstdio>
 #include <functional>
+#include <exception>
+#include <stdexcept>
 #include "decoder.hpp"
 #include "jph.hpp"
 // GCC 7.x claims C++17 (__cplusplus >= 201703L) but ships <filesystem>
@@ -50,15 +52,38 @@
   #include <sys/stat.h>
 #endif
 #include "coding_units.hpp"
+#include "stream_row_map.hpp"
 #include "ThreadPool.hpp"
 #ifdef _OPENMP
   #include <omp.h>
+  #include "message_internal.hpp"
 #endif
 namespace open_htj2k {
+// An instance created with num_threads == 1 runs on the calling thread only, even when
+// another instance has created the shared pool (see ThreadPool::SingleThreadScope).
+#ifdef OPENHTJ2K_THREAD
+  #define OPENHTJ2K_SINGLE_THREAD_SCOPE(single) ThreadPool::SingleThreadScope single_thread_scope(single)
+#else
+  #define OPENHTJ2K_SINGLE_THREAD_SCOPE(single) (void)(single)
+#endif
+
+// An empty input holds no codestream.  Rejecting it also keeps the memcpy() of the
+// input below from being called with a null source pointer.
+static void require_input(const uint8_t *buf, size_t length) {
+  if (buf == nullptr || length == 0) {
+    open_htj2k::detail::fail("no codestream data: the input is empty.");
+  }
+}
+
 class openhtj2k_decoder_impl {
  private:
+#ifdef OPENHTJ2K_THREAD
+  // First member: keeps the shared pool alive until everything below is gone.
+  ThreadPoolLease pool_lease_;
+#endif
   j2c_src_memory in;
   uint8_t reduce_NL;
+  bool single_thread_ = false;  // num_threads == 1: never use the shared pool
   uint32_t row_lo_    = 0;
   uint32_t row_limit_ = UINT32_MAX;
   uint32_t col_lo_    = 0;
@@ -66,7 +91,10 @@ class openhtj2k_decoder_impl {
   bool skip_mct_      = false;
   bool is_codestream_set;
   bool is_parsed;
+  // The last invoke*() found data of the image missing (is_truncated()).
+  bool truncated_ = false;
   j2k_main_header main_header;
+  stream_row_map stream_map_;   // output rows of the streaming entry points (parse())
   uint32_t enum_cs;             // EnumCS from JPH colr box; 0 for raw codestreams
   std::vector<uint8_t> jph_file_buf;  // owns full file data when input is a JPH file
 
@@ -75,12 +103,15 @@ class openhtj2k_decoder_impl {
   // keeps the decoded tile alive across calls so the next frame can reuse
   // every aligned allocation hanging off tcomp[] → resolution[] → precinct[]
   // → j2k_codeblock (compressed buffers, tagtrees, ring buffers, line_dec
-  // sub-objects).  Only valid when the main-header marker bytes are byte-
-  // identical across frames; cached_header_fingerprint_ is the FNV-1a hash
-  // of SIZ/COD/COC/QCD/QCC/RGN used as the cache-validity check.
+  // sub-objects).  The structure is kept while the frames' headers describe the
+  // same one (read_reuse_tile()): cached_main_fingerprint_ is the hash of the
+  // structure-shaping main-header marker segments and the resolution reduction,
+  // cached_tile_fingerprint_ that of the tile-part headers, of the last frame
+  // decoded on it (0 when none was).
   bool single_tile_reuse_enabled_      = false;
   std::vector<j2k_tile> cached_tileSet_;
-  uint64_t cached_header_fingerprint_  = 0;
+  uint64_t cached_main_fingerprint_ = 0;
+  uint64_t cached_tile_fingerprint_ = 0;
 
   // JPIP partial-decode filter: invoked per-packet during every subsequent
   // invoke*() call, once per (t, c, r, p_rc).  An empty std::function means
@@ -94,6 +125,7 @@ class openhtj2k_decoder_impl {
       packet_observer_;
 
  public:
+  bool single_thread() const { return single_thread_; }
   openhtj2k_decoder_impl();
   openhtj2k_decoder_impl(const char *, uint8_t reduce_NL, uint32_t num_threads);
   openhtj2k_decoder_impl(const uint8_t *, size_t, uint8_t reduce_NL, uint32_t num_threads);
@@ -112,6 +144,8 @@ class openhtj2k_decoder_impl {
   }
   uint8_t get_minimum_DWT_levels();
   uint8_t get_max_safe_reduce_NL();
+  uint32_t get_stream_row_count() const;
+  uint32_t get_stream_component_row(uint16_t c, uint32_t y) const;
 
   void invoke_line_based(std::vector<int32_t *> &, std::vector<uint32_t> &, std::vector<uint32_t> &,
                          std::vector<uint8_t> &, std::vector<bool> &);
@@ -135,6 +169,19 @@ class openhtj2k_decoder_impl {
     col_hi_ = col_hi;
   }
   void set_skip_mct(bool skip) { skip_mct_ = skip; }
+  bool is_truncated() const { return truncated_; }
+  // Called at the start of every decode: the flag describes the last one.
+  void reset_truncated() { truncated_ = false; }
+  // Reads the tile-parts up to the EOC marker, handing each SOT marker segment to
+  // add_tile_part, which reads the rest of the tile-part into its tile.  A codestream
+  // that ends first is truncated: the tile-part it ends in keeps the bytes there are, or
+  // is left out when the codestream ends inside its header, and the decode goes on with
+  // the data read (reported once per decode, is_truncated()).
+  void read_tile_parts(const std::function<void(SOT_marker &)> &add_tile_part);
+  // After a tile's packets are read (create_tile_buf()): notes a tile that lacks data.
+  void note_tile_data(const j2k_tile &tile) {
+    if (tile.is_data_missing()) truncated_ = true;
+  }
   void set_precinct_filter(std::function<bool(uint16_t, uint16_t, uint8_t, uint32_t)> f);
   void set_packet_observer(
       std::function<void(uint16_t, uint16_t, uint8_t, uint32_t, uint16_t, uint64_t, uint64_t)> f);
@@ -148,6 +195,39 @@ class openhtj2k_decoder_impl {
   // Analogous to install_precinct_filter but for the packet observer.
   void install_packet_observer(j2k_tile &tile, uint16_t tile_idx);
 
+  // Single-tile reuse: sets up cached_tileSet_[0] for this frame, reads its tile-parts and
+  // creates its tile buffer, keeping the structure of the last frame decoded when this
+  // frame's headers describe the same one and building it afresh otherwise.  The cache
+  // counts as holding no decoded frame until the caller records the returned fingerprints
+  // after decoding.
+  struct reuse_fingerprints {
+    uint64_t main_header, tile_parts;
+  };
+  reuse_fingerprints read_reuse_tile(const char *entry_point);
+  void drop_reuse_cache() {
+    cached_tileSet_.clear();
+    cached_main_fingerprint_ = 0;
+    cached_tile_fingerprint_ = 0;
+  }
+
+  // The decoders reconstruct samples, add the DC offset and clamp in 32-bit integers and
+  // hand out int32_t samples (ISO/IEC 15444-1 allows up to 38 bits).  That leaves room
+  // for the overshoot of lossy reconstruction above and below the sample range up to
+  // 30-bit unsigned and 31-bit signed samples: refuse deeper ones.
+  void require_int32_samples() {
+    const uint16_t nc = main_header.SIZ->get_num_components();
+    for (uint16_t c = 0; c < nc; ++c) {
+      const uint8_t bd = main_header.SIZ->get_bitdepth(c);
+      const bool sg    = main_header.SIZ->is_signed(c);
+      if (bd > (sg ? 31 : 30)) {
+        open_htj2k::detail::fail(
+            "component %u has %u-bit %s samples: not supported, the decoder takes up to 30-bit unsigned "
+            "and 31-bit signed samples.",
+            static_cast<unsigned>(c), static_cast<unsigned>(bd), sg ? "signed" : "unsigned");
+      }
+    }
+  }
+
   void destroy();
 };
 
@@ -160,11 +240,12 @@ openhtj2k_decoder_impl::openhtj2k_decoder_impl() {
 
 openhtj2k_decoder_impl::openhtj2k_decoder_impl(const char *filename, const uint8_t r, uint32_t num_threads)
     : reduce_NL(r), is_codestream_set(false), is_parsed(false), enum_cs(0) {
+  single_thread_ = (num_threads == 1);
   uintmax_t file_size;
 #ifdef OPENHTJ2K_HAS_FILESYSTEM
   try {
     file_size = std::filesystem::file_size(filename);
-  } catch (std::filesystem::filesystem_error &err) {
+  } catch (std::filesystem::filesystem_error &) {
     throw std::runtime_error(std::string("input file not found: ") + filename);
   }
 #else
@@ -174,17 +255,22 @@ openhtj2k_decoder_impl::openhtj2k_decoder_impl(const char *filename, const uint8
   }
   file_size = static_cast<uintmax_t>(st.st_size);
 #endif
+  if (file_size == 0) {
+    open_htj2k::detail::fail("%s is empty.", filename);
+  }
 #ifdef OPENHTJ2K_THREAD
   ThreadPool::instance(num_threads);
 #endif
   // Read the entire file into a temporary buffer for JPH detection.
   FILE *fp = fopen(filename, "rb");
+  if (fp == nullptr) {
+    open_htj2k::detail::fail("%s cannot be opened.", filename);
+  }
   jph_file_buf.resize(static_cast<size_t>(file_size));
   size_t bytes_read = fread(jph_file_buf.data(), sizeof(uint8_t), jph_file_buf.size(), fp);
   fclose(fp);
   if (bytes_read < static_cast<size_t>(file_size)) {
-    printf("ERROR: %s seems to have not enough data.\n", filename);
-    throw std::exception();
+    open_htj2k::detail::fail("%s seems to have not enough data.", filename);
   }
   // Detect JPH/JP2 signature and extract embedded codestream if found.
   jph_info info;
@@ -209,8 +295,8 @@ openhtj2k_decoder_impl::openhtj2k_decoder_impl(const char *filename, const uint8
 openhtj2k_decoder_impl::openhtj2k_decoder_impl(const uint8_t *buf, const size_t length, const uint8_t r,
                                                uint32_t num_threads)
     : reduce_NL(r), is_codestream_set(false), is_parsed(false), enum_cs(0) {
-  if (buf == nullptr) {
-  }
+  single_thread_ = (num_threads == 1);
+  require_input(buf, length);
 #ifdef OPENHTJ2K_THREAD
   ThreadPool::instance(num_threads);
 #endif
@@ -231,10 +317,12 @@ openhtj2k_decoder_impl::openhtj2k_decoder_impl(const uint8_t *buf, const size_t 
 
 void openhtj2k_decoder_impl::init(const uint8_t *buf, const size_t length, const uint8_t r,
                                   uint32_t num_threads) {
+  single_thread_ = (num_threads == 1);
   reduce_NL = r;
   enum_cs   = 0;
-  if (buf == nullptr) {
-  }
+  // Until this input is in place, parse() must not read the previous one.
+  is_codestream_set = false;
+  require_input(buf, length);
 #ifdef OPENHTJ2K_THREAD
   ThreadPool::instance(num_threads);
 #endif
@@ -254,10 +342,11 @@ void openhtj2k_decoder_impl::init(const uint8_t *buf, const size_t length, const
 
 void openhtj2k_decoder_impl::init_borrow(uint8_t *buf, const size_t length, const uint8_t r,
                                           uint32_t num_threads) {
+  single_thread_ = (num_threads == 1);
   reduce_NL = r;
   enum_cs   = 0;
-  if (buf == nullptr) {
-  }
+  is_codestream_set = false;
+  require_input(buf, length);
 #ifdef OPENHTJ2K_THREAD
   ThreadPool::instance(num_threads);
 #endif
@@ -282,15 +371,86 @@ void openhtj2k_decoder_impl::init_borrow(uint8_t *buf, const size_t length, cons
 
 void openhtj2k_decoder_impl::parse() {
   if (is_codestream_set == false) {
-    printf(
-        "ERROR: openhtj2k_decoder_impl::openhtj2k_decoder_impl() shall be called before calling "
-        "openhtj2k_decoder_impl::parse().\n");
-    throw std::exception();
+    open_htj2k::detail::fail(
+        "openhtj2k_decoder_impl::openhtj2k_decoder_impl() shall be called before calling "
+        "openhtj2k_decoder_impl::parse().");
   }
   // Read main header
   main_header.read(in);
   in.rewind_2bytes();
+  {
+    element_siz siz, Osiz, Rsiz;
+    main_header.SIZ->get_image_size(siz);
+    main_header.SIZ->get_image_origin(Osiz);
+    const uint16_t num_components = main_header.SIZ->get_num_components();
+    std::vector<uint32_t> yr(num_components);
+    for (uint16_t c = 0; c < num_components; ++c) {
+      main_header.SIZ->get_subsampling_factor(Rsiz, c);
+      yr[c] = Rsiz.y;
+    }
+    stream_map_.init(Osiz.y, siz.y, yr, reduce_NL);
+  }
   is_parsed = true;
+  truncated_ = false;
+}
+
+// For the tile-part whose SOT marker code was just read: whether the codestream holds its
+// header, the SOT marker segment and the marker segments up to SOD.  Only a tile-part that
+// reaches past the end of the codestream (by its Psot, or with Psot 0) can lack it; a
+// header that the bytes there are hold is read as it is, and refused there when malformed.
+static bool tile_part_header_present(j2c_src_memory &in) {
+  const uint32_t remaining = in.get_remaining();
+  const uint8_t *p         = in.get_buf_pos();
+  if (remaining < 10) return false;  // Lsot, Isot, Psot, TPsot and TNsot
+  const uint32_t Psot = (static_cast<uint32_t>(p[4]) << 24) | (static_cast<uint32_t>(p[5]) << 16)
+                        | (static_cast<uint32_t>(p[6]) << 8) | p[7];
+  // Psot counts from the SOT marker code, the 2 bytes before p.
+  if (Psot >= 2 && Psot - 2 <= remaining) return true;
+  uint32_t i = 10;
+  for (;;) {
+    if (remaining - i < 2) return false;
+    const uint32_t marker = (static_cast<uint32_t>(p[i]) << 8) | p[i + 1];
+    if (marker == _SOD) return true;
+    if (marker >= 0xFF30 && marker <= 0xFF3F) {  // a marker without a segment (A.1.4)
+      i += 2;
+      continue;
+    }
+    if (remaining - i < 4) return false;
+    const uint32_t Lmar = (static_cast<uint32_t>(p[i + 2]) << 8) | p[i + 3];
+    if (Lmar < 2) return true;  // malformed: refused by the header reader
+    if (Lmar > remaining - i - 2) return false;
+    i += 2 + Lmar;
+  }
+}
+
+void openhtj2k_decoder_impl::read_tile_parts(const std::function<void(SOT_marker &)> &add_tile_part) {
+  while (in.get_remaining() >= 2) {
+    const uint16_t word = in.get_word();
+    if (word == _EOC) return;
+    if (word != _SOT) {
+      open_htj2k::detail::fail("SOT marker segment expected but %04X is found", word);
+    }
+    if (!tile_part_header_present(in)) break;
+    SOT_marker sot(in);
+    add_tile_part(sot);
+  }
+  if (!truncated_) {
+    open_htj2k::detail::warn("codestream ends before its EOC marker — decoding the partial data.");
+  }
+  truncated_ = true;
+}
+
+uint32_t openhtj2k_decoder_impl::get_stream_row_count() const {
+  if (!is_parsed) {
+    open_htj2k::detail::fail("parse() shall be called before get_stream_row_count().");
+  }
+  return stream_map_.n;
+}
+uint32_t openhtj2k_decoder_impl::get_stream_component_row(uint16_t c, uint32_t y) const {
+  if (!is_parsed) {
+    open_htj2k::detail::fail("parse() shall be called before get_stream_component_row().");
+  }
+  return stream_map_.row(c, y);
 }
 
 uint16_t openhtj2k_decoder_impl::get_num_component() const { return main_header.SIZ->get_num_components(); }
@@ -300,7 +460,7 @@ uint32_t openhtj2k_decoder_impl::get_component_width(uint16_t c) const {
   main_header.SIZ->get_image_origin(origin);
   main_header.SIZ->get_subsampling_factor(subsampling_factor, c);
 
-  return ceil_int(size.x - origin.x, subsampling_factor.x);
+  return ceil_int(size.x, subsampling_factor.x) - ceil_int(origin.x, subsampling_factor.x);
 }
 uint32_t openhtj2k_decoder_impl::get_component_height(uint16_t c) const {
   element_siz size, origin, subsampling_factor;
@@ -308,7 +468,7 @@ uint32_t openhtj2k_decoder_impl::get_component_height(uint16_t c) const {
   main_header.SIZ->get_image_origin(origin);
   main_header.SIZ->get_subsampling_factor(subsampling_factor, c);
 
-  return ceil_int(size.y - origin.y, subsampling_factor.y);
+  return ceil_int(size.y, subsampling_factor.y) - ceil_int(origin.y, subsampling_factor.y);
 }
 uint8_t openhtj2k_decoder_impl::get_component_depth(uint16_t c) const {
   return main_header.SIZ->get_bitdepth(c);
@@ -317,45 +477,35 @@ bool openhtj2k_decoder_impl::get_component_signedness(uint16_t c) const {
   return main_header.SIZ->is_signed(c);
 }
 
+// Main-header COC markers may appear in any component order, so both functions
+// below look at every COC marker rather than walking the components.  A COC for a
+// component index the image does not have is ignored.
 uint8_t openhtj2k_decoder_impl::get_minimum_DWT_levels() {
   uint8_t NL = main_header.COD->get_dwt_levels();
-  if (main_header.COC.empty() == false) {
-    size_t i = 0;
-    for (uint16_t c = 0; c < this->get_num_component(); ++c) {
-      if (main_header.COC[i]->get_component_index() == c) {
-        // When DFS is active, SPcoc[0] encodes the DFS index, not level count.
-        // Skip this COC for minimum level calculation; use COD's NL instead.
-        if (!main_header.COC[i]->is_dfs_defined()) {
-          if (NL > main_header.COC[i]->get_dwt_levels()) {
-            NL = main_header.COC[i]->get_dwt_levels();
-          }
-        }
-        ++i;
-      }
+  for (const auto &coc : main_header.COC) {
+    if (coc->get_component_index() >= this->get_num_component()) continue;
+    // When DFS is active, SPcoc[0] encodes the DFS index, not level count.
+    // Skip this COC for minimum level calculation; use COD's NL instead.
+    if (!coc->is_dfs_defined() && NL > coc->get_dwt_levels()) {
+      NL = coc->get_dwt_levels();
     }
   }
   return NL;
 }
 
 uint8_t openhtj2k_decoder_impl::get_max_safe_reduce_NL() {
-  // Start with the non-DFS upper bound.
-  uint8_t max_r = get_minimum_DWT_levels();
+  // Start with the non-DFS upper bound.  Reducing by all 32 levels of a 32-level
+  // transform is not supported: the reduced coordinates divide by 2^32.
+  uint8_t max_r = std::min<uint8_t>(get_minimum_DWT_levels(), 31);
   // For each DFS-active component, further limit to consecutive BIDIR levels from
   // the finest: reducing through a HONLY or VONLY level produces an image that
   // only has half the resolution in one spatial dimension, which is meaningless.
-  if (!main_header.COC.empty()) {
-    size_t i = 0;
-    for (uint16_t c = 0; c < this->get_num_component(); ++c) {
-      if (i < main_header.COC.size() && main_header.COC[i]->get_component_index() == c) {
-        if (main_header.COC[i]->is_dfs_defined()) {
-          const DFS_marker *dfs = main_header.get_dfs_marker(main_header.COC[i]->get_dfs_index());
-          if (dfs != nullptr) {
-            uint8_t dfs_safe = dfs->get_max_safe_reduce();
-            if (max_r > dfs_safe) max_r = dfs_safe;
-          }
-        }
-        ++i;
-      }
+  for (const auto &coc : main_header.COC) {
+    if (coc->get_component_index() >= this->get_num_component() || !coc->is_dfs_defined()) continue;
+    const DFS_marker *dfs = main_header.get_dfs_marker(coc->get_dfs_index());
+    if (dfs != nullptr) {
+      uint8_t dfs_safe = dfs->get_max_safe_reduce();
+      if (max_r > dfs_safe) max_r = dfs_safe;
     }
   }
   return max_r;
@@ -363,11 +513,8 @@ uint8_t openhtj2k_decoder_impl::get_max_safe_reduce_NL() {
 
 void openhtj2k_decoder_impl::destroy() {}
 
-openhtj2k_decoder_impl::~openhtj2k_decoder_impl() {
-#ifdef OPENHTJ2K_THREAD
-  ThreadPool::release();
-#endif
-}
+// The pool reference is dropped by pool_lease_, after the other members.
+openhtj2k_decoder_impl::~openhtj2k_decoder_impl() {}
 
 // public interface
 openhtj2k_decoder::openhtj2k_decoder() { this->impl = MAKE_UNIQUE<openhtj2k_decoder_impl>(); }
@@ -387,7 +534,10 @@ void openhtj2k_decoder::init_borrow(uint8_t *buf, size_t length, const uint8_t r
                                     uint32_t num_threads) {
   this->impl->init_borrow(buf, length, reduce_NL, num_threads);
 }
-void openhtj2k_decoder::parse() { this->impl->parse(); }
+void openhtj2k_decoder::parse() {
+  OPENHTJ2K_SINGLE_THREAD_SCOPE(this->impl->single_thread());
+  this->impl->parse();
+}
 
 uint16_t openhtj2k_decoder::get_num_component() { return this->impl->get_num_component(); }
 uint32_t openhtj2k_decoder::get_component_width(uint16_t c) { return this->impl->get_component_width(c); }
@@ -398,8 +548,13 @@ bool openhtj2k_decoder::get_component_signedness(uint16_t c) {
 }
 uint8_t openhtj2k_decoder::get_minumum_DWT_levels() { return this->impl->get_minimum_DWT_levels(); }
 uint8_t openhtj2k_decoder::get_max_safe_reduce_NL() { return this->impl->get_max_safe_reduce_NL(); }
+uint32_t openhtj2k_decoder::get_stream_row_count() { return this->impl->get_stream_row_count(); }
+uint32_t openhtj2k_decoder::get_stream_component_row(uint16_t c, uint32_t y) {
+  return this->impl->get_stream_component_row(c, y);
+}
 uint32_t openhtj2k_decoder::get_colorspace() { return this->impl->get_colorspace(); }
 uint8_t openhtj2k_decoder::get_mct() { return this->impl->get_mct(); }
+bool openhtj2k_decoder::is_truncated() { return this->impl->is_truncated(); }
 
 // ─────────────────────────────────────────────────────────────────────────────
 void openhtj2k_decoder_impl::invoke_line_based(std::vector<int32_t *> &buf,
@@ -408,11 +563,11 @@ void openhtj2k_decoder_impl::invoke_line_based(std::vector<int32_t *> &buf,
                                                std::vector<uint8_t> &depth,
                                                std::vector<bool> &is_signed) {
   if (!is_parsed) {
-    printf(
-        "ERROR: openhtj2k_decoder_impl::parse() shall be called before calling "
-        "openhtj2k_decoder_impl::invoke_line_based().\n");
-    throw std::exception();
+    open_htj2k::detail::fail(
+        "openhtj2k_decoder_impl::parse() shall be called before calling "
+        "openhtj2k_decoder_impl::invoke_line_based().");
   }
+  require_int32_samples();
   if (reduce_NL > this->get_max_safe_reduce_NL()) {
     throw std::runtime_error(
         "Attempting to access a non-existent resolution level: -reduce exceeds the\n"
@@ -426,8 +581,7 @@ void openhtj2k_decoder_impl::invoke_line_based(std::vector<int32_t *> &buf,
   // Validate tile count BEFORE allocating output buffers — otherwise the raw `new int32_t[]`
   // pointers pushed into `buf` would leak on throw (caller owns `buf` but only after return).
   if (numTiles.x * numTiles.y > 65535) {
-    printf("ERROR: The number of tiles exceeds its allowable maximum (65535).\n");
-    throw std::exception();
+    open_htj2k::detail::fail("The number of tiles exceeds its allowable maximum (65535).");
   }
 
   // Allocate output buffers.
@@ -437,15 +591,27 @@ void openhtj2k_decoder_impl::invoke_line_based(std::vector<int32_t *> &buf,
   main_header.SIZ->get_image_origin(Osiz);
   main_header.SIZ->get_tile_size(Tsiz);
   main_header.SIZ->get_tile_origin(TOsiz);
+  // Check every buffer size before allocating any (see above): width * height can
+  // exceed 32 bits, and on a 32-bit platform the byte count can exceed size_t.
+  for (uint16_t c = 0; c < num_components; c++) {
+    main_header.SIZ->get_subsampling_factor(Rsiz, c);
+    const uint64_t w = reduced_extent(ceil_int(Osiz.x, Rsiz.x), ceil_int(siz.x, Rsiz.x), reduce_NL);
+    const uint64_t h = reduced_extent(ceil_int(Osiz.y, Rsiz.y), ceil_int(siz.y, Rsiz.y), reduce_NL);
+    if (w * h > SIZE_MAX / sizeof(int32_t)) {
+      open_htj2k::detail::fail("component %u has %llu x %llu samples: too many for this platform.",
+                               static_cast<unsigned>(c), static_cast<unsigned long long>(w),
+                               static_cast<unsigned long long>(h));
+    }
+  }
   for (uint16_t c = 0; c < num_components; c++) {
     main_header.SIZ->get_subsampling_factor(Rsiz, c);
     const uint32_t x0 = ceil_int(Osiz.x, Rsiz.x);
     const uint32_t x1 = ceil_int(siz.x, Rsiz.x);
     const uint32_t y0 = ceil_int(Osiz.y, Rsiz.y);
     const uint32_t y1 = ceil_int(siz.y, Rsiz.y);
-    width.push_back(ceil_int(x1 - x0, (1U << reduce_NL)));
-    height.push_back(ceil_int(y1 - y0, (1U << reduce_NL)));
-    buf.emplace_back(new int32_t[width[c] * height[c]]);
+    width.push_back(reduced_extent(x0, x1, reduce_NL));
+    height.push_back(reduced_extent(y0, y1, reduce_NL));
+    buf.emplace_back(new int32_t[static_cast<size_t>(width[c]) * height[c]]);
     depth.push_back(main_header.SIZ->get_bitdepth(c));
     is_signed.push_back(main_header.SIZ->is_signed(c));
   }
@@ -456,24 +622,14 @@ void openhtj2k_decoder_impl::invoke_line_based(std::vector<int32_t *> &buf,
     tileSet[i].dec_init(i, main_header, reduce_NL);
   }
 
-  uint16_t word;
-  SOT_marker tmpSOT;
-  uint16_t tile_index;
-  // Read all tile parts; treat EOF as EOC for truncated codestreams.
-  while (in.get_remaining() >= 2 && (word = in.get_word()) != _EOC) {
-    if (word != _SOT) {
-      printf("ERROR: SOT marker segment expected but %04X is found\n", word);
-      throw std::exception();
-    }
-    tmpSOT     = SOT_marker(in);
-    tile_index = tmpSOT.get_tile_index();
+  read_tile_parts([&](SOT_marker &sot) {
+    const uint16_t tile_index = sot.get_tile_index();
     if (tile_index >= tileSet.size()) {
-      printf("ERROR: SOT tile index %u is out of range (numTiles=%zu)\n",
-             tile_index, tileSet.size());
-      throw std::exception();
+      open_htj2k::detail::fail("SOT tile index %u is out of range (numTiles=%zu)", tile_index,
+                               tileSet.size());
     }
-    tileSet[tile_index].add_tile_part(tmpSOT, in, main_header);
-  }
+    tileSet[tile_index].add_tile_part(sot, in, main_header);
+  });
 
   for (uint32_t i = 0; i < numTiles.x * numTiles.y; i++) {
     try {
@@ -481,11 +637,11 @@ void openhtj2k_decoder_impl::invoke_line_based(std::vector<int32_t *> &buf,
       install_precinct_filter(tileSet[i], static_cast<uint16_t>(i));
       install_packet_observer(tileSet[i], static_cast<uint16_t>(i));
       tileSet[i].create_tile_buf(main_header);
-    } catch (std::exception &exc) {
-      printf("ERROR: %s\n", exc.what());
+    } catch (std::exception &) {
       tileSet[i].destroy();
-      throw std::runtime_error("Abort Decoding!");
+      throw;
     }
+    note_tile_data(tileSet[i]);
     // decode_line_based() replaces decode() + ycbcr_to_rgb() + finalize().
     tileSet[i].decode_line_based(main_header, reduce_NL, buf);
     tileSet[i].destroy();  // Release tile-internal buffers immediately (output is in buf)
@@ -495,6 +651,8 @@ void openhtj2k_decoder_impl::invoke_line_based(std::vector<int32_t *> &buf,
 void openhtj2k_decoder::invoke_line_based(std::vector<int32_t *> &buf, std::vector<uint32_t> &width,
                                           std::vector<uint32_t> &height, std::vector<uint8_t> &depth,
                                           std::vector<bool> &is_signed) {
+  OPENHTJ2K_SINGLE_THREAD_SCOPE(this->impl->single_thread());
+  this->impl->reset_truncated();
   this->impl->invoke_line_based(buf, width, height, depth, is_signed);
 }
 
@@ -502,11 +660,11 @@ void openhtj2k_decoder_impl::invoke_line_based_stream(
     std::function<void(uint32_t, int32_t *const *, uint16_t)> cb, std::vector<uint32_t> &width,
     std::vector<uint32_t> &height, std::vector<uint8_t> &depth, std::vector<bool> &is_signed) {
   if (!is_parsed) {
-    printf(
-        "ERROR: openhtj2k_decoder_impl::parse() shall be called before calling "
-        "openhtj2k_decoder_impl::invoke_line_based_stream().\n");
-    throw std::exception();
+    open_htj2k::detail::fail(
+        "openhtj2k_decoder_impl::parse() shall be called before calling "
+        "openhtj2k_decoder_impl::invoke_line_based_stream().");
   }
+  require_int32_samples();
   if (reduce_NL > this->get_max_safe_reduce_NL()) {
     throw std::runtime_error(
         "Attempting to access a non-existent resolution level: -reduce exceeds the\n"
@@ -519,8 +677,7 @@ void openhtj2k_decoder_impl::invoke_line_based_stream(
   main_header.get_number_of_tiles(numTiles.x, numTiles.y);
   // Validate tile count BEFORE populating output metadata.
   if (numTiles.x * numTiles.y > 65535) {
-    printf("ERROR: The number of tiles exceeds its allowable maximum (65535).\n");
-    throw std::exception();
+    open_htj2k::detail::fail("The number of tiles exceeds its allowable maximum (65535).");
   }
 
   uint16_t num_components = main_header.SIZ->get_num_components();
@@ -535,8 +692,8 @@ void openhtj2k_decoder_impl::invoke_line_based_stream(
     const uint32_t x1 = ceil_int(siz.x, Rsiz.x);
     const uint32_t y0 = ceil_int(Osiz.y, Rsiz.y);
     const uint32_t y1 = ceil_int(siz.y, Rsiz.y);
-    width.push_back(ceil_int(x1 - x0, (1U << reduce_NL)));
-    height.push_back(ceil_int(y1 - y0, (1U << reduce_NL)));
+    width.push_back(reduced_extent(x0, x1, reduce_NL));
+    height.push_back(reduced_extent(y0, y1, reduce_NL));
     depth.push_back(main_header.SIZ->get_bitdepth(c));
     is_signed.push_back(main_header.SIZ->is_signed(c));
   }
@@ -547,30 +704,18 @@ void openhtj2k_decoder_impl::invoke_line_based_stream(
     tileSet[i].dec_init(i, main_header, reduce_NL);
   }
 
-  uint16_t word;
-  SOT_marker tmpSOT;
-  uint16_t tile_index;
-  // Read all tile parts; treat EOF as EOC for truncated codestreams.
-  while (in.get_remaining() >= 2 && (word = in.get_word()) != _EOC) {
-    if (word != _SOT) {
-      printf("ERROR: SOT marker segment expected but %04X is found\n", word);
-      throw std::exception();
-    }
-    tmpSOT     = SOT_marker(in);
-    tile_index = tmpSOT.get_tile_index();
+  read_tile_parts([&](SOT_marker &sot) {
+    const uint16_t tile_index = sot.get_tile_index();
     if (tile_index >= tileSet.size()) {
-      printf("ERROR: SOT tile index %u is out of range (numTiles=%zu)\n",
-             tile_index, tileSet.size());
-      throw std::exception();
+      open_htj2k::detail::fail("SOT tile index %u is out of range (numTiles=%zu)", tile_index,
+                               tileSet.size());
     }
-    tileSet[tile_index].add_tile_part(tmpSOT, in, main_header);
-  }
-
-  const uint32_t rscale = 1U << reduce_NL;
+    tileSet[tile_index].add_tile_part(sot, in, main_header);
+  });
 
   // Compute tile-component geometry (pixel offset + size at active resolution).
-  auto get_tile_geom = [&](uint32_t tx, uint32_t ty, uint16_t c, uint32_t &x_off,
-                           uint32_t &y_off, uint32_t &t_w, uint32_t &t_h) {
+  auto get_tile_geom = [&](uint32_t tx, uint32_t ty, uint16_t c, uint32_t &x_off, uint32_t &y_off,
+                           uint32_t &t_w, uint32_t &t_h) {
     element_siz Rsiz_c;
     main_header.SIZ->get_subsampling_factor(Rsiz_c, c);
     const uint32_t x0_c  = ceil_int(Osiz.x, Rsiz_c.x);
@@ -583,69 +728,100 @@ void openhtj2k_decoder_impl::invoke_line_based_stream(
     const uint32_t tcx1  = ceil_int(gtx1, Rsiz_c.x);
     const uint32_t tcy0  = ceil_int(gty0, Rsiz_c.y);
     const uint32_t tcy1  = ceil_int(gty1, Rsiz_c.y);
-    x_off = ceil_int(tcx0, rscale) - ceil_int(x0_c, rscale);
-    y_off = ceil_int(tcy0, rscale) - ceil_int(y0_c, rscale);
-    t_w   = ceil_int(tcx1, rscale) - ceil_int(tcx0, rscale);
-    t_h   = ceil_int(tcy1, rscale) - ceil_int(tcy0, rscale);
+    x_off                = static_cast<uint32_t>(stream_row_map::ceil_shift(tcx0, reduce_NL)
+                                                 - stream_row_map::ceil_shift(x0_c, reduce_NL));
+    y_off                = static_cast<uint32_t>(stream_row_map::ceil_shift(tcy0, reduce_NL)
+                                                 - stream_row_map::ceil_shift(y0_c, reduce_NL));
+    t_w                  = static_cast<uint32_t>(stream_row_map::ceil_shift(tcx1, reduce_NL)
+                                                 - stream_row_map::ceil_shift(tcx0, reduce_NL));
+    t_h                  = static_cast<uint32_t>(stream_row_map::ceil_shift(tcy1, reduce_NL)
+                                                 - stream_row_map::ceil_shift(tcy0, reduce_NL));
+  };
+  // First and one-past-last reduced reference-grid rows of tile row ty.
+  auto tile_row_span = [&](uint32_t ty, uint64_t &g0, uint64_t &g1) {
+    const uint64_t t0 = static_cast<uint64_t>(TOsiz.y) + static_cast<uint64_t>(ty) * Tsiz.y;
+    g0                = stream_row_map::ceil_shift(std::max<uint64_t>(t0, Osiz.y), reduce_NL);
+    g1                = stream_row_map::ceil_shift(std::min<uint64_t>(t0 + Tsiz.y, siz.y), reduce_NL);
   };
 
-  uint32_t global_y = 0;
+  // Output rows (stream_row_map.hpp, documented with invoke_line_based_stream in
+  // decoder.hpp).  Each tile delivers the output rows that start in it.
+  const stream_row_map &map = stream_map_;
 
   if (numTiles.x == 1) {
     // Fast path: single tile column — deliver rows directly to user callback, no accumulator.
+    // The row buffers persist from one tile to the next, so a component row that
+    // started in an earlier tile (a tile height that is not a multiple of the
+    // component's vertical factor) is still there.
+    std::vector<std::vector<int32_t>> rows(num_components);
+    for (uint16_t c = 0; c < num_components; ++c) rows[c].assign(std::max<size_t>(width[c], 1), 0);
     for (uint32_t ty = 0; ty < numTiles.y; ++ty) {
-      uint32_t x_off, y_off, t_w, band_h0;
-      get_tile_geom(0, ty, 0, x_off, y_off, t_w, band_h0);
+      uint64_t g0, g1;
+      tile_row_span(ty, g0, g1);
+      if (map.first_out_at(g0) >= row_limit_) break;  // past the window
+      // The tile's rows go to the callback as image rows, so the tile must span the
+      // image width in every component (the SIZ checks guarantee it for one tile column).
+      for (uint16_t c = 0; c < num_components; ++c) {
+        uint32_t cx, cy, cw, ch;
+        get_tile_geom(0, ty, c, cx, cy, cw, ch);
+        if (cx != 0 || cw != width[c]) {
+          open_htj2k::detail::fail("tile %u spans %u of the %u columns of component %u — malformed input.",
+                                   static_cast<unsigned>(ty), cw, width[c], static_cast<unsigned>(c));
+        }
+      }
       const uint32_t tile_idx = ty;
       try {
         tileSet[tile_idx].line_based_decode = true;
         install_precinct_filter(tileSet[tile_idx], static_cast<uint16_t>(tile_idx));
         install_packet_observer(tileSet[tile_idx], static_cast<uint16_t>(tile_idx));
         tileSet[tile_idx].create_tile_buf(main_header);
-      } catch (std::exception &exc) {
-        printf("ERROR: %s\n", exc.what());
+      } catch (std::exception &) {
         tileSet[tile_idx].destroy();
-        throw std::runtime_error("Abort Decoding!");
+        throw;
       }
-      tileSet[tile_idx].decode_line_based_stream(main_header, reduce_NL,
-          [&](uint32_t y_local, int32_t *const *rows, uint16_t nc) {
-            cb(global_y + y_local, rows, nc);
-          }, row_limit_, row_lo_, col_lo_, col_hi_, skip_mct_);
+      note_tile_data(tileSet[tile_idx]);
+      tileSet[tile_idx].decode_line_based_stream(main_header, reduce_NL, cb, row_limit_, row_lo_, col_lo_,
+                                                 col_hi_, skip_mct_, &rows);
       tileSet[tile_idx].destroy();
-      global_y += band_h0;
     }
     return;
   }
 
-  // General path: multiple tile columns — scatter into per-band-row accumulators.
+  // General path: multiple tile columns — scatter into per-tile-row accumulators.
+  // accum[c] holds the rows of component c in the current tile row (absolute rows
+  // [tr_first[c], tr_first[c] + tr_rows[c])); carry[c] the last row of component c
+  // before it (zeros until there is one), for output rows whose component row began
+  // in an earlier tile row.  set_row_range reaches the per-tile decode, which skips
+  // the rows above the window, and the delivery below.
   // Hoist all per-iteration scratch vectors out of the loops so the heap allocations
   // happen once instead of (numTiles.y * (1 + numTiles.x + 1)) times.
-  // NOTE: set_row_range is applied here at the per-tile decode (row_lo/row_hi in
-  // global finest-active-level coords, re-interpreted as tile-local inside each
-  // tile's decode_line_based_stream because tile band-heights stack vertically).
-  // The final `cb(global_y + y, ...)` loop below does NOT filter by row_lo, so
-  // multi-tile row_range still delivers all rows above/below the window back to
-  // the user callback — the savings only reach the HT decode layer.  A future
-  // caller wanting a clean multi-tile row_range needs to translate global row_lo
-  // into tile-local coords for each ty iteration and filter this cb loop.
-  std::vector<uint32_t>             band_h(num_components);
-  std::vector<uint32_t>             tile_x_off(num_components);
-  std::vector<uint32_t>             tile_w(num_components);
-  std::vector<int32_t *>            row_ptrs(num_components);
+  std::vector<uint32_t> tr_first(num_components);
+  std::vector<uint32_t> tr_rows(num_components);
+  std::vector<uint32_t> tile_x_off(num_components);
+  std::vector<uint32_t> tile_w(num_components);
+  std::vector<uint32_t> last_k(num_components);
+  std::vector<int32_t *> row_ptrs(num_components);
   std::vector<std::vector<int32_t>> accum(num_components);
+  std::vector<std::vector<int32_t>> carry(num_components);
+  for (uint16_t c = 0; c < num_components; ++c) carry[c].assign(std::max<size_t>(width[c], 1), 0);
 
   for (uint32_t ty = 0; ty < numTiles.y; ++ty) {
-    // Compute band height per component (same for all tx in this tile row).
-    {
-      uint32_t x_off, y_off, t_w;
-      for (uint16_t c = 0; c < num_components; ++c)
-        get_tile_geom(0, ty, c, x_off, y_off, t_w, band_h[c]);
-    }
+    uint64_t g0, g1;
+    tile_row_span(ty, g0, g1);
+    const uint32_t yb = map.first_out_at(g0);
+    const uint32_t ye = map.first_out_at(g1);
+    if (yb >= row_limit_) break;  // past the window
 
-    // (Re)allocate full-width accumulator buffers for this tile-row band.
+    // (Re)allocate full-width accumulator buffers for this tile row.
     // assign() reuses existing capacity when the new size fits.
-    for (uint16_t c = 0; c < num_components; ++c)
-      accum[c].assign(static_cast<size_t>(band_h[c]) * width[c], 0);
+    // A subsampled component can have no rows in a tile row; keep one zero row so the
+    // row pointers stay valid.
+    for (uint16_t c = 0; c < num_components; ++c) {
+      const uint64_t yr = map.yr[c];
+      tr_first[c]       = static_cast<uint32_t>((g0 + yr - 1) / yr);
+      tr_rows[c]        = static_cast<uint32_t>((g1 + yr - 1) / yr) - tr_first[c];
+      accum[c].assign(static_cast<size_t>(std::max(tr_rows[c], 1U)) * width[c], 0);
+    }
 
     for (uint32_t tx = 0; tx < numTiles.x; ++tx) {
       const uint32_t tile_idx = ty * numTiles.x + tx;
@@ -655,17 +831,29 @@ void openhtj2k_decoder_impl::invoke_line_based_stream(
         uint32_t x_off, y_off, t_w, t_h;
         for (uint16_t c = 0; c < num_components; ++c) {
           get_tile_geom(tx, ty, c, x_off, y_off, t_w, t_h);
+          // The scatter below copies tile_w samples to column x_off of an image row.
+          if (static_cast<uint64_t>(x_off) + t_w > width[c]) {
+            open_htj2k::detail::fail(
+                "tile %u spans columns %u to %llu of component %u, past the image width %u — malformed "
+                "input.",
+                static_cast<unsigned>(tile_idx), x_off, static_cast<unsigned long long>(x_off) + t_w,
+                static_cast<unsigned>(c), width[c]);
+          }
           tile_x_off[c] = x_off;
           tile_w[c]     = t_w;
+          last_k[c]     = UINT32_MAX;
         }
       }
 
-      // Internal scatter callback: copy tile-local rows into accumulator.
-      auto scatter = [&](uint32_t y_local, int32_t *const *rows, uint16_t nc) {
+      // Internal scatter callback: copy each component row of this tile row into its
+      // accumulator row, once.
+      auto scatter = [&](uint32_t y, int32_t *const *rows, uint16_t nc) {
         for (uint16_t c = 0; c < nc; ++c) {
-          if (tile_w[c] == 0 || y_local >= band_h[c]) continue;
-          int32_t *dst =
-              accum[c].data() + static_cast<ptrdiff_t>(y_local) * static_cast<ptrdiff_t>(width[c]) + tile_x_off[c];
+          const uint32_t k = map.abs_row(c, y);
+          if (tile_w[c] == 0 || k == last_k[c] || k < tr_first[c] || k - tr_first[c] >= tr_rows[c])
+            continue;
+          last_k[c]    = k;
+          int32_t *dst = accum[c].data() + static_cast<size_t>(k - tr_first[c]) * width[c] + tile_x_off[c];
           std::memcpy(dst, rows[c], tile_w[c] * sizeof(int32_t));
         }
       };
@@ -675,44 +863,58 @@ void openhtj2k_decoder_impl::invoke_line_based_stream(
         install_precinct_filter(tileSet[tile_idx], static_cast<uint16_t>(tile_idx));
         install_packet_observer(tileSet[tile_idx], static_cast<uint16_t>(tile_idx));
         tileSet[tile_idx].create_tile_buf(main_header);
-      } catch (std::exception &exc) {
-        printf("ERROR: %s\n", exc.what());
+      } catch (std::exception &) {
         tileSet[tile_idx].destroy();
-        throw std::runtime_error("Abort Decoding!");
+        throw;
       }
-      tileSet[tile_idx].decode_line_based_stream(main_header, reduce_NL, scatter, row_limit_,
-                                                  row_lo_, col_lo_, col_hi_, skip_mct_);
+      note_tile_data(tileSet[tile_idx]);
+      tileSet[tile_idx].decode_line_based_stream(main_header, reduce_NL, scatter, row_limit_, row_lo_,
+                                                 col_lo_, col_hi_, skip_mct_, nullptr,
+                                                 /*emit_all_rows=*/true);
       tileSet[tile_idx].destroy();  // Release tile-internal buffers immediately
     }
 
-    // Deliver complete rows for this tile-row band to the user callback.
-    for (uint32_t y = 0; y < band_h[0]; ++y) {
+    // Deliver the output rows of this tile row in the window to the user callback.
+    const uint32_t e0 = std::max(yb, row_lo_);
+    const uint32_t e1 = std::min(ye, row_limit_);
+    for (uint32_t y = e0; y < e1; ++y) {
       for (uint16_t c = 0; c < num_components; ++c) {
-        // For subsampled components, clamp to last valid row.
-        const uint32_t cy = (band_h[c] > 0) ? std::min(y, band_h[c] - 1) : 0;
-        row_ptrs[c] = accum[c].data() + static_cast<ptrdiff_t>(cy) * static_cast<ptrdiff_t>(width[c]);
+        const uint32_t k = map.abs_row(c, y);
+        row_ptrs[c] = (k >= tr_first[c]) ? accum[c].data() + static_cast<size_t>(k - tr_first[c]) * width[c]
+                                         : carry[c].data();
       }
-      cb(global_y + y, row_ptrs.data(), num_components);
+      cb(y, row_ptrs.data(), num_components);
     }
-    global_y += band_h[0];
+    for (uint16_t c = 0; c < num_components; ++c) {
+      if (tr_rows[c] > 0 && width[c] > 0) {
+        std::memcpy(carry[c].data(), accum[c].data() + static_cast<size_t>(tr_rows[c] - 1) * width[c],
+                    width[c] * sizeof(int32_t));
+      }
+    }
   }
 }
 
 void openhtj2k_decoder::invoke_line_based_stream(
     std::function<void(uint32_t y, int32_t *const *, uint16_t nc)> cb, std::vector<uint32_t> &width,
     std::vector<uint32_t> &height, std::vector<uint8_t> &depth, std::vector<bool> &is_signed) {
+  OPENHTJ2K_SINGLE_THREAD_SCOPE(this->impl->single_thread());
+  this->impl->reset_truncated();
   this->impl->invoke_line_based_stream(std::move(cb), width, height, depth, is_signed);
 }
 
 void openhtj2k_decoder::invoke_line_based_stream_reuse(
     std::function<void(uint32_t y, int32_t *const *, uint16_t nc)> cb, std::vector<uint32_t> &width,
     std::vector<uint32_t> &height, std::vector<uint8_t> &depth, std::vector<bool> &is_signed) {
+  OPENHTJ2K_SINGLE_THREAD_SCOPE(this->impl->single_thread());
+  this->impl->reset_truncated();
   this->impl->invoke_line_based_stream_reuse(std::move(cb), width, height, depth, is_signed);
 }
 
 void openhtj2k_decoder::invoke_line_based_direct(
     PlanarOutputDesc *descs, uint16_t nc, std::vector<uint32_t> &width,
     std::vector<uint32_t> &height, std::vector<uint8_t> &depth, std::vector<bool> &is_signed) {
+  OPENHTJ2K_SINGLE_THREAD_SCOPE(this->impl->single_thread());
+  this->impl->reset_truncated();
   this->impl->invoke_line_based_direct(descs, nc, width, height, depth, is_signed);
 }
 
@@ -724,8 +926,7 @@ void openhtj2k_decoder_impl::enable_single_tile_reuse(bool on) {
   single_tile_reuse_enabled_ = on;
   if (!on) {
     // Drop the cache so the next call starts from a clean slate.
-    cached_tileSet_.clear();
-    cached_header_fingerprint_ = 0;
+    drop_reuse_cache();
   }
 }
 
@@ -789,6 +990,77 @@ void openhtj2k_decoder_impl::install_packet_observer(j2k_tile &tile, uint16_t ti
   }
 }
 
+// What a cached single-tile structure depends on: the main header's structure-shaping
+// marker segments (j2k_main_header::structure_fingerprint), the resolution reduction, for
+// which the line decoders are sized, and the tile-part headers' structure-shaping marker
+// segments (j2k_tile::header_fingerprint()), which are known only once the tile-parts are
+// read.  A frame that differs in any of them is decoded with a structure built for it.
+openhtj2k_decoder_impl::reuse_fingerprints openhtj2k_decoder_impl::read_reuse_tile(
+    const char *entry_point) {
+  reuse_fingerprints fp;
+  fp.main_header = fnv1a_bytes(main_header.structure_fingerprint, &reduce_NL, sizeof(reduce_NL));
+  const bool main_header_hit = !cached_tileSet_.empty() && cached_tileSet_[0].is_structure_built()
+                               && cached_main_fingerprint_ == fp.main_header;
+  const uint64_t cached_tile_parts = cached_tile_fingerprint_;
+  // Until this frame is decoded the cache holds no decoded frame: a frame that fails
+  // part-way must not leave a structure built for it under the last frame's fingerprints.
+  cached_main_fingerprint_ = 0;
+  cached_tile_fingerprint_ = 0;
+
+  auto start_afresh = [this]() {
+    if (!cached_tileSet_.empty()) cached_tileSet_[0].destroy();  // gives its budget back
+    cached_tileSet_.clear();
+    cached_tileSet_.resize(1);
+    cached_tileSet_[0].dec_init(0, main_header, reduce_NL);
+  };
+  const uint32_t first_tile_part = in.get_pos();
+  const uint32_t tile_parts_read = main_header.num_tile_parts_read;
+  auto read_tile_parts_of_tile_0 = [&]() {
+    read_tile_parts([&](SOT_marker &sot) {
+      if (sot.get_tile_index() != 0) {
+        throw std::runtime_error(std::string("openhtj2k_decoder_impl::") + entry_point
+                                 + " expected a single-tile codestream (tile_index != 0 found)");
+      }
+      cached_tileSet_[0].add_tile_part(sot, in, main_header);
+    });
+  };
+
+  try {
+    if (main_header_hit) {
+      cached_tileSet_[0].prepare_for_next_frame();
+      // dec_init is a scalar-only update that's safe to call repeatedly; calling it
+      // ensures tile.index / num_components / CCap15 / reduce_NL track the new frame.
+      cached_tileSet_[0].dec_init(0, main_header, reduce_NL);
+    } else {
+      start_afresh();
+    }
+    read_tile_parts_of_tile_0();
+    fp.tile_parts = cached_tileSet_[0].header_fingerprint();
+    if (main_header_hit && fp.tile_parts != cached_tile_parts) {
+      // A tile-part header describes another structure: build it afresh, reading the
+      // tile-parts again.
+      start_afresh();
+      in.set_pos(first_tile_part);
+      main_header.num_tile_parts_read = tile_parts_read;
+      read_tile_parts_of_tile_0();
+    }
+
+    // Flip persistence on tile_components BEFORE the decode call so
+    // finalize_line_decode inside it skips teardown.
+    cached_tileSet_[0].set_line_decode_persistent_all(true);
+    cached_tileSet_[0].line_based_decode = true;
+    install_precinct_filter(cached_tileSet_[0], 0);
+    install_packet_observer(cached_tileSet_[0], 0);
+    cached_tileSet_[0].create_tile_buf(main_header);
+    note_tile_data(cached_tileSet_[0]);
+  } catch (std::exception &) {
+    // The cached tile is likely in a bad state: drop it and rethrow.
+    drop_reuse_cache();
+    throw;
+  }
+  return fp;
+}
+
 // Single-tile reuse entry point.  Mirrors the single-tile fast path of
 // invoke_line_based_stream (numTiles.x == 1 branch) but keeps the j2k_tile
 // parked on cached_tileSet_ so the next call skips create_resolutions,
@@ -804,11 +1076,11 @@ void openhtj2k_decoder_impl::invoke_line_based_stream_reuse(
     std::function<void(uint32_t, int32_t *const *, uint16_t)> cb, std::vector<uint32_t> &width,
     std::vector<uint32_t> &height, std::vector<uint8_t> &depth, std::vector<bool> &is_signed) {
   if (!is_parsed) {
-    printf(
-        "ERROR: openhtj2k_decoder_impl::parse() shall be called before calling "
-        "openhtj2k_decoder_impl::invoke_line_based_stream_reuse().\n");
-    throw std::exception();
+    open_htj2k::detail::fail(
+        "openhtj2k_decoder_impl::parse() shall be called before calling "
+        "openhtj2k_decoder_impl::invoke_line_based_stream_reuse().");
   }
+  require_int32_samples();
   if (!single_tile_reuse_enabled_) {
     invoke_line_based_stream(std::move(cb), width, height, depth, is_signed);
     return;
@@ -828,90 +1100,9 @@ void openhtj2k_decoder_impl::invoke_line_based_stream_reuse(
   // JPEG 2000 encoders — falls through to the legacy path.  The cache is
   // dropped to prevent us from mixing shapes across calls.
   if (numTiles.x != 1 || numTiles.y != 1) {
-    cached_tileSet_.clear();
-    cached_header_fingerprint_ = 0;
+    drop_reuse_cache();
     invoke_line_based_stream(std::move(cb), width, height, depth, is_signed);
     return;
-  }
-
-  // Compute a fingerprint of the marker segments that the tile tree is
-  // structurally sensitive to.  SIZ/COD/COC/QCD/QCC/RGN cover every field
-  // read by create_resolutions / create_subbands / create_precincts; if
-  // any of their encoded bytes change, we must drop the cache.  The
-  // fingerprint is a cheap FNV-1a over the marker's get_length() /
-  // parameter-derived values obtained from the parsed main_header —
-  // computing over the raw bytes would require keeping a copy of the
-  // codestream prefix, which is overkill for a safety check.
-  auto fnv1a_u64 = [](uint64_t h, const void *data, size_t len) {
-    const uint8_t *p = static_cast<const uint8_t *>(data);
-    for (size_t i = 0; i < len; ++i) {
-      h ^= p[i];
-      h *= 1099511628211ull;
-    }
-    return h;
-  };
-  uint64_t fp = 14695981039346656037ull;  // FNV-1a offset basis
-  auto mix_u64 = [&](uint64_t v) {
-    fp = fnv1a_u64(fp, &v, sizeof(v));
-  };
-  {
-    element_siz s_siz, s_osiz, s_tsiz, s_tosiz;
-    main_header.SIZ->get_image_size(s_siz);
-    main_header.SIZ->get_image_origin(s_osiz);
-    main_header.SIZ->get_tile_size(s_tsiz);
-    main_header.SIZ->get_tile_origin(s_tosiz);
-    const uint16_t ncomp = main_header.SIZ->get_num_components();
-    mix_u64((static_cast<uint64_t>(s_siz.x)  << 32) | s_siz.y);
-    mix_u64((static_cast<uint64_t>(s_osiz.x) << 32) | s_osiz.y);
-    mix_u64((static_cast<uint64_t>(s_tsiz.x) << 32) | s_tsiz.y);
-    mix_u64((static_cast<uint64_t>(s_tosiz.x)<< 32) | s_tosiz.y);
-    mix_u64(ncomp);
-    for (uint16_t c = 0; c < ncomp; ++c) {
-      element_siz sub;
-      const uint8_t bd = main_header.SIZ->get_bitdepth(c);
-      const bool    sn = main_header.SIZ->is_signed(c);
-      main_header.SIZ->get_subsampling_factor(sub, c);
-      mix_u64((static_cast<uint64_t>(bd) << 56)
-              | (static_cast<uint64_t>(sn ? 1 : 0) << 48)
-              | (static_cast<uint64_t>(sub.x) << 16)
-              | static_cast<uint64_t>(sub.y));
-    }
-    if (main_header.COD != nullptr) {
-      const uint8_t  dl  = main_header.COD->get_dwt_levels();
-      const uint8_t  po  = main_header.COD->get_progression_order();
-      const uint16_t nl  = main_header.COD->get_number_of_layers();
-      const uint8_t  mct = main_header.COD->use_color_trafo();
-      const uint8_t  cm  = main_header.COD->get_Cmodes();
-      const uint8_t  tx  = main_header.COD->get_transformation();
-      element_siz    cbsz; main_header.COD->get_codeblock_size(cbsz);
-      mix_u64((static_cast<uint64_t>(dl) << 56) | (static_cast<uint64_t>(po) << 48)
-              | (static_cast<uint64_t>(nl) << 32)
-              | (static_cast<uint64_t>(mct) << 24) | (static_cast<uint64_t>(cm) << 16)
-              | static_cast<uint64_t>(tx));
-      mix_u64((static_cast<uint64_t>(cbsz.x) << 32) | cbsz.y);
-      for (uint8_t r = 0; r <= dl; ++r) {
-        element_siz pp; main_header.COD->get_precinct_size(pp, r);
-        mix_u64((static_cast<uint64_t>(pp.x) << 32) | pp.y);
-      }
-    }
-    if (main_header.QCD != nullptr) {
-      const uint8_t qs = main_header.QCD->get_quantization_style();
-      const uint8_t gb = main_header.QCD->get_number_of_guardbits();
-      const uint8_t n0 = main_header.QCD->get_num_entries();
-      mix_u64((static_cast<uint64_t>(qs) << 16) | (static_cast<uint64_t>(gb) << 8)
-              | static_cast<uint64_t>(n0));
-      if (n0 > 0) {
-        const uint8_t  e0 = main_header.QCD->get_exponents(0);
-        const uint16_t m0 = main_header.QCD->get_mantissas(0);
-        mix_u64((static_cast<uint64_t>(e0) << 16) | m0);
-      }
-    }
-    // COC / QCC / RGN lists: hash the count only.  rtp_recv streams do not
-    // use per-component overrides or region-of-interest, so any non-zero
-    // count is an unexpected-shape signal that invalidates the cache.
-    mix_u64(static_cast<uint64_t>(main_header.COC.size()));
-    mix_u64(static_cast<uint64_t>(main_header.QCC.size()));
-    mix_u64(static_cast<uint64_t>(main_header.RGN.size()));
   }
 
   // Populate the output metadata vectors the same way the legacy path does.
@@ -927,74 +1118,19 @@ void openhtj2k_decoder_impl::invoke_line_based_stream_reuse(
     const uint32_t x1 = ceil_int(siz.x, Rsiz.x);
     const uint32_t y0 = ceil_int(Osiz.y, Rsiz.y);
     const uint32_t y1 = ceil_int(siz.y, Rsiz.y);
-    width.push_back(ceil_int(x1 - x0, (1U << reduce_NL)));
-    height.push_back(ceil_int(y1 - y0, (1U << reduce_NL)));
+    width.push_back(reduced_extent(x0, x1, reduce_NL));
+    height.push_back(reduced_extent(y0, y1, reduce_NL));
     depth.push_back(main_header.SIZ->get_bitdepth(c));
     is_signed.push_back(main_header.SIZ->is_signed(c));
   }
 
-  // Cache hit if: we have a cached tile whose tree is built AND whose
-  // fingerprint matches the current frame's main-header.  Otherwise drop
-  // the cache and treat this frame as a first frame.
-  const bool cache_hit = !cached_tileSet_.empty()
-                         && cached_tileSet_[0].is_structure_built()
-                         && cached_header_fingerprint_ == fp;
-  if (!cache_hit) {
-    cached_tileSet_.clear();
-    cached_tileSet_.resize(1);
-    cached_tileSet_[0].dec_init(0, main_header, reduce_NL);
-  } else {
-    cached_tileSet_[0].prepare_for_next_frame();
-    // dec_init is a scalar-only update that's safe to call repeatedly;
-    // calling it ensures tile.index / num_components / CCap15 / reduce_NL
-    // track any ABI-compatible main-header tweaks (same fingerprint).
-    cached_tileSet_[0].dec_init(0, main_header, reduce_NL);
-  }
-
-  // Read tile-parts from the current bitstream into the cached (or fresh) tile.
-  {
-    uint16_t word;
-    SOT_marker tmpSOT;
-    while (in.get_remaining() >= 2 && (word = in.get_word()) != _EOC) {
-      if (word != _SOT) {
-        printf("ERROR: SOT marker segment expected but %04X is found\n", word);
-        throw std::exception();
-      }
-      tmpSOT = SOT_marker(in);
-      const uint16_t tile_index = tmpSOT.get_tile_index();
-      if (tile_index != 0) {
-        throw std::runtime_error(
-            "openhtj2k_decoder_impl::invoke_line_based_stream_reuse expected a "
-            "single-tile codestream (tile_index != 0 found)");
-      }
-      cached_tileSet_[0].add_tile_part(tmpSOT, in, main_header);
-    }
-  }
-
-  // Flip persistence on tile_components BEFORE decode_line_based_stream so
-  // finalize_line_decode inside the decode call skips teardown.  On the
-  // first frame this is the point at which the flag starts holding true;
-  // on subsequent frames prepare_for_next_frame already set it.
-  cached_tileSet_[0].set_line_decode_persistent_all(true);
-
-  try {
-    cached_tileSet_[0].line_based_decode = true;
-    install_precinct_filter(cached_tileSet_[0], 0);
-    install_packet_observer(cached_tileSet_[0], 0);
-    cached_tileSet_[0].create_tile_buf(main_header);
-  } catch (std::exception &exc) {
-    printf("ERROR: %s\n", exc.what());
-    // On a create_tile_buf failure the cache is likely in a bad state —
-    // drop it and rethrow.
-    cached_tileSet_.clear();
-    cached_header_fingerprint_ = 0;
-    throw std::runtime_error("Abort Decoding!");
-  }
+  const reuse_fingerprints fp = read_reuse_tile("invoke_line_based_stream_reuse");
 
   cached_tileSet_[0].decode_line_based_stream(main_header, reduce_NL, cb, row_limit_,
                                                row_lo_, col_lo_, col_hi_, skip_mct_);
 
-  cached_header_fingerprint_ = fp;
+  cached_main_fingerprint_ = fp.main_header;
+  cached_tile_fingerprint_ = fp.tile_parts;
 }
 
 // ── Direct-to-planar decode ───────────────────────────────────────────────
@@ -1006,24 +1142,27 @@ void openhtj2k_decoder_impl::invoke_line_based_direct(
     PlanarOutputDesc *descs, uint16_t nc, std::vector<uint32_t> &width,
     std::vector<uint32_t> &height, std::vector<uint8_t> &depth, std::vector<bool> &is_signed) {
   if (!is_parsed) {
-    printf(
-        "ERROR: openhtj2k_decoder_impl::parse() shall be called before calling "
-        "openhtj2k_decoder_impl::invoke_line_based_direct().\n");
-    throw std::exception();
+    open_htj2k::detail::fail(
+        "openhtj2k_decoder_impl::parse() shall be called before calling "
+        "openhtj2k_decoder_impl::invoke_line_based_direct().");
   }
+  require_int32_samples();
   if (!single_tile_reuse_enabled_) {
     // No single-tile cache — fall back to the callback path with a
-    // synthesized callback that writes to the planar descriptors.
+    // synthesized callback that writes to the planar descriptors, each
+    // component row once, at the first output row it covers.
+    std::vector<uint32_t> next(nc, 0);  // next row of each plane
     invoke_line_based_stream(
         [&](uint32_t y, int32_t *const *rows, uint16_t nc_cb) {
           for (uint16_t c = 0; c < nc_cb && c < nc; ++c) {
             const PlanarOutputDesc &d = descs[c];
-            if (y % d.yr != 0) continue;
-            const uint32_t cy = y / d.yr;
-            if (cy >= d.height) continue;
+            const uint32_t cy         = stream_map_.row(c, y);
+            if (cy == UINT32_MAX || cy < next[c] || cy >= d.height) continue;
+            next[c]          = cy + 1;
+            const uint32_t w = std::min(d.width, width[c]);  // a wider plane gets the component's samples
             if (d.is_16bit) {
               auto *dst = static_cast<uint16_t *>(d.base) + static_cast<size_t>(cy) * d.stride;
-              for (uint32_t x = 0; x < d.width; ++x) {
+              for (uint32_t x = 0; x < w; ++x) {
                 int32_t v = rows[c][x];
                 if (v < d.minval) v = d.minval;
                 if (v > d.maxval) v = d.maxval;
@@ -1031,7 +1170,7 @@ void openhtj2k_decoder_impl::invoke_line_based_direct(
               }
             } else {
               auto *dst = static_cast<uint8_t *>(d.base) + static_cast<size_t>(cy) * d.stride;
-              for (uint32_t x = 0; x < d.width; ++x) {
+              for (uint32_t x = 0; x < w; ++x) {
                 int32_t v = rows[c][x];
                 if (v < d.minval) v = d.minval;
                 if (v > d.maxval) v = d.maxval;
@@ -1054,84 +1193,13 @@ void openhtj2k_decoder_impl::invoke_line_based_direct(
   element_siz numTiles;
   main_header.get_number_of_tiles(numTiles.x, numTiles.y);
   if (numTiles.x != 1 || numTiles.y != 1) {
-    cached_tileSet_.clear();
-    cached_header_fingerprint_ = 0;
+    drop_reuse_cache();
     // Multi-tile: fall back via recursive call with reuse disabled.
     bool was_enabled = single_tile_reuse_enabled_;
     single_tile_reuse_enabled_ = false;
     invoke_line_based_direct(descs, nc, width, height, depth, is_signed);
     single_tile_reuse_enabled_ = was_enabled;
     return;
-  }
-
-  // Fingerprint — identical to invoke_line_based_stream_reuse.
-  auto fnv1a_u64 = [](uint64_t h, const void *data, size_t len) {
-    const uint8_t *p = static_cast<const uint8_t *>(data);
-    for (size_t i = 0; i < len; ++i) {
-      h ^= p[i];
-      h *= 1099511628211ull;
-    }
-    return h;
-  };
-  uint64_t fp = 14695981039346656037ull;
-  auto mix_u64 = [&](uint64_t v) {
-    fp = fnv1a_u64(fp, &v, sizeof(v));
-  };
-  {
-    element_siz s_siz, s_osiz, s_tsiz, s_tosiz;
-    main_header.SIZ->get_image_size(s_siz);
-    main_header.SIZ->get_image_origin(s_osiz);
-    main_header.SIZ->get_tile_size(s_tsiz);
-    main_header.SIZ->get_tile_origin(s_tosiz);
-    const uint16_t ncomp = main_header.SIZ->get_num_components();
-    mix_u64((static_cast<uint64_t>(s_siz.x)  << 32) | s_siz.y);
-    mix_u64((static_cast<uint64_t>(s_osiz.x) << 32) | s_osiz.y);
-    mix_u64((static_cast<uint64_t>(s_tsiz.x) << 32) | s_tsiz.y);
-    mix_u64((static_cast<uint64_t>(s_tosiz.x)<< 32) | s_tosiz.y);
-    mix_u64(ncomp);
-    for (uint16_t c = 0; c < ncomp; ++c) {
-      element_siz sub;
-      const uint8_t bd = main_header.SIZ->get_bitdepth(c);
-      const bool    sn = main_header.SIZ->is_signed(c);
-      main_header.SIZ->get_subsampling_factor(sub, c);
-      mix_u64((static_cast<uint64_t>(bd) << 56)
-              | (static_cast<uint64_t>(sn ? 1 : 0) << 48)
-              | (static_cast<uint64_t>(sub.x) << 16)
-              | static_cast<uint64_t>(sub.y));
-    }
-    if (main_header.COD != nullptr) {
-      const uint8_t  dl  = main_header.COD->get_dwt_levels();
-      const uint8_t  po  = main_header.COD->get_progression_order();
-      const uint16_t nl  = main_header.COD->get_number_of_layers();
-      const uint8_t  mct = main_header.COD->use_color_trafo();
-      const uint8_t  cm  = main_header.COD->get_Cmodes();
-      const uint8_t  tx  = main_header.COD->get_transformation();
-      element_siz    cbsz; main_header.COD->get_codeblock_size(cbsz);
-      mix_u64((static_cast<uint64_t>(dl) << 56) | (static_cast<uint64_t>(po) << 48)
-              | (static_cast<uint64_t>(nl) << 32)
-              | (static_cast<uint64_t>(mct) << 24) | (static_cast<uint64_t>(cm) << 16)
-              | static_cast<uint64_t>(tx));
-      mix_u64((static_cast<uint64_t>(cbsz.x) << 32) | cbsz.y);
-      for (uint8_t r = 0; r <= dl; ++r) {
-        element_siz pp; main_header.COD->get_precinct_size(pp, r);
-        mix_u64((static_cast<uint64_t>(pp.x) << 32) | pp.y);
-      }
-    }
-    if (main_header.QCD != nullptr) {
-      const uint8_t qs = main_header.QCD->get_quantization_style();
-      const uint8_t gb = main_header.QCD->get_number_of_guardbits();
-      const uint8_t n0 = main_header.QCD->get_num_entries();
-      mix_u64((static_cast<uint64_t>(qs) << 16) | (static_cast<uint64_t>(gb) << 8)
-              | static_cast<uint64_t>(n0));
-      if (n0 > 0) {
-        const uint8_t  e0 = main_header.QCD->get_exponents(0);
-        const uint16_t m0 = main_header.QCD->get_mantissas(0);
-        mix_u64((static_cast<uint64_t>(e0) << 16) | m0);
-      }
-    }
-    mix_u64(static_cast<uint64_t>(main_header.COC.size()));
-    mix_u64(static_cast<uint64_t>(main_header.QCC.size()));
-    mix_u64(static_cast<uint64_t>(main_header.RGN.size()));
   }
 
   // Populate output metadata.
@@ -1147,60 +1215,18 @@ void openhtj2k_decoder_impl::invoke_line_based_direct(
     const uint32_t x1 = ceil_int(siz.x, Rsiz.x);
     const uint32_t y0 = ceil_int(Osiz.y, Rsiz.y);
     const uint32_t y1 = ceil_int(siz.y, Rsiz.y);
-    width.push_back(ceil_int(x1 - x0, (1U << reduce_NL)));
-    height.push_back(ceil_int(y1 - y0, (1U << reduce_NL)));
+    width.push_back(reduced_extent(x0, x1, reduce_NL));
+    height.push_back(reduced_extent(y0, y1, reduce_NL));
     depth.push_back(main_header.SIZ->get_bitdepth(c));
     is_signed.push_back(main_header.SIZ->is_signed(c));
   }
 
-  const bool cache_hit = !cached_tileSet_.empty()
-                         && cached_tileSet_[0].is_structure_built()
-                         && cached_header_fingerprint_ == fp;
-  if (!cache_hit) {
-    cached_tileSet_.clear();
-    cached_tileSet_.resize(1);
-    cached_tileSet_[0].dec_init(0, main_header, reduce_NL);
-  } else {
-    cached_tileSet_[0].prepare_for_next_frame();
-    cached_tileSet_[0].dec_init(0, main_header, reduce_NL);
-  }
-
-  {
-    uint16_t word;
-    SOT_marker tmpSOT;
-    while (in.get_remaining() >= 2 && (word = in.get_word()) != _EOC) {
-      if (word != _SOT) {
-        printf("ERROR: SOT marker segment expected but %04X is found\n", word);
-        throw std::exception();
-      }
-      tmpSOT = SOT_marker(in);
-      const uint16_t tile_index = tmpSOT.get_tile_index();
-      if (tile_index != 0) {
-        throw std::runtime_error(
-            "openhtj2k_decoder_impl::invoke_line_based_direct expected a "
-            "single-tile codestream (tile_index != 0 found)");
-      }
-      cached_tileSet_[0].add_tile_part(tmpSOT, in, main_header);
-    }
-  }
-
-  cached_tileSet_[0].set_line_decode_persistent_all(true);
-
-  try {
-    cached_tileSet_[0].line_based_decode = true;
-    install_precinct_filter(cached_tileSet_[0], 0);
-    install_packet_observer(cached_tileSet_[0], 0);
-    cached_tileSet_[0].create_tile_buf(main_header);
-  } catch (std::exception &exc) {
-    printf("ERROR: %s\n", exc.what());
-    cached_tileSet_.clear();
-    cached_header_fingerprint_ = 0;
-    throw std::runtime_error("Abort Decoding!");
-  }
+  const reuse_fingerprints fp = read_reuse_tile("invoke_line_based_direct");
 
   cached_tileSet_[0].decode_line_based_stream_planar(main_header, reduce_NL, descs, nc);
 
-  cached_header_fingerprint_ = fp;
+  cached_main_fingerprint_ = fp.main_header;
+  cached_tile_fingerprint_ = fp.tile_parts;
 }
 
 

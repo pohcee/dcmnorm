@@ -2,20 +2,17 @@
 //! CPU variants are built and kept apart, and src/htj2k_bridge.cpp for the C ABI.
 //!
 //! OpenHTJ2K keeps one process-wide worker pool, sized by the first call that needs one and shared
-//! by every later decode/encode, so the thread count passed here is effectively fixed at first use:
-//! [`crate::threads::configured_threads`].
-//!
-//! Calls are serialized through [`CODEC_LOCK`]: OpenHTJ2K is not safe for concurrent decodes or
-//! encodes in one process (a thread blocked in one call's barrier runs other calls' pool tasks
-//! inline, sharing per-thread scratch buffers - concurrent decodes segfault, see
-//! `concurrent_decodes_are_serialized_safely`). Each call already spreads one image across the
-//! whole pool, so serializing costs little throughput.
+//! by every later multi-threaded decode/encode (`num_threads > 1`). Calls with `num_threads == 1`
+//! run on the calling thread without touching the shared pool, so [`crate::threads::per_call_threads`]
+//! passes `1` when already executing inside a rayon worker and [`crate::threads::configured_threads`]
+//! otherwise. Multiple concurrent decoder/encoder instances across threads are supported natively
+//! by OpenHTJ2K (each call owns its own instance).
 
 use std::ffi::CStr;
 use std::os::raw::{c_char, c_int};
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 
-use crate::threads::configured_threads;
+use crate::threads::per_call_threads;
 use crate::{DecodedComponent, DecodedImage};
 
 /// Forces the portable (non-AVX2) build even on a CPU that supports x86-64-v3 - set to `base`.
@@ -163,9 +160,6 @@ extern "C" {
     fn dcmnorm_htj2k_v3_free_buffer(buffer: *mut std::ffi::c_void);
 }
 
-/// Serializes every call into OpenHTJ2K - see the module docs.
-static CODEC_LOCK: Mutex<()> = Mutex::new(());
-
 struct Variant {
     name: &'static str,
     decode: DecodeFn,
@@ -240,14 +234,11 @@ pub fn decode(codestream: &[u8]) -> Result<DecodedImage, String> {
     let variant = variant();
     let mut raw = RawImage::empty();
     let mut error: *mut c_char = std::ptr::null_mut();
-    let _guard = CODEC_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let status = unsafe {
         (variant.decode)(
             codestream.as_ptr(),
             codestream.len(),
-            configured_threads(),
+            per_call_threads(),
             &mut raw,
             &mut error,
         )
@@ -312,14 +303,11 @@ pub fn decode_into(
     let variant = variant();
     let mut info = RawInfo::default();
     let mut error: *mut c_char = std::ptr::null_mut();
-    let _guard = CODEC_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let status = unsafe {
         (variant.decode_into)(
             codestream.as_ptr(),
             codestream.len(),
-            configured_threads(),
+            per_call_threads(),
             out.as_mut_ptr(),
             out.len(),
             bytes_per_sample,
@@ -378,9 +366,6 @@ pub fn encode_lossless(
     let mut data: *mut u8 = std::ptr::null_mut();
     let mut len = 0usize;
     let mut error: *mut c_char = std::ptr::null_mut();
-    let _guard = CODEC_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let status = unsafe {
         (variant.encode)(
             pointers.as_ptr(),
@@ -390,7 +375,7 @@ pub fn encode_lossless(
             bit_depth,
             c_int::from(signed),
             c_int::from(progression == Progression::Rpcl),
-            configured_threads(),
+            per_call_threads(),
             &mut data,
             &mut len,
             &mut error,
@@ -426,11 +411,15 @@ mod tests {
     #[test]
     fn lossless_round_trip_is_exact() {
         for &(width, height, bits, signed, components) in &[
-            (37u32, 29u32, 8u8, false, 1usize),
+            (1u32, 1u32, 8u8, false, 1usize),
+            (2, 2, 12, false, 1),
+            (7, 5, 16, false, 1),
+            (16, 16, 16, true, 1),
+            (37, 29, 8, false, 1),
+            (64, 64, 16, false, 1),
             (512, 512, 12, false, 1),
             (300, 200, 16, true, 1),
             (64, 48, 8, false, 3),
-            (1, 1, 8, false, 1),
         ] {
             let planes: Vec<Vec<i32>> = (0..components)
                 .map(|c| {
@@ -525,22 +514,92 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_decodes_are_serialized_safely() {
-        let plane = pattern(1024, 768, 12, false);
-        let encoded = encode_lossless(&[&plane], 1024, 768, 12, false, Progression::Lrcp).unwrap();
+    fn truncated_codestream_is_rejected() {
+        let plane = pattern(128, 128, 12, false);
+        let encoded = encode_lossless(&[&plane], 128, 128, 12, false, Progression::Lrcp).unwrap();
+        assert!(encoded.len() > 64);
+
+        let mut out = vec![0u8; 128 * 128 * 2];
+        // Cut right before EOC (missing EOC marker) and mid-payload.
+        for cut in [encoded.len() - 2, encoded.len() / 2] {
+            let truncated = &encoded[..cut];
+            let err = decode(truncated).expect_err("truncated codestream must fail decode()");
+            assert!(
+                err.contains("truncated") || err.contains("failed"),
+                "unexpected error for cut={cut}: {err}"
+            );
+            assert!(
+                matches!(
+                    decode_into(truncated, &mut out, 2, 1, 128, 128),
+                    Err(DecodeIntoError::Failed(_))
+                ),
+                "truncated codestream must fail decode_into() at cut={cut}"
+            );
+        }
+    }
+
+    #[test]
+    fn concurrent_calls_are_thread_safe() {
+        let plane_a = pattern(1024, 768, 12, false);
+        let encoded_a =
+            encode_lossless(&[&plane_a], 1024, 768, 12, false, Progression::Lrcp).unwrap();
+        let plane_b = pattern(256, 256, 16, true);
+        let encoded_b =
+            encode_lossless(&[&plane_b], 256, 256, 16, true, Progression::Lrcp).unwrap();
+        let expected_b: Vec<u8> = plane_b
+            .iter()
+            .flat_map(|v| v.to_le_bytes()[..2].to_vec())
+            .collect();
+
+        // Concurrent OS threads sharing the OpenHTJ2K worker pool directly (no mutex).
         std::thread::scope(|scope| {
-            for _ in 0..8 {
-                scope.spawn(|| {
-                    for _ in 0..10 {
-                        let decoded = decode(&encoded).unwrap();
-                        assert_eq!(decoded.components[0].data, plane);
-                        let again =
-                            encode_lossless(&[&plane], 1024, 768, 12, false, Progression::Rpcl)
-                                .unwrap();
-                        assert_eq!(decode(&again).unwrap().components[0].data, plane);
+            for t in 0..8 {
+                let plane_a = &plane_a;
+                let encoded_a = &encoded_a;
+                let plane_b = &plane_b;
+                let encoded_b = &encoded_b;
+                let expected_b = &expected_b;
+                scope.spawn(move || {
+                    let mut out_b = vec![0u8; expected_b.len()];
+                    for i in 0..10 {
+                        if (t + i) % 2 == 0 {
+                            let decoded = decode(encoded_a).unwrap();
+                            assert_eq!(decoded.components[0].data, *plane_a);
+                            let again = encode_lossless(
+                                &[plane_a],
+                                1024,
+                                768,
+                                12,
+                                false,
+                                Progression::Rpcl,
+                            )
+                            .unwrap();
+                            assert_eq!(decode(&again).unwrap().components[0].data, *plane_a);
+                        } else {
+                            decode_into(encoded_b, &mut out_b, 2, 1, 256, 256).unwrap();
+                            assert_eq!(out_b, *expected_b);
+                            let again =
+                                encode_lossless(&[plane_b], 256, 256, 16, true, Progression::Lrcp)
+                                    .unwrap();
+                            decode_into(&again, &mut out_b, 2, 1, 256, 256).unwrap();
+                            assert_eq!(out_b, *expected_b);
+                        }
                     }
                 });
             }
+        });
+
+        // Concurrent Rayon workers exercising single-threaded per_call_threads() == 1 mode.
+        use rayon::prelude::*;
+        (0..16).into_par_iter().for_each(|_| {
+            assert_eq!(per_call_threads(), 1);
+            let mut out_b = vec![0u8; expected_b.len()];
+            decode_into(&encoded_b, &mut out_b, 2, 1, 256, 256).unwrap();
+            assert_eq!(out_b, expected_b);
+            let again =
+                encode_lossless(&[&plane_b], 256, 256, 16, true, Progression::Lrcp).unwrap();
+            decode_into(&again, &mut out_b, 2, 1, 256, 256).unwrap();
+            assert_eq!(out_b, expected_b);
         });
     }
 }

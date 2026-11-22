@@ -32,6 +32,8 @@
     !defined(OPENHTJ2K_ENABLE_WASM_SIMD) && !defined(OPENHTJ2K_ENABLE_ARM_NEON)
   #include "color.hpp"
 
+namespace open_htj2k {
+
 void cvt_rgb_to_ycbcr_rev(int32_t *sp0, int32_t *sp1, int32_t *sp2, uint32_t width, uint32_t height) {
   int32_t R, G, B;
   int32_t Y, Cb, Cr;
@@ -194,10 +196,7 @@ void cvt_rgb_to_ycbcr_irrev_float(const int32_t *sp0, const int32_t *sp1, const 
 }
 
 static int32_t finalize_one(float v, const FinalizeParams &p) {
-  int32_t x = static_cast<int32_t>(v);
-  if (p.ds > 0) x = (x + p.rnd) >> p.ds;
-  else if (p.ds < 0) x <<= -p.ds;
-  x += p.dc;
+  int32_t x = finalize_round(v, p.scale) + p.dc;
   if (x > p.maxval) x = p.maxval;
   if (x < p.minval) x = p.minval;
   return x;
@@ -234,4 +233,5 @@ void fused_ycbcr_rev_to_rgb_i32(const float *y, const float *cb, const float *cr
     b[n] = clamp(Cb + G, fp[2]);
   }
 }
+}  // namespace open_htj2k
 #endif

@@ -28,7 +28,9 @@
 
 #pragma once
 #include <cstdint>
+#include <algorithm>
 #include "open_htj2k_typedef.hpp"
+#include "utils.hpp"
 
 #if defined(_MSC_VER) || defined(__MINGW64__)
   #include <intrin.h>
@@ -36,7 +38,9 @@
   #include <x86intrin.h>
 #endif
 
-#if __GNUC__ || __has_attribute(always_inline)
+namespace open_htj2k {
+
+#if defined(__GNUC__) || defined(__clang__)
   #define FORCE_INLINE inline __attribute__((always_inline))
 #elif defined(_MSC_VER)
   #define FORCE_INLINE __forceinline
@@ -44,9 +48,11 @@
   #define FORCE_INLINE inline
 #endif
 
-#define MAX_Lcup 16384
+// The cleanup segment of a code-block: MagSgn bytes followed by the MEL/VLC bytes (Scup at
+// most 4079).  4096 samples of up to 32 MagSgn bits each, with a stuffed bit in every 16, take
+// at most 17477 bytes; 16384 overflowed with 30 magnitude bit-planes (tiny step sizes).
+#define MAX_Lcup (17477 + MAX_Scup + 64)
 #define MAX_Scup 4079
-#define MAX_Lref 2046
 
 /********************************************************************************
  * state_MS_enc: state class for MagSgn encoding
@@ -85,7 +91,7 @@ class state_MS_enc {
       last = static_cast<uint8_t>(val >> 24);
       Creg >>= 32;
       ctreg -= 32;
-      *reinterpret_cast<uint32_t *>(buf + pos) = val;
+      store_u32_unaligned(buf + pos, val);
       pos += 4;
       return;
     }
@@ -118,7 +124,7 @@ class state_MS_enc {
 
     Creg >>= bits_local;
     ctreg -= bits_local;
-    *reinterpret_cast<uint32_t *>(buf + pos) = t;
+    store_u32_unaligned(buf + pos, t);
     pos += 4;
   }
 
@@ -215,7 +221,8 @@ class state_MS_enc {
           && ((val >> 16) & 0xFF) < 0xFF) {
         la = static_cast<uint8_t>(val >> 24);
         cr >>= 32; ct -= 32;
-        *reinterpret_cast<uint32_t *>(buf + po) = val; po += 4;
+        store_u32_unaligned(buf + po, val);
+        po += 4;
       } else {
         uint32_t bl = 0, t = 0, stuff = (la == 0xFF), tmp;
         tmp = val & ((1U << (8U - stuff)) - 1U);
@@ -227,7 +234,8 @@ class state_MS_enc {
         tmp = (val >> bl) & ((1U << (8U - stuff)) - 1U);
         t |= tmp << 24; bl += 8 - stuff;
         la = static_cast<uint8_t>(tmp); cr >>= bl; ct -= bl;
-        *reinterpret_cast<uint32_t *>(buf + po) = t; po += 4;
+        store_u32_unaligned(buf + po, t);
+        po += 4;
       }
     };
 
@@ -300,7 +308,7 @@ class state_VLC_enc {
       last = static_cast<uint8_t>(val >> 24);
       Creg >>= 32;
       ctreg -= 32;
-      *reinterpret_cast<uint32_t *>(buf + pos - 3) = openhtj2k_bswap32(val);
+      store_u32_unaligned(buf + pos - 3, openhtj2k_bswap32(val));
       pos -= 4;
       return;
     }
@@ -337,7 +345,7 @@ class state_VLC_enc {
     Creg >>= bits_local;
     ctreg -= bits_local;
 
-    *reinterpret_cast<uint32_t *>(buf + pos - 3) = t;
+    store_u32_unaligned(buf + pos - 3, t);
     pos -= 4;
   }
 
@@ -433,73 +441,4 @@ class state_MEL_enc {
     }
   }
 };
-
-class MR_enc;  // forward declaration for friend function termSPandMR()
-/********************************************************************************
- * SP_enc: state class for HT SigProp encoding
- *******************************************************************************/
-class SP_enc {
- private:
-  uint32_t pos;
-  uint8_t bits;
-  uint8_t max;
-  uint8_t tmp;
-  uint8_t *const buf;
-  friend int32_t termSPandMR(SP_enc &, MR_enc &);
-
- public:
-  explicit SP_enc(uint8_t *Dref) : pos(0), bits(0), max(8), tmp(0), buf(Dref) {}
-  void emitSPBit(uint8_t bit) {
-    tmp |= static_cast<uint8_t>(bit << bits);
-    bits++;
-    if (bits == max) {
-      buf[pos] = tmp;
-      pos++;
-      max  = (tmp == 0xFF) ? 7 : 8;
-      tmp  = 0;
-      bits = 0;
-    }
-  }
-  void termSP() {
-    if (tmp != 0) {
-      buf[pos] = tmp;
-      pos++;
-      max = (tmp == 0xFF) ? 7 : 8;
-    }
-    if (max == 7) {
-      buf[pos] = 0x00;
-      pos++;  // this prevents the appearance of a terminal 0xFF
-    }
-  }
-  OPENHTJ2K_NODISCARD uint32_t get_length() const { return pos; }
-};
-/********************************************************************************
- * MR_enc: state class for HT MagRef encoding
- *******************************************************************************/
-class MR_enc {
- private:
-  uint32_t pos;
-  uint8_t bits;
-  uint8_t tmp;
-  uint8_t last;
-  uint8_t *const buf;
-  friend int32_t termSPandMR(SP_enc &, MR_enc &);
-
- public:
-  explicit MR_enc(uint8_t *Dref) : pos(MAX_Lref), bits(0), tmp(0), last(255), buf(Dref) {}
-  void emitMRBit(uint8_t bit) {
-    tmp |= static_cast<uint8_t>(bit << bits);
-    bits++;
-    if ((last > 0x8F) && (tmp == 0x7F)) {
-      bits++;  // this must leave MR_bits equal to 8
-    }
-    if (bits == 8) {
-      buf[pos] = tmp;
-      pos--;  // MR buf gorws reverse order
-      last = tmp;
-      tmp  = 0;
-      bits = 0;
-    }
-  }
-  OPENHTJ2K_NODISCARD uint32_t get_length() const { return MAX_Lref - pos; }
-};
+}  // namespace open_htj2k

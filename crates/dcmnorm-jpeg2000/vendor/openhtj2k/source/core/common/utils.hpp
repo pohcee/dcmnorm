@@ -30,12 +30,37 @@
 
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
+#include <new>
 #include "open_htj2k_typedef.hpp"
 
-#define round_up(x, n) (((x) + (n) - 1) & (-n))
+// The block coders load and store bit-stream words with native-endian 32- and
+// 64-bit accesses that assume little-endian byte order (for example
+// load_u32_unaligned in the HT decoder, openhtj2k_bswap32 in the HT encoder);
+// a big-endian build would silently produce wrong output.
+#if defined(__BYTE_ORDER__) && defined(__ORDER_BIG_ENDIAN__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+  #error "OpenHTJ2K supports little-endian targets only."
+#endif
+
+#define round_up(x, n) (((x) + (n) - 1) & ~((n) - 1))  // n a power of 2; ~(n - 1) == -n
 // #define round_down(x, n) ((x) & (-n))
 #define round_down(x, n) ((x) - ((x) % (n)))
 #define ceil_int(a, b) ((a) + ((b) - 1)) / (b)
+// floor(a / 2^n) and ceil(a / 2^n), a coordinate n resolution levels down (B-14), for
+// any n.  n reaches 32 at the lowest resolution of a 32-level transform, past what a
+// 32-bit shift allows, and the ceiling does not overflow for a near 2^32 as
+// ceil_int(a, 1U << n) does.
+static inline uint32_t floor_div_pow2(uint32_t a, uint32_t n) { return (n >= 32) ? 0U : (a >> n); }
+static inline uint32_t ceil_div_pow2(uint32_t a, uint32_t n) {
+  if (n >= 32) return (a != 0) ? 1U : 0U;
+  return (a >> n) + (((a & ((1U << n) - 1U)) != 0) ? 1U : 0U);
+}
+// Size of the extent [a0, a1) at a resolution reduced by r levels: it maps to
+// [ceil(a0 / 2^r), ceil(a1 / 2^r)) (ISO/IEC 15444-1, B.5), which is narrower than
+// ceil((a1 - a0) / 2^r) when a0 is not a multiple of 2^r.
+static inline uint32_t reduced_extent(uint32_t a0, uint32_t a1, uint32_t r) {
+  return ceil_div_pow2(a1, r) - ceil_div_pow2(a0, r);
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // DWT buffer border slack
@@ -65,6 +90,17 @@ constexpr int32_t DWT_RIGHT_SLACK = 32;
 
 #if defined(__INTEL_LLVM_COMPILER)
   #define __INTEL_COMPILER
+#endif
+
+// Every x86-64 CPU has SSE2: builds for x86-64 without AVX2 (a portable target, for
+// example -DOPENHTJ2K_TARGET_CPU=generic) take 128-bit SSE2 paths instead of the scalar
+// ones, unless configured with -DENABLE_SSE2=OFF.  The AVX2 and AVX-512 builds keep their
+// own.
+#if (defined(__x86_64__) || (defined(_M_X64) && !defined(_M_ARM64EC)))             \
+    && !defined(OPENHTJ2K_ENABLE_ARM_NEON) && !defined(OPENHTJ2K_ENABLE_WASM_SIMD) \
+    && !(defined(OPENHTJ2K_TRY_AVX2) && defined(__AVX2__)) && !defined(OPENHTJ2K_DISABLE_SSE2)
+  #define OPENHTJ2K_ENABLE_SSE2
+  #include <emmintrin.h>
 #endif
 
 #if defined(OPENHTJ2K_ENABLE_ARM_NEON)
@@ -137,6 +173,24 @@ static inline int32_t hMax(__m128i v) {
 #define openhtj2k_bswap32(x) __builtin_bswap32(x)
 #endif
 
+// 32-bit load/store at any address (byte streams, uint16_t arrays).  Reading
+// or writing through a cast uint32_t pointer is undefined behaviour when the
+// address is not 4-byte aligned; memcpy is the portable form, and compilers
+// turn it into a single load or store.
+static inline uint32_t load_u32_unaligned(const void* p) {
+  uint32_t v;
+  memcpy(&v, p, sizeof(v));
+  return v;
+}
+static inline void store_u32_unaligned(void* p, uint32_t v) { memcpy(p, &v, sizeof(v)); }
+
+// v << s for a signed v.  Shifting a negative value left is undefined before
+// C++20; shifting the same bits as unsigned is defined and compiles to the
+// same instruction.
+static inline int32_t shl_i32(int32_t v, int32_t s) {
+  return static_cast<int32_t>(static_cast<uint32_t>(v) << s);
+}
+
 // Portable count-trailing-zeros for uint32_t (input must be non-zero).
 static inline uint32_t openhtj2k_ctz32(uint32_t x) {
 #if defined(_MSC_VER)
@@ -150,9 +204,11 @@ static inline uint32_t openhtj2k_ctz32(uint32_t x) {
 
 static inline size_t popcount32(uint32_t num) {
   size_t precision = 0;
-#if defined(_MSC_VER) && !defined(_M_ARM64)
+#if defined(_MSC_VER) && !defined(_M_ARM64) && defined(__AVX__)
+  // MSVC emits POPCNT unconditionally; every CPU with AVX has it.  Builds for
+  // older CPUs (no /arch:AVX) use the loop below.
   precision = __popcnt(static_cast<uint32_t>(num));
-#elif defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
+#elif !defined(_MSC_VER) && (defined(__x86_64__) || defined(__i386__))
   precision = static_cast<size_t>(_popcnt32(num));
 #elif defined(OPENHTJ2K_ENABLE_ARM_NEON)
   uint32x2_t val = vld1_dup_u32(static_cast<const uint32_t*>(&num));
@@ -169,38 +225,32 @@ static inline size_t popcount32(uint32_t num) {
   return precision;
 }
 
+// floor(log2(x)); 0 for x == 0.
 static inline uint32_t int_log2(const uint32_t x) {
-  uint32_t y;
 #if defined(_MSC_VER)
   unsigned long tmp;
-  _BitScanReverse(&tmp, x);
-  y = tmp;
+  return _BitScanReverse(&tmp, x) ? static_cast<uint32_t>(tmp) : 0;
 #else
-  y = static_cast<uint32_t>(31 - __builtin_clz(x));
+  // __builtin_clz(0) is undefined; x | 1 gives the same result for every x
+  // (int_log2(0) and int_log2(1) are both 0).
+  return static_cast<uint32_t>(31 - __builtin_clz(x | 1));
 #endif
-  return (x == 0) ? 0 : y;
 }
 
+// Number of leading zero bits; 32 for x == 0.
 static inline uint32_t count_leading_zeros(const uint32_t x) {
-  uint32_t y;
-#if defined(_MSC_VER) && !defined(_M_ARM64)
-  y = __lzcnt(x);
-#elif defined(OPENHTJ2K_TRY_AVX2) && defined(__AVX2__) && defined(_MSC_VER) && defined(_WIN32)
-  y = _lzcnt_u32(x);
-#elif defined(OPENHTJ2K_TRY_AVX2) && defined(__AVX2__) && defined(__MINGW32__)
-  y = __builtin_ia32_lzcnt_u32(x);
-#elif defined(__MINGW32__) || defined(__MINGW64__)
-  y = __builtin_clz(x);
-#elif defined(OPENHTJ2K_ENABLE_ARM_NEON) && !defined(_M_ARM64)
-  y = static_cast<uint32_t>(__builtin_clz(x));
-#elif defined(OPENHTJ2K_ENABLE_ARM_NEON) && defined(_M_ARM64)
+#if defined(_MSC_VER) && !defined(_M_ARM64) && defined(__AVX2__)
+  // MSVC emits LZCNT unconditionally; CPUs without it run the opcode as BSR
+  // and return a wrong count.  Every CPU with AVX2 has LZCNT.
+  return __lzcnt(x);
+#elif defined(_MSC_VER)
   unsigned long tmp;
-  _BitScanReverse(&tmp, x);
-  y = 31 - tmp;
+  return _BitScanReverse(&tmp, x) ? 31 - static_cast<uint32_t>(tmp) : 32;
 #else
-  y = 31 - int_log2(x);
+  // __builtin_clz(0) is undefined.  With LZCNT (x86) or on AArch64 the
+  // compiler folds this into the single instruction, which yields 32 for 0.
+  return x ? static_cast<uint32_t>(__builtin_clz(x)) : 32;
 #endif
-  return (x == 0) ? 32 : y;
 }
 
 // Large-buffer reuse pool (Linux/glibc and Apple platforms).
@@ -222,15 +272,22 @@ static inline uint32_t count_leading_zeros(const uint32_t x) {
 #endif
 
 #ifdef OPENHTJ2K_LARGE_POOL
+namespace open_htj2k {
 struct AlignedLargePool {
   static constexpr size_t THRESHOLD = 16384;  // 16 KB: cache buffers >= this size
   static constexpr int    MAX_SLOTS = 128;    // max cached entries per thread
+  // Most bytes a thread keeps cached; a buffer that would exceed it is freed.
+  static constexpr size_t MAX_CACHED_BYTES = static_cast<size_t>(512) << 20;
   struct Slot { void* ptr; size_t usable; };
   Slot   slots[MAX_SLOTS];
-  int    count = 0;
+  int    count        = 0;
+  size_t cached_bytes = 0;
+  // Cleared by the destructor: other thread_local objects destroyed after the
+  // pool at thread exit may still free buffers, which then go straight to free().
+  bool   alive        = true;
 
   void* alloc(size_t bytes, size_t align) {
-    if (bytes >= THRESHOLD) {
+    if (bytes >= THRESHOLD && alive) {
       // Best-fit: find smallest cached buffer with usable >= bytes AND alignment compatible.
       int    best_i = -1;
       size_t best_u = SIZE_MAX;
@@ -244,6 +301,7 @@ struct AlignedLargePool {
       }
       if (best_i >= 0) {
         void* p        = slots[best_i].ptr;
+        cached_bytes -= slots[best_i].usable;
         slots[best_i]  = slots[--count];
         return p;
       }
@@ -256,8 +314,9 @@ struct AlignedLargePool {
   void release(void* ptr) {
     if (!ptr) return;
     size_t sz = OPENHTJ2K_POOL_SIZE_FN(ptr);
-    if (sz >= THRESHOLD && count < MAX_SLOTS) {
+    if (alive && sz >= THRESHOLD && count < MAX_SLOTS && sz <= MAX_CACHED_BYTES - cached_bytes) {
       slots[count++] = {ptr, sz};
+      cached_bytes += sz;
     } else {
       free(ptr);
     }
@@ -265,14 +324,29 @@ struct AlignedLargePool {
 
   ~AlignedLargePool() {
     for (int i = 0; i < count; ++i) free(slots[i].ptr);
-    count = 0;
+    count        = 0;
+    cached_bytes = 0;
+    alive        = false;
   }
 };
-static thread_local AlignedLargePool tl_aligned_pool;
+
+// One pool per thread for the whole library.  (A `static thread_local` pool
+// in this header gave every source file its own pool, so a buffer freed in a
+// file other than the one that allocated it was cached where it was never
+// reused, and a long-lived thread kept memory from every decode.)
+inline AlignedLargePool &tl_aligned_pool() {
+  static thread_local AlignedLargePool pool;
+  return pool;
+}
+}  // namespace open_htj2k
 #endif  // OPENHTJ2K_LARGE_POOL
 
+// Returns `size` bytes aligned to `align`, or throws std::bad_alloc: callers write
+// into the buffer without checking for nullptr.  A zero-byte request allocates one
+// byte, since some of the platform allocators below may return nullptr for it.
 static inline void* aligned_mem_alloc(size_t size, size_t align) {
   void* result;
+  if (size == 0) size = 1;
 #if defined(__INTEL_COMPILER)
   result = _mm_malloc(size, align);
 #elif defined(_MSC_VER)
@@ -280,12 +354,13 @@ static inline void* aligned_mem_alloc(size_t size, size_t align) {
 #elif defined(__MINGW32__) || defined(__MINGW64__)
   result = __mingw_aligned_malloc(size, align);
 #elif defined(OPENHTJ2K_LARGE_POOL)
-  result = tl_aligned_pool.alloc(size, align);
+  result = open_htj2k::tl_aligned_pool().alloc(size, align);
 #else
   if (posix_memalign(&result, align, size)) {
     result = nullptr;
   }
 #endif
+  if (result == nullptr) throw std::bad_alloc();
   return result;
 }
 
@@ -297,7 +372,7 @@ static inline void aligned_mem_free(void* ptr) {
 #elif defined(__MINGW32__) || defined(__MINGW64__)
   __mingw_aligned_free(ptr);
 #elif defined(OPENHTJ2K_LARGE_POOL)
-  tl_aligned_pool.release(ptr);
+  open_htj2k::tl_aligned_pool().release(ptr);
 #else
   free(ptr);
 #endif

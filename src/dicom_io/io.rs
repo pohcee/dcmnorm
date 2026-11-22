@@ -2043,10 +2043,13 @@ pub(super) fn is_parallel_decode_transfer_syntax(uid: &str) -> bool {
             // JPEG-LS
             | "1.2.840.10008.1.2.4.80"
             | "1.2.840.10008.1.2.4.81"
-            // JPEG 2000 (not HTJ2K: OpenHTJ2K serializes its calls and spreads each frame across its
-            // own pool, so frame-parallel workers would only block on its lock)
+            // JPEG 2000 and HTJ2K (per_call_threads() passes 1 inside Rayon workers so each
+            // frame decodes on its worker thread without nested pool oversubscription)
             | "1.2.840.10008.1.2.4.90"
             | "1.2.840.10008.1.2.4.91"
+            | "1.2.840.10008.1.2.4.201"
+            | "1.2.840.10008.1.2.4.202"
+            | "1.2.840.10008.1.2.4.203"
             // RLE Lossless
             | "1.2.840.10008.1.2.5"
     )

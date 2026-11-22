@@ -38,12 +38,14 @@
 #if defined(OPENHTJ2K_ENABLE_WASM_SIMD)
   #include <wasm_simd128.h>
 #endif
+
+namespace open_htj2k {
 // Forward declarations for static ATK filter functions defined later in this file.
-[[maybe_unused]] static void idwt_1d_filtr_irrev53_fixed(sprec_t *X, int32_t left, int32_t u_i0,
-                                                         int32_t u_i1);
-[[maybe_unused]] static void idwt_irrev53_ver_sr_fixed(sprec_t *in, int32_t u0, int32_t u1,
-                                                       int32_t v0, int32_t v1, int32_t stride,
-                                                       sprec_t *pse_scratch, sprec_t **buf_scratch);
+OPENHTJ2K_MAYBE_UNUSED static void idwt_1d_filtr_irrev53_fixed(sprec_t *X, int32_t left, int32_t u_i0,
+                                                               int32_t u_i1);
+OPENHTJ2K_MAYBE_UNUSED static void idwt_irrev53_ver_sr_fixed(sprec_t *in, int32_t u0, int32_t u1,
+                                                             int32_t v0, int32_t v1, int32_t stride,
+                                                             sprec_t *pse_scratch, sprec_t **buf_scratch);
 #if defined(OPENHTJ2K_ENABLE_WASM_SIMD)
 static idwt_1d_filtd_func_fixed idwt_1d_filtr_fixed[2] = {idwt_1d_filtr_irrev97_fixed_wasm,
                                                            idwt_1d_filtr_rev53_fixed_wasm};
@@ -139,15 +141,15 @@ static void idwt_1d_filtr_rev53_i32_scalar(int32_t *X, int32_t left, int32_t u_i
   const int32_t stop   = u_i1 / 2;
   const int32_t offset = left - u_i0 % 2;
   for (int32_t n = 0 + offset, i = start; i < stop + 1; ++i, n += 2)
-    X[n] -= (X[n - 1] + X[n + 1] + 2) >> 2;
+    X[n] = rev53_undo_update(X[n], X[n - 1], X[n + 1]);
   for (int32_t n = 0 + offset, i = start; i < stop; ++i, n += 2)
-    X[n + 1] += (X[n] + X[n + 2]) >> 1;
+    X[n + 1] = rev53_undo_predict(X[n + 1], X[n], X[n + 2]);
 }
 static void adv_idwt_rev_lp_step_i32_scalar(int32_t n, const int32_t *prev, const int32_t *next, int32_t *tgt) {
-  for (int32_t i = 0; i < n; ++i) tgt[i] -= (prev[i] + next[i] + 2) >> 2;
+  for (int32_t i = 0; i < n; ++i) tgt[i] = rev53_undo_update(tgt[i], prev[i], next[i]);
 }
 static void adv_idwt_rev_hp_step_i32_scalar(int32_t n, const int32_t *prev, const int32_t *next, int32_t *tgt) {
-  for (int32_t i = 0; i < n; ++i) tgt[i] += (prev[i] + next[i]) >> 1;
+  for (int32_t i = 0; i < n; ++i) tgt[i] = rev53_undo_predict(tgt[i], prev[i], next[i]);
 }
 static idwt_1d_filtr_i32_fn_t      idwt_1d_filtr_rev53_i32_fn  = idwt_1d_filtr_rev53_i32_scalar;
 static adv_idwt_rev_step_i32_fn_t  adv_idwt_rev_lp_step_i32_fn = adv_idwt_rev_lp_step_i32_scalar;
@@ -215,8 +217,8 @@ void idwt_1d_filtr_rev53_fixed(sprec_t *X, const int32_t left, const int32_t u_i
 // HP pass reads post-LP values there.  Same loop bounds as idwt_1d_filtr_rev53_fixed above
 // (LP runs stop+1-start times from offset, one lift landing on the even PSE position when the
 // edge sample is HP).
-[[maybe_unused]] static void idwt_1d_filtr_irrev53_fixed(sprec_t *X, const int32_t left, const int32_t u_i0,
-                                                         const int32_t u_i1) {
+OPENHTJ2K_MAYBE_UNUSED static void idwt_1d_filtr_irrev53_fixed(sprec_t *X, const int32_t left,
+                                                               const int32_t u_i0, const int32_t u_i1) {
   const int32_t start  = u_i0 / 2;
   const int32_t stop   = u_i1 / 2;
   const int32_t offset = left - u_i0 % 2;
@@ -1003,7 +1005,7 @@ void idwt_1d_row_inplace_range(sprec_t *row, const int32_t left, const int32_t r
 // LP/HP is `a`).  a_width/b_width may differ by one (odd row width).
 static void interleave_row_planes(sprec_t *out, const sprec_t *a_ptr, const sprec_t *b_ptr,
                                   const int32_t a_width, const int32_t b_width, const bool use_i32) {
-  [[maybe_unused]] const int32_t min_w = a_width < b_width ? a_width : b_width;
+  OPENHTJ2K_MAYBE_UNUSED const int32_t min_w = a_width < b_width ? a_width : b_width;
   int32_t i                            = 0;
 #if defined(OPENHTJ2K_ENABLE_AVX2)
   if (use_i32) {
@@ -1213,6 +1215,26 @@ void idwt_1d_row_from_planar(sprec_t *out, const sprec_t *lp, const sprec_t *hp,
       return;
     }
   }
+#elif defined(OPENHTJ2K_ENABLE_SSE2)
+  // Planar fast path, 4-lane SSE2 — the WASM kernels and guards.  Bit-identical to
+  // the scalar in-place kernels of the fallback below.
+  const int32_t N = u1 / 2 - u0 / 2;
+  if ((u0 & 1) == 0 && N >= 12) {
+    if (transformation == 1 && use_i32) {
+      idwt_1d_filtr_rev53_planar_i32_sse2(reinterpret_cast<int32_t *>(out),
+                                          reinterpret_cast<const int32_t *>(lp),
+                                          reinterpret_cast<const int32_t *>(hp), u0, u1);
+      return;
+    }
+    if (transformation == 0 && !use_i32) {
+      if (col_lo <= u0 && col_hi >= u1) {
+        idwt_1d_filtr_irrev97_planar_sse2(out, lp, hp, u0, u1);
+        return;
+      }
+      idwt_1d_filtr_irrev97_planar_sr_sse2(out, lp, hp, u0, u1, col_lo, col_hi);
+      return;
+    }
+  }
 #endif
 
   // Fallback: interleave into the ring slot (LP at u0%2, HP at 1-u0%2), then
@@ -1253,10 +1275,19 @@ static inline bool is_lp(int32_t r) { return (r & 1) == 0; }
 #define is_zero    idwt_is_zero
 #define set_zero   idwt_set_zero
 
+// True if every sample of the row has all bits zero.  A row that holds any nonzero
+// sample usually holds one near its start, so the scan goes in blocks of 64 words and
+// stops at the first nonzero block instead of reading the whole row.
 static inline bool row_all_zero(const sprec_t *row, int32_t width) {
-  uint32_t acc = 0;
   const uint32_t *p = reinterpret_cast<const uint32_t *>(row);
-  for (int32_t i = 0; i < width; ++i) acc |= p[i];
+  int32_t i         = 0;
+  for (; i + 64 <= width; i += 64) {
+    uint32_t acc = 0;
+    for (int32_t k = 0; k < 64; ++k) acc |= p[i + k];
+    if (acc != 0) return false;
+  }
+  uint32_t acc = 0;
+  for (; i < width; ++i) acc |= p[i];
   return acc == 0;
 }
 
@@ -1423,11 +1454,11 @@ static void fetch_one(idwt_2d_state *s) {
   // Make room in the ring: advance ring_origin over output rows.
   while (r >= s->ring_origin + IDWT_STATE_RING_DEPTH) {
     if (s->ring_origin >= s->next_out) break;  // can't evict un-output rows
-    s->d_level[s->ring_origin % IDWT_STATE_RING_DEPTH] = -1;
+    s->d_level[idwt_ring_slot(s->ring_origin)] = -1;
     ++s->ring_origin;
   }
 
-  const int32_t slot = r % IDWT_STATE_RING_DEPTH;
+  const int32_t slot = idwt_ring_slot(r);
   s->d_level[slot]   = -1;
   sprec_t *dst = rptr(s, r);
   s->get_src_row(s->src_ctx, r, dst);
@@ -1477,7 +1508,11 @@ void idwt_2d_state_init(idwt_2d_state *s,
   s->horz_out_buf  = nullptr;
 
   if (dir == DWT_BIDIR) {
-    const size_t row_bytes  = sizeof(sprec_t) * static_cast<size_t>(s->stride);
+    // An empty resolution (u1 == u0, possible with a non-zero image or tile
+    // origin) still gets non-empty PSE buffers: zero-size allocations are
+    // implementation-defined.
+    const size_t row_bytes =
+        sizeof(sprec_t) * static_cast<size_t>(s->stride > 0 ? s->stride : SIMD_PADDING);
     const size_t slot_bytes = sizeof(sprec_t) * static_cast<size_t>(s->slot_stride);
     s->ring_buf    = aligned_mem_alloc(IDWT_STATE_RING_DEPTH * slot_bytes, 32);
     s->top_pse_buf = (s->top_pse    > 0) ? aligned_mem_alloc(static_cast<size_t>(s->top_pse)    * row_bytes, 32) : nullptr;
@@ -1604,7 +1639,7 @@ sprec_t *idwt_2d_state_pull_row_ref(idwt_2d_state *s) {
     // Advance ring_origin past already-output rows to make room for new fetches.
     while (s->ring_origin < s->next_out &&
            s->next_fetch >= s->ring_origin + IDWT_STATE_RING_DEPTH) {
-      s->d_level[s->ring_origin % IDWT_STATE_RING_DEPTH] = -1;
+      s->d_level[idwt_ring_slot(s->ring_origin)] = -1;
       ++s->ring_origin;
     }
     fetch_one(s);
@@ -1616,3 +1651,4 @@ sprec_t *idwt_2d_state_pull_row_ref(idwt_2d_state *s) {
   ++s->next_out;
   return result;
 }
+}  // namespace open_htj2k

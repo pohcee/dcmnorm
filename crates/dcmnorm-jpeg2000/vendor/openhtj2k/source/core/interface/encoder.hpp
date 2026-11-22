@@ -31,6 +31,7 @@
 #include <cmath>
 #include <functional>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -44,15 +45,20 @@
   #endif
 #endif
 
+// Windows DLL linkage: export while building the library (CMake defines
+// open_htj2k_EXPORTS for its sources), import in code that uses it, and
+// nothing when linking the static library (OHTJ2K_STATIC).
 #if defined(_MSC_VER) && !defined(OHTJ2K_STATIC)
-  #define OPENHTJ2K_EXPORT __declspec(dllexport)
+  #if defined(open_htj2k_EXPORTS)
+    #define OPENHTJ2K_EXPORT __declspec(dllexport)
+  #else
+    #define OPENHTJ2K_EXPORT __declspec(dllimport)
+  #endif
 #else
   #define OPENHTJ2K_EXPORT
 #endif
 
-#if defined(OPENHTJ2K_TIFF_SUPPORT)
-  #include <tiffio.h>
-#endif
+#include "openhtj2k_message.hpp"
 namespace open_htj2k {
 class image {
  private:
@@ -68,23 +74,20 @@ class image {
  public:
   OPENHTJ2K_EXPORT explicit image(const std::vector<std::string> &filenames);
   OPENHTJ2K_EXPORT int read_pnmpgx(const std::string &filename, uint16_t nc);
-#if defined(OPENHTJ2K_TIFF_SUPPORT)
+  // Fails (returns EXIT_FAILURE) when the library was built without libtiff.
   OPENHTJ2K_EXPORT int read_tiff(const std::string &filename);
-#endif
 
   OPENHTJ2K_NODISCARD uint32_t get_width() const { return this->width; }
   OPENHTJ2K_NODISCARD uint32_t get_height() const { return this->height; }
   OPENHTJ2K_NODISCARD uint32_t get_component_width(uint16_t c) const {
-    if (c > num_components) {
-      printf("ERROR: component index %d is larger than maximum value %d.\n", c, num_components);
-      throw std::exception();
+    if (c >= num_components) {
+      throw std::out_of_range("open_htj2k::image: component index out of range");
     }
     return this->component_width[c];
   }
   OPENHTJ2K_NODISCARD uint32_t get_component_height(uint16_t c) const {
-    if (c > num_components) {
-      printf("ERROR: component index %d is larger than maximum value %d.\n", c, num_components);
-      throw std::exception();
+    if (c >= num_components) {
+      throw std::out_of_range("open_htj2k::image: component index out of range");
     }
     return this->component_height[c];
   }
@@ -92,7 +95,7 @@ class image {
   uint8_t get_Ssiz_value(uint16_t c) {
     uint8_t val = static_cast<uint8_t>(this->bits_per_pixel[c] - 1);
     if (this->is_signed[c]) {
-      val = val | 0x80;
+      val = static_cast<uint8_t>(val | 0x80);
     }
     return val;
   }
@@ -133,6 +136,11 @@ struct cod_params {
   uint16_t number_of_layers;
   uint8_t use_color_trafo;
   uint8_t dwt_levels;
+  // SPcod code-block style.  0x40 selects the HT block coder (ISO/IEC 15444-15),
+  // optionally with 0x08 (vertically causal contexts).  Without 0x40 the Part 1
+  // block coder (ISO/IEC 15444-1) is used, with any of the mode switches of
+  // Table A.19: 0x01 BYPASS, 0x02 RESET, 0x04 RESTART, 0x08 CAUSAL, 0x10 ERTERM,
+  // 0x20 SEGMARK.  Other values are rejected.
   uint8_t codeblock_style;
   uint8_t transformation;
   std::vector<uint8_t> PPx, PPy;
@@ -144,15 +152,37 @@ struct qcd_params {
   double base_step;
 };
 
+// What the encoder writes: the bare codestream, or a file with the codestream in
+// a Contiguous Codestream box after the signature, file type and JP2 header boxes.
+enum class file_format : uint8_t {
+  codestream = 0,  // the bare codestream (.j2c, .j2k, .jhc)
+  jph        = 1,  // JPH file (.jph, ISO/IEC 15444-15), for the HT block coder
+  jp2        = 2,  // JP2 file (.jp2, ISO/IEC 15444-1 Annex I), for a Part 1 codestream only
+};
+
 class openhtj2k_encoder {
  private:
   std::unique_ptr<class openhtj2k_encoder_impl> impl;
 
  public:
+  // num_threads: 1 encodes on the calling thread only.  Any other value uses the
+  // worker pool that all decoders and encoders in the process share: 0 asks for
+  // one thread per hardware thread, n for n threads; either way at most 1024
+  // (a larger count gets 1024).  The pool is created by the
+  // first instance that needs it, with that instance's count, and is kept until
+  // the last instance using it is destroyed; while it exists, other instances
+  // use it as it is.  Instances may be used from several threads at once, each
+  // instance from one thread at a time.
   OPENHTJ2K_EXPORT openhtj2k_encoder(const char *, const std::vector<int32_t *> &input_buf, siz_params &siz,
                                      cod_params &cod, qcd_params &qcd, uint8_t qfactor, bool isJPH,
                                      uint8_t color_space, uint32_t num_threads);
   OPENHTJ2K_EXPORT void set_output_buffer(std::vector<uint8_t> &output_buf);
+  // Selects the file format, replacing the constructor's isJPH (true is file_format::jph,
+  // false file_format::codestream).  file_format::jp2 needs a Part 1 codestream: the Part 1
+  // block coder (cod_params::codeblock_style without 0x40), no Part 2 progression order
+  // (PRCL) and no Part 2 or CAP bits in siz_params::Rsiz; invoke_* throws otherwise.
+  // color_space applies to JP2 as to JPH (the colour specification box).
+  OPENHTJ2K_EXPORT void set_file_format(file_format format);
   // EXPERIMENTAL: enable analytic visual (CSF) weighting for the Qfactor path.
   // model: 0 = legacy table (default, output unchanged), 1 = Mannos-Sakrison, 2 = Daly.
   // ref_ppd: reference pixels-per-degree at zoom 1.0 (<= 0 keeps the default).
@@ -167,6 +197,40 @@ class openhtj2k_encoder {
   // EXPERIMENTAL: A/B switch -- evaluate the luminance CSF for Cb/Cr components
   // instead of the low-pass chroma CSF, keeping the sub-sampling frequency mapping.
   OPENHTJ2K_EXPORT void set_chroma_csf_reuse_luma(bool reuse_luma);
+  // Visual weights of the Qfactor path. 0 = visual (default): the JPEG Qfactor
+  // guideline's per-subband weights, which fade out from Qfactor 65 to 97. 1 = flat:
+  // every subband weight is 1 at every Qfactor (MSE-optimal steps, for scientific or
+  // other non-visual data); the CSF settings above are then unused. The Qfactor sets
+  // the reference step either way. Call before invoke_*; only affects encodes with
+  // Qfactor. Any other value throws std::runtime_error.
+  OPENHTJ2K_EXPORT void set_qfactor_weights(uint8_t weights);
+  // How the Qfactor scales with the sample precision. 0 = the JPEG Qfactor guideline
+  // (default): a Qfactor keeps the same number of bits at every precision. 1 =
+  // precision-scaled, an OpenHTJ2K extension: a Qfactor removes the same fraction of the
+  // precision at every bit depth (identical to the guideline at 8 bits). Combine with
+  // set_qfactor_weights(1) for steps without visual weights. Call before invoke_*; only
+  // affects encodes with Qfactor. Any other value throws std::runtime_error.
+  OPENHTJ2K_EXPORT void set_qfactor_scale(uint8_t scale);
+  // EXPERIMENTAL: code each HT code-block as one HT set of three passes: the HT
+  // cleanup pass `planes` bit-planes above the LSB, then the HT SigProp and HT
+  // MagRef passes of the plane below it (ISO/IEC 15444-15).  0 (default) codes
+  // the cleanup pass only.  SigProp only reaches samples next to a significant
+  // one, so the refined plane is not coded completely and any planes below it are
+  // dropped: the result is not lossless.  The value is clamped per code-block so
+  // that the cleanup pass keeps a significant sample.  HT block coding only.
+  OPENHTJ2K_EXPORT void set_ht_refinement(uint8_t planes);
+  // EXPERIMENTAL: truncate the code-blocks so that the codestream (SOC to EOC, without
+  // any JPH or JP2 file-format boxes) takes at most `bytes` bytes, at the least squared error
+  // (PCRD optimisation over the HT SigProp/MagRef truncation points, or the coding passes
+  // of the Part 1 block coder).  0 (default) disables it.  The base step size
+  // (qcd_params) bounds the highest quality.  Requires the irreversible 9/7 wavelet, one
+  // quality layer and no Qfactor.
+  OPENHTJ2K_EXPORT void set_target_size(uint64_t bytes);
+  // EXPERIMENTAL: the same with quality layers, Part 1 block coder only: one target per
+  // layer (cod_params::number_of_layers of them, none decreasing), layer l and the layers
+  // below it taking at most bytes[l] bytes of the codestream.  The last target bounds
+  // the codestream.  An empty list disables it.
+  OPENHTJ2K_EXPORT void set_target_sizes(const std::vector<uint64_t> &bytes);
   OPENHTJ2K_EXPORT size_t invoke_line_based();
   OPENHTJ2K_EXPORT size_t
   invoke_line_based_stream(std::function<void(uint32_t, int32_t **, uint16_t)> src_fn);

@@ -31,6 +31,8 @@
 #include <limits>
 #include "codestream.hpp"
 
+namespace open_htj2k {
+
 // MARK: j2c_dst_memory -
 int32_t j2c_dst_memory::put_byte(uint8_t byte) {
   ensure_capacity(static_cast<size_t>(pos) + 1U);
@@ -89,13 +91,4 @@ int32_t j2c_dst_memory::flush(std::vector<uint8_t> *obuf) {
 }
 
 size_t j2c_dst_memory::get_length() const { return pos; }
-
-OPENHTJ2K_MAYBE_UNUSED [[deprecated]] void j2c_dst_memory::print_bytes() {
-  for (size_t i = 0; i < pos; i++) {
-    if (i % 32 == 0) {
-      printf("\n");
-    }
-    printf("%02x ", buf[i]);
-  }
-  printf("\n");
-}
+}  // namespace open_htj2k

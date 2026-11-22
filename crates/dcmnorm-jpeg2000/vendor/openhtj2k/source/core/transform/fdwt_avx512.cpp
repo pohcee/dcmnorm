@@ -42,6 +42,8 @@
 // Same slli_epi64(32) trick as AVX2: within each 64-bit lane the sum of the two
 // neighbouring samples is shifted to the odd (update-target) slot, zeroing the even
 // (pass-through) slot, so fmadd updates only the target slot in one fused instruction.
+namespace open_htj2k {
+
 auto fdwt_irrev97_fixed_avx512_hor_step = [](const int32_t init_pos, const int32_t simdlen,
                                               float *const X, const int32_t n0, const int32_t n1,
                                               float coeff) {
@@ -311,7 +313,7 @@ void fdwt_rev_ver_sr_fixed_avx512(sprec_t *in, const int32_t u0, const int32_t u
       const int32_t ce        = (cs + DWT_VERT_STRIP < width) ? cs + DWT_VERT_STRIP : width;
       const int32_t simdlen_s = (ce - cs) - (ce - cs) % 16;
       const int32_t tail      = ce - cs - simdlen_s;
-      const __mmask16 tmask   = tail > 0 ? static_cast<__mmask16>((1U << tail) - 1U) : 0;
+      const __mmask16 tmask   = static_cast<__mmask16>(tail > 0 ? (1U << tail) - 1U : 0U);
       const __m512 x05 = _mm512_set1_ps(0.5f);
       // step 1: H[k] -= floor((L[k] + L[k+1]) * 0.5)
       for (int32_t n = -2 + offset, i = start - 1; i < stop; ++i, n += 2) {
@@ -687,4 +689,5 @@ void fdwt_1d_filtr_rev53_planar_i32_avx512(int32_t *lp, int32_t *hp, const int32
   }
 }
 
+}  // namespace open_htj2k
 #endif  // OPENHTJ2K_TRY_AVX2 && __AVX512F__
