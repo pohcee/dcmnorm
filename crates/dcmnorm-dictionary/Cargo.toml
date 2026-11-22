@@ -34,5 +34,5 @@ name = "dcmnorm_dictionary"
 path = "src/lib.rs"
 
 [dependencies]
-dcmnorm-core = { path = "../dcmnorm-core", version = "=0.20.0" }
+dcmnorm-core = { path = "../dcmnorm-core", version = "=0.20.1" }
 once_cell = "1.18.0"

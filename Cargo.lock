@@ -375,7 +375,7 @@ checksum = "914a755b7c2d4af2bdcff7ce1739e2db9a1b81a9b07123d8015786ae03c0980d"
 
 [[package]]
 name = "dcmnorm"
-version = "0.20.0"
+version = "0.20.1"
 dependencies = [
  "base64",
  "cc",
@@ -403,7 +403,7 @@ dependencies = [
 
 [[package]]
 name = "dcmnorm-cli"
-version = "0.20.0"
+version = "0.20.1"
 dependencies = [
  "clap",
  "dcmnorm",
@@ -427,7 +427,7 @@ dependencies = [
 
 [[package]]
 name = "dcmnorm-core"
-version = "0.20.0"
+version = "0.20.1"
 dependencies = [
  "chrono",
  "either",
@@ -440,7 +440,7 @@ dependencies = [
 
 [[package]]
 name = "dcmnorm-dictionary"
-version = "0.20.0"
+version = "0.20.1"
 dependencies = [
  "dcmnorm-core",
  "once_cell",
@@ -448,7 +448,7 @@ dependencies = [
 
 [[package]]
 name = "dcmnorm-dimse"
-version = "0.20.0"
+version = "0.20.1"
 dependencies = [
  "dcmnorm-encoding",
  "dcmnorm-transcode",
@@ -456,7 +456,7 @@ dependencies = [
 
 [[package]]
 name = "dcmnorm-encoding"
-version = "0.20.0"
+version = "0.20.1"
 dependencies = [
  "byteordered",
  "dcmnorm-core",
@@ -478,11 +478,11 @@ dependencies = [
 
 [[package]]
 name = "dcmnorm-jpeg"
-version = "0.20.0"
+version = "0.20.1"
 
 [[package]]
 name = "dcmnorm-jpeg2000"
-version = "0.20.0"
+version = "0.20.1"
 dependencies = [
  "cc",
  "openjpeg-sys",
@@ -504,7 +504,7 @@ dependencies = [
 
 [[package]]
 name = "dcmnorm-object"
-version = "0.20.0"
+version = "0.20.1"
 dependencies = [
  "dcmnorm-core",
  "dcmnorm-dictionary",
@@ -517,7 +517,7 @@ dependencies = [
 
 [[package]]
 name = "dcmnorm-parser"
-version = "0.20.0"
+version = "0.20.1"
 dependencies = [
  "dcmnorm-core",
  "dcmnorm-dictionary",
@@ -539,7 +539,7 @@ dependencies = [
 
 [[package]]
 name = "dcmnorm-transcode"
-version = "0.20.0"
+version = "0.20.1"
 dependencies = [
  "byteordered",
  "dcmnorm-core",
@@ -554,7 +554,7 @@ dependencies = [
 
 [[package]]
 name = "dcmtalk"
-version = "0.20.0"
+version = "0.20.1"
 dependencies = [
  "clap",
  "dcmnorm",

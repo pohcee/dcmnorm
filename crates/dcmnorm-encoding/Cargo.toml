@@ -18,8 +18,8 @@ name = "dcmnorm_encoding"
 path = "src/lib.rs"
 
 [dependencies]
-dcmnorm-core = { path = "../dcmnorm-core", version = "=0.20.0" }
-dcmnorm-dictionary = { path = "../dcmnorm-dictionary", version = "=0.20.0" }
+dcmnorm-core = { path = "../dcmnorm-core", version = "=0.20.1" }
+dcmnorm-dictionary = { path = "../dcmnorm-dictionary", version = "=0.20.1" }
 encoding = "0.2.33"
 byteordered = "0.6"
 snafu = "0.8"
