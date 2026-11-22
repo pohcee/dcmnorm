@@ -36,10 +36,10 @@ simd = ["jpeg-encoder?/simd"]
 
 [dependencies]
 byteordered = "0.6"
-dcmnorm-core = { path = "../dcmnorm-core", version = "=0.19.0" }
-dcmnorm-encoding = { path = "../dcmnorm-encoding", version = "=0.19.0" }
-dcmnorm-jpeg = { path = "../dcmnorm-jpeg", version = "=0.19.0", optional = true }
-dcmnorm-jpeg2000 = { path = "../dcmnorm-jpeg2000", version = "=0.19.0", optional = true }
+dcmnorm-core = { path = "../dcmnorm-core", version = "=0.20.0" }
+dcmnorm-encoding = { path = "../dcmnorm-encoding", version = "=0.20.0" }
+dcmnorm-jpeg = { path = "../dcmnorm-jpeg", version = "=0.20.0", optional = true }
+dcmnorm-jpeg2000 = { path = "../dcmnorm-jpeg2000", version = "=0.20.0", optional = true }
 flate2 = { version = "1.0.28", optional = true }
 jpeg-encoder = { version = "0.6", optional = true }
 lazy_static = "1.2.0"
