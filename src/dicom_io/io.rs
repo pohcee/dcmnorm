@@ -2830,6 +2830,51 @@ mod tests {
     }
 
     #[test]
+    fn htj2k_parallel_decode_preserves_fragmented_frames() {
+        use dcmnorm_core::PrimitiveValue;
+        use dcmnorm_dictionary::{tags, uids};
+        use dcmnorm_encoding::transfer_syntax::TransferSyntaxIndex;
+        use dcmnorm_transcode::TransferSyntaxRegistry;
+
+        let target = "1.2.840.10008.1.2.4.201";
+        let pixels = [vec![13u8; 32 * 32], vec![37u8; 32 * 32]].concat();
+        let native = htj2k_test_object(
+            uids::EXPLICIT_VR_LITTLE_ENDIAN,
+            32,
+            32,
+            1,
+            8,
+            8,
+            false,
+            2,
+            PrimitiveValue::from(pixels.clone()).into(),
+        );
+        let mut encoded = super::transcode_dcmnorm_object(&native, target).unwrap();
+        let frames = encoded
+            .element(tags::PIXEL_DATA)
+            .unwrap()
+            .fragments()
+            .unwrap();
+        let second_offset = (frames[0].len() + 16) as u32;
+        let fragments: Vec<Vec<u8>> = frames
+            .iter()
+            .flat_map(|frame| [frame[..32].to_vec(), frame[32..].to_vec()])
+            .collect();
+        super::replace_with_encapsulated_pixel_data(
+            &mut encoded,
+            vec![0, second_offset],
+            fragments,
+        );
+
+        assert!(super::should_parallel_frame_decode(&encoded, target, 2));
+        let syntax = TransferSyntaxRegistry.get(target).unwrap();
+        let reader = syntax.pixel_data_reader().unwrap();
+        let decoded =
+            super::decode_pixel_data_parallel_frames(reader.as_ref(), &encoded, 2).unwrap();
+        assert_eq!(decoded, pixels);
+    }
+
+    #[test]
     fn htj2k_capabilities_are_reported_accurately() {
         let support = super::list_transfer_syntax_support();
         let entry = |uid: &str| {
