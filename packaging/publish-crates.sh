@@ -3,7 +3,8 @@
 # packaging/README.md, "crates.io").
 #
 #   packaging/publish-crates.sh            publish every crate whose version crates.io lacks
-#   packaging/publish-crates.sh --dry-run  list them and package + verify them; upload nothing
+#   packaging/publish-crates.sh --dry-run  package + verify every publishable crate (published or
+#                                          not, so pull requests keep checking them); upload nothing
 #
 # The crates are every workspace member without `publish = false` (the bindings and
 # dcmnorm-codegen have it). cargo orders them by their dependencies and waits for each to reach
@@ -20,18 +21,33 @@ case "${1:-}" in
   *) echo "usage: $0 [--dry-run]" >&2; exit 2 ;;
 esac
 
-# "name version" for each publishable member.
-mapfile -t crates < <(
-  cargo metadata --format-version 1 --no-deps --locked |
-    python3 -c '
+# "name version" for each publishable member. Captured first, so a cargo metadata failure stops
+# the script instead of looking like an empty workspace.
+metadata="$(cargo metadata --format-version 1 --no-deps --locked)"
+listing="$(python3 -c '
 import json, sys
 meta = json.load(sys.stdin)
 members = set(meta["workspace_members"])
 for p in meta["packages"]:
     if p["id"] in members and p["publish"] != []:
         print(p["name"], p["version"])
-'
-)
+' <<< "$metadata")"
+mapfile -t crates <<< "$listing"
+if [[ -z "$listing" || ${#crates[@]} -eq 0 ]]; then
+  echo "no publishable crates found in the workspace" >&2
+  exit 1
+fi
+
+if [[ "$dry_run" -eq 1 ]]; then
+  # Packages and builds each crate from its .crate file, against the others' local packages.
+  all=()
+  for entry in "${crates[@]}"; do
+    read -r name _ <<< "$entry"
+    echo "package $name"
+    all+=(-p "$name")
+  done
+  exec cargo package --locked "${all[@]}"
+fi
 
 # The sparse index path of a crate: https://doc.rust-lang.org/cargo/reference/registry-index.html
 index_url() {
@@ -69,11 +85,6 @@ done
 if [[ ${#todo[@]} -eq 0 ]]; then
   echo "Every crate is already on crates.io."
   exit 0
-fi
-
-if [[ "$dry_run" -eq 1 ]]; then
-  # Packages and builds each crate from its .crate file, against the others' local packages.
-  exec cargo package --locked "${todo[@]}"
 fi
 
 : "${CARGO_REGISTRY_TOKEN:?CARGO_REGISTRY_TOKEN is not set}"

@@ -76,7 +76,7 @@ the repository; the builds' outputs are `.gitignore`d.
   SIMD level at run time either way.
 - `check-windows-deps.ps1 <file>` fails if a Windows binary imports an FFmpeg DLL.
 - `publish-crates.sh [--dry-run]` publishes every workspace crate whose version crates.io lacks
-  (the `crates-io` job); `--dry-run` packages and builds them from their `.crate` files instead
+  (the `crates-io` job); `--dry-run` packages and builds every one of them from its `.crate` file instead
   (the `crates` job). Needs a clean, committed tree.
 - `pypi-README.md` is the PyPI project description (both wheels).
 - `make-brand-images.py` draws the dcmnorm icon and everything made from it: the plugin's listing icon
