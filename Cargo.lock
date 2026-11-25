@@ -194,25 +194,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
 
 [[package]]
-name = "charls"
-version = "0.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "461ee0e8f15d5a4a14c6d79e7cf593a85d28e635e4ce7211c93ac649f03cfb5f"
-dependencies = [
- "charls-sys",
-]
-
-[[package]]
-name = "charls-sys"
-version = "2.4.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "28bd4cd0583158019ce942b42ec9b4200462199e65c76cd3be5df5322d3a159b"
-dependencies = [
- "cmake",
- "link-cplusplus",
-]
-
-[[package]]
 name = "chrono"
 version = "0.4.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -273,15 +254,6 @@ name = "clap_lex"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1c133bc6a41be0d194c306b5506d15e6feeea7b1d6604bd3f8310dfb2ca96486"
-
-[[package]]
-name = "cmake"
-version = "0.1.58"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c0f78a02292a74a88ac736019ab962ece0bc380e3f977bf72e376c5d78ff0678"
-dependencies = [
- "cc",
-]
 
 [[package]]
 name = "colorchoice"
@@ -379,12 +351,12 @@ version = "0.20.1"
 dependencies = [
  "base64",
  "cc",
- "charls",
  "dcmnorm-core",
  "dcmnorm-dictionary",
  "dcmnorm-dimse",
  "dcmnorm-encoding",
  "dcmnorm-jpeg2000",
+ "dcmnorm-jpegls",
  "dcmnorm-object",
  "dcmnorm-transcode",
  "ffmpeg-next",
@@ -487,6 +459,13 @@ dependencies = [
  "cc",
  "openjpeg-sys",
  "rayon",
+]
+
+[[package]]
+name = "dcmnorm-jpegls"
+version = "0.20.1"
+dependencies = [
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -1211,15 +1190,6 @@ checksum = "754ca22de805bb5744484a5b151a9e1a8e837d5dc232c2d7d8c2e3492edc8b60"
 dependencies = [
  "cfg-if",
  "windows-link",
-]
-
-[[package]]
-name = "link-cplusplus"
-version = "1.0.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f78c730aaa7d0b9336a299029ea49f9ee53b0ed06e9202e8cb7db9bae7b8c82"
-dependencies = [
- "cc",
 ]
 
 [[package]]

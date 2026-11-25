@@ -30,10 +30,9 @@ docker run --rm \
   -v "$REPO_ROOT":/repo -w /repo \
   -e CARGO_TARGET_DIR="/repo/${TARGET_DIR}" \
   -e CARGO_PROFILE_RELEASE_STRIP=symbols \
-  -e CMAKE_TOOLCHAIN_FILE=/repo/packaging/manylinux.cmake \
   -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
   "$IMAGE" bash -euo pipefail -c '
-    # The image has a C/C++ toolchain (gcc-toolset), cmake and binutils, which is everything the
+    # The image has a C/C++ toolchain (gcc-toolset) and binutils, which is everything the
     # default build needs (FFmpeg is not built, see Cargo.toml).
     curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y -q --profile minimal
     . "$HOME/.cargo/env"

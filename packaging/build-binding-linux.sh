@@ -57,7 +57,6 @@ docker run --rm \
   -e BINDING="$BINDING" -e ARCH="$ARCH" \
   -e CARGO_TARGET_DIR="/repo/${TARGET_DIR}" \
   -e CARGO_PROFILE_RELEASE_STRIP=symbols \
-  -e CMAKE_TOOLCHAIN_FILE=/repo/packaging/manylinux.cmake \
   -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
   "$IMAGE" bash -euo pipefail -c '
     # Everything written under the bind mount is handed back to the invoking user, also when a
@@ -72,8 +71,8 @@ docker run --rm \
     trap hand_back EXIT
 
     # nasm: FFmpeg x86 assembly (its ./configure fails without it on x86_64); clang-devel:
-    # libclang for bindgen (ffmpeg-sys-next). git (FFmpeg source clone), the gcc toolset and
-    # cmake come with the image.
+    # libclang for bindgen (ffmpeg-sys-next). git (FFmpeg source clone) and the gcc toolset
+    # come with the image.
     dnf install -y -q nasm clang-devel > /dev/null
     curl --proto "=https" --tlsv1.2 -sSf --retry 5 https://sh.rustup.rs \
       | sh -s -- -y -q --profile minimal

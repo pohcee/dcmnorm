@@ -741,7 +741,7 @@ is available without extra native imaging libraries:
   [Video transfer syntaxes](#video-transfer-syntaxes))
 - JPEG baseline decode/encode
 - JPEG extended and JPEG lossless decode-only
-- JPEG-LS transfer syntax support via CharLS-backed build integration
+- JPEG-LS lossless and near-lossless decode/encode (`dcmnorm-jpegls`, pure Rust)
 - JPEG 2000 decode, plus encode to `.90`/`.91` (OpenJPEG)
 - High-Throughput JPEG 2000 (HTJ2K) decode for `.201`-`.203`, plus lossless encode to `.201`/`.203` (OpenHTJ2K)
 - JPEG XL decode for `.110`-`.112` (jxl-oxide), plus lossless encode to `.110` (zune-jpegxl,

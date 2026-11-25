@@ -47,12 +47,11 @@ check_apt_build_deps() {
         return 0
     fi
 
-    # The default build needs only a C/C++ toolchain and CMake (CharLS); FFmpeg is not built or
+    # The default build needs only a C/C++ toolchain; FFmpeg is not built or
     # linked (the video transfer syntaxes use the ffmpeg command at run time, see the README).
     local -a required_packages=(
         build-essential
         ca-certificates
-        cmake
         pkg-config
     )
     local -a missing_packages=()
@@ -140,7 +139,6 @@ use_kakadu_ffi=0
 
 check_apt_build_deps
 require_command cargo "Install Rust and Cargo before running this script."
-require_command cmake "Install CMake; the JPEG-LS codec (CharLS) is built with it."
 if ! command -v ffmpeg >/dev/null 2>&1; then
     echo "Note: no ffmpeg command found. Everything works without it except the video transfer"
     echo "syntaxes (MPEG-2, MPEG-4 AVC/H.264, HEVC) and .mp4/.mov output; install FFmpeg for those."

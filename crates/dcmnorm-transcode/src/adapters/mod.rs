@@ -16,7 +16,7 @@
 //! JPEG-LS and JPEG XL have no adapters here (removed - never enabled by any
 //! real build in this workspace; see `entries.rs`'s registry-completeness
 //! stubs for those transfer syntax UIDs). dcmnorm's own JPEG-LS support
-//! calls `charls` directly, bypassing this registry entirely.
+//! calls `dcmnorm-jpegls` directly, bypassing this registry entirely.
 //!
 //! [OpenJPEG]: https://github.com/uclouvain/openjpeg
 #[cfg(feature = "deflate")]

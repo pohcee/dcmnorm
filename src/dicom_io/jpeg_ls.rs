@@ -50,7 +50,7 @@ pub mod jpeg_ls_impl {
             }
         }
 
-        // One fragment per frame. charls decodes samples into native (little-endian) byte
+        // One fragment per frame. `dcmnorm_jpegls` decodes samples into little-endian byte
         // order, matching what every other codec here hands to `replace_with_native_pixel_data`.
         let total = fragments.len();
         let mut decoded = Vec::new();
@@ -132,15 +132,14 @@ pub mod jpeg_ls_impl {
     /// Decode one JPEG-LS codestream (one frame), checking its header against Rows/Columns
     /// first - a mismatch here means either a corrupt fragment or the wrong PixelData
     /// attributes, and either way is worth a clear error instead of the confusing shape
-    /// mismatch that would otherwise surface downstream. charls decodes samples into native
-    /// (little-endian) byte order.
+    /// mismatch that would otherwise surface downstream. `dcmnorm-jpegls` decodes samples into
+    /// native (little-endian) byte order.
     pub fn decode_codestream(codestream: &[u8], rows: u32, cols: u32) -> Result<Vec<u8>, String> {
         if codestream.is_empty() {
             return Err("empty JPEG-LS fragment".to_owned());
         }
 
-        let frame_info = charls::CharLS::default()
-            .get_frame_info(codestream)
+        let frame_info = dcmnorm_jpegls::read_frame_info(codestream)
             .map_err(|e| format!("failed to read JPEG-LS header: {e}"))?;
         if frame_info.width != cols || frame_info.height != rows {
             return Err(format!(
@@ -149,8 +148,16 @@ pub mod jpeg_ls_impl {
             ));
         }
 
-        charls::CharLS::default()
-            .decode(codestream)
+        // Size budget for `u16` sample buffer; dimensions already matched DICOM Rows/Columns.
+        let required_bytes = (rows as usize)
+            .saturating_mul(cols as usize)
+            .saturating_mul(usize::from(frame_info.components))
+            .saturating_mul(2);
+        let opts = dcmnorm_jpegls::DecodeImageOptions {
+            max_decoded_bytes: required_bytes.max(64 * 1024 * 1024),
+        };
+        dcmnorm_jpegls::decode_to_bytes_with_options(codestream, &opts)
+            .map(|(bytes, _)| bytes)
             .map_err(|e| format!("JPEG-LS decode failed: {e}"))
     }
 
@@ -163,29 +170,31 @@ pub mod jpeg_ls_impl {
         planar_configuration: u16,
         lossless: bool,
     ) -> Result<Vec<u8>, String> {
-        let frame_info = charls::FrameInfo {
-            width: u32::from(cols),
-            height: u32::from(rows),
-            bits_per_sample: i32::from(bits_stored),
-            component_count: i32::from(samples_per_pixel),
+        let near = if lossless {
+            0
+        } else {
+            NEAR_LOSSLESS_STEP as u8
         };
-        let near = if lossless { 0 } else { NEAR_LOSSLESS_STEP };
+        let interleave_mode = if samples_per_pixel > 1 && planar_configuration == 0 {
+            2
+        } else {
+            0
+        };
+        let components = u8::try_from(samples_per_pixel)
+            .map_err(|_| format!("unsupported SamplesPerPixel {samples_per_pixel}"))?;
+        let bits = u8::try_from(bits_stored)
+            .map_err(|_| format!("unsupported BitsStored {bits_stored}"))?;
 
-        let mut encoder = charls::CharLS::default();
-        if samples_per_pixel > 1 {
-            let interleave_mode = if planar_configuration == 0 {
-                charls::InterleaveMode::Sample
-            } else {
-                charls::InterleaveMode::None
-            };
-            encoder
-                .set_interleave_mode(interleave_mode)
-                .map_err(|e| format!("failed to set JPEG-LS interleave mode: {e}"))?;
-        }
-
-        encoder
-            .encode(frame_info, near, frame_bytes)
-            .map_err(|e| format!("{e}"))
+        dcmnorm_jpegls::encode_bytes(
+            frame_bytes,
+            u32::from(cols),
+            u32::from(rows),
+            components,
+            bits,
+            near,
+            interleave_mode,
+        )
+        .map_err(|e| format!("{e}"))
     }
 
     /// Encode raw native pixel data to JPEG-LS, one fragment per frame - the mirror image of

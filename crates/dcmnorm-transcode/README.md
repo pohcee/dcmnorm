@@ -40,7 +40,7 @@ Enabled features mirror what `dcmnorm`'s `Cargo.toml` actually requests:
   a compliant JPEG2000 codec is far riskier than the value it'd add.
 - **JPEG-LS** and **JPEG XL** have no adapters in this crate at all anymore
   (see "Trimmed to dcmnorm's actual surface" below) — dcmnorm's own JPEG-LS
-  support calls `charls` directly, bypassing this registry entirely, and
+  support calls `dcmnorm-jpegls` directly, bypassing this registry entirely, and
   nothing in the wild has ever required JPEG XL decode.
 
 ## Trimmed to dcmnorm's actual surface

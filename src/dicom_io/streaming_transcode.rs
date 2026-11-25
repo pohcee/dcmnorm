@@ -2541,7 +2541,7 @@ fn prepare_wire_native_plan(
     if source_be && vr == VR::OW && (!frame_len.is_multiple_of(2) || !length.is_multiple_of(2)) {
         return None;
     }
-    // CharLS treats bits_per_sample <= 8 as 1 byte/sample; decline streaming JPEG-LS when
+    // JPEG-LS treats bits_per_sample <= 8 as 1 byte/sample; decline streaming JPEG-LS when
     // native pixels are stored in 16-bit allocated containers with <= 8 stored bits.
     if matches!(target_mode, TargetMode::JpegLs { .. }) && bits_allocated == 16 && bits_stored <= 8
     {
