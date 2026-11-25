@@ -611,8 +611,10 @@ fn parse_defined_length_encapsulated_bytes(bytes: &[u8]) -> Option<(Vec<u32>, Ve
         return None;
     }
     let offset_table = bytes[8..8 + bot_len]
-        .chunks_exact(4)
-        .map(|chunk| u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|chunk| u32::from_le_bytes(*chunk))
         .collect();
     let mut pos = 8 + bot_len;
     let mut fragments = Vec::new();
@@ -683,8 +685,10 @@ fn try_parse_defined_length_encapsulated_file(
             })?;
     }
     let offset_table = bot_bytes
-        .chunks_exact(4)
-        .map(|chunk| u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|chunk| u32::from_le_bytes(*chunk))
         .collect();
     let mut pos = offset + 8 + bot_len;
     let mut fragments = Vec::new();
