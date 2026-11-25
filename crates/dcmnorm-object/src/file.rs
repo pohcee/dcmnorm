@@ -89,7 +89,10 @@ impl DefaultDicomObject {
             .ok_or_else(|| ReadError::UnsupportedTransferSyntax {
                 uid: meta.transfer_syntax.clone(),
             })?;
-        let object = InMemDicomObject::read_dataset_with_ts(source, ts)?;
+        let mut object = InMemDicomObject::read_dataset_with_ts(source, ts)?;
+        if ts.is_encapsulated_pixel_data() {
+            normalize_defined_length_encapsulated_pixel_data(&mut object);
+        }
         backfill_media_storage_uids(&mut meta, &object);
         Ok(FileDicomObject { meta, object })
     }
@@ -626,6 +629,9 @@ fn parse_defined_length_encapsulated_bytes(bytes: &[u8]) -> Option<(Vec<u32>, Ve
         let item_len = u32::from_le_bytes(bytes[pos + 4..pos + 8].try_into().ok()?) as usize;
         pos += 8;
         if tag == SEQ_DELIM_TAG && item_len == 0 {
+            if pos != bytes.len() {
+                return None;
+            }
             break;
         }
         if tag != ITEM_TAG {
@@ -704,6 +710,9 @@ fn try_parse_defined_length_encapsulated_file(
         let item_len = u32::from_le_bytes(header[4..8].try_into().unwrap());
         pos += 8;
         if header[..4] == SEQ_DELIM_TAG && item_len == 0 {
+            if pos != end {
+                return Ok(None);
+            }
             break;
         }
         if header[..4] != ITEM_TAG {
@@ -847,17 +856,22 @@ mod tests {
         let mut bytes = Vec::new();
         file_obj.write_all(&mut bytes).unwrap();
 
-        // In-memory read normalizes defined-length encapsulated PixelData to fragments.
-        let read = OpenFileOptions::new()
-            .from_reader(std::io::Cursor::new(&bytes))
-            .expect("in-memory read should succeed");
-        let frags = read
-            .element(tags::PIXEL_DATA)
-            .unwrap()
-            .fragments()
-            .expect("should normalize to PixelFragmentSequence");
-        assert_eq!(frags.len(), 1);
-        assert_eq!(frags[0], vec![0xFF, 0xD8, 0xFF, 0xD9]);
+        // Both OpenFileOptions::from_reader and default FileDicomObject::from_reader normalize.
+        for read in [
+            OpenFileOptions::new()
+                .from_reader(std::io::Cursor::new(&bytes))
+                .expect("OpenFileOptions read should succeed"),
+            crate::FileDicomObject::from_reader(std::io::Cursor::new(&bytes))
+                .expect("FileDicomObject::from_reader should succeed"),
+        ] {
+            let frags = read
+                .element(tags::PIXEL_DATA)
+                .unwrap()
+                .fragments()
+                .expect("should normalize to PixelFragmentSequence");
+            assert_eq!(frags.len(), 1);
+            assert_eq!(frags[0], vec![0xFF, 0xD8, 0xFF, 0xD9]);
+        }
 
         // Deferred read reports DeferredPixelData::Encapsulated with exact fragment offset/length.
         let tmp = std::env::temp_dir().join("dcmnorm_defined_len_encaps_test.dcm");
@@ -884,5 +898,68 @@ mod tests {
             }
             other => panic!("expected DeferredPixelData::Encapsulated, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn defined_length_encapsulated_rejects_trailing_items_after_sequence_delimiter() {
+        use crate::DeferredPixelData;
+        use dcmnorm_core::{DataElement, PrimitiveValue, VR};
+
+        let mut obj = crate::InMemDicomObject::new_empty();
+        obj.put(DataElement::new(
+            tags::SOP_CLASS_UID,
+            VR::UI,
+            PrimitiveValue::from("1.2.840.10008.5.1.4.1.1.2"),
+        ));
+        obj.put(DataElement::new(
+            tags::SOP_INSTANCE_UID,
+            VR::UI,
+            PrimitiveValue::from("1.2.826.0.1.3680043.8.498.2"),
+        ));
+        // BOT -> fragment A -> Sequence Delimiter -> trailing fragment B (invalid early delimiter).
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&[0xFE, 0xFF, 0x00, 0xE0, 0, 0, 0, 0]);
+        payload.extend_from_slice(&[0xFE, 0xFF, 0x00, 0xE0, 4, 0, 0, 0]);
+        payload.extend_from_slice(&[0xFF, 0xD8, 0xFF, 0xD9]);
+        payload.extend_from_slice(&[0xFE, 0xFF, 0xDD, 0xE0, 0, 0, 0, 0]);
+        payload.extend_from_slice(&[0xFE, 0xFF, 0x00, 0xE0, 4, 0, 0, 0]);
+        payload.extend_from_slice(&[0x01, 0x02, 0x03, 0x04]);
+        let payload_len = payload.len();
+        obj.put(DataElement::new(
+            tags::PIXEL_DATA,
+            VR::OB,
+            PrimitiveValue::U8(payload.into()),
+        ));
+
+        let file_obj = obj
+            .with_meta(
+                crate::FileMetaTableBuilder::new()
+                    .transfer_syntax("1.2.840.10008.1.2.4.70")
+                    .media_storage_sop_class_uid("1.2.840.10008.5.1.4.1.1.2")
+                    .media_storage_sop_instance_uid("1.2.826.0.1.3680043.8.498.2"),
+            )
+            .unwrap();
+        let mut bytes = Vec::new();
+        file_obj.write_all(&mut bytes).unwrap();
+
+        // In-memory read preserves original primitive representation instead of silently dropping fragment B.
+        let read = crate::FileDicomObject::from_reader(std::io::Cursor::new(&bytes))
+            .expect("in-memory read should succeed");
+        let pd = read.element(tags::PIXEL_DATA).unwrap();
+        assert!(pd.fragments().is_none());
+        assert_eq!(pd.to_bytes().unwrap().len(), payload_len);
+
+        // Deferred read also preserves Native instead of returning a truncated fragment list.
+        let tmp = std::env::temp_dir().join("dcmnorm_defined_len_early_delim_test.dcm");
+        std::fs::write(&tmp, &bytes).unwrap();
+        let (_, deferred, _) = OpenFileOptions::new()
+            .open_file_deferring_pixel_data(&tmp)
+            .expect("deferred read should succeed")
+            .expect("should defer");
+        let _ = std::fs::remove_file(&tmp);
+        assert!(matches!(
+            deferred,
+            DeferredPixelData::Native { length, .. } if length as usize == payload_len
+        ));
     }
 }
