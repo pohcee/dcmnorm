@@ -11,30 +11,17 @@
 /// - `rc`: above-left neighbour (c)
 ///
 /// Returns the predicted value before bias correction and clamping.
-#[inline]
+#[inline(always)]
 pub(crate) fn predict_med(ra: i32, rb: i32, rc: i32) -> i32 {
-    if rc >= ra.max(rb) {
-        // Vertical edge detected -- predict the smaller of a, b.
-        ra.min(rb)
-    } else if rc <= ra.min(rb) {
-        // Horizontal edge detected -- predict the larger of a, b.
-        ra.max(rb)
-    } else {
-        // No strong edge -- use the plane predictor.
-        ra + rb - rc
-    }
+    let min_ab = ra.min(rb);
+    let max_ab = ra.max(rb);
+    (ra + rb - rc).clamp(min_ab, max_ab)
 }
 
 /// Clamp `val` to the inclusive range `[lo, hi]`.
-#[inline]
+#[inline(always)]
 pub(crate) fn clamp(val: i32, lo: i32, hi: i32) -> i32 {
-    if val < lo {
-        lo
-    } else if val > hi {
-        hi
-    } else {
-        val
-    }
+    val.clamp(lo, hi)
 }
 
 // ---------------------------------------------------------------------------

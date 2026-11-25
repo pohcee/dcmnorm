@@ -42,7 +42,84 @@ pub(crate) struct CtxEntry {
     pub n: i32,
 }
 
+impl CtxEntry {
+    #[inline(always)]
+    pub fn update_lossless(&mut self, err_val: i32, reset: i32) {
+        self.b += err_val;
+        self.a += err_val.abs();
+        if self.n == reset {
+            self.a >>= 1;
+            self.b = if self.b >= 0 {
+                self.b >> 1
+            } else {
+                -((1 - self.b) >> 1)
+            };
+            self.n >>= 1;
+        }
+        self.n += 1;
+        if self.b <= -self.n {
+            if self.c > MIN_C {
+                self.c -= 1;
+            }
+            self.b += self.n;
+            if self.b <= -self.n {
+                self.b = -self.n + 1;
+            }
+        } else if self.b > 0 {
+            if self.c < MAX_C {
+                self.c += 1;
+            }
+            self.b -= self.n;
+            if self.b > 0 {
+                self.b = 0;
+            }
+        }
+    }
+
+    #[inline(always)]
+    pub fn update_lossy(&mut self, err_val: i32, step: i32, reset: i32) {
+        self.b += err_val * step;
+        self.a += err_val.abs();
+        if self.n == reset {
+            self.a >>= 1;
+            self.b = if self.b >= 0 {
+                self.b >> 1
+            } else {
+                -((1 - self.b) >> 1)
+            };
+            self.n >>= 1;
+        }
+        self.n += 1;
+        if self.b <= -self.n {
+            if self.c > MIN_C {
+                self.c -= 1;
+            }
+            self.b += self.n;
+            if self.b <= -self.n {
+                self.b = -self.n + 1;
+            }
+        } else if self.b > 0 {
+            if self.c < MAX_C {
+                self.c += 1;
+            }
+            self.b -= self.n;
+            if self.b > 0 {
+                self.b = 0;
+            }
+        }
+    }
+}
+
+/// Inline quantization LUT covers `2 * t3 + 1 <= 1024` (`t3 <= 511`), which covers all
+/// standard 2..=16-bit T.87 default thresholds with zero heap allocation and zero bounds checks.
+/// For 8-bit (`max_val <= 255`), `d` is guaranteed in `[-255, 255]`, so lookups skip clamping.
+const INLINE_QUANT_MAX_T3: i32 = 511;
+const INLINE_QUANT_LEN: usize = 1024;
+const NO_CLAMP_OFFSET: i32 = 256;
+
 pub(crate) struct ContextModel {
+    pub t1: i32,
+    pub t2: i32,
     pub t3: i32,
     pub max_val: i32,
     pub near: i32,
@@ -50,15 +127,19 @@ pub(crate) struct ContextModel {
     pub qbpp: i32,
     pub limit: i32,
     pub reset: i32,
+    pub no_clamp_quant: bool,
+    pub use_inline_quant: bool,
+    pub is_pow2_range: bool,
 
     /// Compact AoS context table (365 regular + 2 run contexts).
     pub ctx: [CtxEntry; NUM_CONTEXTS],
     /// Nn[RItype]: negative-error counters for the two run contexts (A.7.2).
     pub nn: [i32; 2],
 
-    /// Precomputed gradient quantization LUT for `d` clamped to `[-t3, t3]`.
-    /// Indexed by `(d.clamp(-t3, t3) + t3) as usize`.
-    quant_lut: Vec<i8>,
+    /// Inline gradient quantization LUT.
+    /// - When `no_clamp_quant` (`max_val <= 255`): `quant_lut[(d + 256) & 511]`.
+    /// - Otherwise when `use_inline_quant` (`t3 <= 511`): `quant_lut[(d.clamp(-t3, t3) + t3) & 1023]`.
+    quant_lut: [i8; INLINE_QUANT_LEN],
 
     pub j: [i32; 32],
     pub run_index: usize,
@@ -99,33 +180,26 @@ impl ContextModel {
             n: 1,
         };
 
-        // Build compact gradient quantization LUT over [-t3, t3] (max ~1024 bytes for 16-bit).
-        let lut_len = (2 * t3 + 1) as usize;
-        let mut quant_lut = Vec::with_capacity(lut_len);
-        for d in -t3..=t3 {
-            let q = if d <= -t3 {
-                -4
-            } else if d <= -t2 {
-                -3
-            } else if d <= -t1 {
-                -2
-            } else if d < -near {
-                -1
-            } else if d <= near {
-                0
-            } else if d < t1 {
-                1
-            } else if d < t2 {
-                2
-            } else if d < t3 {
-                3
-            } else {
-                4
-            };
-            quant_lut.push(q);
+        let no_clamp_quant = max_val <= 255;
+        let use_inline_quant = t3 <= INLINE_QUANT_MAX_T3;
+        let mut quant_lut = [0i8; INLINE_QUANT_LEN];
+        if no_clamp_quant {
+            for (idx, slot) in quant_lut[..512].iter_mut().enumerate() {
+                let d = idx as i32 - NO_CLAMP_OFFSET;
+                *slot = Self::quantize_raw(d, t1, t2, t3, near) as i8;
+            }
+        } else if use_inline_quant {
+            let len = (2 * t3 + 1) as usize;
+            for (idx, slot) in quant_lut[..len].iter_mut().enumerate() {
+                let d = idx as i32 - t3;
+                *slot = Self::quantize_raw(d, t1, t2, t3, near) as i8;
+            }
         }
+        let is_pow2_range = near == 0 && range == max_val + 1 && (range & max_val) == 0;
 
         Self {
+            t1,
+            t2,
             t3,
             max_val,
             near,
@@ -133,11 +207,37 @@ impl ContextModel {
             qbpp,
             limit,
             reset,
+            no_clamp_quant,
+            use_inline_quant,
+            is_pow2_range,
             ctx: [entry; NUM_CONTEXTS],
             nn: [0, 0],
             quant_lut,
             j: J_TABLE,
             run_index: 0,
+        }
+    }
+
+    #[inline(always)]
+    fn quantize_raw(d: i32, t1: i32, t2: i32, t3: i32, near: i32) -> i32 {
+        if d <= -t3 {
+            -4
+        } else if d <= -t2 {
+            -3
+        } else if d <= -t1 {
+            -2
+        } else if d < -near {
+            -1
+        } else if d <= near {
+            0
+        } else if d < t1 {
+            1
+        } else if d < t2 {
+            2
+        } else if d < t3 {
+            3
+        } else {
+            4
         }
     }
 
@@ -157,24 +257,41 @@ impl ContextModel {
         }
     }
 
-    #[inline(always)]
-    pub fn quantize_gradient(&self, d: i32) -> i32 {
-        let idx = (d.clamp(-self.t3, self.t3) + self.t3) as usize;
-        i32::from(self.quant_lut[idx])
+    #[cold]
+    #[inline(never)]
+    fn compute_qs_slow(&self, d1: i32, d2: i32, d3: i32) -> i32 {
+        let q1 = Self::quantize_raw(d1, self.t1, self.t2, self.t3, self.near);
+        let q2 = Self::quantize_raw(d2, self.t1, self.t2, self.t3, self.near);
+        let q3 = Self::quantize_raw(d3, self.t1, self.t2, self.t3, self.near);
+        (q1 * 9 + q2) * 9 + q3
     }
 
+    /// Compute the signed context id `qs` in `-364..=364`.
+    /// `qs == 0` iff all three gradients are within `[-near, near]` (run mode condition).
     #[inline(always)]
-    pub fn get_context_index(&self, d1: i32, d2: i32, d3: i32) -> (usize, i32) {
-        let q1 = self.quantize_gradient(d1);
-        let q2 = self.quantize_gradient(d2);
-        let q3 = self.quantize_gradient(d3);
-
-        let raw = q1 * 81 + q2 * 9 + q3;
-        if raw < 0 {
-            ((-raw) as usize, -1)
+    pub fn compute_qs(&self, d1: i32, d2: i32, d3: i32) -> i32 {
+        if self.no_clamp_quant {
+            let q1 = i32::from(self.quant_lut[((d1 + NO_CLAMP_OFFSET) as usize) & 511]);
+            let q2 = i32::from(self.quant_lut[((d2 + NO_CLAMP_OFFSET) as usize) & 511]);
+            let q3 = i32::from(self.quant_lut[((d3 + NO_CLAMP_OFFSET) as usize) & 511]);
+            (q1 * 9 + q2) * 9 + q3
+        } else if self.use_inline_quant {
+            let t3 = self.t3;
+            let q1 = i32::from(self.quant_lut[((d1.clamp(-t3, t3) + t3) as usize) & 1023]);
+            let q2 = i32::from(self.quant_lut[((d2.clamp(-t3, t3) + t3) as usize) & 1023]);
+            let q3 = i32::from(self.quant_lut[((d3.clamp(-t3, t3) + t3) as usize) & 1023]);
+            (q1 * 9 + q2) * 9 + q3
         } else {
-            (raw as usize, 1)
+            self.compute_qs_slow(d1, d2, d3)
         }
+    }
+
+    /// Split signed `qs` into `(q_index in 0..=364, sign in {-1, 1})` branchlessly.
+    #[inline(always)]
+    pub fn split_qs(qs: i32) -> (usize, i32) {
+        let mask = qs >> 31;
+        let q = ((qs ^ mask) - mask) as usize;
+        (q.min(364), 1 | mask)
     }
 
     /// Branchless Golomb-Rice parameter `k`: smallest `k >= 0` with `(n << k) >= a`.
@@ -185,77 +302,6 @@ impl ContextModel {
         }
         let s = (n.leading_zeros() - a.leading_zeros()) as i32;
         s + i32::from((n << s) < a)
-    }
-
-    #[inline(always)]
-    pub fn update_stats_lossless(&mut self, q: usize, err_val: i32) {
-        let reset = self.reset;
-        let e = &mut self.ctx[q];
-        e.b += err_val;
-        e.a += err_val.abs();
-        if e.n == reset {
-            e.a >>= 1;
-            e.b = if e.b >= 0 {
-                e.b >> 1
-            } else {
-                -((1 - e.b) >> 1)
-            };
-            e.n >>= 1;
-        }
-        e.n += 1;
-        if e.b <= -e.n {
-            if e.c > MIN_C {
-                e.c -= 1;
-            }
-            e.b += e.n;
-            if e.b <= -e.n {
-                e.b = -e.n + 1;
-            }
-        } else if e.b > 0 {
-            if e.c < MAX_C {
-                e.c += 1;
-            }
-            e.b -= e.n;
-            if e.b > 0 {
-                e.b = 0;
-            }
-        }
-    }
-
-    #[inline(always)]
-    pub fn update_stats(&mut self, q: usize, err_val: i32) {
-        let reset = self.reset;
-        let step = 2 * self.near + 1;
-        let e = &mut self.ctx[q];
-        e.b += err_val * step;
-        e.a += err_val.abs();
-        if e.n == reset {
-            e.a >>= 1;
-            e.b = if e.b >= 0 {
-                e.b >> 1
-            } else {
-                -((1 - e.b) >> 1)
-            };
-            e.n >>= 1;
-        }
-        e.n += 1;
-        if e.b <= -e.n {
-            if e.c > MIN_C {
-                e.c -= 1;
-            }
-            e.b += e.n;
-            if e.b <= -e.n {
-                e.b = -e.n + 1;
-            }
-        } else if e.b > 0 {
-            if e.c < MAX_C {
-                e.c += 1;
-            }
-            e.b -= e.n;
-            if e.b > 0 {
-                e.b = 0;
-            }
-        }
     }
 
     #[inline(always)]

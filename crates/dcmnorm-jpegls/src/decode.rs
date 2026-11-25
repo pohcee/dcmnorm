@@ -170,52 +170,15 @@ pub fn decode_to_bytes(data: &[u8]) -> Result<(Vec<u8>, FrameInfo), CodecError> 
 }
 
 /// Like [`decode_to_bytes`], with a caller-supplied maximum decoded byte budget.
+///
+/// Decodes row-by-row directly into the output `Vec<u8>` without allocating an
+/// intermediate full-frame `Vec<u16>`.
 pub fn decode_to_bytes_with_options(
     data: &[u8],
     opts: &DecodeImageOptions,
 ) -> Result<(Vec<u8>, FrameInfo), CodecError> {
-    let img = decode_image_with_options(data, opts)?;
-    let info = FrameInfo {
-        width: img.width,
-        height: img.height,
-        bits_per_sample: img.bits_per_sample,
-        components: img.components,
-        interleave_mode: img.interleave_mode,
-        near: img.near,
-    };
-    let n = (img.width as usize) * (img.height as usize);
-    let spp = img.components as usize;
-    let bps = if img.bits_per_sample <= 8 { 1 } else { 2 };
-    let mut out = Vec::with_capacity(n * spp * bps);
-
-    if spp == 1 || img.interleave_mode == 0 {
-        if bps == 1 {
-            out.extend(img.samples.iter().map(|&v| v as u8));
-        } else {
-            for &v in &img.samples {
-                out.extend_from_slice(&v.to_le_bytes());
-            }
-        }
-    } else if bps == 1 {
-        let p0 = &img.samples[0..n];
-        let p1 = &img.samples[n..2 * n];
-        let p2 = &img.samples[2 * n..3 * n];
-        for i in 0..n {
-            out.push(p0[i] as u8);
-            out.push(p1[i] as u8);
-            out.push(p2[i] as u8);
-        }
-    } else {
-        let p0 = &img.samples[0..n];
-        let p1 = &img.samples[n..2 * n];
-        let p2 = &img.samples[2 * n..3 * n];
-        for i in 0..n {
-            out.extend_from_slice(&p0[i].to_le_bytes());
-            out.extend_from_slice(&p1[i].to_le_bytes());
-            out.extend_from_slice(&p2[i].to_le_bytes());
-        }
-    }
-    Ok((out, info))
+    let mut dec = Decoder::new(data);
+    dec.decode_to_bytes(opts)
 }
 
 // ---------------------------------------------------------------------------
@@ -602,6 +565,268 @@ impl<'a> Decoder<'a> {
         Ok((pixels, exp_width, exp_height))
     }
 
+    /// Decode a full image directly into a single native little-endian `Vec<u8>`
+    /// (1 byte/sample for `<= 8`-bit, 2 bytes/sample LE for `> 8`-bit; planar for
+    /// `ILV = 0`, sample-interleaved for `ILV = 1` / `ILV = 2`).
+    fn decode_to_bytes(
+        &mut self,
+        opts: &DecodeImageOptions,
+    ) -> Result<(Vec<u8>, FrameInfo), CodecError> {
+        let (frame, presets, first_scan) = self.read_headers()?;
+        let near = first_scan.near;
+        let (max_val, reset) = validate_params(&frame, &presets, near)?;
+
+        let w = frame.width;
+        let h = frame.height;
+        let components = frame.components;
+        let bps = if frame.precision <= 8 { 1usize } else { 2usize };
+        let plane = w * h;
+        let count = plane
+            .checked_mul(components)
+            .ok_or_else(|| CodecError::InvalidData("sample count overflow".into()))?;
+        let bytes = count
+            .checked_mul(bps)
+            .ok_or_else(|| CodecError::InvalidData("decoded size overflow".into()))?;
+        if bytes > opts.max_decoded_bytes {
+            return Err(CodecError::InvalidData(format!(
+                "decoded image needs {bytes} bytes, limit is {}",
+                opts.max_decoded_bytes
+            )));
+        }
+
+        let mut out = Vec::new();
+        out.try_reserve_exact(bytes)
+            .map_err(|_| CodecError::InvalidData("decoded image allocation failed".into()))?;
+        out.resize(bytes, 0u8);
+
+        let mut seen = [false; 3];
+        let ilv = first_scan.ilv;
+
+        if ilv == 0 {
+            let plane_bytes = plane * bps;
+            let mut scan = first_scan;
+            for c in 0..components {
+                if c > 0 {
+                    let (marker, length) = self.read_marker()?;
+                    if marker != MARKER_SOS {
+                        return Err(CodecError::InvalidData(format!(
+                            "expected SOS for component {c}, got marker 0x{marker:04X}"
+                        )));
+                    }
+                    scan = self.read_sos(length, Some(components))?;
+                    if scan.ilv != 0 {
+                        return Err(CodecError::InvalidData(
+                            "mixed ILV modes across scans".into(),
+                        ));
+                    }
+                    if scan.near != near {
+                        return Err(CodecError::InvalidData(format!(
+                            "per-scan NEAR differs across components ({near} then {})",
+                            scan.near
+                        )));
+                    }
+                }
+                let index = frame
+                    .component_ids
+                    .iter()
+                    .position(|&id| id == scan.component_ids[0])
+                    .ok_or_else(|| {
+                        CodecError::InvalidData("unknown SOS component selector".into())
+                    })?;
+                if seen[index] {
+                    return Err(CodecError::InvalidData(
+                        "duplicate SOS component selector".into(),
+                    ));
+                }
+                seen[index] = true;
+                let plane_slot = &mut out[index * plane_bytes..(index + 1) * plane_bytes];
+                let ctx = ContextModel::with_presets(
+                    max_val, near, reset, presets.t1, presets.t2, presets.t3,
+                );
+                let scan_start = self.pos;
+                let consumed = if bps == 1 {
+                    decode_scan_t87_with(
+                        &self.data[scan_start..],
+                        w,
+                        h,
+                        ctx,
+                        scan_start,
+                        |y, row_cur| {
+                            let dst = &mut plane_slot[y * w..(y + 1) * w];
+                            for (d, &s) in dst.iter_mut().zip(row_cur.iter()) {
+                                *d = s as u8;
+                            }
+                        },
+                    )?
+                } else {
+                    decode_scan_t87_with(
+                        &self.data[scan_start..],
+                        w,
+                        h,
+                        ctx,
+                        scan_start,
+                        |y, row_cur| {
+                            let dst = &mut plane_slot[y * w * 2..(y + 1) * w * 2];
+                            for (d, &s) in dst.as_chunks_mut::<2>().0.iter_mut().zip(row_cur.iter())
+                            {
+                                *d = s.to_le_bytes();
+                            }
+                        },
+                    )?
+                };
+                self.pos = scan_start + consumed;
+            }
+        } else {
+            if first_scan.component_ids.len() != components || components != 3 {
+                return Err(CodecError::InvalidData(
+                    "interleaved scan must cover all 3 components".into(),
+                ));
+            }
+            let mut comp_map = [0usize; 3];
+            for (slot, &cid) in first_scan.component_ids.iter().enumerate() {
+                let index = frame
+                    .component_ids
+                    .iter()
+                    .position(|&id| id == cid)
+                    .ok_or_else(|| {
+                        CodecError::InvalidData("unknown SOS component selector".into())
+                    })?;
+                if seen[index] {
+                    return Err(CodecError::InvalidData(
+                        "duplicate SOS component selector".into(),
+                    ));
+                }
+                seen[index] = true;
+                comp_map[slot] = index;
+            }
+            let ctx = ContextModel::with_presets(
+                max_val, near, reset, presets.t1, presets.t2, presets.t3,
+            );
+            let scan_start = self.pos;
+            let consumed = if ilv == 1 {
+                if bps == 1 {
+                    decode_scan_ilv1_with(
+                        &self.data[scan_start..],
+                        w,
+                        h,
+                        ctx,
+                        scan_start,
+                        |y, c0, c1, c2| {
+                            let row = &mut out[y * w * 3..(y + 1) * w * 3];
+                            let dst = row.as_chunks_mut::<3>().0;
+                            if comp_map == [0, 1, 2] {
+                                for x in 0..w {
+                                    dst[x] = [c0[x] as u8, c1[x] as u8, c2[x] as u8];
+                                }
+                            } else {
+                                let (m0, m1, m2) = (comp_map[0], comp_map[1], comp_map[2]);
+                                for x in 0..w {
+                                    let mut px = [0u8; 3];
+                                    px[m0] = c0[x] as u8;
+                                    px[m1] = c1[x] as u8;
+                                    px[m2] = c2[x] as u8;
+                                    dst[x] = px;
+                                }
+                            }
+                        },
+                    )?
+                } else {
+                    decode_scan_ilv1_with(
+                        &self.data[scan_start..],
+                        w,
+                        h,
+                        ctx,
+                        scan_start,
+                        |y, c0, c1, c2| {
+                            let row = &mut out[y * w * 6..(y + 1) * w * 6];
+                            let dst = row.as_chunks_mut::<2>().0;
+                            if comp_map == [0, 1, 2] {
+                                for x in 0..w {
+                                    dst[x * 3] = c0[x].to_le_bytes();
+                                    dst[x * 3 + 1] = c1[x].to_le_bytes();
+                                    dst[x * 3 + 2] = c2[x].to_le_bytes();
+                                }
+                            } else {
+                                let (m0, m1, m2) = (comp_map[0], comp_map[1], comp_map[2]);
+                                for x in 0..w {
+                                    dst[x * 3 + m0] = c0[x].to_le_bytes();
+                                    dst[x * 3 + m1] = c1[x].to_le_bytes();
+                                    dst[x * 3 + m2] = c2[x].to_le_bytes();
+                                }
+                            }
+                        },
+                    )?
+                }
+            } else if bps == 1 {
+                decode_scan_ilv2_with(
+                    &self.data[scan_start..],
+                    w,
+                    h,
+                    ctx,
+                    scan_start,
+                    |y, row_cur| {
+                        let row = &mut out[y * w * 3..(y + 1) * w * 3];
+                        let dst = row.as_chunks_mut::<3>().0;
+                        if comp_map == [0, 1, 2] {
+                            for (d, s) in dst.iter_mut().zip(row_cur.iter()) {
+                                *d = [s[0] as u8, s[1] as u8, s[2] as u8];
+                            }
+                        } else {
+                            let (m0, m1, m2) = (comp_map[0], comp_map[1], comp_map[2]);
+                            for (d, s) in dst.iter_mut().zip(row_cur.iter()) {
+                                let mut px = [0u8; 3];
+                                px[m0] = s[0] as u8;
+                                px[m1] = s[1] as u8;
+                                px[m2] = s[2] as u8;
+                                *d = px;
+                            }
+                        }
+                    },
+                )?
+            } else {
+                decode_scan_ilv2_with(
+                    &self.data[scan_start..],
+                    w,
+                    h,
+                    ctx,
+                    scan_start,
+                    |y, row_cur| {
+                        let row = &mut out[y * w * 6..(y + 1) * w * 6];
+                        let dst = row.as_chunks_mut::<2>().0;
+                        if comp_map == [0, 1, 2] {
+                            for (x, s) in row_cur.iter().enumerate() {
+                                dst[x * 3] = s[0].to_le_bytes();
+                                dst[x * 3 + 1] = s[1].to_le_bytes();
+                                dst[x * 3 + 2] = s[2].to_le_bytes();
+                            }
+                        } else {
+                            let (m0, m1, m2) = (comp_map[0], comp_map[1], comp_map[2]);
+                            for (x, s) in row_cur.iter().enumerate() {
+                                dst[x * 3 + m0] = s[0].to_le_bytes();
+                                dst[x * 3 + m1] = s[1].to_le_bytes();
+                                dst[x * 3 + m2] = s[2].to_le_bytes();
+                            }
+                        }
+                    },
+                )?
+            };
+            self.pos = scan_start + consumed;
+        }
+        self.expect_eoi()?;
+
+        Ok((
+            out,
+            FrameInfo {
+                width: w as u32,
+                height: h as u32,
+                bits_per_sample: frame.precision as u8,
+                components: components as u8,
+                interleave_mode: ilv,
+                near: near as u8,
+            },
+        ))
+    }
+
     /// Decode a full image (grayscale or 3-component planar), reading geometry
     /// from the codestream. T.87 path only.
     fn decode_image(&mut self, opts: &DecodeImageOptions) -> Result<DecodedImage, CodecError> {
@@ -797,6 +1022,8 @@ fn validate_params(
 // ---------------------------------------------------------------------------
 
 /// Classify a bit-reader error hit mid-scan (before all samples are decoded).
+#[cold]
+#[inline(never)]
 fn scan_error(e: CodecError, offset: usize) -> CodecError {
     match e {
         CodecError::Marker(m) if (0xFFD0..=0xFFD7).contains(&m) => {
@@ -810,53 +1037,55 @@ fn scan_error(e: CodecError, offset: usize) -> CodecError {
     }
 }
 
-/// Decode one regular sample at `(ra, rb, rc)` with known gradients `(d1, d2, d3)`.
+/// Decode one regular sample given pre-computed signed context id `qs` and neighbors `(ra, rb, rc)`.
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
-fn decode_regular_sample<const LOSSLESS: bool>(
+fn decode_regular_qs<const LOSSLESS: bool, const POW2: bool>(
     br: &mut BitReader<'_>,
     ctx: &mut ContextModel,
+    qs: i32,
     ra: i32,
     rb: i32,
     rc: i32,
-    d1: i32,
-    d2: i32,
-    d3: i32,
     base_offset: usize,
 ) -> Result<i32, CodecError> {
     let near = if LOSSLESS { 0 } else { ctx.near };
     let max_val = ctx.max_val;
     let range = ctx.range;
-    let (q, sign) = ctx.get_context_index(d1, d2, d3);
-    let e = ctx.ctx[q];
+    let limit = ctx.limit;
+    let qbpp = ctx.qbpp;
+    let reset = ctx.reset;
+    let (q, sign) = ContextModel::split_qs(qs);
+    let e = &mut ctx.ctx[q];
     let k = ContextModel::compute_k_from(e.n, e.a);
     let mut px = predict_med(ra, rb, rc) + sign * e.c;
     px = clamp(px, 0, max_val);
 
-    let correction = if LOSSLESS && k == 0 && 2 * e.b <= -e.n {
-        -1
-    } else {
-        0
-    };
-    let mapped = match br.read_limited_golomb(k, ctx.limit, ctx.qbpp) {
+    let (mut err_q, from_lut) = match br.read_regular_error(k, limit, qbpp) {
         Ok(v) => v,
         Err(err) => return Err(scan_error(err, base_offset + br.pos())),
     };
-    let err_q = run_mode::unmap_error(mapped, correction);
-    if let Err(err) = run_mode::check_errval(err_q, range) {
-        return Err(scan_error(err, base_offset + br.pos()));
+    if LOSSLESS && k == 0 && 2 * e.b <= -e.n {
+        err_q ^= -1;
+    }
+    if !from_lut || range < 128 {
+        if let Err(err) = run_mode::check_errval(err_q, range) {
+            return Err(scan_error(err, base_offset + br.pos()));
+        }
     }
     if LOSSLESS {
-        ctx.update_stats_lossless(q, err_q);
+        e.update_lossless(err_q, reset);
         let mut v = px + sign * err_q;
-        if v < 0 {
+        if POW2 {
+            v &= max_val;
+        } else if v < 0 {
             v += range;
         } else if v > max_val {
             v -= range;
         }
         Ok(v)
     } else {
-        ctx.update_stats(q, err_q);
+        e.update_lossy(err_q, 2 * near + 1, reset);
         Ok(run_mode::fix_reconstructed(
             px + sign * err_q * (2 * near + 1),
             near,
@@ -867,61 +1096,105 @@ fn decode_regular_sample<const LOSSLESS: bool>(
 }
 
 #[inline(always)]
-fn decode_line_t87<const LOSSLESS: bool>(
+fn decode_line_t87<const LOSSLESS: bool, const POW2: bool>(
     br: &mut BitReader<'_>,
     ctx: &mut ContextModel,
-    cur: &mut [i32],
-    prev: &mut [i32],
-    out_row: &mut [u16],
+    cur: &mut [u16],
+    prev: &mut [u16],
     width: usize,
     base_offset: usize,
 ) -> Result<(), CodecError> {
-    assert!(cur.len() >= width + 2 && prev.len() >= width + 2 && out_row.len() >= width);
-    let near = if LOSSLESS { 0 } else { ctx.near };
+    let cur = &mut cur[..width + 2];
+    let prev = &mut prev[..width + 2];
     cur[0] = prev[1];
     prev[width + 1] = prev[width];
 
     let mut x = 0usize;
-    let mut ra = cur[0];
-    let mut rc = prev[0];
-    let mut rb = prev[1];
+    let mut ra = i32::from(cur[0]);
+    let mut rc = i32::from(prev[0]);
+    let mut rb = i32::from(prev[1]);
     while x < width {
-        let rd = prev[x + 2];
-        let d1 = rd - rb;
-        let d2 = rb - rc;
-        let d3 = rc - ra;
+        let rd = i32::from(prev[x + 2]);
+        let qs = ctx.compute_qs(rd - rb, rb - rc, rc - ra);
 
-        let in_run = if LOSSLESS {
-            (d1 | d2 | d3) == 0
-        } else {
-            d1.abs() <= near && d2.abs() <= near && d3.abs() <= near
-        };
-        if in_run {
+        if qs == 0 {
             x = match run_mode::decode_run(br, ctx, cur, prev, x, width) {
                 Ok(v) => v,
                 Err(e) => return Err(scan_error(e, base_offset + br.pos())),
             };
             if x < width {
-                ra = cur[x];
-                rc = prev[x];
-                rb = prev[x + 1];
+                ra = i32::from(cur[x]);
+                rc = i32::from(prev[x]);
+                rb = i32::from(prev[x + 1]);
             }
             continue;
         }
 
-        let recon =
-            decode_regular_sample::<LOSSLESS>(br, ctx, ra, rb, rc, d1, d2, d3, base_offset)?;
-        cur[x + 1] = recon;
+        let recon = decode_regular_qs::<LOSSLESS, POW2>(br, ctx, qs, ra, rb, rc, base_offset)?;
+        cur[x + 1] = recon as u16;
         ra = recon;
         rc = rb;
         rb = rd;
         x += 1;
     }
-    // Single tight auto-vectorizable pass to narrow i32 -> u16 at end of row.
-    for (dst, &src) in out_row[..width].iter_mut().zip(&cur[1..width + 1]) {
-        *dst = src as u16;
-    }
     Ok(())
+}
+
+/// Decode a single-component scan, delivering each decoded row `&cur[1..=width]` to `emit_row`.
+fn decode_scan_t87_with<F: FnMut(usize, &[u16])>(
+    scan_data: &[u8],
+    width: usize,
+    height: usize,
+    mut ctx: ContextModel,
+    base_offset: usize,
+    mut emit_row: F,
+) -> Result<usize, CodecError> {
+    let mut br = BitReader::new(scan_data);
+    let mut prev = vec![0u16; width + 2];
+    let mut cur = vec![0u16; width + 2];
+
+    if ctx.is_pow2_range {
+        for y in 0..height {
+            decode_line_t87::<true, true>(
+                &mut br,
+                &mut ctx,
+                &mut cur,
+                &mut prev,
+                width,
+                base_offset,
+            )?;
+            emit_row(y, &cur[1..width + 1]);
+            std::mem::swap(&mut prev, &mut cur);
+        }
+    } else if ctx.near == 0 {
+        for y in 0..height {
+            decode_line_t87::<true, false>(
+                &mut br,
+                &mut ctx,
+                &mut cur,
+                &mut prev,
+                width,
+                base_offset,
+            )?;
+            emit_row(y, &cur[1..width + 1]);
+            std::mem::swap(&mut prev, &mut cur);
+        }
+    } else {
+        for y in 0..height {
+            decode_line_t87::<false, false>(
+                &mut br,
+                &mut ctx,
+                &mut cur,
+                &mut prev,
+                width,
+                base_offset,
+            )?;
+            emit_row(y, &cur[1..width + 1]);
+            std::mem::swap(&mut prev, &mut cur);
+        }
+    }
+
+    Ok(br.marker_pos())
 }
 
 /// Decode the entropy-coded scan (T.87 A.4-A.7); returns bytes consumed.
@@ -930,43 +1203,110 @@ pub(crate) fn decode_scan_t87(
     pixels: &mut [u16],
     width: usize,
     height: usize,
-    mut ctx: ContextModel,
+    ctx: ContextModel,
     base_offset: usize,
 ) -> Result<usize, CodecError> {
-    let mut br = BitReader::new(scan_data);
-    let mut prev = vec![0i32; width + 2];
-    let mut cur = vec![0i32; width + 2];
+    decode_scan_t87_with(scan_data, width, height, ctx, base_offset, |y, row_cur| {
+        pixels[y * width..(y + 1) * width].copy_from_slice(row_cur);
+    })
+}
 
-    if ctx.near == 0 {
+/// Decode a 3-component line-interleaved (`ILV = 1`) scan, delivering each decoded row's
+/// 3 component slices to `emit_row`.
+fn decode_scan_ilv1_with<F: FnMut(usize, &[u16], &[u16], &[u16])>(
+    scan_data: &[u8],
+    width: usize,
+    height: usize,
+    mut ctx: ContextModel,
+    base_offset: usize,
+    mut emit_row: F,
+) -> Result<usize, CodecError> {
+    let mut br = BitReader::new(scan_data);
+    let mut prev = [
+        vec![0u16; width + 2],
+        vec![0u16; width + 2],
+        vec![0u16; width + 2],
+    ];
+    let mut cur = [
+        vec![0u16; width + 2],
+        vec![0u16; width + 2],
+        vec![0u16; width + 2],
+    ];
+
+    let mut run_indices = [0usize; 3];
+    if ctx.is_pow2_range {
         for y in 0..height {
-            let row = &mut pixels[y * width..(y + 1) * width];
-            decode_line_t87::<true>(
-                &mut br,
-                &mut ctx,
-                &mut cur,
-                &mut prev,
-                row,
-                width,
-                base_offset,
-            )?;
-            std::mem::swap(&mut prev, &mut cur);
+            for c in 0..3 {
+                ctx.run_index = run_indices[c];
+                decode_line_t87::<true, true>(
+                    &mut br,
+                    &mut ctx,
+                    &mut cur[c],
+                    &mut prev[c],
+                    width,
+                    base_offset,
+                )?;
+                run_indices[c] = ctx.run_index;
+            }
+            emit_row(
+                y,
+                &cur[0][1..width + 1],
+                &cur[1][1..width + 1],
+                &cur[2][1..width + 1],
+            );
+            for c in 0..3 {
+                std::mem::swap(&mut prev[c], &mut cur[c]);
+            }
+        }
+    } else if ctx.near == 0 {
+        for y in 0..height {
+            for c in 0..3 {
+                ctx.run_index = run_indices[c];
+                decode_line_t87::<true, false>(
+                    &mut br,
+                    &mut ctx,
+                    &mut cur[c],
+                    &mut prev[c],
+                    width,
+                    base_offset,
+                )?;
+                run_indices[c] = ctx.run_index;
+            }
+            emit_row(
+                y,
+                &cur[0][1..width + 1],
+                &cur[1][1..width + 1],
+                &cur[2][1..width + 1],
+            );
+            for c in 0..3 {
+                std::mem::swap(&mut prev[c], &mut cur[c]);
+            }
         }
     } else {
         for y in 0..height {
-            let row = &mut pixels[y * width..(y + 1) * width];
-            decode_line_t87::<false>(
-                &mut br,
-                &mut ctx,
-                &mut cur,
-                &mut prev,
-                row,
-                width,
-                base_offset,
-            )?;
-            std::mem::swap(&mut prev, &mut cur);
+            for c in 0..3 {
+                ctx.run_index = run_indices[c];
+                decode_line_t87::<false, false>(
+                    &mut br,
+                    &mut ctx,
+                    &mut cur[c],
+                    &mut prev[c],
+                    width,
+                    base_offset,
+                )?;
+                run_indices[c] = ctx.run_index;
+            }
+            emit_row(
+                y,
+                &cur[0][1..width + 1],
+                &cur[1][1..width + 1],
+                &cur[2][1..width + 1],
+            );
+            for c in 0..3 {
+                std::mem::swap(&mut prev[c], &mut cur[c]);
+            }
         }
     }
-
     Ok(br.marker_pos())
 }
 
@@ -977,61 +1317,63 @@ fn decode_scan_ilv1(
     comp_map: [usize; 3],
     width: usize,
     height: usize,
-    mut ctx: ContextModel,
+    ctx: ContextModel,
     base_offset: usize,
 ) -> Result<usize, CodecError> {
-    let mut br = BitReader::new(scan_data);
     let plane = width * height;
-    let mut prev = [
-        vec![0i32; width + 2],
-        vec![0i32; width + 2],
-        vec![0i32; width + 2],
-    ];
-    let mut cur = [
-        vec![0i32; width + 2],
-        vec![0i32; width + 2],
-        vec![0i32; width + 2],
-    ];
+    decode_scan_ilv1_with(
+        scan_data,
+        width,
+        height,
+        ctx,
+        base_offset,
+        |y, c0, c1, c2| {
+            let row_base = y * width;
+            samples[comp_map[0] * plane + row_base..][..width].copy_from_slice(c0);
+            samples[comp_map[1] * plane + row_base..][..width].copy_from_slice(c1);
+            samples[comp_map[2] * plane + row_base..][..width].copy_from_slice(c2);
+        },
+    )
+}
 
-    let mut run_indices = [0usize; 3];
-    if ctx.near == 0 {
-        for y in 0..height {
-            for c in 0..3 {
-                ctx.run_index = run_indices[c];
-                let off = comp_map[c] * plane + y * width;
-                decode_line_t87::<true>(
-                    &mut br,
-                    &mut ctx,
-                    &mut cur[c],
-                    &mut prev[c],
-                    &mut samples[off..off + width],
-                    width,
-                    base_offset,
-                )?;
-                run_indices[c] = ctx.run_index;
-                std::mem::swap(&mut prev[c], &mut cur[c]);
-            }
-        }
+/// Decode a 3-component sample-interleaved (`ILV = 2`) scan, delivering each decoded row's
+/// triplet slice `&cur[1..=width]` to `emit_row`.
+fn decode_scan_ilv2_with<F: FnMut(usize, &[[u16; 3]])>(
+    scan_data: &[u8],
+    width: usize,
+    height: usize,
+    ctx: ContextModel,
+    base_offset: usize,
+    emit_row: F,
+) -> Result<usize, CodecError> {
+    if ctx.is_pow2_range {
+        decode_scan_ilv2_inner::<true, true, _>(
+            scan_data,
+            width,
+            height,
+            ctx,
+            base_offset,
+            emit_row,
+        )
+    } else if ctx.near == 0 {
+        decode_scan_ilv2_inner::<true, false, _>(
+            scan_data,
+            width,
+            height,
+            ctx,
+            base_offset,
+            emit_row,
+        )
     } else {
-        for y in 0..height {
-            for c in 0..3 {
-                ctx.run_index = run_indices[c];
-                let off = comp_map[c] * plane + y * width;
-                decode_line_t87::<false>(
-                    &mut br,
-                    &mut ctx,
-                    &mut cur[c],
-                    &mut prev[c],
-                    &mut samples[off..off + width],
-                    width,
-                    base_offset,
-                )?;
-                run_indices[c] = ctx.run_index;
-                std::mem::swap(&mut prev[c], &mut cur[c]);
-            }
-        }
+        decode_scan_ilv2_inner::<false, false, _>(
+            scan_data,
+            width,
+            height,
+            ctx,
+            base_offset,
+            emit_row,
+        )
     }
-    Ok(br.marker_pos())
 }
 
 /// Decode a 3-component sample-interleaved (`ILV = 2`) scan into component-planar `samples`.
@@ -1044,85 +1386,75 @@ fn decode_scan_ilv2(
     ctx: ContextModel,
     base_offset: usize,
 ) -> Result<usize, CodecError> {
-    if ctx.near == 0 {
-        decode_scan_ilv2_inner::<true>(
-            scan_data,
-            samples,
-            comp_map,
-            width,
-            height,
-            ctx,
-            base_offset,
-        )
-    } else {
-        decode_scan_ilv2_inner::<false>(
-            scan_data,
-            samples,
-            comp_map,
-            width,
-            height,
-            ctx,
-            base_offset,
-        )
-    }
+    let plane = width * height;
+    decode_scan_ilv2_with(scan_data, width, height, ctx, base_offset, |y, row_cur| {
+        let row_base = y * width;
+        let p0 = comp_map[0] * plane + row_base;
+        let p1 = comp_map[1] * plane + row_base;
+        let p2 = comp_map[2] * plane + row_base;
+        for (x, s) in row_cur.iter().enumerate() {
+            samples[p0 + x] = s[0];
+        }
+        for (x, s) in row_cur.iter().enumerate() {
+            samples[p1 + x] = s[1];
+        }
+        for (x, s) in row_cur.iter().enumerate() {
+            samples[p2 + x] = s[2];
+        }
+    })
 }
 
-fn decode_scan_ilv2_inner<const LOSSLESS: bool>(
+fn decode_scan_ilv2_inner<const LOSSLESS: bool, const POW2: bool, F: FnMut(usize, &[[u16; 3]])>(
     scan_data: &[u8],
-    samples: &mut [u16],
-    comp_map: [usize; 3],
     width: usize,
     height: usize,
     mut ctx: ContextModel,
     base_offset: usize,
+    mut emit_row: F,
 ) -> Result<usize, CodecError> {
     let mut br = BitReader::new(scan_data);
-    let near = if LOSSLESS { 0 } else { ctx.near };
-    let plane = width * height;
-    let mut prev = vec![[0i32; 3]; width + 2];
-    let mut cur = vec![[0i32; 3]; width + 2];
+    let mut prev_vec = vec![[0u16; 3]; width + 2];
+    let mut cur_vec = vec![[0u16; 3]; width + 2];
 
     for y in 0..height {
+        let prev = &mut prev_vec[..width + 2];
+        let cur = &mut cur_vec[..width + 2];
         cur[0] = prev[1];
         prev[width + 1] = prev[width];
         let mut x = 0usize;
-        let mut ra = cur[0];
-        let mut rc = prev[0];
-        let mut rb = prev[1];
+        let mut ra = [
+            i32::from(cur[0][0]),
+            i32::from(cur[0][1]),
+            i32::from(cur[0][2]),
+        ];
+        let mut rc = [
+            i32::from(prev[0][0]),
+            i32::from(prev[0][1]),
+            i32::from(prev[0][2]),
+        ];
+        let mut rb = [
+            i32::from(prev[1][0]),
+            i32::from(prev[1][1]),
+            i32::from(prev[1][2]),
+        ];
         while x < width {
-            let rd = prev[x + 2];
-            let d1_0 = rd[0] - rb[0];
-            let d2_0 = rb[0] - rc[0];
-            let d3_0 = rc[0] - ra[0];
-            let d1_1 = rd[1] - rb[1];
-            let d2_1 = rb[1] - rc[1];
-            let d3_1 = rc[1] - ra[1];
-            let d1_2 = rd[2] - rb[2];
-            let d2_2 = rb[2] - rc[2];
-            let d3_2 = rc[2] - ra[2];
+            let rd_u16 = prev[x + 2];
+            let rd = [
+                i32::from(rd_u16[0]),
+                i32::from(rd_u16[1]),
+                i32::from(rd_u16[2]),
+            ];
+            let qs0 = ctx.compute_qs(rd[0] - rb[0], rb[0] - rc[0], rc[0] - ra[0]);
+            let qs1 = ctx.compute_qs(rd[1] - rb[1], rb[1] - rc[1], rc[1] - ra[1]);
+            let qs2 = ctx.compute_qs(rd[2] - rb[2], rb[2] - rc[2], rc[2] - ra[2]);
 
-            let all_in_run = if LOSSLESS {
-                (d1_0 | d2_0 | d3_0 | d1_1 | d2_1 | d3_1 | d1_2 | d2_2 | d3_2) == 0
-            } else {
-                d1_0.abs() <= near
-                    && d2_0.abs() <= near
-                    && d3_0.abs() <= near
-                    && d1_1.abs() <= near
-                    && d2_1.abs() <= near
-                    && d3_1.abs() <= near
-                    && d1_2.abs() <= near
-                    && d2_2.abs() <= near
-                    && d3_2.abs() <= near
-            };
-
-            if all_in_run {
+            if (qs0 | qs1 | qs2) == 0 {
                 let run_len = match run_mode::decode_run_pixels(&mut br, &mut ctx, width - x) {
                     Ok(v) => v,
                     Err(e) => return Err(scan_error(e, base_offset + br.pos())),
                 };
-                for slot in &mut cur[x + 1..x + 1 + run_len] {
-                    *slot = ra;
-                }
+                let ra_u16 = [ra[0] as u16, ra[1] as u16, ra[2] as u16];
+                cur[x + 1..x + 1 + run_len].fill(ra_u16);
                 x += run_len;
                 if x == width {
                     break;
@@ -1131,79 +1463,63 @@ fn decode_scan_ilv2_inner<const LOSSLESS: bool>(
                 let mut recon = [0i32; 3];
                 for c in 0..3 {
                     recon[c] = match run_mode::decode_run_interruption_ilv2(
-                        &mut br, &mut ctx, ra[c], rb_i[c],
+                        &mut br,
+                        &mut ctx,
+                        ra[c],
+                        i32::from(rb_i[c]),
                     ) {
                         Ok(v) => v,
                         Err(e) => return Err(scan_error(e, base_offset + br.pos())),
                     };
                 }
-                cur[x + 1] = recon;
+                cur[x + 1] = [recon[0] as u16, recon[1] as u16, recon[2] as u16];
                 ctx.decrement_run_index();
                 x += 1;
                 if x < width {
                     ra = recon;
-                    rc = prev[x];
-                    rb = prev[x + 1];
+                    let p_x = prev[x];
+                    let p_x1 = prev[x + 1];
+                    rc = [i32::from(p_x[0]), i32::from(p_x[1]), i32::from(p_x[2])];
+                    rb = [i32::from(p_x1[0]), i32::from(p_x1[1]), i32::from(p_x1[2])];
                 }
                 continue;
             }
 
-            let r0 = decode_regular_sample::<LOSSLESS>(
+            let r0 = decode_regular_qs::<LOSSLESS, POW2>(
                 &mut br,
                 &mut ctx,
+                qs0,
                 ra[0],
                 rb[0],
                 rc[0],
-                d1_0,
-                d2_0,
-                d3_0,
                 base_offset,
             )?;
-            let r1 = decode_regular_sample::<LOSSLESS>(
+            let r1 = decode_regular_qs::<LOSSLESS, POW2>(
                 &mut br,
                 &mut ctx,
+                qs1,
                 ra[1],
                 rb[1],
                 rc[1],
-                d1_1,
-                d2_1,
-                d3_1,
                 base_offset,
             )?;
-            let r2 = decode_regular_sample::<LOSSLESS>(
+            let r2 = decode_regular_qs::<LOSSLESS, POW2>(
                 &mut br,
                 &mut ctx,
+                qs2,
                 ra[2],
                 rb[2],
                 rc[2],
-                d1_2,
-                d2_2,
-                d3_2,
                 base_offset,
             )?;
-            let recon = [r0, r1, r2];
-            cur[x + 1] = recon;
-            ra = recon;
+            cur[x + 1] = [r0 as u16, r1 as u16, r2 as u16];
+            ra = [r0, r1, r2];
             rc = rb;
             rb = rd;
             x += 1;
         }
-        // Flush row to planar output sequentially per component (avoids 3-stream strided writes in inner loop).
-        let row_base = y * width;
-        let p0 = comp_map[0] * plane + row_base;
-        let p1 = comp_map[1] * plane + row_base;
-        let p2 = comp_map[2] * plane + row_base;
-        let row_cur = &cur[1..width + 1];
-        for x in 0..width {
-            samples[p0 + x] = row_cur[x][0] as u16;
-        }
-        for x in 0..width {
-            samples[p1 + x] = row_cur[x][1] as u16;
-        }
-        for x in 0..width {
-            samples[p2 + x] = row_cur[x][2] as u16;
-        }
-        std::mem::swap(&mut prev, &mut cur);
+        emit_row(y, &cur_vec[1..width + 1]);
+        std::mem::swap(&mut prev_vec, &mut cur_vec);
     }
 
     Ok(br.marker_pos())

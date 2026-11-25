@@ -123,6 +123,8 @@ pub fn encode_with_options(
 
 /// Encode a native little-endian DICOM pixel buffer to a JPEG-LS codestream.
 ///
+/// Streams rows directly from `data` without allocating an intermediate full-frame `Vec<u16>`.
+///
 /// - For `bits_per_sample <= 8`, `data` holds 1 byte per sample (`u8`).
 /// - For `bits_per_sample > 8`, `data` holds 2 bytes per sample little-endian (`u16`).
 /// - For `components == 3`:
@@ -151,12 +153,28 @@ pub fn encode_bytes(
             allowed: "1 or 3",
         });
     }
-    let n = (width as usize)
-        .checked_mul(height as usize)
-        .ok_or_else(|| CodecError::InvalidData("image dimensions overflow".into()))?;
+    if width == 0 || width > 65535 {
+        return Err(CodecError::InvalidParameter {
+            name: "width",
+            value: i64::from(width),
+            allowed: "1..=65535",
+        });
+    }
+    if height == 0 || height > 65535 {
+        return Err(CodecError::InvalidParameter {
+            name: "height",
+            value: i64::from(height),
+            allowed: "1..=65535",
+        });
+    }
+    let (wu, hu) = (width as usize, height as usize);
+    let plane = wu * hu;
     let spp = components as usize;
-    let bps = if bits_per_sample <= 8 { 1 } else { 2 };
-    let expected_bytes = n * spp * bps;
+    let bps = if bits_per_sample <= 8 { 1usize } else { 2usize };
+    let expected_bytes = plane
+        .checked_mul(spp)
+        .and_then(|v| v.checked_mul(bps))
+        .ok_or_else(|| CodecError::InvalidData("image dimensions overflow".into()))?;
     if data.len() != expected_bytes {
         return Err(CodecError::DimensionMismatch {
             expected: expected_bytes,
@@ -164,39 +182,180 @@ pub fn encode_bytes(
         });
     }
 
-    let mut planar = vec![0u16; n * spp];
-    if spp == 1 || interleave_mode == 0 {
-        if bps == 1 {
-            for (dst, &b) in planar.iter_mut().zip(data.iter()) {
-                *dst = u16::from(b);
-            }
-        } else {
-            for (dst, chunk) in planar.iter_mut().zip(data.as_chunks::<2>().0.iter()) {
-                *dst = u16::from_le_bytes(*chunk);
-            }
-        }
-    } else if bps == 1 {
-        for i in 0..n {
-            planar[i] = u16::from(data[i * 3]);
-            planar[n + i] = u16::from(data[i * 3 + 1]);
-            planar[2 * n + i] = u16::from(data[i * 3 + 2]);
-        }
-    } else {
-        let chunks = data.as_chunks::<2>().0;
-        for i in 0..n {
-            planar[i] = u16::from_le_bytes(chunks[i * 3]);
-            planar[n + i] = u16::from_le_bytes(chunks[i * 3 + 1]);
-            planar[2 * n + i] = u16::from_le_bytes(chunks[i * 3 + 2]);
-        }
+    let max_val: i32 = (1i32 << bits_per_sample) - 1;
+    let near_i32 = i32::from(near);
+    let near_max = (max_val / 2).min(255);
+    if near_i32 > near_max {
+        return Err(CodecError::InvalidParameter {
+            name: "near",
+            value: i64::from(near),
+            allowed: "0..=min(255, MAXVAL/2)",
+        });
     }
 
-    let opts = EncodeOptions {
-        near,
-        precision: Some(bits_per_sample),
-        interleave_mode: if components == 1 { 0 } else { interleave_mode },
+    let ilv = if components == 1 { 0 } else { interleave_mode };
+    if ilv > 2 {
+        return Err(CodecError::InvalidParameter {
+            name: "interleave_mode",
+            value: i64::from(ilv),
+            allowed: "0 (none), 1 (line), or 2 (sample)",
+        });
+    }
+
+    let check_bounds = bits_per_sample != 8 && bits_per_sample != 16;
+    let max_u16 = max_val as u16;
+    let check_sample = |v: u16| -> Result<u16, CodecError> {
+        if check_bounds && v > max_u16 {
+            return Err(CodecError::InvalidParameter {
+                name: "precision",
+                value: i64::from(bits_per_sample),
+                allowed: "large enough to hold every sample",
+            });
+        }
+        Ok(v)
     };
+
     let mut out = Vec::with_capacity(expected_bytes / 2 + 64);
-    encode_image(&planar, width, height, components, &opts, &mut out)?;
+    write_marker(&mut out, MARKER_SOI)?;
+    write_sof(
+        &mut out,
+        bits_per_sample,
+        height as u16,
+        width as u16,
+        components,
+    )?;
+    match ilv {
+        0 => {
+            let plane_bytes = plane * bps;
+            for c in 0..spp {
+                write_sos_component(&mut out, (c + 1) as u8, near)?;
+                let ctx = ContextModel::new(max_val, near_i32, DEFAULT_RESET);
+                let plane_data = &data[c * plane_bytes..(c + 1) * plane_bytes];
+                if bps == 1 {
+                    encode_scan_t87_with(&mut out, wu, hu, ctx, |y, src_row| {
+                        let row = &plane_data[y * wu..(y + 1) * wu];
+                        if check_bounds {
+                            for (dst, &b) in src_row.iter_mut().zip(row.iter()) {
+                                *dst = check_sample(u16::from(b))?;
+                            }
+                        } else {
+                            for (dst, &b) in src_row.iter_mut().zip(row.iter()) {
+                                *dst = u16::from(b);
+                            }
+                        }
+                        Ok(())
+                    })?;
+                } else {
+                    encode_scan_t87_with(&mut out, wu, hu, ctx, |y, src_row| {
+                        let row = &plane_data[y * wu * 2..(y + 1) * wu * 2];
+                        let chunks = row.as_chunks::<2>().0;
+                        if check_bounds {
+                            for (dst, chunk) in src_row.iter_mut().zip(chunks.iter()) {
+                                *dst = check_sample(u16::from_le_bytes(*chunk))?;
+                            }
+                        } else {
+                            for (dst, chunk) in src_row.iter_mut().zip(chunks.iter()) {
+                                *dst = u16::from_le_bytes(*chunk);
+                            }
+                        }
+                        Ok(())
+                    })?;
+                }
+            }
+        }
+        1 => {
+            write_sos_multi(&mut out, components, near, 1)?;
+            let ctx = ContextModel::new(max_val, near_i32, DEFAULT_RESET);
+            if bps == 1 {
+                encode_scan_ilv1_with(&mut out, wu, hu, ctx, |y, rows| {
+                    let row = &data[y * wu * 3..(y + 1) * wu * 3];
+                    let pixels = row.as_chunks::<3>().0;
+                    if check_bounds {
+                        for (x, p) in pixels.iter().enumerate() {
+                            rows[0][x] = check_sample(u16::from(p[0]))?;
+                            rows[1][x] = check_sample(u16::from(p[1]))?;
+                            rows[2][x] = check_sample(u16::from(p[2]))?;
+                        }
+                    } else {
+                        for (x, p) in pixels.iter().enumerate() {
+                            rows[0][x] = u16::from(p[0]);
+                            rows[1][x] = u16::from(p[1]);
+                            rows[2][x] = u16::from(p[2]);
+                        }
+                    }
+                    Ok(())
+                })?;
+            } else {
+                encode_scan_ilv1_with(&mut out, wu, hu, ctx, |y, rows| {
+                    let row = &data[y * wu * 6..(y + 1) * wu * 6];
+                    let chunks = row.as_chunks::<2>().0;
+                    if check_bounds {
+                        for x in 0..wu {
+                            rows[0][x] = check_sample(u16::from_le_bytes(chunks[x * 3]))?;
+                            rows[1][x] = check_sample(u16::from_le_bytes(chunks[x * 3 + 1]))?;
+                            rows[2][x] = check_sample(u16::from_le_bytes(chunks[x * 3 + 2]))?;
+                        }
+                    } else {
+                        for x in 0..wu {
+                            rows[0][x] = u16::from_le_bytes(chunks[x * 3]);
+                            rows[1][x] = u16::from_le_bytes(chunks[x * 3 + 1]);
+                            rows[2][x] = u16::from_le_bytes(chunks[x * 3 + 2]);
+                        }
+                    }
+                    Ok(())
+                })?;
+            }
+        }
+        2 => {
+            write_sos_multi(&mut out, components, near, 2)?;
+            let ctx = ContextModel::new(max_val, near_i32, DEFAULT_RESET);
+            if bps == 1 {
+                encode_scan_ilv2_with(&mut out, wu, hu, ctx, |y, src_row| {
+                    let row = &data[y * wu * 3..(y + 1) * wu * 3];
+                    let pixels = row.as_chunks::<3>().0;
+                    if check_bounds {
+                        for (dst, p) in src_row.iter_mut().zip(pixels.iter()) {
+                            *dst = [
+                                check_sample(u16::from(p[0]))?,
+                                check_sample(u16::from(p[1]))?,
+                                check_sample(u16::from(p[2]))?,
+                            ];
+                        }
+                    } else {
+                        for (dst, p) in src_row.iter_mut().zip(pixels.iter()) {
+                            *dst = [u16::from(p[0]), u16::from(p[1]), u16::from(p[2])];
+                        }
+                    }
+                    Ok(())
+                })?;
+            } else {
+                encode_scan_ilv2_with(&mut out, wu, hu, ctx, |y, src_row| {
+                    let row = &data[y * wu * 6..(y + 1) * wu * 6];
+                    let chunks = row.as_chunks::<2>().0;
+                    if check_bounds {
+                        for (x, dst) in src_row.iter_mut().enumerate() {
+                            *dst = [
+                                check_sample(u16::from_le_bytes(chunks[x * 3]))?,
+                                check_sample(u16::from_le_bytes(chunks[x * 3 + 1]))?,
+                                check_sample(u16::from_le_bytes(chunks[x * 3 + 2]))?,
+                            ];
+                        }
+                    } else {
+                        for (x, dst) in src_row.iter_mut().enumerate() {
+                            *dst = [
+                                u16::from_le_bytes(chunks[x * 3]),
+                                u16::from_le_bytes(chunks[x * 3 + 1]),
+                                u16::from_le_bytes(chunks[x * 3 + 2]),
+                            ];
+                        }
+                    }
+                    Ok(())
+                })?;
+            }
+        }
+        _ => unreachable!(),
+    }
+    write_marker(&mut out, MARKER_EOI)?;
     Ok(out)
 }
 
@@ -336,22 +495,23 @@ fn write_headers(
 
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
-fn encode_regular_sample<const LOSSLESS: bool, W: Write>(
+fn encode_regular_qs<const LOSSLESS: bool, W: Write>(
     bw: &mut BitWriter<W>,
     ctx: &mut ContextModel,
+    qs: i32,
     ix: i32,
     ra: i32,
     rb: i32,
     rc: i32,
-    d1: i32,
-    d2: i32,
-    d3: i32,
 ) -> Result<i32, CodecError> {
     let near = if LOSSLESS { 0 } else { ctx.near };
     let max_val = ctx.max_val;
     let range = ctx.range;
-    let (q, sign) = ctx.get_context_index(d1, d2, d3);
-    let e = ctx.ctx[q];
+    let limit = ctx.limit;
+    let qbpp = ctx.qbpp;
+    let reset = ctx.reset;
+    let (q, sign) = ContextModel::split_qs(qs);
+    let e = &mut ctx.ctx[q];
     let k = ContextModel::compute_k_from(e.n, e.a);
     let mut px = predict_med(ra, rb, rc) + sign * e.c;
     px = clamp(px, 0, max_val);
@@ -367,12 +527,12 @@ fn encode_regular_sample<const LOSSLESS: bool, W: Write>(
         0
     };
     let mapped = run_mode::map_error(err_q, correction);
-    bw.write_limited_golomb(k, mapped, ctx.limit, ctx.qbpp)?;
+    bw.write_limited_golomb(k, mapped, limit, qbpp)?;
     if LOSSLESS {
-        ctx.update_stats_lossless(q, err_q);
+        e.update_lossless(err_q, reset);
         Ok(ix)
     } else {
-        ctx.update_stats(q, err_q);
+        e.update_lossy(err_q, 2 * near + 1, reset);
         Ok(run_mode::fix_reconstructed(
             px + sign * err_q * (2 * near + 1),
             near,
@@ -386,48 +546,73 @@ fn encode_regular_sample<const LOSSLESS: bool, W: Write>(
 fn encode_line_t87<const LOSSLESS: bool, W: Write>(
     bw: &mut BitWriter<W>,
     ctx: &mut ContextModel,
-    src_row: &[i32],
-    cur: &mut [i32],
-    prev: &mut [i32],
+    src_row: &[u16],
+    cur: &mut [u16],
+    prev: &mut [u16],
     width: usize,
 ) -> Result<(), CodecError> {
-    let near = if LOSSLESS { 0 } else { ctx.near };
+    let src_row = &src_row[..width];
+    let cur = &mut cur[..width + 2];
+    let prev = &mut prev[..width + 2];
     cur[0] = prev[1];
     prev[width + 1] = prev[width];
 
     let mut x = 0usize;
-    let mut ra = cur[0];
-    let mut rc = prev[0];
-    let mut rb = prev[1];
+    let mut ra = i32::from(cur[0]);
+    let mut rc = i32::from(prev[0]);
+    let mut rb = i32::from(prev[1]);
     while x < width {
-        let rd = prev[x + 2];
-        let d1 = rd - rb;
-        let d2 = rb - rc;
-        let d3 = rc - ra;
+        let rd = i32::from(prev[x + 2]);
+        let qs = ctx.compute_qs(rd - rb, rb - rc, rc - ra);
 
-        let in_run = if LOSSLESS {
-            (d1 | d2 | d3) == 0
-        } else {
-            d1.abs() <= near && d2.abs() <= near && d3.abs() <= near
-        };
-        if in_run {
+        if qs == 0 {
             x = run_mode::encode_run(bw, ctx, src_row, cur, prev, x, width)?;
             if x < width {
-                ra = cur[x];
-                rc = prev[x];
-                rb = prev[x + 1];
+                ra = i32::from(cur[x]);
+                rc = i32::from(prev[x]);
+                rb = i32::from(prev[x + 1]);
             }
             continue;
         }
 
         let recon =
-            encode_regular_sample::<LOSSLESS, _>(bw, ctx, src_row[x], ra, rb, rc, d1, d2, d3)?;
-        cur[x + 1] = recon;
+            encode_regular_qs::<LOSSLESS, _>(bw, ctx, qs, i32::from(src_row[x]), ra, rb, rc)?;
+        cur[x + 1] = recon as u16;
         ra = recon;
         rc = rb;
         rb = rd;
         x += 1;
     }
+    Ok(())
+}
+
+fn encode_scan_t87_with<W: Write, F: FnMut(usize, &mut [u16]) -> Result<(), CodecError>>(
+    out: W,
+    width: usize,
+    height: usize,
+    mut ctx: ContextModel,
+    mut load_row: F,
+) -> Result<(), CodecError> {
+    let mut bw = BitWriter::new(out);
+    let mut prev = vec![0u16; width + 2];
+    let mut cur = vec![0u16; width + 2];
+    let mut src_row = vec![0u16; width];
+
+    if ctx.near == 0 {
+        for y in 0..height {
+            load_row(y, &mut src_row)?;
+            encode_line_t87::<true, _>(&mut bw, &mut ctx, &src_row, &mut cur, &mut prev, width)?;
+            std::mem::swap(&mut prev, &mut cur);
+        }
+    } else {
+        for y in 0..height {
+            load_row(y, &mut src_row)?;
+            encode_line_t87::<false, _>(&mut bw, &mut ctx, &src_row, &mut cur, &mut prev, width)?;
+            std::mem::swap(&mut prev, &mut cur);
+        }
+    }
+
+    bw.flush()?;
     Ok(())
 }
 
@@ -440,25 +625,84 @@ pub(crate) fn encode_scan_t87(
     mut ctx: ContextModel,
 ) -> Result<(), CodecError> {
     let mut bw = BitWriter::new(out);
-    let mut prev = vec![0i32; width + 2];
-    let mut cur = vec![0i32; width + 2];
-    let mut src_row = vec![0i32; width];
+    let mut prev = vec![0u16; width + 2];
+    let mut cur = vec![0u16; width + 2];
 
     if ctx.near == 0 {
         for y in 0..height {
-            for (dst, &px) in src_row.iter_mut().zip(&pixels[y * width..(y + 1) * width]) {
-                *dst = i32::from(px);
-            }
-            encode_line_t87::<true, _>(&mut bw, &mut ctx, &src_row, &mut cur, &mut prev, width)?;
+            let src_row = &pixels[y * width..(y + 1) * width];
+            encode_line_t87::<true, _>(&mut bw, &mut ctx, src_row, &mut cur, &mut prev, width)?;
             std::mem::swap(&mut prev, &mut cur);
         }
     } else {
         for y in 0..height {
-            for (dst, &px) in src_row.iter_mut().zip(&pixels[y * width..(y + 1) * width]) {
-                *dst = i32::from(px);
-            }
-            encode_line_t87::<false, _>(&mut bw, &mut ctx, &src_row, &mut cur, &mut prev, width)?;
+            let src_row = &pixels[y * width..(y + 1) * width];
+            encode_line_t87::<false, _>(&mut bw, &mut ctx, src_row, &mut cur, &mut prev, width)?;
             std::mem::swap(&mut prev, &mut cur);
+        }
+    }
+
+    bw.flush()?;
+    Ok(())
+}
+
+fn encode_scan_ilv1_with<
+    W: Write,
+    F: FnMut(usize, &mut [Vec<u16>; 3]) -> Result<(), CodecError>,
+>(
+    out: W,
+    width: usize,
+    height: usize,
+    mut ctx: ContextModel,
+    mut load_rows: F,
+) -> Result<(), CodecError> {
+    let mut bw = BitWriter::new(out);
+    let mut prev = [
+        vec![0u16; width + 2],
+        vec![0u16; width + 2],
+        vec![0u16; width + 2],
+    ];
+    let mut cur = [
+        vec![0u16; width + 2],
+        vec![0u16; width + 2],
+        vec![0u16; width + 2],
+    ];
+    let mut src_rows = [vec![0u16; width], vec![0u16; width], vec![0u16; width]];
+
+    let mut run_indices = [0usize; 3];
+    if ctx.near == 0 {
+        for y in 0..height {
+            load_rows(y, &mut src_rows)?;
+            for c in 0..3 {
+                ctx.run_index = run_indices[c];
+                encode_line_t87::<true, _>(
+                    &mut bw,
+                    &mut ctx,
+                    &src_rows[c],
+                    &mut cur[c],
+                    &mut prev[c],
+                    width,
+                )?;
+                run_indices[c] = ctx.run_index;
+                std::mem::swap(&mut prev[c], &mut cur[c]);
+            }
+        }
+    } else {
+        for y in 0..height {
+            load_rows(y, &mut src_rows)?;
+            for c in 0..3 {
+                ctx.run_index = run_indices[c];
+                encode_line_t87::<false, _>(
+                    &mut bw,
+                    &mut ctx,
+                    &src_rows[c],
+                    &mut cur[c],
+                    &mut prev[c],
+                    width,
+                )?;
+                run_indices[c] = ctx.run_index;
+                std::mem::swap(&mut prev[c], &mut cur[c]);
+            }
         }
     }
 
@@ -472,67 +716,30 @@ fn encode_scan_ilv1(
     samples: &[u16],
     width: usize,
     height: usize,
-    mut ctx: ContextModel,
+    ctx: ContextModel,
 ) -> Result<(), CodecError> {
-    let mut bw = BitWriter::new(out);
     let plane = width * height;
-    let mut prev = [
-        vec![0i32; width + 2],
-        vec![0i32; width + 2],
-        vec![0i32; width + 2],
-    ];
-    let mut cur = [
-        vec![0i32; width + 2],
-        vec![0i32; width + 2],
-        vec![0i32; width + 2],
-    ];
-    let mut src_row = vec![0i32; width];
+    encode_scan_ilv1_with(out, width, height, ctx, |y, src_rows| {
+        for (c, row) in src_rows.iter_mut().enumerate() {
+            let off = c * plane + y * width;
+            row.copy_from_slice(&samples[off..off + width]);
+        }
+        Ok(())
+    })
+}
 
-    let mut run_indices = [0usize; 3];
+fn encode_scan_ilv2_with<W: Write, F: FnMut(usize, &mut [[u16; 3]]) -> Result<(), CodecError>>(
+    out: W,
+    width: usize,
+    height: usize,
+    ctx: ContextModel,
+    load_row: F,
+) -> Result<(), CodecError> {
     if ctx.near == 0 {
-        for y in 0..height {
-            for c in 0..3 {
-                ctx.run_index = run_indices[c];
-                let off = c * plane + y * width;
-                for (dst, &px) in src_row.iter_mut().zip(&samples[off..off + width]) {
-                    *dst = i32::from(px);
-                }
-                encode_line_t87::<true, _>(
-                    &mut bw,
-                    &mut ctx,
-                    &src_row,
-                    &mut cur[c],
-                    &mut prev[c],
-                    width,
-                )?;
-                run_indices[c] = ctx.run_index;
-                std::mem::swap(&mut prev[c], &mut cur[c]);
-            }
-        }
+        encode_scan_ilv2_inner::<true, _, _>(out, width, height, ctx, load_row)
     } else {
-        for y in 0..height {
-            for c in 0..3 {
-                ctx.run_index = run_indices[c];
-                let off = c * plane + y * width;
-                for (dst, &px) in src_row.iter_mut().zip(&samples[off..off + width]) {
-                    *dst = i32::from(px);
-                }
-                encode_line_t87::<false, _>(
-                    &mut bw,
-                    &mut ctx,
-                    &src_row,
-                    &mut cur[c],
-                    &mut prev[c],
-                    width,
-                )?;
-                run_indices[c] = ctx.run_index;
-                std::mem::swap(&mut prev[c], &mut cur[c]);
-            }
-        }
+        encode_scan_ilv2_inner::<false, _, _>(out, width, height, ctx, load_row)
     }
-
-    bw.flush()?;
-    Ok(())
 }
 
 /// Encode a 3-component sample-interleaved (`ILV = 2`) scan from component-planar `samples`.
@@ -543,83 +750,87 @@ fn encode_scan_ilv2(
     height: usize,
     ctx: ContextModel,
 ) -> Result<(), CodecError> {
-    if ctx.near == 0 {
-        encode_scan_ilv2_inner::<true>(out, samples, width, height, ctx)
-    } else {
-        encode_scan_ilv2_inner::<false>(out, samples, width, height, ctx)
-    }
-}
-
-fn encode_scan_ilv2_inner<const LOSSLESS: bool>(
-    out: &mut dyn Write,
-    samples: &[u16],
-    width: usize,
-    height: usize,
-    mut ctx: ContextModel,
-) -> Result<(), CodecError> {
-    let mut bw = BitWriter::new(out);
-    let near = if LOSSLESS { 0 } else { ctx.near };
     let plane = width * height;
-    let mut prev = vec![[0i32; 3]; width + 2];
-    let mut cur = vec![[0i32; 3]; width + 2];
-    let mut src_row = vec![[0i32; 3]; width];
-
-    for y in 0..height {
-        cur[0] = prev[1];
-        prev[width + 1] = prev[width];
+    encode_scan_ilv2_with(out, width, height, ctx, |y, src_row| {
         let row_base = y * width;
         let s0 = &samples[row_base..row_base + width];
         let s1 = &samples[plane + row_base..plane + row_base + width];
         let s2 = &samples[2 * plane + row_base..2 * plane + row_base + width];
         for x in 0..width {
-            src_row[x] = [i32::from(s0[x]), i32::from(s1[x]), i32::from(s2[x])];
+            src_row[x] = [s0[x], s1[x], s2[x]];
         }
+        Ok(())
+    })
+}
+
+fn encode_scan_ilv2_inner<
+    const LOSSLESS: bool,
+    W: Write,
+    F: FnMut(usize, &mut [[u16; 3]]) -> Result<(), CodecError>,
+>(
+    out: W,
+    width: usize,
+    height: usize,
+    mut ctx: ContextModel,
+    mut load_row: F,
+) -> Result<(), CodecError> {
+    let mut bw = BitWriter::new(out);
+    let near = if LOSSLESS { 0 } else { ctx.near };
+    let mut prev_vec = vec![[0u16; 3]; width + 2];
+    let mut cur_vec = vec![[0u16; 3]; width + 2];
+    let mut src_row_vec = vec![[0u16; 3]; width];
+
+    for y in 0..height {
+        load_row(y, &mut src_row_vec)?;
+        let prev = &mut prev_vec[..width + 2];
+        let cur = &mut cur_vec[..width + 2];
+        let src_row = &src_row_vec[..width];
+        cur[0] = prev[1];
+        prev[width + 1] = prev[width];
 
         let mut x = 0usize;
-        let mut ra = cur[0];
-        let mut rc = prev[0];
-        let mut rb = prev[1];
+        let mut ra = [
+            i32::from(cur[0][0]),
+            i32::from(cur[0][1]),
+            i32::from(cur[0][2]),
+        ];
+        let mut rc = [
+            i32::from(prev[0][0]),
+            i32::from(prev[0][1]),
+            i32::from(prev[0][2]),
+        ];
+        let mut rb = [
+            i32::from(prev[1][0]),
+            i32::from(prev[1][1]),
+            i32::from(prev[1][2]),
+        ];
         while x < width {
-            let rd = prev[x + 2];
-            let d1_0 = rd[0] - rb[0];
-            let d2_0 = rb[0] - rc[0];
-            let d3_0 = rc[0] - ra[0];
-            let d1_1 = rd[1] - rb[1];
-            let d2_1 = rb[1] - rc[1];
-            let d3_1 = rc[1] - ra[1];
-            let d1_2 = rd[2] - rb[2];
-            let d2_2 = rb[2] - rc[2];
-            let d3_2 = rc[2] - ra[2];
+            let rd_u16 = prev[x + 2];
+            let rd = [
+                i32::from(rd_u16[0]),
+                i32::from(rd_u16[1]),
+                i32::from(rd_u16[2]),
+            ];
+            let qs0 = ctx.compute_qs(rd[0] - rb[0], rb[0] - rc[0], rc[0] - ra[0]);
+            let qs1 = ctx.compute_qs(rd[1] - rb[1], rb[1] - rc[1], rc[1] - ra[1]);
+            let qs2 = ctx.compute_qs(rd[2] - rb[2], rb[2] - rc[2], rc[2] - ra[2]);
 
-            let all_in_run = if LOSSLESS {
-                (d1_0 | d2_0 | d3_0 | d1_1 | d2_1 | d3_1 | d1_2 | d2_2 | d3_2) == 0
-            } else {
-                d1_0.abs() <= near
-                    && d2_0.abs() <= near
-                    && d3_0.abs() <= near
-                    && d1_1.abs() <= near
-                    && d2_1.abs() <= near
-                    && d3_1.abs() <= near
-                    && d1_2.abs() <= near
-                    && d2_2.abs() <= near
-                    && d3_2.abs() <= near
-            };
-
-            if all_in_run {
+            if (qs0 | qs1 | qs2) == 0 {
+                let ra_u16 = [ra[0] as u16, ra[1] as u16, ra[2] as u16];
                 let mut run_len = 0usize;
                 while x + run_len < width {
                     let s = src_row[x + run_len];
                     let matches = if LOSSLESS {
-                        s == ra
+                        s == ra_u16
                     } else {
-                        (s[0] - ra[0]).abs() <= near
-                            && (s[1] - ra[1]).abs() <= near
-                            && (s[2] - ra[2]).abs() <= near
+                        (i32::from(s[0]) - ra[0]).abs() <= near
+                            && (i32::from(s[1]) - ra[1]).abs() <= near
+                            && (i32::from(s[2]) - ra[2]).abs() <= near
                     };
                     if !matches {
                         break;
                     }
-                    cur[x + run_len + 1] = ra;
+                    cur[x + run_len + 1] = ra_u16;
                     run_len += 1;
                 }
                 let end_of_line = x + run_len == width;
@@ -633,38 +844,61 @@ fn encode_scan_ilv2_inner<const LOSSLESS: bool>(
                 let mut recon = [0i32; 3];
                 for c in 0..3 {
                     recon[c] = run_mode::encode_run_interruption_ilv2(
-                        &mut bw, &mut ctx, ix[c], ra[c], rb_i[c],
+                        &mut bw,
+                        &mut ctx,
+                        i32::from(ix[c]),
+                        ra[c],
+                        i32::from(rb_i[c]),
                     )?;
                 }
-                cur[x + 1] = recon;
+                cur[x + 1] = [recon[0] as u16, recon[1] as u16, recon[2] as u16];
                 ctx.decrement_run_index();
                 x += 1;
                 if x < width {
                     ra = recon;
-                    rc = prev[x];
-                    rb = prev[x + 1];
+                    let p_x = prev[x];
+                    let p_x1 = prev[x + 1];
+                    rc = [i32::from(p_x[0]), i32::from(p_x[1]), i32::from(p_x[2])];
+                    rb = [i32::from(p_x1[0]), i32::from(p_x1[1]), i32::from(p_x1[2])];
                 }
                 continue;
             }
 
             let ix = src_row[x];
-            let r0 = encode_regular_sample::<LOSSLESS, _>(
-                &mut bw, &mut ctx, ix[0], ra[0], rb[0], rc[0], d1_0, d2_0, d3_0,
+            let r0 = encode_regular_qs::<LOSSLESS, _>(
+                &mut bw,
+                &mut ctx,
+                qs0,
+                i32::from(ix[0]),
+                ra[0],
+                rb[0],
+                rc[0],
             )?;
-            let r1 = encode_regular_sample::<LOSSLESS, _>(
-                &mut bw, &mut ctx, ix[1], ra[1], rb[1], rc[1], d1_1, d2_1, d3_1,
+            let r1 = encode_regular_qs::<LOSSLESS, _>(
+                &mut bw,
+                &mut ctx,
+                qs1,
+                i32::from(ix[1]),
+                ra[1],
+                rb[1],
+                rc[1],
             )?;
-            let r2 = encode_regular_sample::<LOSSLESS, _>(
-                &mut bw, &mut ctx, ix[2], ra[2], rb[2], rc[2], d1_2, d2_2, d3_2,
+            let r2 = encode_regular_qs::<LOSSLESS, _>(
+                &mut bw,
+                &mut ctx,
+                qs2,
+                i32::from(ix[2]),
+                ra[2],
+                rb[2],
+                rc[2],
             )?;
-            let recon = [r0, r1, r2];
-            cur[x + 1] = recon;
-            ra = recon;
+            cur[x + 1] = [r0 as u16, r1 as u16, r2 as u16];
+            ra = [r0, r1, r2];
             rc = rb;
             rb = rd;
             x += 1;
         }
-        std::mem::swap(&mut prev, &mut cur);
+        std::mem::swap(&mut prev_vec, &mut cur_vec);
     }
 
     bw.flush()?;

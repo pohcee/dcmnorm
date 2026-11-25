@@ -148,11 +148,16 @@ pub mod jpeg_ls_impl {
             ));
         }
 
-        // Size budget for `u16` sample buffer; dimensions already matched DICOM Rows/Columns.
+        // Size budget for the decoded byte buffer; dimensions already matched DICOM Rows/Columns.
+        let bps = if frame_info.bits_per_sample <= 8 {
+            1
+        } else {
+            2
+        };
         let required_bytes = (rows as usize)
             .saturating_mul(cols as usize)
             .saturating_mul(usize::from(frame_info.components))
-            .saturating_mul(2);
+            .saturating_mul(bps);
         let opts = dcmnorm_jpegls::DecodeImageOptions {
             max_decoded_bytes: required_bytes.max(64 * 1024 * 1024),
         };

@@ -46,6 +46,7 @@ pub(crate) fn map_error(err_val: i32, correction: i32) -> u32 {
 }
 
 /// Inverse of [`map_error`] (T.87 A.5.2).
+#[cfg(test)]
 #[inline]
 pub(crate) fn unmap_error(mapped: u32, correction: i32) -> i32 {
     let m = mapped as i32;
@@ -85,12 +86,18 @@ pub(crate) fn modulo_range(mut e: i32, range: i32) -> i32 {
 /// unchecked it inflates the context's A accumulator, which raises k, which
 /// lets the next code decode larger still, until A overflows `i32`. Within
 /// the bound A stays below `RESET * RANGE/2 <= 65535 * 32768 < i32::MAX`.
-#[inline]
+#[cold]
+#[inline(never)]
+fn errval_out_of_range(err: i32, range: i32) -> CodecError {
+    CodecError::InvalidData(format!(
+        "decoded error {err} outside +/-RANGE/2 (RANGE = {range})"
+    ))
+}
+
+#[inline(always)]
 pub(crate) fn check_errval(err: i32, range: i32) -> Result<(), CodecError> {
     if err.unsigned_abs() > (range / 2) as u32 {
-        return Err(CodecError::InvalidData(format!(
-            "decoded error {err} outside +/-RANGE/2 (RANGE = {range})"
-        )));
+        return Err(errval_out_of_range(err, range));
     }
     Ok(())
 }
@@ -314,18 +321,19 @@ fn decode_run_interruption_with(
 pub(crate) fn encode_run<W: Write>(
     bw: &mut BitWriter<W>,
     ctx: &mut ContextModel,
-    src: &[i32],
-    cur: &mut [i32],
-    prev: &[i32],
+    src: &[u16],
+    cur: &mut [u16],
+    prev: &[u16],
     start: usize,
     width: usize,
 ) -> Result<usize, CodecError> {
     let near = ctx.near;
-    let ra = cur[start]; // logical sample start-1 (border at start==0)
+    let ra_u16 = cur[start]; // logical sample start-1 (border at start==0)
+    let ra = i32::from(ra_u16);
 
     let mut run_length = 0usize;
-    while start + run_length < width && (src[start + run_length] - ra).abs() <= near {
-        cur[start + run_length + 1] = ra;
+    while start + run_length < width && (i32::from(src[start + run_length]) - ra).abs() <= near {
+        cur[start + run_length + 1] = ra_u16;
         run_length += 1;
     }
     let end = start + run_length;
@@ -335,9 +343,9 @@ pub(crate) fn encode_run<W: Write>(
         return Ok(end);
     }
 
-    let rb = prev[end + 1];
-    let recon = encode_run_interruption(bw, ctx, src[end], ra, rb)?;
-    cur[end + 1] = recon;
+    let rb = i32::from(prev[end + 1]);
+    let recon = encode_run_interruption(bw, ctx, i32::from(src[end]), ra, rb)?;
+    cur[end + 1] = recon as u16;
     ctx.decrement_run_index();
     Ok(end + 1)
 }
@@ -346,25 +354,24 @@ pub(crate) fn encode_run<W: Write>(
 pub(crate) fn decode_run(
     br: &mut BitReader<'_>,
     ctx: &mut ContextModel,
-    cur: &mut [i32],
-    prev: &[i32],
+    cur: &mut [u16],
+    prev: &[u16],
     start: usize,
     width: usize,
 ) -> Result<usize, CodecError> {
-    let ra = cur[start];
+    let ra_u16 = cur[start];
+    let ra = i32::from(ra_u16);
 
     let run_length = decode_run_pixels(br, ctx, width - start)?;
-    for i in 0..run_length {
-        cur[start + i + 1] = ra;
-    }
+    cur[start + 1..start + 1 + run_length].fill(ra_u16);
     let end = start + run_length;
     if end == width {
         return Ok(end);
     }
 
-    let rb = prev[end + 1];
+    let rb = i32::from(prev[end + 1]);
     let recon = decode_run_interruption(br, ctx, ra, rb)?;
-    cur[end + 1] = recon;
+    cur[end + 1] = recon as u16;
     ctx.decrement_run_index();
     Ok(end + 1)
 }

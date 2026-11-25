@@ -10,24 +10,28 @@ use std::io::Write;
 
 use crate::error::CodecError;
 
-/// Fast SWAR test: returns true if any byte in `w` is `0xFF`.
+/// Find the byte offset of the next `0xFF` byte at or after `from`, or `data.len()`.
 #[inline(always)]
-fn has_0xff(w: u64) -> bool {
-    let inv = !w;
-    (inv.wrapping_sub(0x0101_0101_0101_0101) & !inv & 0x8080_8080_8080_8080) != 0
+fn find_next_ff(data: &[u8], from: usize) -> usize {
+    match data[from..].iter().position(|&b| b == 0xFF) {
+        Some(rel) => from + rel,
+        None => data.len(),
+    }
 }
 
-/// Compile-time 8-bit Golomb-Rice decode lookup table for `k in 0..8`.
-/// When `len > 0`, the entire non-escaped Golomb code fits in the top `len` bits
-/// (so `unary_zeros <= 7 < escape` for all valid T.87 parameters) and decodes to `val`.
+/// Compile-time 8-bit Golomb-Rice decode lookup table for regular mode (`k in 0..8`, 4 KiB).
+///
+/// Stores the **already-unmapped** signed error value `err` (assuming `correction == 0`;
+/// when `k == 0`, the caller XORs with `correction`) so LUT hits skip `unmap_error` and
+/// `check_errval` (for `range >= 128`, since `|err| <= 64`).
 #[derive(Clone, Copy)]
-struct GolombEntry {
+struct RegularGolombEntry {
     len: u8,
-    val: u8,
+    err: i8,
 }
 
-const fn build_golomb_lut() -> [[GolombEntry; 256]; 8] {
-    let mut table = [[GolombEntry { len: 0, val: 0 }; 256]; 8];
+const fn build_regular_golomb_lut() -> [[RegularGolombEntry; 256]; 8] {
+    let mut table = [[RegularGolombEntry { len: 0, err: 0 }; 256]; 8];
     let mut k = 0usize;
     while k < 8 {
         let mut byte = 0usize;
@@ -41,10 +45,11 @@ const fn build_golomb_lut() -> [[GolombEntry; 256]; 8] {
                 } else {
                     0
                 };
-                let val = (zeros << k) | rem;
-                table[k][byte] = GolombEntry {
+                let mapped = ((zeros << k) | rem) as i32;
+                let err = (mapped >> 1) ^ -(mapped & 1);
+                table[k][byte] = RegularGolombEntry {
                     len: total as u8,
-                    val: val as u8,
+                    err: err as i8,
                 };
             }
             byte += 1;
@@ -54,7 +59,7 @@ const fn build_golomb_lut() -> [[GolombEntry; 256]; 8] {
     table
 }
 
-static GOLOMB_LUT: [[GolombEntry; 256]; 8] = build_golomb_lut();
+static REGULAR_GOLOMB_LUT: [[RegularGolombEntry; 256]; 8] = build_regular_golomb_lut();
 
 // ---------------------------------------------------------------------------
 // BitReader
@@ -63,6 +68,9 @@ static GOLOMB_LUT: [[GolombEntry; 256]; 8] = build_golomb_lut();
 pub(crate) struct BitReader<'a> {
     data: &'a [u8],
     pos: usize,
+    /// Offset of the next `0xFF` byte at or after `pos` (or `data.len()`).
+    /// While `pos + 8 <= next_ff` and `!last_ff`, refill pulls 4–7 bytes with zero `0xFF` checks.
+    next_ff: usize,
     /// Left-justified bit buffer: bit 63 is the next bit to read.
     bits: u64,
     /// Number of valid bits currently in `bits` (0..=64).
@@ -78,6 +86,7 @@ impl<'a> BitReader<'a> {
         Self {
             data,
             pos: 0,
+            next_ff: find_next_ff(data, 0),
             bits: 0,
             n_bits: 0,
             last_ff: false,
@@ -114,25 +123,22 @@ impl<'a> BitReader<'a> {
         p
     }
 
-    /// Pull as many bits as fit into `self.bits` (up to 56..64 bits).
+    /// Pull 4–7 bytes into `self.bits` with zero `0xFF` checks while safely ahead of `next_ff`,
+    /// falling back to byte-at-a-time bit-unstuffing around `0xFF` bytes or near EOF.
     /// Never returns an error; stops at EOF or a marker (`pending_marker`).
     #[inline(always)]
     fn refill(&mut self) {
-        if !self.last_ff && self.n_bits <= 32 && self.pos + 8 <= self.data.len() {
+        if !self.last_ff && self.n_bits <= 31 && self.pos + 8 <= self.next_ff {
             let word = u64::from_be_bytes(self.data[self.pos..self.pos + 8].try_into().unwrap());
-            if !has_0xff(word) {
-                let bytes = ((64 - self.n_bits) >> 3) as usize;
-                let shift_bits = (bytes * 8) as u32;
-                let mask = if shift_bits == 64 {
-                    !0u64
-                } else {
-                    !0u64 << (64 - shift_bits)
-                };
-                self.bits |= (word & mask) >> (self.n_bits as u32);
-                self.n_bits += shift_bits as i32;
-                self.pos += bytes;
-                return;
-            }
+            // `n_bits in 0..=31` => `bytes = (63 - n_bits) >> 3` is always in `4..=7`,
+            // so `shift_bits in {32, 40, 48, 56}` (never 0 or 64).
+            let bytes = ((63 - self.n_bits) >> 3) as usize;
+            let shift_bits = (bytes * 8) as u32;
+            let mask = !0u64 << (64 - shift_bits);
+            self.bits |= (word & mask) >> (self.n_bits as u32);
+            self.n_bits += shift_bits as i32;
+            self.pos += bytes;
+            return;
         }
         self.refill_slow();
     }
@@ -172,6 +178,9 @@ impl<'a> BitReader<'a> {
                 self.n_bits += 8;
                 self.last_ff = false;
             }
+        }
+        if !self.last_ff && self.pending_marker.is_none() && self.pos > self.next_ff {
+            self.next_ff = find_next_ff(self.data, self.pos);
         }
     }
 
@@ -214,6 +223,34 @@ impl<'a> BitReader<'a> {
         Ok(val)
     }
 
+    /// Read and unmap a regular-mode length-limited Golomb-Rice error (T.87 A.5.3 + A.5.2).
+    ///
+    /// Returns the unmapped signed error with `correction == 0` (the caller XORs with
+    /// `correction` when `k == 0 && LOSSLESS`). In regular mode `escape >= 17 >= 8` always,
+    /// so any 8-bit LUT hit is guaranteed non-escaped and has `|err| <= 64`.
+    #[inline(always)]
+    pub fn read_regular_error(
+        &mut self,
+        k: i32,
+        glimit: i32,
+        qbpp: i32,
+    ) -> Result<(i32, bool), CodecError> {
+        if self.n_bits < 32 {
+            self.refill();
+        }
+        if (k as u32) < 8 {
+            let entry = REGULAR_GOLOMB_LUT[k as usize][(self.bits >> 56) as usize];
+            if (entry.len as u32).wrapping_sub(1) < (self.n_bits as u32) {
+                self.bits <<= entry.len;
+                self.n_bits -= i32::from(entry.len);
+                return Ok((i32::from(entry.err), true));
+            }
+        }
+        let mapped = self.read_limited_golomb_no_lut(k, glimit - qbpp - 1, qbpp)?;
+        let m = mapped as i32;
+        Ok(((m >> 1) ^ -(m & 1), false))
+    }
+
     /// Read a length-limited Golomb-Rice code (T.87 A.5.3).
     #[inline(always)]
     pub fn read_limited_golomb(
@@ -226,15 +263,16 @@ impl<'a> BitReader<'a> {
         if self.n_bits < 32 {
             self.refill();
         }
-        // Ultra-fast 8-bit L1 LUT path: covers ~85-95% of regular pixels in 1 lookup + 1 shift.
-        if (k as u32) < 8 && escape >= 8 {
-            let entry = GOLOMB_LUT[k as usize][(self.bits >> 56) as usize];
-            if entry.len > 0 && i32::from(entry.len) <= self.n_bits {
-                self.bits <<= entry.len;
-                self.n_bits -= i32::from(entry.len);
-                return Ok(u32::from(entry.val));
-            }
-        }
+        self.read_limited_golomb_no_lut(k, escape, qbpp)
+    }
+
+    #[inline(always)]
+    fn read_limited_golomb_no_lut(
+        &mut self,
+        k: i32,
+        escape: i32,
+        qbpp: i32,
+    ) -> Result<u32, CodecError> {
         let lz = self.bits.leading_zeros() as i32;
         if lz < self.n_bits {
             if lz < escape {
