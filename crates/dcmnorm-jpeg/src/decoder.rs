@@ -1048,6 +1048,7 @@ impl<R: Read> Decoder<R> {
                                     self.ac_huffman_tables[scan.ac_table_indices[i]].as_ref(),
                                     scan.spectral_selection.clone(),
                                     scan.successive_approximation_low,
+                                    frame.precision + 3,
                                     &mut eob_run,
                                     &mut dc_predictors[i],
                                 )?;
@@ -1143,6 +1144,7 @@ fn decode_block<R: Read>(
     ac_table: Option<&HuffmanTable>,
     spectral_selection: Range<u8>,
     successive_approximation_low: u8,
+    max_dc_category: u8,
     eob_run: &mut u16,
     dc_predictor: &mut i16,
 ) -> Result<()> {
@@ -1150,11 +1152,12 @@ fn decode_block<R: Read>(
 
     if spectral_selection.start == 0 {
         // Section F.2.2.1
-        // Figure F.12
+        // Figure F.12; ITU-T T.81 Table F.1 allows categories 0..=11 for 8-bit DCT
+        // and 0..=15 for 12-bit Extended DCT (P + 3).
         let value = huffman.decode(reader, dc_table.unwrap())?;
         let diff = match value {
             0 => 0,
-            1..=11 => huffman.receive_extend(reader, value)?,
+            1..=15 if value <= max_dc_category => huffman.receive_extend(reader, value)?,
             _ => {
                 // Section F.1.2.1.1
                 // Table F.1
@@ -1557,4 +1560,70 @@ fn stbi_f2f(x: f32) -> i32 {
 
 fn clamp_fixed_point(value: i32) -> u8 {
     (value >> FIXED_POINT_OFFSET).clamp(0, 255) as u8
+}
+
+#[cfg(test)]
+mod tests {
+    use super::decode_block;
+    use crate::huffman::{HuffmanDecoder, HuffmanTable, HuffmanTableClass};
+    use std::io::Cursor;
+
+    fn single_symbol_table(symbol: u8, class: HuffmanTableClass) -> HuffmanTable {
+        let mut bits = [0u8; 16];
+        bits[0] = 1; // 1-bit code `0` maps to `symbol`
+        HuffmanTable::new(&bits, &[symbol], class).unwrap()
+    }
+
+    #[test]
+    fn decode_block_allows_dc_categories_up_to_15_for_12_bit_dct() {
+        let dc_table = single_symbol_table(13, HuffmanTableClass::DC);
+        let ac_table = single_symbol_table(0x00, HuffmanTableClass::AC); // EOB
+
+        // Bitstream: DC symbol `0` (1 bit -> category 13), 13 payload bits `1_0000_0000_0000`
+        // (+4096), AC EOB `0` (1 bit), 1 pad bit -> 0b0100_0000_0000_0000 = [0x40, 0x00],
+        // followed by EOI marker [0xFF, 0xD9] so the bitreader can refill cleanly.
+        let bytes = [0x40u8, 0x00, 0xFF, 0xD9];
+
+        // 12-bit DCT (max_dc_category = 15) accepts category 13.
+        let mut coeffs = [0i16; 64];
+        let mut huffman = HuffmanDecoder::new();
+        let mut eob_run = 0;
+        let mut dc_pred = 0;
+        decode_block(
+            &mut Cursor::new(&bytes),
+            &mut coeffs,
+            &mut huffman,
+            Some(&dc_table),
+            Some(&ac_table),
+            0..64,
+            0,
+            15,
+            &mut eob_run,
+            &mut dc_pred,
+        )
+        .expect("12-bit DCT should accept DC category 13");
+        assert_eq!(coeffs[0], 4096);
+
+        // 8-bit DCT (max_dc_category = 11) still rejects category 13.
+        let mut coeffs = [0i16; 64];
+        let mut huffman = HuffmanDecoder::new();
+        let mut eob_run = 0;
+        let mut dc_pred = 0;
+        let err = decode_block(
+            &mut Cursor::new(&bytes),
+            &mut coeffs,
+            &mut huffman,
+            Some(&dc_table),
+            Some(&ac_table),
+            0..64,
+            0,
+            11,
+            &mut eob_run,
+            &mut dc_pred,
+        )
+        .expect_err("8-bit DCT must reject DC category > 11");
+        assert!(err
+            .to_string()
+            .contains("invalid DC difference magnitude category"));
+    }
 }
