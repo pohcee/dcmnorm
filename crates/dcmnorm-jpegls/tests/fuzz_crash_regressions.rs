@@ -43,7 +43,7 @@ fn crash_0ac3d3b_with_valid_sof_is_rejected_without_overflow() {
     let (body, w, h) = split(&data);
     let result = decode(body, w, h);
     assert!(
-        matches!(result, Err(CodecError::Truncated { .. })),
+        matches!(result, Err(CodecError::InvalidData(ref msg)) if msg.contains("outside +/-RANGE/2")),
         "{result:?}"
     );
 }

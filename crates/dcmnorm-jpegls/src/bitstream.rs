@@ -99,18 +99,23 @@ impl<'a> BitReader<'a> {
     }
 
     /// Byte offset of the marker terminating the scan.
+    ///
+    /// Always rewinds any whole unread bytes still buffered in `self.bits` so
+    /// trailing non-padding entropy bytes before EOI/SOS/RST are exposed to the
+    /// caller's marker check rather than silently discarded.
     pub fn marker_pos(&self) -> usize {
-        if self.pending_marker.is_some() {
-            return self.pos;
-        }
-        if self.last_ff {
-            return self.pos + 1;
-        }
-        // Rewind any whole 8-bit non-FF bytes that `refill()` read ahead.
-        // Because `refill` stops at any marker (`0xFF >=0x80`), any unread
-        // whole bytes here are pure data bytes before EOI/SOS.
         let mut rem_bits = self.n_bits;
         let mut p = self.pos;
+        if self.last_ff {
+            // The 0xFF byte itself was consumed into `bits`, leaving its stuffed
+            // follower byte unread at `self.pos`. If 8+ bits remain unread, the
+            // 0xFF byte itself wasn't needed; otherwise advance past the follower.
+            if rem_bits < 8 {
+                return p + 1;
+            }
+            rem_bits -= 8;
+            p -= 1;
+        }
         while rem_bits >= 8 && p > 0 {
             let prev_is_ff = p >= 2 && self.data[p - 2] == 0xFF;
             let width = if prev_is_ff { 7 } else { 8 };

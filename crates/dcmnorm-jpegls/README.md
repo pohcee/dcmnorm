@@ -20,7 +20,7 @@ dedicated RHEL `manylinux.cmake` toolchain file for Linux wheels).
 - **Multi-component interleaved scans (`ILV = 1` line-interleaved and `ILV = 2` sample-interleaved)** for both decoding and encoding:
   - `ILV = 1` implements per-component `RUNindex` tracking across shared contexts per ITU-T T.87 A.7.1.
   - `ILV = 2` implements triplet run mode and sample-interleaved run interruption (`RItype = 0`, `Px = Rb`, `sign = sign(Rb - Ra)`) per ITU-T T.87 A.7.3.
-- **Direct row-streaming DICOM byte-buffer APIs (1× peak memory)**:
+- **Direct row-streaming DICOM byte-buffer APIs (no intermediate full-frame `Vec<u16>`)**:
   - `read_frame_info(&[u8])` parses SOF55/LSE/SOS headers without decoding pixel data.
   - `decode_to_bytes(&[u8])` / `decode_to_bytes_with_options(...)` stream each decoded row directly into a single native little-endian `Vec<u8>` (1 byte/sample for `<= 8`-bit, 2 bytes/sample LE for `> 8`-bit; planar for `ILV = 0`, sample-interleaved for `ILV = 1`/`ILV = 2`) with **no intermediate full-frame `Vec<u16>`**.
   - `encode_bytes(...)` streams rows directly from native little-endian byte buffers (`ILV = 0`, `1`, or `2`) with **no intermediate full-frame `Vec<u16>`**.
@@ -38,9 +38,11 @@ dedicated RHEL `manylinux.cmake` toolchain file for Linux wheels).
 
 ## Memory Profile
 
-- **Internal codec working memory:** `ContextModel` (~7 KiB inline, zero heap allocations), static 4 KiB `REGULAR_GOLOMB_LUT` in `.rodata`, `BitWriter` 4 KiB stack buffer, and two `u16` (or `[u16; 3]` for `ILV = 2`) line buffers (**2–8 KiB** heap for 512–2048 px widths).
-- **Decode peak heap (`decode_to_bytes`):** **1.00×–1.01×** of the output frame size (**+1–8 KiB** working buffers above the single returned `Vec<u8>` — matching CharLS, with zero intermediate `Vec<u16>`).
-- **Encode peak heap (`encode_bytes`):** zero copy of the input pixel buffer; allocates only the compressed output `Vec<u8>` (pre-sized to `raw_bytes / 2 + 64`) plus 2–12 KiB of row buffers.
+- **Internal codec working memory:** `ContextModel` (~7 KiB inline, zero heap allocations), static 4 KiB `REGULAR_GOLOMB_LUT` in `.rodata`, `BitWriter` 4 KiB stack buffer, and per-mode `u16` row buffers:
+  - **`ILV = 0` (grayscale or planar):** 2 rows (`2 × (W + 2) × 2 B`) on decode (~8 KiB at `W = 2048`); +1 source row (~12 KiB at `W = 2048`) on encode.
+  - **`ILV = 1` / `ILV = 2` (3-component interleaved):** 6 component rows (`6 × (W + 2) × 2 B`) on decode (~24 KiB at `W = 2048`); +3 source rows (~36 KiB at `W = 2048`) on encode.
+- **Decode peak heap (`decode_to_bytes`):** measured at **1.00×–1.01×** of the output frame size across the benchmark workloads below (**+1–8 KiB** working buffers above the single returned `Vec<u8>` — matching CharLS, with no intermediate full-frame `Vec<u16>`).
+- **Encode peak heap (`encode_bytes`):** zero copy of the input pixel buffer; allocates only the compressed output `Vec<u8>` (pre-sized to `raw_bytes / 2 + 64`) plus the row buffers above.
 
 ## Benchmark vs C++ CharLS (`charls` 0.4.2 / CharLS 2.4.5)
 

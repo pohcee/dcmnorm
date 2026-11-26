@@ -32,7 +32,7 @@ const DEFAULT_RESET: i32 = 64;
 ///
 /// `pixels` is a row-major pixel buffer of length `width * height`.
 /// The output is written to `w`. Uses [`EncodeOptions::default`]
-/// ([`Profile::T87`], lossless).
+/// (ITU-T T.87 lossless JPEG-LS).
 pub fn encode(
     pixels: &[u16],
     width: u32,
@@ -394,8 +394,12 @@ pub fn encode_image(
     }
 
     let (wu, hu) = (width as usize, height as usize);
-    let plane = wu * hu;
-    let expected = plane * components as usize;
+    let plane = wu
+        .checked_mul(hu)
+        .ok_or_else(|| CodecError::InvalidData("image dimensions overflow".into()))?;
+    let expected = plane
+        .checked_mul(components as usize)
+        .ok_or_else(|| CodecError::InvalidData("image dimensions overflow".into()))?;
     if samples.len() != expected {
         return Err(CodecError::DimensionMismatch {
             expected,

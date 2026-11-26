@@ -710,6 +710,23 @@ fn charls_2_4_5_bidirectional_golden_conformance() {
                 v.name
             );
         } else {
+            // CharLS 2.4.5 emits an optional 15-byte LSE ID=1 marker for >12-bit;
+            // the SOS header + entropy-coded scan payload + EOI must match byte-for-byte.
+            let our_sos = ours
+                .windows(2)
+                .position(|w| w == [0xFF, 0xDA])
+                .expect("our SOS marker");
+            let charls_sos = v
+                .charls_encoded
+                .windows(2)
+                .position(|w| w == [0xFF, 0xDA])
+                .expect("CharLS SOS marker");
+            assert_eq!(
+                &ours[our_sos..],
+                &v.charls_encoded[charls_sos..],
+                "{}: 16-bit SOS + scan payload differs from CharLS 2.4.5",
+                v.name
+            );
             let (roundtripped, _) = dcmnorm_jpegls::decode_to_bytes(&ours).unwrap();
             assert_eq!(
                 roundtripped, v.charls_decoded,

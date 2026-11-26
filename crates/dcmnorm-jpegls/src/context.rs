@@ -304,6 +304,20 @@ impl ContextModel {
         s + i32::from((n << s) < a)
     }
 
+    /// Reset adaptive statistics and run state at a JPEG-LS restart marker (RSTm).
+    pub fn reset_for_restart(&mut self) {
+        let a_init = ((self.range + 32) / 64).max(2);
+        let entry = CtxEntry {
+            a: a_init,
+            b: 0,
+            c: 0,
+            n: 1,
+        };
+        self.ctx.fill(entry);
+        self.nn = [0, 0];
+        self.run_index = 0;
+    }
+
     #[inline(always)]
     pub fn increment_run_index(&mut self) {
         if self.run_index < 31 {
