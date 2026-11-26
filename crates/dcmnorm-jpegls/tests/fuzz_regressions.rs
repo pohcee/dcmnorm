@@ -71,12 +71,14 @@ fn assert_errval_rejected(name: &str, stream: &[u8]) {
     repaired[sos + 5] = 1;
     let stream = repaired.as_slice();
     match dcmnorm_jpegls::decode_image(stream) {
-        Err(CodecError::InvalidData(_)) => {}
+        Err(CodecError::InvalidData(ref msg))
+            if msg.contains("outside +/-RANGE/2") && msg.contains("at byte offset") => {}
         other => panic!("{name}: decode_image -> {other:?}"),
     }
     let (w, h) = sof_dims(stream);
     match dcmnorm_jpegls::decode(stream, w, h) {
-        Err(CodecError::InvalidData(_)) => {}
+        Err(CodecError::InvalidData(ref msg))
+            if msg.contains("outside +/-RANGE/2") && msg.contains("at byte offset") => {}
         other => panic!("{name}: decode -> {:?}", other.map(|_| ())),
     }
 }

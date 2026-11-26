@@ -80,10 +80,19 @@ pub struct FrameInfo {
     /// Interleave mode (`0` = none/planar, `1` = line, `2` = sample).
     pub interleave_mode: u8,
     /// NEAR error bound (`0` = lossless).
+    ///
+    /// Note: [`read_frame_info`] inspects only the first SOS header, so for
+    /// multi-scan planar (`ILV = 0`) frames it reports the first scan's `NEAR`.
+    /// Full decode APIs ([`decode_to_bytes`], [`decode_to_bytes_with_options`],
+    /// [`decode_to_interleaved_bytes_with_options`]) report the maximum `NEAR`
+    /// observed across all scans in the frame.
     pub near: u8,
 }
 
-/// Parse JPEG-LS headers (SOI, SOF55, optional LSE/DRI, first SOS) without decoding pixels.
+/// Parse JPEG-LS headers (SOI, SOF55, optional LSE/DRI/APP8, first SOS) without decoding pixels.
+///
+/// For multi-scan planar (`ILV = 0`) frames, [`FrameInfo::near`] reflects the first scan's
+/// `NEAR` value because later SOS headers are not parsed until full decode.
 pub fn read_frame_info(data: &[u8]) -> Result<FrameInfo, CodecError> {
     let mut dec = Decoder::new(data);
     let (frame, presets, scan) = dec.read_headers()?;
@@ -181,7 +190,19 @@ pub fn decode_to_bytes_with_options(
     opts: &DecodeImageOptions,
 ) -> Result<(Vec<u8>, FrameInfo), CodecError> {
     let mut dec = Decoder::new(data);
-    dec.decode_to_bytes(opts)
+    dec.decode_to_bytes(opts, false)
+}
+
+/// Like [`decode_to_bytes_with_options`], but always outputs sample-interleaved
+/// (`RGBRGB…`) bytes for 3-component frames — including `ILV = 0` planar scans —
+/// by writing each planar scan row directly into its interleaved destination
+/// positions inside the single output `Vec<u8>`.
+pub fn decode_to_interleaved_bytes_with_options(
+    data: &[u8],
+    opts: &DecodeImageOptions,
+) -> Result<(Vec<u8>, FrameInfo), CodecError> {
+    let mut dec = Decoder::new(data);
+    dec.decode_to_bytes(opts, true)
 }
 
 // ---------------------------------------------------------------------------
@@ -386,13 +407,21 @@ impl<'a> Decoder<'a> {
     }
 
     /// Parse a DRI (Define Restart Interval) segment.
+    /// Per ISO/IEC 14495-2 (T.870) and CharLS, JPEG-LS supports 2-, 3-, and 4-byte
+    /// big-endian restart intervals.
     fn read_dri(&mut self, payload_len: usize) -> Result<usize, CodecError> {
-        if payload_len != 2 {
-            return Err(CodecError::InvalidData(format!(
-                "DRI segment payload is {payload_len} bytes, expected 2"
-            )));
+        let mut val: u32 = 0;
+        match payload_len {
+            2..=4 => {
+                for _ in 0..payload_len {
+                    val = (val << 8) | u32::from(self.read_byte()?);
+                }
+                Ok(val as usize)
+            }
+            _ => Err(CodecError::InvalidData(format!(
+                "DRI segment payload is {payload_len} bytes, expected 2, 3, or 4"
+            ))),
         }
-        Ok(self.read_u16be()? as usize)
     }
 
     /// Inspect an APP8 segment for a CharLS `mrfx` color-transform marker.
@@ -484,7 +513,13 @@ impl<'a> Decoder<'a> {
     }
 
     fn expect_eoi(&mut self) -> Result<(), CodecError> {
-        let b1 = self.read_byte()?;
+        let mut b1 = self.read_byte()?;
+        // Tolerate one legacy trailing 0x00 padding byte immediately before the
+        // EOI marker (as CharLS does), while still rejecting non-zero trailing
+        // entropy bytes or multiple zero bytes.
+        if b1 == 0x00 && self.data.get(self.pos) == Some(&0xFF) {
+            b1 = self.read_byte()?;
+        }
         let mut b2 = self.read_byte()?;
         // As in `read_marker`, 0xFF fill bytes may precede the EOI (T.81
         // B.1.1.2). DCMTK pads an odd-length stream to even this way by
@@ -543,6 +578,11 @@ impl<'a> Decoder<'a> {
         loop {
             let (marker, length) = self.read_marker()?;
             match marker {
+                MARKER_SOF55 => {
+                    return Err(CodecError::InvalidData(
+                        "duplicate SOF55 marker between planar scans".into(),
+                    ));
+                }
                 MARKER_LSE => self.read_lse(length, presets)?,
                 MARKER_DRI => presets.restart_interval = self.read_dri(length)?,
                 MARKER_APP8 => self.read_app8(length)?,
@@ -625,6 +665,7 @@ impl<'a> Decoder<'a> {
     fn decode_to_bytes(
         &mut self,
         opts: &DecodeImageOptions,
+        interleave_planar: bool,
     ) -> Result<(Vec<u8>, FrameInfo), CodecError> {
         let (frame, mut presets, first_scan) = self.read_headers()?;
         let (first_max_val, first_reset) = validate_params(&frame, &presets, first_scan.near)?;
@@ -687,42 +728,80 @@ impl<'a> Decoder<'a> {
                     ));
                 }
                 seen[index] = true;
-                let plane_slot = &mut out[index * plane_bytes..(index + 1) * plane_bytes];
                 let ctx = ContextModel::with_presets(
                     max_val, scan.near, reset, presets.t1, presets.t2, presets.t3,
                 );
                 let scan_start = self.pos;
-                let consumed = if bps == 1 {
-                    decode_scan_t87_with(
-                        &self.data[scan_start..],
-                        w,
-                        h,
-                        ctx,
-                        presets.restart_interval,
-                        scan_start,
-                        |y, row_cur| {
-                            let dst = &mut plane_slot[y * w..(y + 1) * w];
-                            for (d, &s) in dst.iter_mut().zip(row_cur.iter()) {
-                                *d = s as u8;
-                            }
-                        },
-                    )?
+                let consumed = if interleave_planar && components == 3 {
+                    if bps == 1 {
+                        decode_scan_t87_with(
+                            &self.data[scan_start..],
+                            w,
+                            h,
+                            ctx,
+                            presets.restart_interval,
+                            scan_start,
+                            |y, row_cur| {
+                                let row = &mut out[y * w * 3..(y + 1) * w * 3];
+                                for (dst, &s) in
+                                    row.as_chunks_mut::<3>().0.iter_mut().zip(row_cur.iter())
+                                {
+                                    dst[index] = s as u8;
+                                }
+                            },
+                        )?
+                    } else {
+                        decode_scan_t87_with(
+                            &self.data[scan_start..],
+                            w,
+                            h,
+                            ctx,
+                            presets.restart_interval,
+                            scan_start,
+                            |y, row_cur| {
+                                let row = &mut out[y * w * 6..(y + 1) * w * 6];
+                                let words = row.as_chunks_mut::<2>().0;
+                                for (x, &s) in row_cur.iter().enumerate() {
+                                    words[x * 3 + index] = s.to_le_bytes();
+                                }
+                            },
+                        )?
+                    }
                 } else {
-                    decode_scan_t87_with(
-                        &self.data[scan_start..],
-                        w,
-                        h,
-                        ctx,
-                        presets.restart_interval,
-                        scan_start,
-                        |y, row_cur| {
-                            let dst = &mut plane_slot[y * w * 2..(y + 1) * w * 2];
-                            for (d, &s) in dst.as_chunks_mut::<2>().0.iter_mut().zip(row_cur.iter())
-                            {
-                                *d = s.to_le_bytes();
-                            }
-                        },
-                    )?
+                    let plane_slot = &mut out[index * plane_bytes..(index + 1) * plane_bytes];
+                    if bps == 1 {
+                        decode_scan_t87_with(
+                            &self.data[scan_start..],
+                            w,
+                            h,
+                            ctx,
+                            presets.restart_interval,
+                            scan_start,
+                            |y, row_cur| {
+                                let dst = &mut plane_slot[y * w..(y + 1) * w];
+                                for (d, &s) in dst.iter_mut().zip(row_cur.iter()) {
+                                    *d = s as u8;
+                                }
+                            },
+                        )?
+                    } else {
+                        decode_scan_t87_with(
+                            &self.data[scan_start..],
+                            w,
+                            h,
+                            ctx,
+                            presets.restart_interval,
+                            scan_start,
+                            |y, row_cur| {
+                                let dst = &mut plane_slot[y * w * 2..(y + 1) * w * 2];
+                                for (d, &s) in
+                                    dst.as_chunks_mut::<2>().0.iter_mut().zip(row_cur.iter())
+                                {
+                                    *d = s.to_le_bytes();
+                                }
+                            },
+                        )?
+                    }
                 };
                 self.pos = scan_start + consumed;
             }
@@ -1110,13 +1189,19 @@ fn scan_error(e: CodecError, offset: usize) -> CodecError {
 }
 
 /// Consume an expected `RSTm` marker (`0xFFD0 + expected_rst`, tolerating leading `0xFF`
-/// fill bytes per T.81 B.1.1.2) and return the byte offset immediately after it.
+/// fill bytes per T.81 B.1.1.2) and return the scan-relative byte offset immediately after it.
 #[cold]
 #[inline(never)]
-fn consume_rst_marker(data: &[u8], mut pos: usize, expected_rst: u8) -> Result<usize, CodecError> {
+fn consume_rst_marker(
+    data: &[u8],
+    mut pos: usize,
+    expected_rst: u8,
+    base_offset: usize,
+) -> Result<usize, CodecError> {
     if pos >= data.len() || data[pos] != 0xFF {
         return Err(CodecError::InvalidData(format!(
-            "expected RST{expected_rst} marker prefix 0xFF at scan offset {pos}"
+            "expected RST{expected_rst} marker prefix 0xFF at offset {}",
+            base_offset + pos
         )));
     }
     while pos < data.len() && data[pos] == 0xFF {
@@ -1124,7 +1209,7 @@ fn consume_rst_marker(data: &[u8], mut pos: usize, expected_rst: u8) -> Result<u
     }
     if pos >= data.len() {
         return Err(CodecError::Truncated {
-            offset: pos,
+            offset: base_offset + pos,
             context: "restart marker",
         });
     }
@@ -1275,7 +1360,7 @@ fn decode_scan_t87_with<F: FnMut(usize, &[u16])>(
                     && (y + 1).is_multiple_of(restart_interval)
                 {
                     let after = chunk_start + br.marker_pos();
-                    chunk_start = consume_rst_marker(scan_data, after, rst_idx)?;
+                    chunk_start = consume_rst_marker(scan_data, after, rst_idx, base_offset)?;
                     rst_idx = (rst_idx + 1) & 7;
                     br = BitReader::new(&scan_data[chunk_start..]);
                     ctx.reset_for_restart();
@@ -1374,7 +1459,7 @@ fn decode_scan_ilv1_with<F: FnMut(usize, &[u16], &[u16], &[u16])>(
                     && (y + 1).is_multiple_of(restart_interval)
                 {
                     let after = chunk_start + br.marker_pos();
-                    chunk_start = consume_rst_marker(scan_data, after, rst_idx)?;
+                    chunk_start = consume_rst_marker(scan_data, after, rst_idx, base_offset)?;
                     rst_idx = (rst_idx + 1) & 7;
                     br = BitReader::new(&scan_data[chunk_start..]);
                     ctx.reset_for_restart();
@@ -1629,7 +1714,7 @@ fn decode_scan_ilv2_inner<const LOSSLESS: bool, const POW2: bool, F: FnMut(usize
         std::mem::swap(&mut prev_vec, &mut cur_vec);
         if restart_interval > 0 && y + 1 < height && (y + 1).is_multiple_of(restart_interval) {
             let after = chunk_start + br.marker_pos();
-            chunk_start = consume_rst_marker(scan_data, after, rst_idx)?;
+            chunk_start = consume_rst_marker(scan_data, after, rst_idx, base_offset)?;
             rst_idx = (rst_idx + 1) & 7;
             br = BitReader::new(&scan_data[chunk_start..]);
             ctx.reset_for_restart();
@@ -1888,11 +1973,71 @@ mod tests {
 
     #[test]
     fn marker_segment_length_below_two_rejected() {
-        // SOI + APP0 with invalid length 1 (< 2).
-        let stream = [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x01, 0xFF, 0xD9];
+        // Inject an APP0 segment with invalid length 1 (< 2) into an otherwise valid frame
+        // so the test specifically exercises the length < 2 guard.
+        let pixels: Vec<u16> = (0..16).map(|i| i * 3).collect();
+        let mut buf = Vec::new();
+        encode_with_options(&pixels, 4, 4, &EncodeOptions::default(), &mut buf).unwrap();
+        let sos = buf.windows(2).position(|p| p == [0xFF, 0xDA]).unwrap();
+        let mut bad = buf[..sos].to_vec();
+        bad.extend_from_slice(&[0xFF, 0xE0, 0x00, 0x01]);
+        bad.extend_from_slice(&buf[sos..]);
         assert!(matches!(
-            decode_image(&stream),
-            Err(CodecError::InvalidData(_))
+            decode_image(&bad),
+            Err(CodecError::InvalidData(ref msg)) if msg.contains("invalid segment length")
+        ));
+    }
+
+    #[test]
+    fn dri_three_and_four_byte_intervals_accepted() {
+        let pixels: Vec<u16> = (0..16).map(|i| i * 5).collect();
+        let mut buf = Vec::new();
+        encode_with_options(&pixels, 4, 4, &EncodeOptions::default(), &mut buf).unwrap();
+        let sos = buf.windows(2).position(|p| p == [0xFF, 0xDA]).unwrap();
+        // 3-byte DRI (Lr=5, interval=65536 > height=4, no RST markers needed).
+        let mut dri3 = buf[..sos].to_vec();
+        dri3.extend_from_slice(&[0xFF, 0xDD, 0x00, 0x05, 0x01, 0x00, 0x00]);
+        dri3.extend_from_slice(&buf[sos..]);
+        assert_eq!(decode(&dri3, 4, 4).unwrap().0, pixels);
+
+        // 4-byte DRI (Lr=6, interval=65536).
+        let mut dri4 = buf[..sos].to_vec();
+        dri4.extend_from_slice(&[0xFF, 0xDD, 0x00, 0x06, 0x00, 0x01, 0x00, 0x00]);
+        dri4.extend_from_slice(&buf[sos..]);
+        assert_eq!(decode(&dri4, 4, 4).unwrap().0, pixels);
+    }
+
+    #[test]
+    fn single_legacy_zero_padding_byte_before_eoi_tolerated() {
+        let pixels: Vec<u16> = (0..16).map(|i| i * 7).collect();
+        let mut buf = Vec::new();
+        encode_with_options(&pixels, 4, 4, &EncodeOptions::default(), &mut buf).unwrap();
+        let eoi = buf.len() - 2;
+        let mut padded = buf[..eoi].to_vec();
+        padded.push(0x00);
+        padded.extend_from_slice(&buf[eoi..]);
+        assert_eq!(decode(&padded, 4, 4).unwrap().0, pixels);
+    }
+
+    #[test]
+    fn duplicate_sof55_between_planar_scans_rejected() {
+        let planar: Vec<u8> = (0..48u8).collect();
+        let encoded = encode_bytes(&planar, 4, 4, 3, 8, 0, 0).unwrap();
+        // Find the second SOS marker and inject a duplicate SOF55 right before it.
+        let mut sos_positions = encoded
+            .windows(2)
+            .enumerate()
+            .filter_map(|(i, w)| (w == [0xFF, 0xDA]).then_some(i));
+        let _first_sos = sos_positions.next().unwrap();
+        let second_sos = sos_positions.next().unwrap();
+        let mut bad = encoded[..second_sos].to_vec();
+        bad.extend_from_slice(&[
+            0xFF, 0xF7, 0x00, 0x11, 8, 0, 4, 0, 4, 3, 1, 0x11, 0, 2, 0x11, 0, 3, 0x11, 0,
+        ]);
+        bad.extend_from_slice(&encoded[second_sos..]);
+        assert!(matches!(
+            decode_to_bytes(&bad),
+            Err(CodecError::InvalidData(ref msg)) if msg.contains("duplicate SOF55")
         ));
     }
 

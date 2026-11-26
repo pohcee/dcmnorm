@@ -24,7 +24,8 @@ mod run_mode;
 
 pub use decode::{
     decode, decode_image, decode_image_with_options, decode_to_bytes, decode_to_bytes_with_options,
-    read_frame_info, DecodeImageOptions, DecodedImage, FrameInfo,
+    decode_to_interleaved_bytes_with_options, read_frame_info, DecodeImageOptions, DecodedImage,
+    FrameInfo,
 };
 pub use encode::{encode, encode_bytes, encode_image, encode_with_options};
 pub use error::CodecError;
