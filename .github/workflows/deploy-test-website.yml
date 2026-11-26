@@ -9,7 +9,7 @@ name: Deploy Test Website
 #     dcmnorm version on npm.
 #   - workflow_run of Build and release (release.yml) for a release tag - that run published the
 #     tag's version to npm, so this deploys exactly that version. That workflow also runs on PRs
-#     and main, which publish nothing; the deploy job skips those.
+#     and main, which publish nothing; the trigger's tag filter keeps those from starting a run.
 #   - workflow_dispatch - on-demand redeploy of the latest npm version.
 #
 # Auth is keyless Workload Identity Federation (no SA key). The provider only trusts this repo on
@@ -37,14 +37,16 @@ on:
       - bindings/node/**
       - test/files/**
       - .github/workflows/deploy-test-website.yml
-  # No `branches:` filter here: it matches the *triggering* run's branch, and a release run is on
-  # the tag (head_branch = v0.4.1, not main), so a main filter silently skips every release. The
-  # deploy job's condition keeps tag runs only. This job still checks out main, and the OIDC
+  # `branches:` matches the *triggering* run's head_branch, which for a release run is the tag
+  # (v0.4.1), and for PR / main runs is their branch. Filtering on the tag pattern keeps those
+  # runs (which publish nothing) from starting this workflow at all; the deploy job's condition
+  # still checks the run was a successful non-PR one. This job still checks out main, and the OIDC
   # token's ref is main either way (workflow_run executes in the default branch's context), which
   # the WIF condition requires.
   workflow_run:
     workflows: [Build and release]
     types: [completed]
+    branches: ['v[0-9]*']
   workflow_dispatch: {}
 
 # Newer commit supersedes an in-flight deploy - only the latest version matters.
