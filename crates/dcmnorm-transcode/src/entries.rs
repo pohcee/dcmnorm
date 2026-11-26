@@ -379,7 +379,7 @@ pub const HIGH_THROUGHPUT_JPEG_2000_IMAGE_COMPRESSION: Ts = create_ts_stub(
 
 // --- JPEG-LS ---
 //
-// No adapter here: dcmnorm's own JPEG-LS support (src/dicom_io/jpeg_ls.rs) calls charls
+// No adapter here: dcmnorm's own JPEG-LS support (src/dicom_io/jpeg_ls.rs) calls dcmnorm-jpegls
 // directly and bypasses this registry entirely - these are registry-completeness stubs only,
 // so `TransferSyntaxRegistry`/`TransferSyntaxIndex` lookups still resolve the UID.
 

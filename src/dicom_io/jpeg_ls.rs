@@ -50,7 +50,7 @@ pub mod jpeg_ls_impl {
             }
         }
 
-        // One fragment per frame. charls decodes samples into native (little-endian) byte
+        // One fragment per frame. `dcmnorm_jpegls` decodes samples into little-endian byte
         // order, matching what every other codec here hands to `replace_with_native_pixel_data`.
         let total = fragments.len();
         let mut decoded = Vec::new();
@@ -132,15 +132,14 @@ pub mod jpeg_ls_impl {
     /// Decode one JPEG-LS codestream (one frame), checking its header against Rows/Columns
     /// first - a mismatch here means either a corrupt fragment or the wrong PixelData
     /// attributes, and either way is worth a clear error instead of the confusing shape
-    /// mismatch that would otherwise surface downstream. charls decodes samples into native
-    /// (little-endian) byte order.
+    /// mismatch that would otherwise surface downstream. `dcmnorm-jpegls` decodes samples into
+    /// native (little-endian) byte order.
     pub fn decode_codestream(codestream: &[u8], rows: u32, cols: u32) -> Result<Vec<u8>, String> {
         if codestream.is_empty() {
             return Err("empty JPEG-LS fragment".to_owned());
         }
 
-        let frame_info = charls::CharLS::default()
-            .get_frame_info(codestream)
+        let frame_info = dcmnorm_jpegls::read_frame_info(codestream)
             .map_err(|e| format!("failed to read JPEG-LS header: {e}"))?;
         if frame_info.width != cols || frame_info.height != rows {
             return Err(format!(
@@ -149,8 +148,23 @@ pub mod jpeg_ls_impl {
             ));
         }
 
-        charls::CharLS::default()
-            .decode(codestream)
+        // Size budget for the decoded byte buffer; dimensions already matched DICOM Rows/Columns.
+        let bps = if frame_info.bits_per_sample <= 8 {
+            1
+        } else {
+            2
+        };
+        let required_bytes = (rows as usize)
+            .saturating_mul(cols as usize)
+            .saturating_mul(usize::from(frame_info.components))
+            .saturating_mul(bps);
+        let opts = dcmnorm_jpegls::DecodeImageOptions {
+            max_decoded_bytes: required_bytes.max(64 * 1024 * 1024),
+        };
+        // Decode directly into a single sample-interleaved byte buffer (PlanarConfiguration=0),
+        // including 3-component ILV=0 planar streams, without allocating a second full-frame buffer.
+        dcmnorm_jpegls::decode_to_interleaved_bytes_with_options(codestream, &opts)
+            .map(|(bytes, _)| bytes)
             .map_err(|e| format!("JPEG-LS decode failed: {e}"))
     }
 
@@ -163,29 +177,65 @@ pub mod jpeg_ls_impl {
         planar_configuration: u16,
         lossless: bool,
     ) -> Result<Vec<u8>, String> {
-        let frame_info = charls::FrameInfo {
-            width: u32::from(cols),
-            height: u32::from(rows),
-            bits_per_sample: i32::from(bits_stored),
-            component_count: i32::from(samples_per_pixel),
+        let near = if lossless {
+            0
+        } else {
+            NEAR_LOSSLESS_STEP as u8
         };
-        let near = if lossless { 0 } else { NEAR_LOSSLESS_STEP };
+        let interleave_mode = if samples_per_pixel > 1 && planar_configuration == 0 {
+            2
+        } else {
+            0
+        };
+        let components = u8::try_from(samples_per_pixel)
+            .map_err(|_| format!("unsupported SamplesPerPixel {samples_per_pixel}"))?;
+        let bits = u8::try_from(bits_stored)
+            .map_err(|_| format!("unsupported BitsStored {bits_stored}"))?;
 
-        let mut encoder = charls::CharLS::default();
-        if samples_per_pixel > 1 {
-            let interleave_mode = if planar_configuration == 0 {
-                charls::InterleaveMode::Sample
+        // DICOM allows unused high bits in 8-bit and 16-bit containers (e.g. sign-extended
+        // negative 12-bit CT values like 0xFFFF, or 7-bit-in-8-bit with bit 7 set). Mask
+        // them to `bits_stored` bits before handing to JPEG-LS, matching CharLS's input
+        // masking without copying when all samples are already in range.
+        let masked_buf: Vec<u8>;
+        let encode_input: &[u8] = if (2..8).contains(&bits) {
+            let mask = (1u8 << bits) - 1;
+            if frame_bytes.iter().any(|&b| b > mask) {
+                masked_buf = frame_bytes.iter().map(|&b| b & mask).collect();
+                &masked_buf
             } else {
-                charls::InterleaveMode::None
-            };
-            encoder
-                .set_interleave_mode(interleave_mode)
-                .map_err(|e| format!("failed to set JPEG-LS interleave mode: {e}"))?;
-        }
+                frame_bytes
+            }
+        } else if (9..16).contains(&bits) {
+            let mask = (1u16 << bits) - 1;
+            let needs_mask = frame_bytes
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .any(|&c| u16::from_le_bytes(c) > mask);
+            if needs_mask {
+                let mut buf = Vec::with_capacity(frame_bytes.len());
+                for &c in frame_bytes.as_chunks::<2>().0 {
+                    buf.extend_from_slice(&(u16::from_le_bytes(c) & mask).to_le_bytes());
+                }
+                masked_buf = buf;
+                &masked_buf
+            } else {
+                frame_bytes
+            }
+        } else {
+            frame_bytes
+        };
 
-        encoder
-            .encode(frame_info, near, frame_bytes)
-            .map_err(|e| format!("{e}"))
+        dcmnorm_jpegls::encode_bytes(
+            encode_input,
+            u32::from(cols),
+            u32::from(rows),
+            components,
+            bits,
+            near,
+            interleave_mode,
+        )
+        .map_err(|e| format!("{e}"))
     }
 
     /// Encode raw native pixel data to JPEG-LS, one fragment per frame - the mirror image of
@@ -240,6 +290,11 @@ pub mod jpeg_ls_impl {
         if bits_allocated == 0 || bits_allocated > 16 {
             return Err(format!(
                 "unsupported BitsAllocated for JPEG-LS encoding: {bits_allocated}"
+            ));
+        }
+        if bits_allocated == 16 && bits_stored <= 8 {
+            return Err(format!(
+                "unsupported BitsAllocated={bits_allocated} with BitsStored={bits_stored} for JPEG-LS encoding"
             ));
         }
         let bytes_per_sample = if bits_allocated <= 8 { 1usize } else { 2usize };
@@ -464,5 +519,63 @@ mod tests {
         ));
         let result = encode_jpeg_ls_pixel_data(&object, true);
         assert!(result.is_err(), "expected an error, got {result:?}");
+    }
+
+    #[test]
+    fn decode_codestream_interleaves_planar_ilv0_rgb_to_match_dicom_contract() {
+        // 4x3 RGB planar (ILV=0): R plane, G plane, B plane.
+        let (rows, cols) = (3u16, 4u16);
+        let n = usize::from(rows) * usize::from(cols);
+        let mut planar = Vec::with_capacity(n * 3);
+        let mut expected_interleaved = Vec::with_capacity(n * 3);
+        for i in 0..n {
+            planar.push((10 + i) as u8);
+        }
+        for i in 0..n {
+            planar.push((100 + i) as u8);
+        }
+        for i in 0..n {
+            planar.push((200 + i) as u8);
+        }
+        for i in 0..n {
+            expected_interleaved.push((10 + i) as u8);
+            expected_interleaved.push((100 + i) as u8);
+            expected_interleaved.push((200 + i) as u8);
+        }
+        let encoded = super::encode_jpeg_ls_frame(&planar, rows, cols, 3, 8, 1, true)
+            .expect("planar ILV=0 encode should succeed");
+        let decoded = super::decode_jpeg_ls_codestream(&encoded, u32::from(rows), u32::from(cols))
+            .expect("planar ILV=0 decode should succeed");
+        assert_eq!(decoded, expected_interleaved);
+    }
+
+    #[test]
+    fn encode_masks_unused_high_bits_in_16bit_containers() {
+        // Signed 12-bit-in-16-bit CT pixels with sign-extended high bits (0xFFFF == -1).
+        let (rows, cols) = (4u16, 4u16);
+        let raw_samples: Vec<u16> = (0..16)
+            .map(|i| if i % 2 == 0 { 0xFFFFu16 - i } else { i * 100 })
+            .collect();
+        let mut raw_bytes = Vec::with_capacity(raw_samples.len() * 2);
+        let mut expected_masked = Vec::with_capacity(raw_samples.len() * 2);
+        for &s in &raw_samples {
+            raw_bytes.extend_from_slice(&s.to_le_bytes());
+            expected_masked.extend_from_slice(&(s & 0x0FFF).to_le_bytes());
+        }
+        let encoded = super::encode_jpeg_ls_frame(&raw_bytes, rows, cols, 1, 12, 0, true)
+            .expect("12-bit encode with sign-extended high bits should succeed");
+        let decoded = super::decode_jpeg_ls_codestream(&encoded, u32::from(rows), u32::from(cols))
+            .expect("decode should succeed");
+        assert_eq!(decoded, expected_masked);
+
+        // 7-bit-in-8-bit samples with unused bit 7 set (0x80..=0xFF).
+        let raw_8: Vec<u8> = (0..16u8).map(|i| 0x80 | (i * 7)).collect();
+        let expected_8: Vec<u8> = raw_8.iter().map(|&b| b & 0x7F).collect();
+        let encoded_8 = super::encode_jpeg_ls_frame(&raw_8, rows, cols, 1, 7, 0, true)
+            .expect("7-bit-in-8-bit encode with unused high bit should succeed");
+        let decoded_8 =
+            super::decode_jpeg_ls_codestream(&encoded_8, u32::from(rows), u32::from(cols))
+                .expect("7-bit decode should succeed");
+        assert_eq!(decoded_8, expected_8);
     }
 }

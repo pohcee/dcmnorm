@@ -24,6 +24,7 @@ members = [
 	"crates/dcmnorm-object",
 	"crates/dcmnorm-dimse",
 	"crates/dcmnorm-jpeg",
+	"crates/dcmnorm-jpegls",
 	"crates/dcmnorm-jpeg2000",
 	"crates/dcmnorm-codegen",
 	"exec/dcmnorm",
@@ -59,7 +60,7 @@ kakadu-ffi = []
 # ffmpeg-codec-linked, which both enable.
 ffmpeg-codec = ["ffmpeg-codec-linked", "ffmpeg-next/build"]
 ffmpeg-codec-linked = ["dep:ffmpeg-next", "ffmpeg-next/static"]
-jpeg-ls-codec = ["dep:charls"]
+jpeg-ls-codec = ["dep:dcmnorm-jpegls"]
 jpeg-xl-codec = ["dep:jxl-oxide", "dep:zune-jpegxl", "dep:zune-core"]
 jpeg2000-openjpeg-encode = ["dep:openjpeg-sys"]
 
@@ -87,6 +88,7 @@ dcmnorm-object = { path = "crates/dcmnorm-object", version = "=0.20.1" }
 dcmnorm-transcode = { path = "crates/dcmnorm-transcode", version = "=0.20.1", default-features = false, features = ["native", "deflate", "jpeg2000"] }
 dcmnorm-dimse = { path = "crates/dcmnorm-dimse", version = "=0.20.1" }
 dcmnorm-jpeg2000 = { path = "crates/dcmnorm-jpeg2000", version = "=0.20.1" }
+dcmnorm-jpegls = { path = "crates/dcmnorm-jpegls", version = "=0.20.1", optional = true }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 lcms2 = "6"
 serde_json = "1.0"
@@ -104,7 +106,6 @@ serde_json = "1.0"
 # `git` and `nasm` on whatever machine runs `cargo build` with this feature on (see
 # bindings/node/build-in-docker.sh for the container-side install).
 ffmpeg-next = { version = "8.1", optional = true, default-features = false, features = ["codec", "format", "software-resampling", "software-scaling"] }
-charls = { version = "0.4.2", optional = true }
 jxl-oxide = { version = "0.10", optional = true }
 # Lossless JPEG XL encoding (JPEG XL Lossless, 1.2.840.10008.1.2.4.110): a pure-Rust modular encoder,
 # so the feature adds no C/C++ toolchain requirement (#3). jxl-oxide above decodes.

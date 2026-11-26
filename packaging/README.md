@@ -24,7 +24,7 @@ variable once its one-time setup below is done; until then a tag publishes every
 | `macos-x86_64` | `macos-15-intel` | `cargo build`, deployment target 10.15 | `.tar.gz`, CLI wheel `macosx_10_15_x86_64` |
 | `windows-x86_64` | `windows-2025` | `cargo build` (MSVC) | `.zip`, CLI wheel `win_amd64` |
 
-The CLI build needs only a C/C++ toolchain and CMake: FFmpeg is not built or linked, and the
+The CLI build needs only a C/C++ toolchain: FFmpeg is not built or linked, and the
 video transfer syntaxes use the `ffmpeg` command at run time (see the top-level README, "Video
 transfer syntaxes"). Release builds are stripped (`CARGO_PROFILE_RELEASE_STRIP=symbols`).
 
@@ -51,8 +51,7 @@ the repository; the builds' outputs are `.gitignore`d.
 - `build-linux.sh [x86_64|aarch64]` builds both CLIs in `quay.io/pypa/manylinux_2_28_<arch>`
   into `target/manylinux_2_28-<arch>/release/`, then fails if either binary needs a glibc newer
   than 2.28 or links a shared library outside the manylinux policy. Needs Docker that runs the
-  image natively. `manylinux.cmake` is the CMake toolchain file it uses so CMake installs
-  CharLS into `lib/`, where charls-sys looks, instead of RHEL's `lib64/`.
+  image natively.
 - `build-binding-linux.sh <python|java> [x86_64|aarch64]` builds the Python wheel or the Java
   library in the same image, with FFmpeg from source (shared target dir
   `target/manylinux_2_28-<arch>-bindings`), and applies the same glibc/policy checks. The
@@ -100,16 +99,16 @@ x86_64 build.
 | `dcmnorm` | the library (default features: JPEG-LS, JPEG XL, OpenJPEG encode; `ffmpeg-codec` / `ffmpeg-codec-linked` link FFmpeg in) |
 | `dcmnorm-cli` | the `dcmnorm` binary: `cargo install dcmnorm-cli` |
 | `dcmtalk` | the `dcmtalk` binary: `cargo install dcmtalk` |
-| `dcmnorm-core`, `-dictionary`, `-encoding`, `-parser`, `-object`, `-transcode`, `-jpeg`, `-jpeg2000`, `-dimse` | the crates `dcmnorm` is built from (the dicom-rs and jpeg-decoder forks keep their MIT OR Apache-2.0 licence and authors) |
+| `dcmnorm-core`, `-dictionary`, `-encoding`, `-parser`, `-object`, `-transcode`, `-jpeg`, `-jpeg2000`, `-jpegls`, `-dimse` | the crates `dcmnorm` is built from (the dicom-rs, jpeg-decoder and pure_jpegls forks keep their MIT OR Apache-2.0 licence and authors) |
 
-All twelve have the workspace version (`[workspace.package]` in the root `Cargo.toml`) and pin
+All thirteen have the workspace version (`[workspace.package]` in the root `Cargo.toml`) and pin
 each other exactly (`version = "=<v>"` next to each path dependency, which crates.io requires), so
 a release publishes all of them and a `dcmnorm` version only ever builds against the internal
 crates it was released with; their APIs are dcmnorm's internals, not stable interfaces of their
 own. The bindings and `dcmnorm-codegen` have `publish = false`. Each crate's `include` list keeps
 the test data, bindings and docs out of the package (the largest, `dcmnorm` and
 `dcmnorm-jpeg2000` with its vendored OpenHTJ2K, are about 440 kB compressed). Building any of
-them needs a C/C++ toolchain and CMake, as a checkout does; nothing is prebuilt. `cargo publish`
+them needs a C/C++ toolchain, as a checkout does; nothing is prebuilt. `cargo publish`
 orders the crates by dependency and verifies each before uploading it; a version already on
 crates.io is skipped.
 

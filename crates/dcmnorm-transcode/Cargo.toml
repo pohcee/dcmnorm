@@ -50,5 +50,5 @@ tracing = "0.1.34"
 #
 # charls/jpeg-ls, jxl-oxide/zune-jpegxl/JPEG-XL, the inventory-registry feature and upstream's
 # jpeg2k-based openjp2/openjpeg-sys features were removed entirely - dcmnorm's own JPEG-LS path
-# calls charls directly, bypassing this registry, and JPEG 2000 goes through dcmnorm-jpeg2000.
+# calls dcmnorm-jpegls directly, bypassing this registry, and JPEG 2000 goes through dcmnorm-jpeg2000.
 # See README.md's "Trimmed to dcmnorm's actual surface" section.

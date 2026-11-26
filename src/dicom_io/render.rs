@@ -2949,7 +2949,7 @@ mod tests {
     /// JPEG-LS is lossless here, so a correct decode reproduces the same MR_small reference
     /// image's pixels exactly - compares against `mr_small.dcm` (the uncompressed encoding of
     /// the same underlying image) rather than hardcoded pixel values, which also transitively
-    /// exercises `jpeg_ls.rs`'s real charls FFI decode path end to end.
+    /// exercises `jpeg_ls.rs`'s real `dcmnorm-jpegls` decode path end to end.
     #[test]
     fn renders_jpegls_lossless_frame_byte_identical_to_the_uncompressed_reference() {
         let reference = render_raw("mr_small.dcm");
@@ -3674,7 +3674,7 @@ fn try_decode_single_frame_object(
 }
 
 /// `try_decode_single_frame_object` for JPEG-LS, which has no registry reader: decodes only
-/// frame `frame_index`'s fragment(s) with the same charls decoder the full transcode uses, so
+/// frame `frame_index`'s fragment(s) with the same JPEG-LS decoder the full transcode uses, so
 /// the frame's bytes are identical to transcoding everything and picking that frame - without
 /// decoding every frame for each frame requested.
 fn try_decode_single_jpeg_ls_frame_object(

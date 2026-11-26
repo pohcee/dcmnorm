@@ -1,0 +1,19 @@
+[package]
+name = "dcmnorm-jpegls"
+version.workspace = true
+authors = ["jpfielding", "The dcmnorm Developers"]
+description = "Pure-Rust ITU-T T.87 JPEG-LS codec for dcmnorm, derived from pure_jpegls 2.1.0 (jpfielding/dicos.rs). See README.md."
+edition = "2021"
+license = "MIT OR Apache-2.0"
+keywords = ["jpeg-ls", "jpegls", "dicom", "lossless", "codec"]
+categories = ["multimedia::images", "encoding"]
+readme = "README.md"
+repository.workspace = true
+include = ["/src/**", "/tests/**", "/README.md", "/LICENSE-APACHE", "/LICENSE-MIT"]
+
+[lib]
+name = "dcmnorm_jpegls"
+path = "src/lib.rs"
+
+[dependencies]
+thiserror = "2"

@@ -56,7 +56,7 @@ jobs:
         # ffmpeg: the video transfer syntax round-trip tests run through the ffmpeg command.
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential cmake pkg-config ffmpeg
+          sudo apt-get install -y build-essential pkg-config ffmpeg
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -174,7 +174,7 @@ jobs:
       - name: Install native dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential cmake pkg-config
+          sudo apt-get install -y build-essential pkg-config
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -386,7 +386,7 @@ jobs:
         shell: pwsh
         # The default codec set with ffmpeg-codec-linked in place of ffmpeg-codec: jpeg-xl-codec
         # is pure Rust (jxl-oxide), jpeg2000-openjpeg-encode compiles vendored OpenJPEG C with cc,
-        # jpeg-ls-codec builds CharLS C++ via cmake, and FFmpeg comes from the vcpkg install above.
+        # jpeg-ls-codec is pure Rust (dcmnorm-jpegls), and FFmpeg comes from the vcpkg install above.
         run: |
           npx napi build --platform --release --target x86_64-pc-windows-msvc --no-default-features --features "ffmpeg-codec-linked,jpeg-ls-codec,jpeg-xl-codec,jpeg2000-openjpeg-encode"
           node prepare-npm.js --fix-loader
@@ -901,7 +901,7 @@ jobs:
         # cargo publish builds each crate before uploading it.
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential cmake pkg-config
+          sudo apt-get install -y build-essential pkg-config
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable

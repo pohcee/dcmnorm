@@ -43,12 +43,7 @@ docker run --rm -v "$SCRIPT_DIR/../..":/repo -w /repo/bindings/node \
     echo "Acquire::Check-Valid-Until false;" > /etc/apt/apt.conf.d/99snapshot
     echo "Acquire::Retries 5;" >> /etc/apt/apt.conf.d/99snapshot
     apt-get update -qq
-    apt-get install -y -qq curl ca-certificates build-essential clang pkg-config libclang-dev \
-      python3-pip > /dev/null
-    # bullseye ships cmake 3.18, older than some C deps (CharLS/jpeg-xl) want, so take a current
-    # one from pip instead of raising the glibc floor by building on a newer distro.
-    pip3 install --quiet "cmake>=3.27,<4"
-    cmake --version | head -1
+    apt-get install -y -qq curl ca-certificates build-essential clang pkg-config libclang-dev > /dev/null
 
     # NOTE: this whole heredoc is inside a single-quoted bash -c argument at the call site
     # below - never use an apostrophe/single-quote character anywhere in these comments. One

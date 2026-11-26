@@ -51,7 +51,7 @@ else works without it.
 
 ### From source with Cargo
 
-From crates.io (needs a C/C++ toolchain and CMake; the binaries are named `dcmnorm` and `dcmtalk`):
+From crates.io (needs a C/C++ toolchain; the binaries are named `dcmnorm` and `dcmtalk`):
 
 ```bash
 cargo install dcmnorm-cli dcmtalk
@@ -135,7 +135,7 @@ already running as root):
 This repository includes a multi-stage Dockerfile that builds `dcmnorm` and `dcmtalk` in a
 toolchain stage and copies only the release binaries into a slim runtime stage. The final
 runtime image installs `ca-certificates`, `ffmpeg` (video transfer syntaxes and `.mp4` output),
-and `libstdc++6`; build-only dependencies (`build-essential`, `cmake`, `pkg-config`) stay in the
+and `libstdc++6`; build-only dependencies (`build-essential`, `pkg-config`) stay in the
 builder stage.
 
 Kakadu is not included in the image — see [JPEG 2000 codec selection](cli.md#jpeg-2000-codec-selection)

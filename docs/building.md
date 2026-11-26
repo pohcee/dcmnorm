@@ -25,11 +25,10 @@
 
 ### Prerequisites
 
-The default build (the library and both CLIs) needs only a C/C++ toolchain and CMake. On Debian
+The default build (the library and both CLIs) needs only a C/C++ toolchain. On Debian
 or Ubuntu:
 
 - `build-essential`
-- `cmake`
 - `pkg-config`
 
 FFmpeg is not built or linked by default; see [Video transfer syntaxes](cli.md#video-transfer-syntaxes).
@@ -45,7 +44,7 @@ Example install command:
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y build-essential cmake pkg-config
+sudo apt-get install -y build-essential pkg-config
 # only for the bindings or --features ffmpeg-codec:
 sudo apt-get install -y clang libclang-dev nasm git
 ```
