@@ -53,18 +53,22 @@ fn native_plane_to_i32(plane: &j2k::J2kNativeComponentPlane) -> Result<Vec<i32>,
             })
             .collect()),
         2 => Ok(data
-            .chunks_exact(2)
-            .map(|c| {
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&[lo, hi]| {
                 if signed {
-                    i32::from(i16::from_le_bytes([c[0], c[1]]))
+                    i32::from(i16::from_le_bytes([lo, hi]))
                 } else {
-                    i32::from(u16::from_le_bytes([c[0], c[1]]))
+                    i32::from(u16::from_le_bytes([lo, hi]))
                 }
             })
             .collect()),
         4 => Ok(data
-            .chunks_exact(4)
-            .map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|&c| i32::from_le_bytes(c))
             .collect()),
         other => Err(format!("unsupported decoded bytes_per_sample: {other}")),
     }
@@ -202,13 +206,12 @@ pub fn decode_into(
             dst.copy_from_slice(src);
         } else if plane.bytes_per_sample() == 1 && bps == 2 {
             let signed = plane.signed();
-            for (s, d) in src.iter().zip(dst.chunks_exact_mut(2)) {
-                let v: [u8; 2] = if signed {
+            for (s, d) in src.iter().zip(dst.as_chunks_mut::<2>().0.iter_mut()) {
+                *d = if signed {
                     i16::from(*s as i8).to_le_bytes()
                 } else {
                     u16::from(*s).to_le_bytes()
                 };
-                d.copy_from_slice(&v);
             }
         } else {
             return Err(DecodeIntoError::LayoutMismatch {
@@ -242,10 +245,10 @@ pub fn decode_into(
             let src = plane.data();
             match plane.bytes_per_sample() {
                 2 => {
-                    for (i, pair) in src.chunks_exact(2).enumerate().take(n_pix) {
+                    for (i, &[lo, hi]) in src.as_chunks::<2>().0.iter().enumerate().take(n_pix) {
                         let off = (i * spp + c) * 2;
-                        dst[off] = pair[0];
-                        dst[off + 1] = pair[1];
+                        dst[off] = lo;
+                        dst[off + 1] = hi;
                     }
                 }
                 1 => {
