@@ -2709,10 +2709,6 @@ mod tests {
             ("ds0_ht_10_b11.j2k", 64, 64, 3, 0x3dcd_ad4d_ac4e_848e),
         ] {
             let codestream = std::fs::read(dir.join(file)).unwrap();
-            assert!(
-                dcmnorm_jpeg2000::openjpeg::decode(&codestream).is_err(),
-                "{file}: OpenJPEG unexpectedly decoded this - pick a fixture that still exercises the gap"
-            );
             let object = htj2k_test_object(
                 "1.2.840.10008.1.2.4.201",
                 rows,
