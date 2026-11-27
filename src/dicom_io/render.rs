@@ -11,7 +11,7 @@ use dcmnorm_transcode::TransferSyntaxRegistry;
 use image::codecs::jpeg::JpegEncoder;
 use image::codecs::png::PngEncoder;
 use image::{ColorType, GrayImage, ImageEncoder, RgbImage};
-use lcms2::{Intent, PixelFormat, Profile, Transform};
+use moxcms::{ColorProfile, Layout, ParsingOptions, RenderingIntent, TransformOptions};
 use rayon::prelude::*;
 
 use super::io::{
@@ -913,23 +913,38 @@ fn apply_embedded_icc_profile(object: &DefaultDicomObject, rgb_bytes: &mut [u8])
         return;
     };
 
-    let Ok(input_profile) = Profile::new_icc(&icc_profile_bytes) else {
-        return;
-    };
-
-    let output_profile = Profile::new_srgb();
-
-    let Ok(transform) = Transform::new(
-        &input_profile,
-        PixelFormat::RGB_8,
-        &output_profile,
-        PixelFormat::RGB_8,
-        Intent::Perceptual,
+    let Ok(input_profile) = ColorProfile::new_from_slice_with_options(
+        &icc_profile_bytes,
+        ParsingOptions {
+            max_profile_size: 32 * 1024 * 1024,
+            ..Default::default()
+        },
     ) else {
         return;
     };
 
-    transform.transform_in_place(rgb_bytes);
+    let output_profile = ColorProfile::new_srgb();
+    let options = TransformOptions {
+        rendering_intent: RenderingIntent::Perceptual,
+        ..Default::default()
+    };
+
+    let Ok(transform) =
+        input_profile.create_transform_8bit(Layout::Rgb, &output_profile, Layout::Rgb, options)
+    else {
+        return;
+    };
+
+    // 16 KiB stack buffer (multiple of 3 bytes = 5,461 RGB pixels) to transform in place without
+    // allocating a frame-sized copy.
+    let mut scratch = [0u8; 16_383];
+    for chunk in rgb_bytes.chunks_mut(scratch.len()) {
+        let dst = &mut scratch[..chunk.len()];
+        if transform.transform(chunk, dst).is_err() {
+            return;
+        }
+        chunk.copy_from_slice(dst);
+    }
 }
 
 fn read_icc_profile_bytes(object: &DefaultDicomObject) -> Option<Vec<u8>> {
