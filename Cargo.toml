@@ -90,7 +90,7 @@ dcmnorm-dimse = { path = "crates/dcmnorm-dimse", version = "=0.20.1" }
 dcmnorm-jpeg2000 = { path = "crates/dcmnorm-jpeg2000", version = "=0.20.1" }
 dcmnorm-jpegls = { path = "crates/dcmnorm-jpegls", version = "=0.20.1", optional = true }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
-lcms2 = "6"
+moxcms = { git = "https://github.com/jpambrun/moxcms", branch = "fix/mab-matrix-clamp" }
 serde_json = "1.0"
 # The ffmpeg-codec feature adds ffmpeg-next's "build" feature, which compiles FFmpeg from source
 # (via ffmpeg-sys-next's build.rs: shallow git clone +
