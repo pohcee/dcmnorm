@@ -1,275 +1,95 @@
-//! HTJ2K (JPEG 2000 Part 15) via the vendored OpenHTJ2K library - see build.rs for how the two
-//! CPU variants are built and kept apart, and src/htj2k_bridge.cpp for the C ABI.
-//!
-//! OpenHTJ2K keeps one process-wide worker pool, sized by the first call that needs one and shared
-//! by every later multi-threaded decode/encode (`num_threads > 1`). Calls with `num_threads == 1`
-//! run on the calling thread without touching the shared pool, so [`crate::threads::per_call_threads`]
-//! passes `1` when already executing inside a rayon worker and [`crate::threads::configured_threads`]
-//! otherwise. Multiple concurrent decoder/encoder instances across threads are supported natively
-//! by OpenHTJ2K (each call owns its own instance).
+//! HTJ2K (JPEG 2000 Part 15) and Part 1 decode and lossless HTJ2K encode via pure-Rust `j2k`.
 
-use std::ffi::CStr;
-use std::os::raw::{c_char, c_int};
-use std::sync::OnceLock;
+use j2k::{
+    encode_j2k_lossless, CpuDecodeParallelism, DecodeSettings, J2kBlockCodingMode, J2kDecoder,
+    J2kEncodeValidation, J2kLosslessEncodeOptions, J2kLosslessSamples, J2kProgressionOrder,
+    J2kView, ReversibleTransform,
+};
 
 use crate::threads::per_call_threads;
 use crate::{DecodedComponent, DecodedImage};
 
-/// Forces the portable (non-AVX2) build even on a CPU that supports x86-64-v3 - set to `base`.
-/// Diagnostic escape hatch only.
+/// Historical diagnostic env var kept for API compatibility.
 pub const SIMD_ENV: &str = "DCMNORM_HTJ2K_SIMD";
 
-#[repr(C)]
-struct RawImage {
-    num_components: u16,
-    planes: *mut *mut i32,
-    widths: *mut u32,
-    heights: *mut u32,
-    depths: *mut u8,
-    is_signed: *mut u8,
+/// Which compiled JPEG 2000 backend variant this process uses.
+pub fn variant_name() -> &'static str {
+    "j2k-rust"
 }
 
-impl RawImage {
-    const fn empty() -> Self {
-        Self {
-            num_components: 0,
-            planes: std::ptr::null_mut(),
-            widths: std::ptr::null_mut(),
-            heights: std::ptr::null_mut(),
-            depths: std::ptr::null_mut(),
-            is_signed: std::ptr::null_mut(),
-        }
+fn decode_parallelism() -> CpuDecodeParallelism {
+    if per_call_threads() <= 1 {
+        CpuDecodeParallelism::Serial
+    } else {
+        CpuDecodeParallelism::Auto
     }
 }
 
-#[repr(C)]
-#[derive(Default)]
-struct RawInfo {
-    num_components: u16,
-    width: u32,
-    height: u32,
-    depth: u8,
-    is_signed: u8,
-}
-
-type DecodeFn =
-    unsafe extern "C" fn(*const u8, usize, u32, *mut RawImage, *mut *mut c_char) -> c_int;
-type DecodeIntoFn = unsafe extern "C" fn(
-    *const u8,
-    usize,
-    u32,
-    *mut u8,
-    usize,
-    u32,
-    u16,
-    u32,
-    u32,
-    *mut RawInfo,
-    *mut *mut c_char,
-) -> c_int;
-type FreeImageFn = unsafe extern "C" fn(*mut RawImage);
-type EncodeFn = unsafe extern "C" fn(
-    *const *const i32,
-    u16,
-    u32,
-    u32,
-    u8,
-    c_int,
-    c_int,
-    u32,
-    *mut *mut u8,
-    *mut usize,
-    *mut *mut c_char,
-) -> c_int;
-type FreeBufferFn = unsafe extern "C" fn(*mut std::ffi::c_void);
-
-extern "C" {
-    fn dcmnorm_htj2k_base_decode(
-        codestream: *const u8,
-        length: usize,
-        num_threads: u32,
-        out: *mut RawImage,
-        error_message: *mut *mut c_char,
-    ) -> c_int;
-    fn dcmnorm_htj2k_base_decode_into(
-        codestream: *const u8,
-        length: usize,
-        num_threads: u32,
-        out: *mut u8,
-        out_len: usize,
-        bytes_per_sample: u32,
-        expected_components: u16,
-        expected_width: u32,
-        expected_height: u32,
-        info: *mut RawInfo,
-        error_message: *mut *mut c_char,
-    ) -> c_int;
-    fn dcmnorm_htj2k_base_free_image(image: *mut RawImage);
-    fn dcmnorm_htj2k_base_encode(
-        planes: *const *const i32,
-        num_components: u16,
-        width: u32,
-        height: u32,
-        bit_depth: u8,
-        is_signed: c_int,
-        rpcl: c_int,
-        num_threads: u32,
-        out_data: *mut *mut u8,
-        out_len: *mut usize,
-        error_message: *mut *mut c_char,
-    ) -> c_int;
-    fn dcmnorm_htj2k_base_free_buffer(buffer: *mut std::ffi::c_void);
-}
-
-#[cfg(dcmnorm_htj2k_v3)]
-extern "C" {
-    fn dcmnorm_htj2k_v3_decode(
-        codestream: *const u8,
-        length: usize,
-        num_threads: u32,
-        out: *mut RawImage,
-        error_message: *mut *mut c_char,
-    ) -> c_int;
-    fn dcmnorm_htj2k_v3_decode_into(
-        codestream: *const u8,
-        length: usize,
-        num_threads: u32,
-        out: *mut u8,
-        out_len: usize,
-        bytes_per_sample: u32,
-        expected_components: u16,
-        expected_width: u32,
-        expected_height: u32,
-        info: *mut RawInfo,
-        error_message: *mut *mut c_char,
-    ) -> c_int;
-    fn dcmnorm_htj2k_v3_free_image(image: *mut RawImage);
-    fn dcmnorm_htj2k_v3_encode(
-        planes: *const *const i32,
-        num_components: u16,
-        width: u32,
-        height: u32,
-        bit_depth: u8,
-        is_signed: c_int,
-        rpcl: c_int,
-        num_threads: u32,
-        out_data: *mut *mut u8,
-        out_len: *mut usize,
-        error_message: *mut *mut c_char,
-    ) -> c_int;
-    fn dcmnorm_htj2k_v3_free_buffer(buffer: *mut std::ffi::c_void);
-}
-
-struct Variant {
-    name: &'static str,
-    decode: DecodeFn,
-    decode_into: DecodeIntoFn,
-    free_image: FreeImageFn,
-    encode: EncodeFn,
-    free_buffer: FreeBufferFn,
-}
-
-const BASE: Variant = Variant {
-    name: "base",
-    decode: dcmnorm_htj2k_base_decode,
-    decode_into: dcmnorm_htj2k_base_decode_into,
-    free_image: dcmnorm_htj2k_base_free_image,
-    encode: dcmnorm_htj2k_base_encode,
-    free_buffer: dcmnorm_htj2k_base_free_buffer,
-};
-
-#[cfg(dcmnorm_htj2k_v3)]
-const V3: Variant = Variant {
-    name: "x86-64-v3",
-    decode: dcmnorm_htj2k_v3_decode,
-    decode_into: dcmnorm_htj2k_v3_decode_into,
-    free_image: dcmnorm_htj2k_v3_free_image,
-    encode: dcmnorm_htj2k_v3_encode,
-    free_buffer: dcmnorm_htj2k_v3_free_buffer,
-};
-
-fn variant() -> &'static Variant {
-    static SELECTED: OnceLock<&'static Variant> = OnceLock::new();
-    SELECTED.get_or_init(|| {
-        #[cfg(dcmnorm_htj2k_v3)]
-        {
-            let forced_base = std::env::var(SIMD_ENV)
-                .map(|value| value.trim().eq_ignore_ascii_case("base"))
-                .unwrap_or(false);
-            // The full x86-64-v3 feature set the v3 variant was compiled for.
-            if !forced_base
-                && std::is_x86_feature_detected!("avx2")
-                && std::is_x86_feature_detected!("fma")
-                && std::is_x86_feature_detected!("bmi1")
-                && std::is_x86_feature_detected!("bmi2")
-                && std::is_x86_feature_detected!("lzcnt")
-                && std::is_x86_feature_detected!("movbe")
-                && std::is_x86_feature_detected!("f16c")
-            {
-                return &V3;
-            }
+fn parse_view(codestream: &[u8]) -> Result<J2kView<'_>, String> {
+    J2kView::parse(codestream).or_else(|strict_err| {
+        // Some JP2-wrapped DICOM fragments carry non-strict container metadata boxes; allow
+        // lenient JP2/JPH metadata recovery only for JP2/JPH containers, never raw codestreams.
+        if codestream.starts_with(&crate::codestream::JP2_SIGNATURE) {
+            J2kView::parse_with_settings(codestream, DecodeSettings::lenient())
+                .map_err(|e| e.to_string())
+        } else {
+            Err(strict_err.to_string())
         }
-        &BASE
     })
 }
 
-/// Which compiled OpenHTJ2K variant this process uses (`"x86-64-v3"` or `"base"`).
-pub fn variant_name() -> &'static str {
-    variant().name
-}
-
-fn take_error(error_message: *mut c_char, free_buffer: FreeBufferFn) -> String {
-    if error_message.is_null() {
-        return "OpenHTJ2K failed without an error message".to_owned();
+fn native_plane_to_i32(plane: &j2k::J2kNativeComponentPlane) -> Result<Vec<i32>, String> {
+    let data = plane.data();
+    let signed = plane.signed();
+    match plane.bytes_per_sample() {
+        1 => Ok(data
+            .iter()
+            .map(|&b| {
+                if signed {
+                    i32::from(b as i8)
+                } else {
+                    i32::from(b)
+                }
+            })
+            .collect()),
+        2 => Ok(data
+            .chunks_exact(2)
+            .map(|c| {
+                if signed {
+                    i32::from(i16::from_le_bytes([c[0], c[1]]))
+                } else {
+                    i32::from(u16::from_le_bytes([c[0], c[1]]))
+                }
+            })
+            .collect()),
+        4 => Ok(data
+            .chunks_exact(4)
+            .map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect()),
+        other => Err(format!("unsupported decoded bytes_per_sample: {other}")),
     }
-    let message = unsafe { CStr::from_ptr(error_message) }
-        .to_string_lossy()
-        .into_owned();
-    unsafe { free_buffer(error_message.cast()) };
-    message
 }
 
-/// Decodes a raw HTJ2K (or classic Part 1) codestream at full resolution.
+/// Decodes a raw HTJ2K, classic Part 1, or JP2-wrapped codestream at full resolution.
 pub fn decode(codestream: &[u8]) -> Result<DecodedImage, String> {
-    let variant = variant();
-    let mut raw = RawImage::empty();
-    let mut error: *mut c_char = std::ptr::null_mut();
-    let status = unsafe {
-        (variant.decode)(
-            codestream.as_ptr(),
-            codestream.len(),
-            per_call_threads(),
-            &mut raw,
-            &mut error,
-        )
-    };
-    if status != 0 {
-        return Err(take_error(error, variant.free_buffer));
-    }
+    let view = parse_view(codestream)?;
+    let mut decoder = J2kDecoder::from_view(view).map_err(|e| e.to_string())?;
+    decoder.set_cpu_decode_parallelism(decode_parallelism());
+    let decoded = decoder
+        .decode_native_components()
+        .map_err(|e| format!("j2k decode failed: {e}"))?;
 
-    let count = usize::from(raw.num_components);
-    let mut components = Vec::with_capacity(count);
-    for c in 0..count {
-        let (width, height, precision, signed, plane) = unsafe {
-            (
-                *raw.widths.add(c),
-                *raw.heights.add(c),
-                *raw.depths.add(c),
-                *raw.is_signed.add(c) != 0,
-                *raw.planes.add(c),
-            )
-        };
-        let len = width as usize * height as usize;
-        let data = unsafe { std::slice::from_raw_parts(plane, len) }.to_vec();
+    let mut components = Vec::with_capacity(decoded.planes().len());
+    for plane in decoded.planes() {
+        let (width, height) = plane.dimensions();
         components.push(DecodedComponent {
             width,
             height,
-            precision,
-            signed,
-            data,
+            precision: plane.bit_depth(),
+            signed: plane.signed(),
+            data: native_plane_to_i32(plane)?,
         });
     }
-    unsafe { (variant.free_image)(&mut raw) };
     Ok(DecodedImage { components })
 }
 
@@ -291,7 +111,7 @@ pub enum DecodeIntoError {
 
 /// Decodes straight into `out` as DICOM native pixel data: `components` samples interleaved per
 /// pixel, `bytes_per_sample` (1 or 2) little-endian bytes each (low bits of the two's-complement
-/// value for signed data). About twice as fast as [`decode`] for large images.
+/// value for signed data).
 pub fn decode_into(
     codestream: &[u8],
     out: &mut [u8],
@@ -300,37 +120,160 @@ pub fn decode_into(
     width: u32,
     height: u32,
 ) -> Result<(), DecodeIntoError> {
-    let variant = variant();
-    let mut info = RawInfo::default();
-    let mut error: *mut c_char = std::ptr::null_mut();
-    let status = unsafe {
-        (variant.decode_into)(
-            codestream.as_ptr(),
-            codestream.len(),
-            per_call_threads(),
-            out.as_mut_ptr(),
-            out.len(),
-            bytes_per_sample,
-            components,
-            width,
-            height,
-            &mut info,
-            &mut error,
-        )
-    };
-    match status {
-        0 => Ok(()),
-        2 => Err(DecodeIntoError::LayoutMismatch {
-            components: info.num_components,
-            width: info.width,
-            height: info.height,
-            depth: info.depth,
-        }),
-        _ => Err(DecodeIntoError::Failed(take_error(
-            error,
-            variant.free_buffer,
-        ))),
+    if bytes_per_sample != 1 && bytes_per_sample != 2 {
+        return Err(DecodeIntoError::Failed(format!(
+            "unsupported bytes_per_sample {bytes_per_sample} (expected 1 or 2)"
+        )));
     }
+
+    let view = parse_view(codestream).map_err(DecodeIntoError::Failed)?;
+    let info = view.info();
+    let (actual_w, actual_h) = info.dimensions;
+    let actual_components = info.components;
+    let (actual_depth, mixed_depth, subsampled) = if let Some(support) = view.support_info() {
+        let depth = support.components.first().map_or(0, |c| c.bit_depth);
+        (
+            depth,
+            support.has_mixed_bit_depths(),
+            support.has_component_subsampling(),
+        )
+    } else {
+        (0, false, false)
+    };
+
+    if actual_components != components
+        || actual_w != width
+        || actual_h != height
+        || mixed_depth
+        || subsampled
+        || actual_depth == 0
+        || u32::from(actual_depth) > bytes_per_sample * 8
+    {
+        return Err(DecodeIntoError::LayoutMismatch {
+            components: actual_components,
+            width: actual_w,
+            height: actual_h,
+            depth: actual_depth,
+        });
+    }
+
+    let expected_bytes = (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|n| n.checked_mul(usize::from(components)))
+        .and_then(|n| n.checked_mul(bytes_per_sample as usize))
+        .ok_or_else(|| DecodeIntoError::Failed("output buffer size overflow".to_owned()))?;
+    if out.len() < expected_bytes {
+        return Err(DecodeIntoError::Failed(format!(
+            "output buffer too small: got {}, expected at least {expected_bytes}",
+            out.len()
+        )));
+    }
+
+    let mut decoder =
+        J2kDecoder::from_view(view).map_err(|e| DecodeIntoError::Failed(e.to_string()))?;
+    decoder.set_cpu_decode_parallelism(decode_parallelism());
+    let decoded = decoder
+        .decode_native_components()
+        .map_err(|e| DecodeIntoError::Failed(format!("j2k decode failed: {e}")))?;
+
+    let planes = decoded.planes();
+    if planes.len() != usize::from(components)
+        || planes.iter().any(|p| p.dimensions() != (width, height))
+    {
+        let first = planes.first();
+        let (w, h) = first.map_or((0, 0), |p| p.dimensions());
+        return Err(DecodeIntoError::LayoutMismatch {
+            components: planes.len() as u16,
+            width: w,
+            height: h,
+            depth: first.map_or(0, |p| p.bit_depth()),
+        });
+    }
+
+    let dst = &mut out[..expected_bytes];
+    let bps = bytes_per_sample as usize;
+    let n_pix = width as usize * height as usize;
+
+    // Fast path for single-component grayscale: copy straight from the fused grayscale IDWT plane.
+    if planes.len() == 1 {
+        let plane = &planes[0];
+        let src = plane.data();
+        if usize::from(plane.bytes_per_sample()) == bps {
+            dst.copy_from_slice(src);
+        } else if plane.bytes_per_sample() == 1 && bps == 2 {
+            let signed = plane.signed();
+            for (s, d) in src.iter().zip(dst.chunks_exact_mut(2)) {
+                let v: [u8; 2] = if signed {
+                    i16::from(*s as i8).to_le_bytes()
+                } else {
+                    u16::from(*s).to_le_bytes()
+                };
+                d.copy_from_slice(&v);
+            }
+        } else {
+            return Err(DecodeIntoError::LayoutMismatch {
+                components: 1,
+                width,
+                height,
+                depth: plane.bit_depth(),
+            });
+        }
+        return Ok(());
+    }
+
+    // Multi-component interleave into caller buffer.
+    let spp = planes.len();
+    if bps == 1 {
+        for (c, plane) in planes.iter().enumerate() {
+            if plane.bytes_per_sample() != 1 {
+                return Err(DecodeIntoError::LayoutMismatch {
+                    components: spp as u16,
+                    width,
+                    height,
+                    depth: plane.bit_depth(),
+                });
+            }
+            for (i, &b) in plane.data().iter().enumerate().take(n_pix) {
+                dst[i * spp + c] = b;
+            }
+        }
+    } else {
+        for (c, plane) in planes.iter().enumerate() {
+            let src = plane.data();
+            match plane.bytes_per_sample() {
+                2 => {
+                    for (i, pair) in src.chunks_exact(2).enumerate().take(n_pix) {
+                        let off = (i * spp + c) * 2;
+                        dst[off] = pair[0];
+                        dst[off + 1] = pair[1];
+                    }
+                }
+                1 => {
+                    let signed = plane.signed();
+                    for (i, &b) in src.iter().enumerate().take(n_pix) {
+                        let off = (i * spp + c) * 2;
+                        let v: [u8; 2] = if signed {
+                            i16::from(b as i8).to_le_bytes()
+                        } else {
+                            u16::from(b).to_le_bytes()
+                        };
+                        dst[off] = v[0];
+                        dst[off + 1] = v[1];
+                    }
+                }
+                _ => {
+                    return Err(DecodeIntoError::LayoutMismatch {
+                        components: spp as u16,
+                        width,
+                        height,
+                        depth: plane.bit_depth(),
+                    });
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// Progression order for [`encode_lossless`].
@@ -350,10 +293,15 @@ pub fn encode_lossless(
     signed: bool,
     progression: Progression,
 ) -> Result<Vec<u8>, String> {
-    let expected = width as usize * height as usize;
     if planes.is_empty() || planes.len() > u16::MAX as usize {
         return Err(format!("unsupported component count {}", planes.len()));
     }
+    if !(1..=16).contains(&bit_depth) {
+        return Err(format!(
+            "unsupported bit_depth {bit_depth} (expected 1..=16)"
+        ));
+    }
+    let expected = width as usize * height as usize;
     if let Some(bad) = planes.iter().find(|plane| plane.len() != expected) {
         return Err(format!(
             "plane has {} samples, expected {expected}",
@@ -361,32 +309,67 @@ pub fn encode_lossless(
         ));
     }
 
-    let variant = variant();
-    let pointers: Vec<*const i32> = planes.iter().map(|plane| plane.as_ptr()).collect();
-    let mut data: *mut u8 = std::ptr::null_mut();
-    let mut len = 0usize;
-    let mut error: *mut c_char = std::ptr::null_mut();
-    let status = unsafe {
-        (variant.encode)(
-            pointers.as_ptr(),
-            planes.len() as u16,
-            width,
-            height,
-            bit_depth,
-            c_int::from(signed),
-            c_int::from(progression == Progression::Rpcl),
-            per_call_threads(),
-            &mut data,
-            &mut len,
-            &mut error,
-        )
-    };
-    if status != 0 {
-        return Err(take_error(error, variant.free_buffer));
+    let spp = planes.len();
+    let bps = if bit_depth <= 8 { 1usize } else { 2usize };
+    let mut interleaved = Vec::with_capacity(expected * spp * bps);
+
+    if bps == 1 {
+        if spp == 1 {
+            for &v in planes[0] {
+                interleaved.push(if signed { (v as i8) as u8 } else { v as u8 });
+            }
+        } else {
+            for i in 0..expected {
+                for plane in planes {
+                    let v = plane[i];
+                    interleaved.push(if signed { (v as i8) as u8 } else { v as u8 });
+                }
+            }
+        }
+    } else if spp == 1 {
+        for &v in planes[0] {
+            let bytes = if signed {
+                (v as i16).to_le_bytes()
+            } else {
+                (v as u16).to_le_bytes()
+            };
+            interleaved.extend_from_slice(&bytes);
+        }
+    } else {
+        for i in 0..expected {
+            for plane in planes {
+                let v = plane[i];
+                let bytes = if signed {
+                    (v as i16).to_le_bytes()
+                } else {
+                    (v as u16).to_le_bytes()
+                };
+                interleaved.extend_from_slice(&bytes);
+            }
+        }
     }
-    let encoded = unsafe { std::slice::from_raw_parts(data, len) }.to_vec();
-    unsafe { (variant.free_buffer)(data.cast()) };
-    Ok(encoded)
+
+    let samples = J2kLosslessSamples {
+        data: &interleaved,
+        width,
+        height,
+        components: spp as u16,
+        bit_depth,
+        signed,
+    };
+    let options = J2kLosslessEncodeOptions::default()
+        .with_block_coding_mode(J2kBlockCodingMode::HighThroughput)
+        .with_progression(match progression {
+            Progression::Lrcp => J2kProgressionOrder::Lrcp,
+            Progression::Rpcl => J2kProgressionOrder::Rpcl,
+        })
+        .with_reversible_transform(ReversibleTransform::None53)
+        .with_max_decomposition_levels(Some(5))
+        .with_validation(J2kEncodeValidation::External);
+
+    encode_j2k_lossless(samples, &options)
+        .map(|encoded| encoded.codestream)
+        .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -551,7 +534,6 @@ mod tests {
             .flat_map(|v| v.to_le_bytes()[..2].to_vec())
             .collect();
 
-        // Concurrent OS threads sharing the OpenHTJ2K worker pool directly (no mutex).
         std::thread::scope(|scope| {
             for t in 0..8 {
                 let plane_a = &plane_a;

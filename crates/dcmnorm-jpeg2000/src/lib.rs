@@ -1,15 +1,15 @@
-//! JPEG 2000 codecs for dcmnorm.
+//! Pure-Rust JPEG 2000 (Part 1) and HTJ2K (Part 15) codecs for dcmnorm, backed by `j2k`.
 //!
 //! - [`htj2k`]: High-Throughput JPEG 2000 (Part 15, DICOM `.201`-`.203`) decode and lossless
-//!   encode via the vendored OpenHTJ2K library.
-//! - [`openjpeg`]: classic JPEG 2000 (Part 1) decode via OpenJPEG, with an explicit thread count.
-//! - [`threads`]: the shared threading policy.
-//! - [`codestream`]: locating the codestream in a fragment (raw or JP2-wrapped) and reading its
+//!   encode.
+//! - [`openjpeg`]: Classic JPEG 2000 (Part 1) decode (kept under the historical module name for
+//!   downstream compatibility; backed by pure-Rust `j2k`).
+//! - [`classic`]: Classic JPEG 2000 (Part 1, DICOM `.90`/`.91`) lossless and lossy encode.
+//! - [`threads`]: The shared threading policy.
+//! - [`codestream`]: Locating the codestream in a fragment (raw or JP2-wrapped) and reading its
 //!   SIZ/COD main-header parameters without decoding.
-//!
-//! See `docs/jpeg2000-codec-evaluation.md` at the repository root for why these two libraries
-//! (and not Kakadu, the `j2k` crate, Grok or OpenJPH) were chosen.
 
+pub mod classic;
 pub mod codestream;
 pub mod htj2k;
 pub mod openjpeg;

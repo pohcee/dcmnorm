@@ -62,7 +62,9 @@ ffmpeg-codec = ["ffmpeg-codec-linked", "ffmpeg-next/build"]
 ffmpeg-codec-linked = ["dep:ffmpeg-next", "ffmpeg-next/static"]
 jpeg-ls-codec = ["dep:dcmnorm-jpegls"]
 jpeg-xl-codec = ["dep:jxl-oxide", "dep:zune-jpegxl", "dep:zune-core"]
-jpeg2000-openjpeg-encode = ["dep:openjpeg-sys"]
+# Retained as a feature flag for downstream compatibility; classic JPEG 2000 encoding is now
+# built into pure-Rust `dcmnorm-jpeg2000` (backed by `j2k`) with no C dependency.
+jpeg2000-openjpeg-encode = []
 
 [lints.clippy]
 # Lints left off for this crate on purpose (everything else clippy warns about is fixed):
@@ -111,7 +113,6 @@ jxl-oxide = { version = "0.10", optional = true }
 # so the feature adds no C/C++ toolchain requirement (#3). jxl-oxide above decodes.
 zune-jpegxl = { version = "0.5.2", optional = true }
 zune-core = { version = "0.5", optional = true }
-openjpeg-sys = { version = "1.0.12", optional = true, default-features = false }
 rayon = "1.10"
 flate2 = "1.0"
 uuid = { version = "1", features = ["v4"] }

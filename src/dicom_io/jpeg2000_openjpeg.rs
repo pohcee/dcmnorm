@@ -1,115 +1,7 @@
-//! Raw `openjpeg-sys` FFI encoder for classic JPEG 2000 (`.90`/`.91`).
-//!
-//! Decode lives in the `dcmnorm-jpeg2000` crate (`openjpeg` module, used by the transfer syntax
-//! registry's adapters); this module is the matching encoder, talking to `openjpeg-sys` directly
-//! the same way `mpeg.rs` talks to `ffmpeg-next`'s raw `ffi` module.
+//! Classic JPEG 2000 Part 1 (`.90`/`.91`) encoder, backed by pure-Rust `dcmnorm-jpeg2000` (`j2k`).
 
 #[cfg(feature = "jpeg2000-openjpeg-encode")]
 mod imp {
-    use openjpeg_sys as sys;
-    use std::os::raw::c_void;
-
-    /// A growable in-memory buffer that OpenJPEG can write to, seek within, and skip ahead in -
-    /// J2K codestream writing isn't purely sequential (e.g. length fields get patched after the
-    /// fact), so all four stream callbacks need to behave like a real seekable byte sink, not
-    /// just an append-only one.
-    struct MemoryTarget {
-        buffer: Vec<u8>,
-        pos: usize,
-    }
-
-    unsafe extern "C" fn write_fn(
-        buffer: *mut c_void,
-        num_bytes: sys::OPJ_SIZE_T,
-        user_data: *mut c_void,
-    ) -> sys::OPJ_SIZE_T {
-        let target = unsafe { &mut *(user_data as *mut MemoryTarget) };
-        let n = num_bytes;
-        let src = unsafe { std::slice::from_raw_parts(buffer as *const u8, n) };
-        let end = target.pos + n;
-        if end > target.buffer.len() {
-            target.buffer.resize(end, 0);
-        }
-        target.buffer[target.pos..end].copy_from_slice(src);
-        target.pos = end;
-        num_bytes
-    }
-
-    unsafe extern "C" fn skip_fn(
-        num_bytes: sys::OPJ_OFF_T,
-        user_data: *mut c_void,
-    ) -> sys::OPJ_OFF_T {
-        let target = unsafe { &mut *(user_data as *mut MemoryTarget) };
-        if num_bytes < 0 {
-            return -1;
-        }
-        let end = target.pos + num_bytes as usize;
-        if end > target.buffer.len() {
-            target.buffer.resize(end, 0);
-        }
-        target.pos = end;
-        num_bytes
-    }
-
-    unsafe extern "C" fn seek_fn(
-        num_bytes: sys::OPJ_OFF_T,
-        user_data: *mut c_void,
-    ) -> sys::OPJ_BOOL {
-        let target = unsafe { &mut *(user_data as *mut MemoryTarget) };
-        if num_bytes < 0 {
-            return 0;
-        }
-        let pos = num_bytes as usize;
-        if pos > target.buffer.len() {
-            target.buffer.resize(pos, 0);
-        }
-        target.pos = pos;
-        1
-    }
-
-    unsafe extern "C" fn error_fn(msg: *const std::os::raw::c_char, client_data: *mut c_void) {
-        let msg = unsafe { std::ffi::CStr::from_ptr(msg) }.to_string_lossy();
-        let errors = unsafe { &mut *(client_data as *mut Vec<String>) };
-        errors.push(msg.trim_end().to_owned());
-    }
-
-    struct Codec(*mut sys::opj_codec_t);
-    impl Drop for Codec {
-        fn drop(&mut self) {
-            if !self.0.is_null() {
-                unsafe { sys::opj_destroy_codec(self.0) };
-            }
-        }
-    }
-
-    struct Stream(*mut sys::opj_stream_t);
-    impl Drop for Stream {
-        fn drop(&mut self) {
-            if !self.0.is_null() {
-                unsafe { sys::opj_stream_destroy(self.0) };
-            }
-        }
-    }
-
-    struct Image(*mut sys::opj_image_t);
-    impl Drop for Image {
-        fn drop(&mut self) {
-            if !self.0.is_null() {
-                unsafe { sys::opj_image_destroy(self.0) };
-            }
-        }
-    }
-
-    /// Encodes one frame's worth of raw, native-byte-order, interleaved pixel samples to a
-    /// classic JPEG 2000 codestream (raw `.j2k`, no JP2 box wrapper - matching what DICOM
-    /// PixelData fragments for `.90`/`.91` expect).
-    ///
-    /// `lossless=true` uses OpenJPEG's defaults, which - per `opj_j2k_setup_encoder`'s own
-    /// normalization of a zeroed `tcp_numlayers`/`tcp_rates` - already means a single,
-    /// rate-unconstrained layer with the reversible 5/3 wavelet (`irreversible=0`): genuinely
-    /// lossless, not merely "high quality". `lossless=false` switches to the irreversible 9/7
-    /// wavelet and targets `lossy_compression_ratio` (e.g. `10.0` for 10:1), OpenJPEG's own
-    /// convention for `tcp_rates` (original-size-to-compressed-size ratio, not a byte count).
     #[allow(clippy::too_many_arguments)]
     pub fn encode(
         pixel_data: &[u8],
@@ -121,159 +13,16 @@ mod imp {
         lossless: bool,
         lossy_compression_ratio: f32,
     ) -> Result<Vec<u8>, String> {
-        if samples_per_pixel != 1 && samples_per_pixel != 3 {
-            return Err(format!(
-                "JPEG2000 encoding only supports 1 or 3 samples per pixel, got {samples_per_pixel}"
-            ));
-        }
-        let bytes_per_sample = if bits_stored > 8 { 2usize } else { 1usize };
-        let expected_len =
-            rows as usize * cols as usize * samples_per_pixel as usize * bytes_per_sample;
-        if pixel_data.len() != expected_len {
-            return Err(format!(
-                "pixel data length {} does not match expected {expected_len} for \
-                 {rows}x{cols}x{samples_per_pixel} at {bytes_per_sample} byte(s)/sample",
-                pixel_data.len()
-            ));
-        }
-
-        let comp_params: Vec<sys::opj_image_cmptparm_t> = (0..samples_per_pixel)
-            .map(|_| sys::opj_image_cmptparm_t {
-                dx: 1,
-                dy: 1,
-                w: cols,
-                h: rows,
-                x0: 0,
-                y0: 0,
-                prec: bits_stored,
-                bpp: bits_stored,
-                sgnd: is_signed as sys::OPJ_UINT32,
-            })
-            .collect();
-
-        let color_space = if samples_per_pixel == 1 {
-            sys::OPJ_COLOR_SPACE::OPJ_CLRSPC_GRAY
-        } else {
-            sys::OPJ_COLOR_SPACE::OPJ_CLRSPC_SRGB
-        };
-
-        let image = unsafe {
-            sys::opj_image_create(
-                samples_per_pixel,
-                comp_params.as_ptr() as *mut _,
-                color_space,
-            )
-        };
-        if image.is_null() {
-            return Err("opj_image_create failed".to_owned());
-        }
-        let image = Image(image);
-
-        unsafe {
-            (*image.0).x0 = 0;
-            (*image.0).y0 = 0;
-            (*image.0).x1 = cols;
-            (*image.0).y1 = rows;
-
-            let comps =
-                std::slice::from_raw_parts_mut((*image.0).comps, samples_per_pixel as usize);
-            for (c, comp) in comps.iter_mut().enumerate() {
-                let data = std::slice::from_raw_parts_mut(comp.data, (rows * cols) as usize);
-                for (i, sample) in data.iter_mut().enumerate() {
-                    let offset = (i * samples_per_pixel as usize + c) * bytes_per_sample;
-                    *sample = if bytes_per_sample == 1 {
-                        if is_signed {
-                            pixel_data[offset] as i8 as sys::OPJ_INT32
-                        } else {
-                            pixel_data[offset] as sys::OPJ_INT32
-                        }
-                    } else {
-                        let raw = u16::from_le_bytes([pixel_data[offset], pixel_data[offset + 1]]);
-                        if is_signed {
-                            raw as i16 as sys::OPJ_INT32
-                        } else {
-                            raw as sys::OPJ_INT32
-                        }
-                    };
-                }
-            }
-        }
-
-        let codec = unsafe { sys::opj_create_compress(sys::OPJ_CODEC_FORMAT::OPJ_CODEC_J2K) };
-        if codec.is_null() {
-            return Err("opj_create_compress failed".to_owned());
-        }
-        let codec = Codec(codec);
-        // Production OpenJPEG used to encode single-threaded; one large frame (a 4096x3328
-        // mammogram) now spreads across the shared JPEG 2000 thread budget - see
-        // dcmnorm_jpeg2000::threads.
-        let threads = dcmnorm_jpeg2000::threads::per_call_threads();
-        if threads > 1 && unsafe { sys::opj_has_thread_support() } != 0 {
-            unsafe { sys::opj_codec_set_threads(codec.0, threads as i32) };
-        }
-        let mut errors: Vec<String> = Vec::new();
-        unsafe {
-            sys::opj_set_error_handler(
-                codec.0,
-                Some(error_fn),
-                &mut errors as *mut Vec<String> as *mut c_void,
-            );
-        }
-
-        let mut params: sys::opj_cparameters_t = unsafe { std::mem::zeroed() };
-        unsafe { sys::opj_set_default_encoder_parameters(&mut params) };
-        // The default of 6 wavelet decomposition levels needs the smallest image dimension to
-        // be at least 2^5=32 (with the default single-tile layout); DICOM images can be smaller
-        // than that (icon/thumbnail frames, tiny secondary captures), so scale it down rather
-        // than let OpenJPEG reject an otherwise perfectly encodable small image.
-        let smallest_dim = rows.min(cols).max(1);
-        params.numresolution = (32 - smallest_dim.leading_zeros()).clamp(1, 6) as i32;
-        if !lossless {
-            params.irreversible = 1;
-            params.cp_disto_alloc = 1;
-            params.tcp_numlayers = 1;
-            params.tcp_rates[0] = lossy_compression_ratio;
-        }
-
-        let setup_ok = unsafe { sys::opj_setup_encoder(codec.0, &mut params, image.0) };
-        if setup_ok == 0 {
-            return Err(format!("opj_setup_encoder failed: {}", errors.join("; ")));
-        }
-
-        let stream = unsafe { sys::opj_stream_create(1024 * 1024, 0) };
-        if stream.is_null() {
-            return Err("opj_stream_create failed".to_owned());
-        }
-        let stream = Stream(stream);
-
-        let mut target = Box::new(MemoryTarget {
-            buffer: Vec::new(),
-            pos: 0,
-        });
-        unsafe {
-            sys::opj_stream_set_write_function(stream.0, Some(write_fn));
-            sys::opj_stream_set_skip_function(stream.0, Some(skip_fn));
-            sys::opj_stream_set_seek_function(stream.0, Some(seek_fn));
-            sys::opj_stream_set_user_data(
-                stream.0,
-                target.as_mut() as *mut MemoryTarget as *mut c_void,
-                None,
-            );
-        }
-
-        let ok = unsafe {
-            sys::opj_start_compress(codec.0, image.0, stream.0) != 0
-                && sys::opj_encode(codec.0, stream.0) != 0
-                && sys::opj_end_compress(codec.0, stream.0) != 0
-        };
-        if !ok {
-            return Err(format!(
-                "OpenJPEG JPEG2000 encode failed: {}",
-                errors.join("; ")
-            ));
-        }
-
-        Ok(target.buffer)
+        dcmnorm_jpeg2000::classic::encode(
+            pixel_data,
+            rows,
+            cols,
+            samples_per_pixel,
+            bits_stored,
+            is_signed,
+            lossless,
+            lossy_compression_ratio,
+        )
     }
 }
 
@@ -289,7 +38,7 @@ mod imp {
         _lossless: bool,
         _lossy_compression_ratio: f32,
     ) -> Result<Vec<u8>, String> {
-        Err("JPEG2000 OpenJPEG encoding requires the 'jpeg2000-openjpeg-encode' feature".to_owned())
+        Err("JPEG2000 encoding requires the 'jpeg2000-openjpeg-encode' feature".to_owned())
     }
 }
 
